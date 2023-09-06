@@ -1,0 +1,58 @@
+# Figure properties
+figure.figsize: 4, 4
+
+# Font properties
+font.family: cmr10, serif
+font.size: 14
+mathtext.fontset: cm
+axes.unicode_minus: False
+mathtext.fallback: dejavusans
+
+
+# SPINE COLORS  -- GRAY
+axes.edgecolor:      2B2B2B
+text.color:          2B2B2B
+axes.labelcolor:     2B2B2B
+xtick.color:         2B2B2B
+ytick.color:         2B2B2B
+
+# Axes properties
+axes.linewidth: 2
+axes.labelpad: 10
+axes.prop_cycle: cycler(color=['008fd5', 'fc4f30', 'e5ae38', '6d904f', '8b8b8b', '810f7c'])
+axes.spines.top:    False
+axes.spines.right:  False
+
+# Tick properties
+# x-axis
+xtick.top: False
+xtick.direction: out
+xtick.major.size: 3
+xtick.major.width: 2
+xtick.minor.size: 2
+xtick.minor.width: 2
+
+# y-axis
+ytick.right: False
+ytick.direction: out
+ytick.major.size: 3
+ytick.major.width: 2
+ytick.minor.size: 2
+ytick.minor.width: 2
+
+# Line properties
+lines.linewidth: 2
+
+# Legend properties
+legend.framealpha: 1
+legend.frameon: False
+
+# Grid Properies
+axes.grid          : False
+axes.grid.axis     : both    ## which axis the grid should apply to
+axes.grid.which    : major   ## gridlines at {major, minor, both} ticks
+grid.color     : 808080  ## grid color
+grid.linestyle : :       ##  - solid
+grid.alpha     : 0.5     ## transparency, between 0.0 and 1.0
+
+#grid.linewidth : 0.8     ## in points
