@@ -1,4 +1,7 @@
+import numpy as np
 from skimage.exposure import equalize_adapthist, rescale_intensity
+
+
 
 def clahe(image, clip_limit = 0.02):
     # Remove singleton dimensions
