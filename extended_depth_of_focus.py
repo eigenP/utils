@@ -45,17 +45,21 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False):
         img = skimage.io.imread(image_or_path)
     else:
         img = image_or_path
+    
+    # 1.1 Validate ndim
+    if img.ndim != 3:
+        raise ValueError(f'Image not 3D, instead received {img.ndim} dims')
 
     original_shape = img.shape[1:]
 
     # 2. Determine the patch size and pad the image to fit
     if patch_size is None:
         patch_size = min(original_shape) // 10
-    overlap = patch_size // 4  # 25% overlap
+    # overlap = patch_size // 4  # 25% overlap
     overlap = patch_size // 3  # 33% overlap
 
-    pad_y = (patch_size - img.shape[1] % patch_size) + overlap
-    pad_x = (patch_size - img.shape[2] % patch_size) + overlap
+    pad_y = (patch_size - img.shape[0] % patch_size) + overlap
+    pad_x = (patch_size - img.shape[1] % patch_size) + overlap
     img = np.pad(img, ((0,0), (0, pad_y), (0, pad_x)), mode='reflect')
 
     # 3. Prepare the empty height map and the storage for final image and counts
