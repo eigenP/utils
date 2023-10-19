@@ -8,6 +8,8 @@ mathtext.fontset: cm
 axes.unicode_minus: False
 mathtext.fallback: stix
 
+# Figure layout
+figure.constrained_layout.use: False 
 
 # SPINE COLORS  -- GRAY
 axes.edgecolor:      2B2B2B
