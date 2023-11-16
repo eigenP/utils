@@ -57,7 +57,7 @@ def _my_clahe_(image, kernel_size=None,
     Returns
     -------
     out : (N1, ...,NN[, C]) ndarray
-        Equalized image with float64 dtype.
+        Equalized image with float16 dtype.
 
     See Also
     --------
