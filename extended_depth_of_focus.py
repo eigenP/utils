@@ -5,16 +5,35 @@ import skimage.io
 
 from scipy.ndimage import generic_filter, zoom
 
+from skimage.filters import median
+from skimage.morphology import disk
+# # Define the custom function
+# def custom_filter(values):
+#     center_value = values[values.size // 2]
+#     counts = np.bincount(values.astype(int))
+#     mode = np.argmax(counts)
+#     if counts[mode] >= 3 and abs(mode - center_value) >= 2:
+#         return mode
+#     else:
+#         return center_value
 
-# Define the custom function
-def custom_filter(values):
-    center_value = values[values.size // 2]
-    counts = np.bincount(values.astype(int))
-    mode = np.argmax(counts)
-    if counts[mode] >= 3 and abs(mode - center_value) >= 2:
-        return mode
-    else:
-        return center_value
+def apply_median_filter(height_map):
+    """
+    Apply a 3x3 median filter to a 2D array.
+
+    Parameters:
+    height_map (ndarray): A 2D array representing the height map.
+
+    Returns:
+    ndarray: The filtered 2D array.
+    """
+    # Define a 2*2+1 diameter (i.e. radius 2) disk structuring element for the median filter
+    selem = disk(3)
+
+    # Apply the median filter with the defined structuring element
+    filtered_map = median(height_map, selem, mode = 'reflect')
+
+    return filtered_map
 
 def _2D_weight(patch_size, overlap):
     # 1D weight function based on cubic spline
@@ -34,7 +53,7 @@ def _2D_weight(patch_size, overlap):
 
     return weight_2d
 
-def best_focus_image(image_or_path, patch_size=None, return_heightmap=False):
+def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
     Expecting an image with dimension order ZYX
     If you have a timelapse, please pass in each individual frame
@@ -85,7 +104,8 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False):
 
 
     # Now we apply this custom median filter function to the height_map
-    height_map_small = generic_filter(height_map_small, custom_filter, size=3)
+    # height_map_small = generic_filter(height_map_small, custom_filter, size=3)
+    height_map_small = apply_median_filter(height_map_small)
 
     # 5. Combine patches to create the final image
     _2D_window = _2D_weight(patch_size, overlap)
