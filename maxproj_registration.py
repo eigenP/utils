@@ -9,9 +9,6 @@ from skimage.registration._phase_cross_correlation import _upsampled_dft
 from tqdm import tqdm
 
 
-def ensure_scikit_update():
-    print('Make sure you have installed scikit-image==0.22.0 or higher')
-
 
 def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0):
     """
@@ -79,10 +76,10 @@ def estimate_drift_2D(frame1, frame2, return_ccm = False):
 
 
     shift_x, error, diffphase = phase_cross_correlation(frame1_max_proj_x,
-                                                      frame2_max_proj_x,  disambiguate=True)
+                                                      frame2_max_proj_x)
 
     shift_y, error, diffphase = phase_cross_correlation(frame1_max_proj_y,
-                                                      frame2_max_proj_y,  disambiguate=True)
+                                                      frame2_max_proj_y)
 
     shift = np.array((shift_x[0], shift_y[0]))
 
@@ -139,8 +136,7 @@ def apply_drift_correction_2D(video_data, save_drift_table=False, csv_filename='
         - corrected_data: A 3D numpy array of the same shape as video_data, representing the drift-corrected video.
         - drift_table: A pandas DataFrame containing the drift values, cumulative drift, and time points.
     """
-    # Warning
-    ensure_scikit_update()
+
 
     # Get the dimensions of the video data
     t, x, y = video_data.shape
