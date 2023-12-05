@@ -1,3 +1,6 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
 def hist_imshow(image, bins=256):
 
     # Ensure image is 2D so that we can plot it
