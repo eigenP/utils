@@ -49,8 +49,7 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0):
     result[tuple(slices_output)] = arr[tuple(slices_input)]
     return result
 
-
-def estimate_drift_2D(frame1, frame2, return_ccm = False):
+def estimate_drift_2D(frame1, frame2, _UPSAMPLE_FACTOR = 8, return_ccm = False):
     """
     Estimate the xy-drift between two 2D frames using cross-correlation.
 
@@ -73,13 +72,17 @@ def estimate_drift_2D(frame1, frame2, return_ccm = False):
     # frame1_max_proj_y = gaussian_filter1d(frame1_max_proj_y, sigma = 3, radius = 5)
     # frame2_max_proj_y = gaussian_filter1d(frame2_max_proj_y, sigma = 3, radius = 5)
 
-
+    
 
     shift_x, error, diffphase = phase_cross_correlation(frame1_max_proj_x,
-                                                      frame2_max_proj_x)
+                                                      frame2_max_proj_x,
+                                                      upsample_factor = _UPSAMPLE_FACTOR,
+                                                      overlap_ratio= 0.4)
 
     shift_y, error, diffphase = phase_cross_correlation(frame1_max_proj_y,
-                                                      frame2_max_proj_y)
+                                                      frame2_max_proj_y,
+                                                      upsample_factor = _UPSAMPLE_FACTOR,
+                                                      overlap_ratio= 0.4)
 
     shift = np.array((shift_x[0], shift_y[0]))
 
