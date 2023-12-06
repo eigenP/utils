@@ -15,7 +15,7 @@ def hist_imshow(image, bins=256):
         slices = tuple(indexing)
 
         print('Displaying only the last two dims (of the "middle" slices)')
-        print(slices)
+        # print(slices)
         image = image[slices]
 
     fig, axes = plt.subplot_mosaic([['Image', '.'], ['Image', 'Histogram'], ['Image', '.']],
