@@ -2,7 +2,32 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 def hist_imshow(image, bins=256):
+    """
+    Displays an image and its histogram.
 
+    This function processes a given image stack, ensuring it is in a 2D format suitable for display. If the image
+    stack has more than two dimensions, the function extracts the middle slice from each of the extra dimensions, 
+    and then displays this 2D slice. Alongside the image, the function plots a histogram of the pixel 
+    intensities to provide a visual representation of the distribution of pixel values within the image.
+
+    Parameters:
+    image (array-like): The input image. Can be multidimensional, but only a 2D slice (from the middle of 
+                        any extra dimensions) will be displayed.
+    bins (int, optional): The number of bins to use for the histogram. Default is 256.
+
+    Returns:
+    matplotlib.figure.Figure: A figure object with two subplots - one showing the image and the other 
+                              showing its histogram.
+
+    Note:
+    Additional information about the original shape and data type of the image is displayed on the x-axis 
+    label of the histogram.
+
+    Example:
+    >>> img = np.random.rand(100, 100)  # Generate a random image
+    >>> fig = hist_imshow(img)
+    >>> plt.show()  # Display the figure with the image and its histogram
+    """
     # Ensure image is 2D so that we can plot it
     im_shape = image.shape
     print(f'Image shape: {im_shape}')
