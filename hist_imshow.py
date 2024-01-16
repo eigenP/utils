@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-def hist_imshow(image, bins=256, origin_ = 'lower'):
+def hist_imshow(image, bins=256, **imshow_kwargs):
     """
     Displays an image and its histogram.
 
@@ -28,6 +28,10 @@ def hist_imshow(image, bins=256, origin_ = 'lower'):
     >>> fig = hist_imshow(img)
     >>> plt.show()  # Display the figure with the image and its histogram
     """
+
+    # Ensure 'origin' is set to 'lower' if not specified
+    imshow_kwargs.setdefault('origin', 'lower')
+    
     # Ensure image is 2D so that we can plot it
     im_shape = image.shape
     print(f'Image shape: {im_shape}')
@@ -46,7 +50,7 @@ def hist_imshow(image, bins=256, origin_ = 'lower'):
     fig, axes = plt.subplot_mosaic([['Image', '.'], ['Image', 'Histogram'], ['Image', '.']],
                                    layout = 'constrained')
 
-    axes['Image'].imshow(image, origin = origin_)
+    axes['Image'].imshow(image, **imshow_kwargs)
 
     # Display histogram
     axes['Histogram'].hist(image.ravel(), bins=bins, density = True, histtype='stepfilled')
