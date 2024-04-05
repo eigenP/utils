@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-def hist_imshow(image, bins=256, **imshow_kwargs):
+def hist_imshow(image, bins=256, return_image_only = False,  **imshow_kwargs):
     """
     Displays an image and its histogram.
 
@@ -46,6 +46,9 @@ def hist_imshow(image, bins=256, **imshow_kwargs):
         print('Displaying only the last two dims (of the "middle" slices)')
         # print(slices)
         image = image[slices]
+
+    if return_image_only:
+        return image
 
     fig, axes = plt.subplot_mosaic([['Image', '.'], ['Image', 'Histogram'], ['Image', '.']],
                                    layout = 'constrained')
