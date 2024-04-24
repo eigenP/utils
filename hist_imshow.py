@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-def hist_imshow(image, bins=256, return_image_only = False,  **imshow_kwargs):
+def hist_imshow(image, bins=64, return_image_only = False,  **imshow_kwargs):
     """
     Displays an image and its histogram.
 
