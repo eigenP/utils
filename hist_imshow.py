@@ -53,7 +53,7 @@ def hist_imshow(image, bins=64, return_image_only = False,  **imshow_kwargs):
     fig, axes = plt.subplot_mosaic([['Image', '.'], ['Image', 'Histogram'], ['Image', '.']],
                                    layout = 'constrained')
 
-    axes['Image'].imshow(image, **imshow_kwargs)
+    axes['Image'].imshow(image, interpolation = 'nearest', **imshow_kwargs)
 
     # Display histogram
     axes['Histogram'].hist(image.ravel(), bins=bins, density = True, histtype='stepfilled')
