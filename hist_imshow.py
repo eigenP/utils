@@ -56,7 +56,8 @@ def hist_imshow(image, bins=64, return_image_only = False,  **imshow_kwargs):
     axes['Image'].imshow(image, interpolation = 'nearest', **imshow_kwargs)
 
     # Display histogram
-    axes['Histogram'].hist(np.log1p(image.ravel()), bins=bins, density = True, histtype='stepfilled')
+    axes['Histogram'].hist(image.ravel() + 1), bins=bins, density = True, histtype='stepfilled')
+    axes['Histogram']..set_yscale('log')
     axes['Histogram'].ticklabel_format(axis='y', style='scientific', scilimits=(0, 0))
     axes['Histogram'].set_xlabel(f' Pixel intensity \n \n shape: {im_shape} \n dtype: {image.dtype}')
     axes['Histogram'].set_ylabel('Log1p')
