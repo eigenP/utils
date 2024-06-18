@@ -1,7 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import PowerNorm
 
-def hist_imshow(image, bins=64, return_image_only = False,  **imshow_kwargs):
+def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_kwargs):
     """
     Displays an image and its histogram.
 
@@ -53,7 +54,12 @@ def hist_imshow(image, bins=64, return_image_only = False,  **imshow_kwargs):
     fig, axes = plt.subplot_mosaic([['Image', '.'], ['Image', 'Histogram'], ['Image', '.']],
                                    layout = 'constrained')
 
-    axes['Image'].imshow(image, interpolation = 'nearest', **imshow_kwargs)
+    norm = None
+    if gamma != 1:
+        norm = PowerNorm(gamma=gamma)
+
+
+    axes['Image'].imshow(image, norm = norm, interpolation = 'nearest', **imshow_kwargs)
 
     # Display histogram
     axes['Histogram'].hist((image.ravel()), bins=bins, density = True, histtype='stepfilled')
