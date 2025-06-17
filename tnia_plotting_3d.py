@@ -248,9 +248,13 @@ def show_xyz_max_slice_interactive(im, sxy=1, sz=1, figsize=None, colormap=None,
 
     if figsize is None:
         z_ , y_, x_ = im_shape
-        width_, height_ = x_ + z_, y_ + z_
+        width_, height_ = x_ + z_ * sz, y_ + z_ * sz
         divisor = max(width_ / 8, height_ / 8)
         width_,  height_ = int(width_ / divisor), int(height_ / divisor)
+
+
+
+        
         figsize = (width_, height_)
         if figsize_scale != 1:
             figsize = (width_ * figsize_scale, height_ * figsize_scale)
