@@ -89,7 +89,7 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
 
     if isinstance(xy,list):
         MULTI_CHANNEL = True
-        xy, xz, zy = create_mutlichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colors = colors)
+        xy, xz, zy = create_multichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colors = colors)
 
         # Set those back to default bcs they are dealt with in the RGB function
         vmax, gamma = None, 1
@@ -125,6 +125,7 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
     ax0=fig.add_subplot(spec[0])
     ax1=fig.add_subplot(spec[1])
     ax2=fig.add_subplot(spec[2])
+    ax3=fig.add_subplot(spec[3])
 
     if z_xy_ratio!=1:
         xz=resize(xz, (int(xz.shape[0]*z_xy_ratio), xz.shape[1]), preserve_range = True)
@@ -146,15 +147,54 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
     # ax2.set_title('xz')
 
     # Remove in-between axes ticks
-    for ax in [ax0,ax1,ax2]:
+    for ax in [ax0,ax1,ax2, ax3]:
         ax.axis('off')
     # ax0.xaxis.set_ticklabels([])
     # ax1.yaxis.set_ticklabels([])
 
     fig.patch.set_alpha(0.01) # set transparent bgnd
 
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
+    # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
+    # Add scale bar
+    width_um = xdim * sxy
+    target = width_um * 0.2
+    
+    # a small utility to pick the largest “nice” number ≤ target
+    def nice_length(x):
+        # get exponent
+        exp = np.floor(np.log10(x))
+        # candidates: 1, 2, 5 times 10^exp
+        for m in [5,2,1]:
+            val = m * 10**exp
+            if val <= x:
+                return val
+        # if nothing smaller (very small x), just return x itself
+        return x
+    
+    bar_um = nice_length(target)
+
+    # Convert back to pixels
+    bar_pix = bar_um / sxy
+    bar_frac = bar_pix / xdim    # fraction of the full width
+
+    # pick fontsize
+    fig_h_in = figsize[1]
+    fontsize_pt = max(8, min(24, fig_h_in * 72 * 0.03))
+
+    ### Draw
+    # center the bar at (x=0.5), y=0.5 in ax3’s normalized coordinates:
+    x0 = 0.5 - bar_frac/2
+    x1 = 0.5 + bar_frac/2
+    y  = 0.5
+    
+    ax3.hlines(y, x0, x1, transform=ax3.transAxes,
+               linewidth=2, color='lightgrey')
+    ax3.text(0.5, y - 0.1, f"{int(bar_um)} µm",
+             transform=ax3.transAxes,
+             ha='center', va='top',
+             color='lightgrey',
+             fontsize=fontsize_pt)
 
     return fig
 
@@ -256,11 +296,12 @@ def show_xyz_max_slice_interactive(im, sxy=1, sz=1, figsize=None, colormap=None,
         im_shape = im.shape
 
 
-
+    if sxy!=sz:
+        z_xy_ratio=sz/sxy
 
     if figsize is None:
         z_ , y_, x_ = im_shape
-        width_, height_ = x_ + z_ * sz, y_ + z_ * sz
+        width_, height_ = x_ + z_ * z_xy_ratio, y_ + z_ * z_xy_ratio
         divisor = max(width_ / 8, height_ / 8)
         width_,  height_ = float(width_ / divisor), float(height_ / divisor)
 
@@ -319,7 +360,7 @@ def show_xyz_max_slice_interactive(im, sxy=1, sz=1, figsize=None, colormap=None,
 
 
 ### New Function
-def create_mutlichannel_rgb(xy_list, xz_list, zy_list, vmin = None, vmax = None, gamma = 1, colors = None):
+def create_multichannel_rgb(xy_list, xz_list, zy_list, vmin = None, vmax = None, gamma = 1, colors = None):
     """
     Display an interactive widget to explore a 3D image by showing a slice in the x, y, and z directions.
 
