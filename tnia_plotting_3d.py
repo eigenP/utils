@@ -189,11 +189,11 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
     y  = 0.5
     
     ax3.hlines(y, x0, x1, transform=ax3.transAxes,
-               linewidth=2, color='lightgrey')
+               linewidth=2, color='gray')
     ax3.text(0.5, y - 0.1, f"{int(bar_um)} µm",
              transform=ax3.transAxes,
              ha='center', va='top',
-             color='lightgrey',
+             color='gray',
              fontsize=fontsize_pt)
 
     return fig
