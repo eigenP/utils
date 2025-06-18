@@ -96,9 +96,9 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
 
 
     if use_plt:
-        fig=plt.figure(figsize=figsize, layout='constrained')
+        fig=plt.figure(figsize=figsize, constrained_layout=False)
     else:
-        fig = Figure(figsize=figsize, constrained_layout=True)
+        fig = Figure(figsize=figsize, constrained_layout=False)
 
 
     xdim = xy.shape[1]
@@ -110,7 +110,7 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
     if sxy!=sz:
         z_xy_ratio=sz/sxy
 
-    spec=gridspec.GridSpec(ncols=2, nrows=2, height_ratios=[ydim,zdim*z_xy_ratio], width_ratios=[xdim,zdim*z_xy_ratio],hspace=.01, figure = fig)
+    spec=gridspec.GridSpec(ncols=2, nrows=2, height_ratios=[ydim,zdim*z_xy_ratio], width_ratios=[xdim,zdim*z_xy_ratio],hspace=.01, wspace=.01, figure = fig)
 
     ax0=fig.add_subplot(spec[0])
     ax1=fig.add_subplot(spec[1])
@@ -142,6 +142,8 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
     # ax1.yaxis.set_ticklabels([])
 
     fig.patch.set_alpha(0.01) # set transparent bgnd
+
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
 
     return fig
