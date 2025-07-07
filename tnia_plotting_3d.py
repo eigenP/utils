@@ -295,7 +295,7 @@ def show_xyz_max_slice_interactive(im, sxy=1, sz=1, figsize=None, colormap=None,
     else:
         im_shape = im.shape
 
-
+    z_xy_ratio = 1
     if sxy!=sz:
         z_xy_ratio=sz/sxy
 
