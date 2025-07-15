@@ -20,6 +20,11 @@ setup(
         'tqdm',
         'scipy',
         'scikit-image',
+        'matplotlib',
+        'pandas',
+        'ipywidgets',
+        'plotly',
+        'marimo',
     ],
     classifiers=[             # Optional metadata
         'Programming Language :: Python :: 3',
