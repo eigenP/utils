@@ -65,7 +65,14 @@ def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_
     axes['Histogram'].hist((image.ravel()), bins=bins, density = True, histtype='stepfilled')
     axes['Histogram'].set_yscale('log')
     # axes['Histogram'].ticklabel_format(axis='y', style='scientific', scilimits=(0, 0))
-    axes['Histogram'].set_xlabel(f' Pixel intensity \n \n shape: {im_shape} \n dtype: {image.dtype}')
+
+    min_val = image.min()
+    max_val = image.max()
+    mean_val = image.mean()
+    stats_msg = f"min:{min_val:.3g} max:{max_val:.3g} mean:{mean_val:.3g}"
+    axes['Histogram'].set_xlabel(
+        f' Pixel intensity ({stats_msg}) \n \n shape: {im_shape} \n dtype: {image.dtype}'
+    )
     axes['Histogram'].set_ylabel('Log Frequency')
 
     # axes['Histogram'].set_xlim(0, 1)

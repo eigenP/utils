@@ -39,3 +39,11 @@ def test_hist_imshow_return_image_only():
 def test_hist_imshow_returns_figure():
     fig = hist_imshow(np.random.rand(2, 2))
     assert isinstance(fig, Figure)
+
+
+def test_hist_imshow_xlabel_contains_statistics():
+    img = np.array([[0, 1], [2, 3]], dtype=float)
+    fig = hist_imshow(img)
+    label = fig.axes[1].get_xlabel()
+    expected = f"min:{img.min():.3g} max:{img.max():.3g} mean:{img.mean():.3g}"
+    assert expected in label
