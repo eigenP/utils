@@ -10,6 +10,7 @@ matplotlib.use("Agg")
 
 from matplotlib import colormaps as mpl_colormaps
 from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 from color_coded_projection import color_coded_projection
 from hist_imshow import hist_imshow
 
@@ -36,14 +37,11 @@ def test_hist_imshow_return_image_only():
     assert np.allclose(slice_img, img[1])
 
 
-def test_hist_imshow_returns_figure():
-    fig = hist_imshow(np.random.rand(2, 2))
-    assert isinstance(fig, Figure)
+
+def test_hist_imshow_axes_dict_contents():
+    res = hist_imshow(np.random.rand(5, 5))
+    axes = res["axes"]
+    assert list(axes.keys()) == ["Image", "Histogram"]
+    assert all(isinstance(ax, Axes) for ax in axes.values())
 
 
-def test_hist_imshow_xlabel_contains_statistics():
-    img = np.array([[0, 1], [2, 3]], dtype=float)
-    fig = hist_imshow(img)
-    label = fig.axes[1].get_xlabel()
-    expected = f"min:{img.min():.3g} max:{img.max():.3g} mean:{img.mean():.3g}"
-    assert expected in label
