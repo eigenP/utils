@@ -14,6 +14,15 @@ from skimage.transform import resize
 from matplotlib.colors import PowerNorm, to_rgb
 
 
+def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
+    a = arr.astype(dtype, copy=False)
+    if symmetric:
+        d = max(eps, float(np.abs(a).max()))
+    else:
+        d = max(eps, float(a.max()))
+    return a / d
+
+
 # Copyright tnia 2021 - BSD License
 def show_xyz_slice(image_to_show, x, y, z, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
@@ -131,12 +140,14 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
         xz=resize(xz, (int(xz.shape[0]*z_xy_ratio), xz.shape[1]), preserve_range = True)
         zy=resize(zy, (zy.shape[0], int(zy.shape[1]*z_xy_ratio)), preserve_range = True)
 
+
+    
     if gamma == 1:
-        ax0.imshow(xy, cmap = colormap, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest')
-        ax1.imshow(zy, cmap = colormap, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest')
-        ax2.imshow(xz, cmap = colormap, vmax=vmax, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest')
+        ax0.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest')
+        ax1.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest')
+        ax2.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest')
     else:
-        norm=PowerNorm(gamma=gamma, vmax=vmax)
+        norm=PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax, clip=True)
         ax0.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest')
         ax1.imshow(zy, cmap = colormap, norm=norm, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest')
         ax2.imshow(xz, cmap = colormap, norm=norm, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest')
@@ -222,9 +233,9 @@ def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=1, sz
     y_ = [int(i) for i in y]
     z_ = [int(i) for i in z]
 
-    x_slices = slice(*x)
-    y_slices = slice(*y)
-    z_slices = slice(*z)
+    x_slices = slice(*x_)
+    y_slices = slice(*y_)
+    z_slices = slice(*z_)
 
     return show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy, sz, figsize, np.max, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors)
 
@@ -266,101 +277,212 @@ from ipywidgets import interact, IntSlider, FloatRangeSlider, Layout
 
 
 ### New function
-def show_xyz_max_slice_interactive(im, sxy=1, sz=1, figsize=None, colormap=None, vmin = None, vmax=None, gamma = 1, figsize_scale = 1,  show_crosshair = True, colors = None):
-    """
-    Display an interactive widget to explore a 3D image by showing a slice in the x, y, and z directions.
 
-    Requires ipywidgets to be installed.
+def show_xyz_max_slice_interactive(
+    im,
+    sxy=1, sz=1,
+    figsize=None, colormap=None,
+    vmin=None, vmax=None,
+    gamma=1, figsize_scale=1,
+    show_crosshair=True,
+    colors=None,
+    # NEW optional initial values (centers and half-thicknesses)
+    x_s=None, y_s=None, z_s=None,
+    x_t=None, y_t=None, z_t=None,
+):
+    """
+    Display an interactive widget to explore a 3D image by showing a slice
+    in the x, y, and z directions.
 
     Parameters
     ----------
-    im : array
-        3D image to display
-    sxy : float
-        scaling factor for x and y dimensions
-    sz : float
-        scaling factor for z dimension
-    figsize : tuple
-        size of the figure
-    colormap : str
-        colormap to use
-    vmax : float
-        maximum value to use for the colormap
+    im : array or list[array]
+        3D image (Z, Y, X) or list of channels (each Z, Y, X)
+    sxy, sz : float
+        voxel sizes in XY and Z
+    figsize : tuple or None
+        figure size; if None, computed from data size
+    colormap : str or None
+    vmin, vmax : float or None
+    gamma : float
+    figsize_scale : float
+    show_crosshair : bool
+    colors : list[str] or None
+    x_s, y_s, z_s : int or None
+        OPTIONAL initial centers (X, Y, Z). If None, defaults to midpoints.
+    x_t, y_t, z_t : int or None
+        OPTIONAL initial half-thicknesses in voxels. If None, defaults to ~size/64.
+        NOTE: Sliders remain interactive and can override these values.
     """
 
+    # Support multi-channel input
+    im_shape = (im[0].shape if isinstance(im, list) else im.shape)  # (Z, Y, X)
+    Z, Y, X = im_shape
 
-    if isinstance(im,list):
-        MULTI_CHANNEL = True
-        im_shape = im[0].shape
-    else:
-        im_shape = im.shape
+    # Compute z/xy aspect ratio
+    z_xy_ratio = (sz / sxy) if sxy != sz else 1
 
-    z_xy_ratio = 1
-    if sxy!=sz:
-        z_xy_ratio=sz/sxy
-
+    # Auto figsize if not provided
     if figsize is None:
-        z_ , y_, x_ = im_shape
-        width_, height_ = x_ + z_ * z_xy_ratio, y_ + z_ * z_xy_ratio
-        divisor = max(width_ / 8, height_ / 8)
-        width_,  height_ = float(width_ / divisor), float(height_ / divisor)
+        width_px  = X + Z * z_xy_ratio
+        height_px = Y + Z * z_xy_ratio
+        # keep visual scale stable across sizes
+        divisor = max(width_px / 8, height_px / 8)
+        w, h = float(width_px / divisor), float(height_px / divisor)
+        figsize = (w * figsize_scale, h * figsize_scale)
 
+    # ---- Defaults (clip to valid ranges) ----
+    def _clip(v, lo, hi):
+        return int(max(lo, min(hi, v)))
 
+    # Sensible default half-thickness ~ size/64 (at least 1)
+    def _default_t(n):  # n is dimension length
+        return max(1, n // 64)
 
-        
-        figsize = (width_, height_)
-        if figsize_scale != 1:
-            figsize = (width_ * figsize_scale, height_ * figsize_scale)
+    # Resolve initial thicknesses (half-widths)
+    x_t0 = _clip(x_t if x_t is not None else _default_t(X), 1, max(1, X - 1))
+    y_t0 = _clip(y_t if y_t is not None else _default_t(Y), 1, max(1, Y - 1))
+    z_t0 = _clip(z_t if z_t is not None else _default_t(Z), 1, max(1, Z - 1))
 
-    def display(x_s,
-                y_s,
-                z_s,
-                x_t,
-                y_t,
-                z_t,):
-        # print(type(x_))
+    # Given t, valid center ranges are [t, dim-1 - t]
+    def _center_bounds(dim, t):
+        lo, hi = t, max(t, dim - 1 - t)
+        return lo, hi
 
-        x_lims = [x_slider.value - x_thick_slider.value,  x_slider.value + x_thick_slider.value]
-        y_lims = [y_slider.value - y_thick_slider.value,  y_slider.value + y_thick_slider.value]
-        z_lims = [z_slider.value - z_thick_slider.value,  z_slider.value + z_thick_slider.value]
+    x_lo0, x_hi0 = _center_bounds(X, x_t0)
+    y_lo0, y_hi0 = _center_bounds(Y, y_t0)
+    z_lo0, z_hi0 = _center_bounds(Z, z_t0)
 
-        fig = show_xyz_max_slabs(im, x_lims, y_lims, z_lims, sxy, sz,figsize, colormap, vmin = vmin, vmax = vmax, gamma = gamma, colors = colors)
+    # Resolve initial centers (defaults to midpoints if not provided)
+    x_s0 = _clip(x_s if x_s is not None else X // 2, x_lo0, x_hi0)
+    y_s0 = _clip(y_s if y_s is not None else Y // 2, y_lo0, y_hi0)
+    z_s0 = _clip(z_s if z_s is not None else Z // 2, z_lo0, z_hi0)
+
+    # ---- Sliders ----
+    # Thickness sliders first (so position slider ranges can depend on them)
+    x_thick_slider = IntSlider(min=1, max=max(1, X - 1), step=1, value=x_t0, layout=Layout(width='70%'))
+    y_thick_slider = IntSlider(min=1, max=max(1, Y - 1), step=1, value=y_t0, layout=Layout(width='70%'))
+    z_thick_slider = IntSlider(min=1, max=max(1, Z - 1), step=1, value=z_t0, layout=Layout(width='70%'))
+
+    # Position sliders with ranges tied to initial thicknesses
+    x_slider = IntSlider(min=x_lo0, max=x_hi0, step=1, value=x_s0, layout=Layout(width='70%'))
+    y_slider = IntSlider(min=y_lo0, max=y_hi0, step=1, value=y_s0, layout=Layout(width='70%'))
+    z_slider = IntSlider(min=z_lo0, max=z_hi0, step=1, value=z_s0, layout=Layout(width='70%'))
+
+    # Keep position slider bounds consistent if thickness changes interactively
+    def _bind_bounds(thick_sl, pos_sl, dim):
+        def _on_change(change):
+            t = change["new"]
+            lo = t
+            hi = max(t, dim - 1 - t)
+            pos_sl.min = lo
+            pos_sl.max = hi
+            # clamp current value if now out of bounds
+            if pos_sl.value < lo: pos_sl.value = lo
+            if pos_sl.value > hi: pos_sl.value = hi
+        thick_sl.observe(_on_change, names='value')
+
+    _bind_bounds(x_thick_slider, x_slider, X)
+    _bind_bounds(y_thick_slider, y_slider, Y)
+    _bind_bounds(z_thick_slider, z_slider, Z)
+
+    # ---- Display callback ----
+    def _display(_x_s, _y_s, _z_s, _x_t, _y_t, _z_t):
+        # Build current limits from sliders (centers +/- half-thickness)
+        x_lims = [x_slider.value - x_thick_slider.value, x_slider.value + x_thick_slider.value]
+        y_lims = [y_slider.value - y_thick_slider.value, y_slider.value + y_thick_slider.value]
+        z_lims = [z_slider.value - z_thick_slider.value, z_slider.value + z_thick_slider.value]
+
+        fig = show_xyz_max_slabs(
+            im, x_lims, y_lims, z_lims,
+            sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
+            vmin=vmin, vmax=vmax, gamma=gamma, colors=colors
+        )
 
         if show_crosshair:
-            fig.axes[0].axvline(x_lims[0]*sxy+0.5, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[0].axhline(y_lims[0]*sxy+0.5, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[1].axvline(z_lims[0]*sz+0.5*sz, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[1].axhline(y_lims[0]*sxy+0.5, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[2].axvline(x_lims[0]*sxy+0.5, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[2].axhline(z_lims[0]*sz+0.5*sz, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[0].axvline(x_lims[1]*sxy+0.5, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[0].axhline(y_lims[1]*sxy+0.5, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[1].axvline(z_lims[1]*sz+0.5*sz, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[1].axhline(y_lims[1]*sxy+0.5, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[2].axvline(x_lims[1]*sxy+0.5, color='r', linestyle = ':', alpha = 0.3)
-            fig.axes[2].axhline(z_lims[1]*sz+0.5*sz, color='r', linestyle = ':', alpha = 0.3)
+            # XY
+            fig.axes[0].axvline(x_lims[0]*sxy + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[0].axhline(y_lims[0]*sxy + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[0].axvline(x_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[0].axhline(y_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3)
+            # ZY
+            fig.axes[1].axvline(z_lims[0]*sz + 0.5*sz, color='r', ls=':', alpha=0.3)
+            fig.axes[1].axhline(y_lims[0]*sxy + 0.5,     color='r', ls=':', alpha=0.3)
+            fig.axes[1].axvline(z_lims[1]*sz + 0.5*sz, color='r', ls=':', alpha=0.3)
+            fig.axes[1].axhline(y_lims[1]*sxy + 0.5,     color='r', ls=':', alpha=0.3)
+            # XZ
+            fig.axes[2].axvline(x_lims[0]*sxy + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[2].axhline(z_lims[0]*sz + 0.5*sz, color='r', ls=':', alpha=0.3)
+            fig.axes[2].axvline(x_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[2].axhline(z_lims[1]*sz + 0.5*sz, color='r', ls=':', alpha=0.3)
+
         plt.show()
 
-    x_thick_slider = IntSlider(min=1, max=im_shape[2]-1, step=1, value=im_shape[2]//64, layout= Layout(width='70%'))
-    y_thick_slider = IntSlider(min=1, max=im_shape[1]-1, step=1, value=im_shape[1]//64, layout= Layout(width='70%'))
-    z_thick_slider = IntSlider(min=1, max=im_shape[0]-1, step=1, value=im_shape[0]//64, layout= Layout(width='70%'))
-
-    x_slider = IntSlider(min=x_thick_slider.value, max=im_shape[2]-1 - x_thick_slider.value, step=1, value=im_shape[2]//2, layout= Layout(width='70%'))
-    y_slider = IntSlider(min=y_thick_slider.value, max=im_shape[1]-1 - y_thick_slider.value, step=1, value=im_shape[1]//2, layout= Layout(width='70%'))
-    z_slider = IntSlider(min=z_thick_slider.value, max=im_shape[0]-1 - z_thick_slider.value, step=1, value=im_shape[0]//2, layout= Layout(width='70%'))
-
-    # print(type(x_lims))
-
-    interact(display, x_s = x_slider,
-                      y_s = y_slider,
-                      z_s = z_slider,
-             x_t = x_thick_slider,
-             y_t = y_thick_slider,
-             z_t = z_thick_slider,)
+    interact(
+        _display,
+        _x_s=x_slider, _y_s=y_slider, _z_s=z_slider,
+        _x_t=x_thick_slider, _y_t=y_thick_slider, _z_t=z_thick_slider
+    )
 
 
 ### New Function
-def create_multichannel_rgb(xy_list, xz_list, zy_list, vmin = None, vmax = None, gamma = 1, colors = None):
+# def create_multichannel_rgb(xy_list, xz_list, zy_list, vmin = None, vmax = None, gamma = 1, colors = None):
+#     """
+#     Display an interactive widget to explore a 3D image by showing a slice in the x, y, and z directions.
+
+#     Requires ipywidgets to be installed.
+
+#     Parameters
+#     ----------
+#     xy_list, xz_list, zy_list : lists of images (len of list is number of channels)
+#     vmax : float
+#         maximum value to use for the PowerNorm
+#     gamma : float
+#         gamma value to use for the PowerNorm
+#     colors : list of strs
+#         one color per channel
+#     """
+
+#     assert isinstance(xy_list,list)
+
+#     num_channels = len(xy_list)
+
+#     if gamma == 1:
+#         gamma = [1] * num_channels
+#     if vmax is None:
+#         vmax = [1] * num_channels
+#     if vmin is None:
+#         vmin = [0] * num_channels
+        
+#     if colors is None:
+#         colors = ['magenta', 'cyan', 'yellow', 'green']
+#         colors = colors[0:num_channels]
+#     # Convert color names or tuples to RGB
+#     color_map = [to_rgb(color) for color in colors]
+
+
+#     # # Initialize RGB arrays for each orientation
+#     # xy_rgb = np.zeros(xy_list[0].shape + (3,))
+#     # xz_rgb = np.zeros(xz_list[0].shape + (3,))
+#     # zy_rgb = np.zeros(zy_list[0].shape + (3,))
+
+#     # # Apply PowerNorm per channel
+#     # for idx_i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
+#     #     eps = 1e-12
+#     #     xy = xy / max(eps, float(np.max(xy)))
+#     #     xz = xz / max(eps, float(np.max(xz)))
+#     #     zy = zy / max(eps, float(np.max(zy)))
+#     #     norm = PowerNorm(gamma=gamma[idx_i], vmin=vmin[idx_i], vmax=vmax[idx_i], clip = True)
+#     #     xy_norm, xz_norm, zy_norm = norm(xy), norm(xz), norm(zy)  # manually applying norm to the image data
+#     #     # xy_list[idx_i], xz_list[idx_i], zy_list[idx_i] = [idx_i]
+
+#     #     # Combine channels into RGB using color weights
+#     #     xy_rgb += np.outer(xy_norm.flatten(), color_map[idx_i]).reshape(xy_norm.shape + (3,))
+#     #     xz_rgb += np.outer(xz_norm.flatten(), color_map[idx_i]).reshape(xz_norm.shape + (3,))
+#     #     zy_rgb += np.outer(zy_norm.flatten(), color_map[idx_i]).reshape(zy_norm.shape + (3,))
+
+
+def create_multichannel_rgb(xy_list, xz_list, zy_list, vmin=None, vmax=None, gamma=1, colors=None):
     """
     Display an interactive widget to explore a 3D image by showing a slice in the x, y, and z directions.
 
@@ -376,45 +498,54 @@ def create_multichannel_rgb(xy_list, xz_list, zy_list, vmin = None, vmax = None,
     colors : list of strs
         one color per channel
     """
+    assert isinstance(xy_list, list) and isinstance(xz_list, list) and isinstance(zy_list, list)
+    n = len(xy_list)
+    assert len(xz_list) == n and len(zy_list) == n, "xy/xz/zy must have same number of channels"
 
-    assert isinstance(xy_list,list)
+    # Allocate composite RGB buffers for each orientation
+    xy_rgb = np.zeros(xy_list[0].shape + (3,), dtype=np.float32)
+    xz_rgb = np.zeros(xz_list[0].shape + (3,), dtype=np.float32)
+    zy_rgb = np.zeros(zy_list[0].shape + (3,), dtype=np.float32)
 
-    num_channels = len(xy_list)
+    # Prepare per-channel params
+    if isinstance(gamma, (list, tuple)): gammas = list(gamma)
+    else:                                 gammas = [gamma] * n
+    if vmin is None: vmins = [0.0] * n
+    else:            vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
+    if vmax is None: vmaxs = [1.0] * n
+    else:            vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
 
-    if gamma == 1:
-        gamma = [1] * num_channels
-    if vmax is None:
-        vmax = [1] * num_channels
-    if vmin is None:
-        vmin = [0] * num_channels
-        
+    # Default colors if none provided
     if colors is None:
-        colors = ['magenta', 'cyan', 'yellow', 'green']
-        colors = colors[0:num_channels]
-    # Convert color names or tuples to RGB
-    color_map = [to_rgb(color) for color in colors]
+        colors = ['magenta', 'cyan', 'yellow', 'green'][:n]
+    color_map = [np.asarray(to_rgb(c), dtype=np.float32) for c in colors]
 
+    # Normalize helper (handles ints; avoids in-place ops)
+    def _to_float(a):  # safe upcast
+        return a.astype(np.float32, copy=False)
 
-    # Initialize RGB arrays for each orientation
-    xy_rgb = np.zeros(xy_list[0].shape + (3,))
-    xz_rgb = np.zeros(xz_list[0].shape + (3,))
-    zy_rgb = np.zeros(zy_list[0].shape + (3,))
+    for i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
+        # Per-channel PowerNorm (respects vmin/vmax/gamma)
+        norm = PowerNorm(gamma=gammas[i], vmin=vmins[i], vmax=vmaxs[i], clip=True)
 
-    # Apply PowerNorm per channel
-    for idx_i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
-        xy, xz, zy = xy/xy.max(), xz/xz.max(), zy/zy.max()
-        norm = PowerNorm(gamma=gamma[idx_i], vmin=vmin[idx_i], vmax=vmax[idx_i], clip = True)
-        xy_norm, xz_norm, zy_norm = norm(xy), norm(xz), norm(zy)  # manually applying norm to the image data
-        # xy_list[idx_i], xz_list[idx_i], zy_list[idx_i] = [idx_i]
+        xy_n = norm(_to_float(xy))
+        xz_n = norm(_to_float(xz))
+        zy_n = norm(_to_float(zy))
 
-        # Combine channels into RGB using color weights
-        xy_rgb += np.outer(xy_norm.flatten(), color_map[idx_i]).reshape(xy_norm.shape + (3,))
-        xz_rgb += np.outer(xz_norm.flatten(), color_map[idx_i]).reshape(xz_norm.shape + (3,))
-        zy_rgb += np.outer(zy_norm.flatten(), color_map[idx_i]).reshape(zy_norm.shape + (3,))
+        c = color_map[i]  # shape (3,)
 
+        # Broadcast add: (H,W) -> (H,W,1) * (3,)
+        xy_rgb += xy_n[..., None] * c
+        xz_rgb += xz_n[..., None] * c
+        zy_rgb += zy_n[..., None] * c
 
+    # Keep display-safe range
+    xy_rgb = np.clip(xy_rgb, 0, 1)
+    xz_rgb = np.clip(xz_rgb, 0, 1)
+    zy_rgb = np.clip(zy_rgb, 0, 1)
 
-
-    # return show_xyz(xy_rgb, xz_rgb, zy_rgb, vmin = None, vmax=None, gamma = 1, use_plt=True)
     return xy_rgb, xz_rgb, zy_rgb
+
+    # # return show_xyz(xy_rgb, xz_rgb, zy_rgb, vmin = None, vmax=None, gamma = 1, use_plt=True)
+    # return xy_rgb, xz_rgb, zy_rgb
 
