@@ -482,67 +482,137 @@ def show_xyz_max_slice_interactive(
 #     #     zy_rgb += np.outer(zy_norm.flatten(), color_map[idx_i]).reshape(zy_norm.shape + (3,))
 
 
-def create_multichannel_rgb(xy_list, xz_list, zy_list, vmin=None, vmax=None, gamma=1, colors=None):
-    """
-    Display an interactive widget to explore a 3D image by showing a slice in the x, y, and z directions.
 
-    Requires ipywidgets to be installed.
+def create_multichannel_rgb(
+    xy_list, xz_list, zy_list,
+    vmin=None, vmax=None, gamma=1, colors=None,
+    blend='add',        # 'add' | 'screen' | 'max'
+    soft_clip=True,     # only used for blend='add'
+    eps=1e-12,
+):
+    """
+    Compose multi-channel XY/XZ/ZY into RGB with per-channel normalization.
 
     Parameters
     ----------
-    xy_list, xz_list, zy_list : lists of images (len of list is number of channels)
-    vmax : float
-        maximum value to use for the PowerNorm
-    gamma : float
-        gamma value to use for the PowerNorm
-    colors : list of strs
-        one color per channel
+    xy_list, xz_list, zy_list : list[np.ndarray]
+        One 2D array per channel for each orientation.
+    vmin, vmax : float | list[float] | None
+        Per-channel input range. If None, auto-computed from data (per-channel,
+        across XY/XZ/ZY). Scalars are broadcast to all channels.
+    gamma : float | list[float]
+        Power gamma applied AFTER linear [0,1] normalization (1 = linear).
+    colors : list[str | tuple]
+        One color per channel (default: ['magenta','cyan','yellow','green'][:n]).
+    blend : str
+        'add' (default), 'screen', or 'max'.
+    soft_clip : bool
+        For 'add' mode, compress values >1 instead of hard clipping.
     """
+
     assert isinstance(xy_list, list) and isinstance(xz_list, list) and isinstance(zy_list, list)
     n = len(xy_list)
     assert len(xz_list) == n and len(zy_list) == n, "xy/xz/zy must have same number of channels"
 
-    # Allocate composite RGB buffers for each orientation
-    xy_rgb = np.zeros(xy_list[0].shape + (3,), dtype=np.float32)
-    xz_rgb = np.zeros(xz_list[0].shape + (3,), dtype=np.float32)
-    zy_rgb = np.zeros(zy_list[0].shape + (3,), dtype=np.float32)
+    Hxy, Wxy = xy_list[0].shape
+    Hxz, Wxz = xz_list[0].shape
+    Hzy, Wzy = zy_list[0].shape
 
-    # Prepare per-channel params
-    if isinstance(gamma, (list, tuple)): gammas = list(gamma)
-    else:                                 gammas = [gamma] * n
-    if vmin is None: vmins = [0.0] * n
-    else:            vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
-    if vmax is None: vmaxs = [1.0] * n
-    else:            vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
+    # Prepare outputs
+    xy_rgb = np.zeros((Hxy, Wxy, 3), dtype=np.float32)
+    xz_rgb = np.zeros((Hxz, Wxz, 3), dtype=np.float32)
+    zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
 
-    # Default colors if none provided
+    # Broadcast params
+    gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+
     if colors is None:
         colors = ['magenta', 'cyan', 'yellow', 'green'][:n]
     color_map = [np.asarray(to_rgb(c), dtype=np.float32) for c in colors]
 
-    # Normalize helper (handles ints; avoids in-place ops)
-    def _to_float(a):  # safe upcast
-        return a.astype(np.float32, copy=False)
+    # Determine per-channel vmin/vmax if not provided
+    if vmin is None:
+        vmins = [0.0] * n
+    else:
+        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [float(vmin)] * n
 
+    if vmax is None:
+        vmaxs = []
+        for xy, xz, zy in zip(xy_list, xz_list, zy_list):
+            # global max across orientations for that channel
+            vmaxs.append(float(max(np.max(xy), np.max(xz), np.max(zy))))
+    else:
+        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [float(vmax)] * n
+
+    # Sanitize: ensure vmax > vmin
+    for i in range(n):
+        if not np.isfinite(vmins[i]): vmins[i] = 0.0
+        if not np.isfinite(vmaxs[i]): vmaxs[i] = vmins[i] + 1.0
+        if vmaxs[i] <= vmins[i] + eps:
+            vmaxs[i] = vmins[i] + 1.0  # avoid zero range
+
+    # Choose blending accumulators
+    if blend == 'screen':
+        xy_acc = np.ones_like(xy_rgb)
+        xz_acc = np.ones_like(xz_rgb)
+        zy_acc = np.ones_like(zy_rgb)
+    else:
+        xy_acc = xy_rgb
+        xz_acc = xz_rgb
+        zy_acc = zy_rgb
+
+    # Helpers
+    def _norm(a, lo, hi, g):
+        # linear normalize to [0,1] then gamma
+        out = (a.astype(np.float32, copy=False) - lo) / max(hi - lo, eps)
+        out = np.clip(out, 0.0, 1.0)
+        return out if g == 1 else np.power(out, g, dtype=np.float32)
+
+    # Per-channel accumulate
     for i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
-        # Per-channel PowerNorm (respects vmin/vmax/gamma)
-        norm = PowerNorm(gamma=gammas[i], vmin=vmins[i], vmax=vmaxs[i], clip=True)
+        c = color_map[i]  # (3,)
+        g = gammas[i]
+        lo, hi = vmins[i], vmaxs[i]
 
-        xy_n = norm(_to_float(xy))
-        xz_n = norm(_to_float(xz))
-        zy_n = norm(_to_float(zy))
+        xy_n = _norm(xy, lo, hi, g)[..., None] * c  # (H,W,3)
+        xz_n = _norm(xz, lo, hi, g)[..., None] * c
+        zy_n = _norm(zy, lo, hi, g)[..., None] * c
 
-        c = color_map[i]  # shape (3,)
+        if blend == 'screen':
+            xy_acc *= (1.0 - xy_n)
+            xz_acc *= (1.0 - xz_n)
+            zy_acc *= (1.0 - zy_n)
+        elif blend == 'max':
+            xy_acc = np.maximum(xy_acc, xy_n)
+            xz_acc = np.maximum(xz_acc, xz_n)
+            zy_acc = np.maximum(zy_acc, zy_n)
+        else:  # 'add'
+            xy_acc += xy_n
+            xz_acc += xz_n
+            zy_acc += zy_n
 
-        # Broadcast add: (H,W) -> (H,W,1) * (3,)
-        xy_rgb += xy_n[..., None] * c
-        xz_rgb += xz_n[..., None] * c
-        zy_rgb += zy_n[..., None] * c
+    # Finalize per blend
+    if blend == 'screen':
+        xy_rgb = 1.0 - xy_acc
+        xz_rgb = 1.0 - xz_acc
+        zy_rgb = 1.0 - zy_acc
+    else:
+        xy_rgb = xy_acc
+        xz_rgb = xz_acc
+        zy_rgb = zy_acc
 
-    # Keep display-safe range
-    xy_rgb = np.clip(xy_rgb, 0, 1)
-    xz_rgb = np.clip(xz_rgb, 0, 1)
-    zy_rgb = np.clip(zy_rgb, 0, 1)
+        if blend == 'add':
+            if soft_clip:
+                # compress highlights smoothly instead of hard clipping
+                # scale by max component per-pixel if it exceeds 1
+                for rgb in (xy_rgb, xz_rgb, zy_rgb):
+                    m = rgb.max(axis=-1, keepdims=True)
+                    scale = np.maximum(1.0, m)
+                    rgb /= scale
+            # ensure display-safe range
+            xy_rgb = np.clip(xy_rgb, 0.0, 1.0)
+            xz_rgb = np.clip(xz_rgb, 0.0, 1.0)
+            zy_rgb = np.clip(zy_rgb, 0.0, 1.0)
 
     return xy_rgb, xz_rgb, zy_rgb
 
