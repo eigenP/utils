@@ -1,13 +1,33 @@
-import marimo as mo
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "marimo",
+#     "matplotlib==3.10.6",
+#     "numpy==2.2.6",
+#     "scikit-image==0.25.2",
+#     "eigenp_utils @ git+https://github.com/eigenP/utils.git"
+# ]
+# ///
 
-__generated_with__ = "0.6.15"
+import marimo
 
-app = mo.App()
+__generated_with = "0.16.4"
+app = marimo.App(auto_download=["html"])
 
 
 @app.cell
-def __():
+def _():
     import marimo as mo
+    return (mo,)
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _(mo):
 
     mo.md(
         """
@@ -26,44 +46,41 @@ def __():
         enhanced slice.
         """
     )
+    return
 
 
 @app.cell
-def __():
+def _():
     import matplotlib.pyplot as plt
     import numpy as np
     from skimage import data
 
     from eigenp_utils.clahe_equalize_adapthist import _my_clahe_
     from eigenp_utils.color_coded_projection import color_coded_projection
-
-    return plt, np, data, _my_clahe_, color_coded_projection
+    return color_coded_projection, data, np, plt
 
 
 @app.cell
-def __():
-    import marimo as mo
+def _(mo):
 
     colormap_dropdown = mo.ui.dropdown(
         label="Projection colormap",
         options=[
-            ("Plasma", "plasma"),
-            ("Viridis", "viridis"),
-            ("Inferno", "inferno"),
-            ("Magma", "magma"),
-            ("Cividis", "cividis"),
+            ("plasma"),
+            ("viridis"),
+            ("inferno"),
+            ("magma"),
+            ("cividis"),
         ],
         value="plasma",
     )
 
     colormap_dropdown
-
-    return colormap_dropdown
+    return (colormap_dropdown,)
 
 
 @app.cell
-def __():
-    import marimo as mo
+def _(mo):
 
     clahe_clip_slider = mo.ui.slider(
         label="CLAHE clip limit",
@@ -74,80 +91,81 @@ def __():
     )
 
     clahe_clip_slider
-
-    return clahe_clip_slider
+    return (clahe_clip_slider,)
 
 
 @app.cell
-def __(data):
+def _(data):
     cells = data.cells3d()
     # Select the membrane channel (index 1)
     membrane_stack = cells[:, 1, :, :]
-    return membrane_stack
+    return (membrane_stack,)
 
 
 @app.cell
-def __(membrane_stack, np):
+def _(membrane_stack):
     # Normalize the stack to the range [0, 1]
     stack_min = membrane_stack.min()
     stack_max = membrane_stack.max()
     normalized_stack = (membrane_stack - stack_min) / (stack_max - stack_min)
-    return normalized_stack
+    return (normalized_stack,)
 
 
 @app.cell
-def __(color_coded_projection, colormap_dropdown, normalized_stack, np):
+def _(color_coded_projection, colormap_dropdown, normalized_stack, np):
     projection = color_coded_projection(
         normalized_stack.astype(np.float32),
         color_map=colormap_dropdown.value,
     )
-    return projection
+    return (projection,)
 
 
 @app.cell
-def __(colormap_dropdown, projection, plt):
-    fig, ax = plt.subplots(figsize=(5, 5))
-    ax.imshow(projection)
-    ax.set_title(
+def _(colormap_dropdown, plt, projection):
+    fig_proj, ax_proj = plt.subplots(figsize=(5, 5))
+    ax_proj.imshow(projection)
+    ax_proj.set_title(
         f"Color-coded projection of membrane channel (cmap: {colormap_dropdown.value})"
     )
-    ax.axis("off")
-    fig.tight_layout()
-    fig
+    ax_proj.axis("off")
+    fig_proj.tight_layout()
+    fig_proj
+    return
 
 
 @app.cell
-def __(membrane_stack):
+def _(membrane_stack):
     slice_index = 30
     original_slice = membrane_stack[slice_index]
     return original_slice, slice_index
 
 
 @app.cell
-def __(_my_clahe_, clahe_clip_slider, original_slice):
+def _(clahe_clip_slider, original_slice):
     clahe_slice = _my_clahe_(
         original_slice,
         clip_limit=float(clahe_clip_slider.value),
         nbins=256,
     )
-    return clahe_slice
+    return (clahe_slice,)
 
 
 @app.cell
-def __(clahe_clip_slider, clahe_slice, original_slice, plt, slice_index):
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    axes[0].imshow(original_slice, cmap="gray")
-    axes[0].set_title(f"Original slice {slice_index}")
-    axes[0].axis("off")
+def _(clahe_clip_slider, clahe_slice, original_slice, plt, slice_index):
+    fig_clahe, axes_clahe = plt.subplots(1, 2, figsize=(10, 4))
+    axes_clahe[0].imshow(original_slice, cmap="gray")
+    axes_clahe[0].set_title(f"Original slice {slice_index}")
+    axes_clahe[0].axis("off")
 
-    axes[1].imshow(clahe_slice, cmap="gray")
-    axes[1].set_title(
+    axes_clahe[1].imshow(clahe_slice, cmap="gray")
+    axes_clahe[1].set_title(
         f"CLAHE enhanced slice (clip_limit={float(clahe_clip_slider.value):.3f})"
     )
-    axes[1].axis("off")
+    axes_clahe[1].axis("off")
 
-    fig.tight_layout()
-    fig
+    fig_clahe.tight_layout()
+    fig_clahe
+    return
 
 
 if __name__ == "__main__":
