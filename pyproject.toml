@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eigenp-utils"           # project (distribution) name on install
+version = "0.0.1"
+description = "Utilities for EigenP"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+# Tell hatch where your package code lives (src-layout)
+packages = ["src/eigenp_utils"]
