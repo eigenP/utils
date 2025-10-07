@@ -34,8 +34,8 @@ def __():
     import numpy as np
     from skimage import data
 
-    from clahe_equalize_adapthist import _my_clahe_
-    from color_coded_projection import color_coded_projection
+    from eigenp_utils.clahe_equalize_adapthist import _my_clahe_
+    from eigenp_utils.color_coded_projection import color_coded_projection
 
     return plt, np, data, _my_clahe_, color_coded_projection
 
