@@ -1,10 +1,6 @@
 import pytest
-import sys
-from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-from dimensionality_parser import parse_slice
+from eigenp_utils.dimensionality_parser import parse_slice
 
 
 def test_parse_slice_single_value():

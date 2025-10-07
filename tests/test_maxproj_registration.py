@@ -1,15 +1,12 @@
 import sys
 import types
-from pathlib import Path
 import numpy as np
 import pytest
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 # Provide a stub pandas module so the import succeeds
 sys.modules.setdefault('pandas', types.ModuleType('pandas'))
 
-from maxproj_registration import zero_shift_multi_dimensional
+from eigenp_utils.maxproj_registration import zero_shift_multi_dimensional
 
 
 def test_zero_shift_positive_negative():

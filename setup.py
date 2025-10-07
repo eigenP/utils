@@ -7,14 +7,15 @@ with open(os.path.join(here, "README.md"), encoding="utf-8") as f:
     long_description = f.read()
 
 setup(
-    name='my_utils',  # Package name
+    name='eigenp_utils',  # Package name
     version='0.1.0',          # Version number
     description='A package for generating kymographs from image data.',
     long_description=long_description,
     long_description_content_type="text/markdown",  # This tells PyPI the format of your long description
     author='Panagiotis Oikonomou',       # Your name
     author_email='po2236@columbia.edu',  # Your email
-    packages=find_packages(), # Automatically find packages
+    package_dir={"": "src"},
+    packages=find_packages(where="src"), # Automatically find packages
     install_requires=[        # Dependencies
         'numpy',
         'tqdm',
@@ -26,6 +27,13 @@ setup(
         'plotly',
         'marimo',
     ],
+    package_data={
+        "eigenp_utils": [
+            "Inter-Regular.ttf",
+            "scientific.mplstyle",
+        ]
+    },
+    include_package_data=True,
     classifiers=[             # Optional metadata
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: BSD 3 License',
