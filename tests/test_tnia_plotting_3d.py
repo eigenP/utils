@@ -1,10 +1,7 @@
 import sys
 import types
-from pathlib import Path
 import numpy as np
 import pytest
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 # Stub ipywidgets if missing to satisfy imports
 widgets = types.ModuleType("ipywidgets")
@@ -19,7 +16,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from tnia_plotting_3d import show_xyz_slice, show_xyz_max_slabs, create_multichannel_rgb
+from eigenp_utils.tnia_plotting_3d import (
+    show_xyz_slice,
+    show_xyz_max_slabs,
+    create_multichannel_rgb,
+)
 from matplotlib.colors import to_rgb
 
 

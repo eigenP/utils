@@ -1,9 +1,5 @@
 import numpy as np
 import pytest
-import sys
-from pathlib import Path
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 matplotlib = pytest.importorskip("matplotlib")
 matplotlib.use("Agg")
@@ -11,8 +7,8 @@ matplotlib.use("Agg")
 from matplotlib import colormaps as mpl_colormaps
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
-from color_coded_projection import color_coded_projection
-from hist_imshow import hist_imshow
+from eigenp_utils import color_coded_projection
+from eigenp_utils import hist_imshow
 
 
 def test_color_coded_projection_basic():
