@@ -5,7 +5,7 @@
 #     "matplotlib==3.10.6",
 #     "numpy==2.2.6",
 #     "scikit-image==0.25.2",
-#     "eigenp_utils @ git+https://github.com/eigenP/utils.git"
+#     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main",
 # ]
 # ///
 
@@ -21,30 +21,54 @@ def _():
     return (mo,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
+    import os, sys, subprocess, shutil
+    from pathlib import Path
+
+    OWNER, REPO, REF = "eigenP", "utils", "main"  # or a tag/branch/commit
+    work = Path.cwd() / "_ext" / f"{REPO}-{REF}"
+    src = work / "src"
+
+    # clean old checkout
+    if work.exists():
+        shutil.rmtree(work, ignore_errors=True)
+
+    # shallow clone at the desired ref
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--branch", REF, f"https://github.com/{OWNER}/{REPO}.git", str(work)],
+        check=True
+    )
+
+    # ensure src is importable
+    p = str(src.resolve())
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+    import eigenp_utils  # noqa: E402
+    print("eigenp_utils imported from:", eigenp_utils.__file__)
+
     return
 
 
 @app.cell
 def _(mo):
-
     mo.md(
         """
-        # Color-coded projection and CLAHE demo
+    # Color-coded projection and CLAHE demo
 
-        This notebook demonstrates how to use the
-        `color_coded_projection` and `_my_clahe_` utilities provided in this
-        repository. We load the sample `cells3d` dataset from scikit-image and
-        showcase both functions:
+    This notebook demonstrates how to use the
+    `color_coded_projection` and `_my_clahe_` utilities provided in this
+    repository. We load the sample `cells3d` dataset from scikit-image and
+    showcase both functions:
 
-        * **color_coded_projection** for creating a time/volume color projection
-        * **_my_clahe_** for applying Contrast Limited Adaptive Histogram Equalization (CLAHE)
+    * **color_coded_projection** for creating a time/volume color projection
+    * **_my_clahe_** for applying Contrast Limited Adaptive Histogram Equalization (CLAHE)
 
-        Use the controls below to explore different color mappings for the
-        projection and adjust the CLAHE clip limit to see its effect on the
-        enhanced slice.
-        """
+    Use the controls below to explore different color mappings for the
+    projection and adjust the CLAHE clip limit to see its effect on the
+    enhanced slice.
+    """
     )
     return
 
