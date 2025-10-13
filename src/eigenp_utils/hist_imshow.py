@@ -40,8 +40,10 @@ def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_
     >>> res["fig"].show()  # Display the figure with the image and its histogram
     """
 
+    ### SET DEFAULT KWARGS
     # Ensure 'origin' is set to 'lower' if not specified
     imshow_kwargs.setdefault('origin', 'lower')
+    imshow_kwargs.setdefault('cmap', 'gray')
     
     # Ensure image is 2D so that we can plot it
     im_shape = image.shape
