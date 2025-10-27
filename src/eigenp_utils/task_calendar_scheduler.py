@@ -1,7 +1,14 @@
 import marimo
 
-__generated_with = "0.11.18"
+__generated_with = "unknown"
 app = marimo.App(width="medium")
+
+
+@app.cell
+def _(mo):
+    time_hrs_slider_ = mo.ui.slider(start=-10, stop=10, step = 0.5)
+    time_hrs_slider_
+    return (time_hrs_slider_,)
 
 
 @app.cell(hide_code=True)
@@ -9,7 +16,7 @@ def _(cal, plot_calendar):
 
     # Plot calendar
     fig = plot_calendar(cal)
-    return (fig,)
+    return
 
 
 @app.cell
@@ -27,7 +34,7 @@ def _():
 @app.cell
 def _(pd):
     from dataclasses import dataclass, field
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, time
     from typing import Optional, Union, List
     import uuid
     import copy
@@ -105,21 +112,7 @@ def _(pd):
             for e in targets:
                 e.start = e.start + timedelta(seconds=delta_start)
                 e.end   = e.end   + timedelta(seconds=delta_end)
-
-    return (
-        Calendar,
-        Event,
-        List,
-        Optional,
-        Union,
-        copy,
-        dataclass,
-        datetime,
-        events_to_dataframe,
-        field,
-        timedelta,
-        uuid,
-    )
+    return Calendar, Event, datetime, events_to_dataframe, time, timedelta
 
 
 @app.cell
@@ -127,29 +120,66 @@ def _(Calendar, events_to_dataframe):
     import plotly.express as px
 
     def plot_calendar(calendar: Calendar, show: bool = True):
+        """
+        Plots the calendar events, attempting to use resource names as colors.
+        Falls back to standard coloring if resource names are not valid colors.
+        """
         df = events_to_dataframe(calendar.events)
-        fig = px.timeline(
-            df,
-            x_start="start",
-            x_end="end",
-            y="group",              # Grouped lanes on y-axis
-            color="resource",       # Optional color-coding
-            hover_data=["name", "description"]
-        )
-        fig.update_yaxes(autorange="reversed")  # Keep top-down order :contentReference[oaicite:6]{index=6}
-        # fig.update_xaxes(
-        #     tickformat="%H:%M",     # Hour:Minute format
-        #     dtick=3600000           # One-hour intervals (ms) :contentReference[oaicite:7]{index=7}
-        # )
+    
+        try:
+            # --- Attempt 1: Use resource names as colors ---
+        
+            # 1. Create the color map from unique resource names
+            #    This assumes resource names are valid color strings (e.g., "Red", "black", "blue")
+            unique_resources = df['resource'].unique()
+            color_map = {res: res for res in unique_resources}
+        
+            print("Attempting to apply color palette from resource names...")
+        
+            # 2. Try to plot using this map for the 'color_discrete_map' argument
+            #    This line will fail if any name in 'color_map' is not a valid color.
+            fig = px.timeline(
+                df,
+                x_start="start",
+                x_end="end",
+                y="group",
+                color="resource",
+                color_discrete_map=color_map,  # <-- This is the custom palette
+                hover_data=["name", "description"]
+            )
+            print("Successfully applied custom color palette.")
+
+        except Exception as e:
+            # --- Attempt 2: Fallback to standard coloring ---
+        
+            print(f"\n--- PLOTTING WARNING ---")
+            print(f"Failed to apply custom palette from resource names. Error: {e}")
+            print("This likely means a 'resource' name isn't a valid color (e.g., 'Incubator1' instead of 'red').")
+            print("Falling back to standard Plotly coloring.\n")
+        
+            # Plot again, but without the 'color_discrete_map' argument
+            fig = px.timeline(
+                df,
+                x_start="start",
+                x_end="end",
+                y="group",
+                color="resource",  # <-- Standard coloring
+                hover_data=["name", "description"]
+            )
+
+        # --- Common layout updates ---
+        fig.update_yaxes(autorange="reversed")
         fig.update_layout(title="Linked Event Schedule", xaxis_title="Time", yaxis_title="Group")
+    
         if show:
             fig.show()
+        
         return fig
-    return plot_calendar, px
+    return (plot_calendar,)
 
 
 @app.cell
-def _(Calendar, Event, datetime, timedelta):
+def _(Calendar, Event, datetime, time, time_hrs_slider_, timedelta):
     # events = [
     #     Event("1", "Opening Ceremony", datetime(2025,5,12,9,0),  datetime(2025,5,12,10,0), resource="Main Hall"),
     #     Event("2", "Keynote",          datetime(2025,5,12,10,30),datetime(2025,5,18,11,30),resource="Main Hall"),
@@ -162,28 +192,52 @@ def _(Calendar, Event, datetime, timedelta):
 
     # Initial events with a shared linkGroup "Team"
 
-    dissection_time = datetime(2025,6,5,9,0)
+    dissection_time_ = datetime(2025,10,30,8,0)
+
+    dissection_time = dissection_time_ - timedelta(hours=time_hrs_slider_.value)
+
 
     events = [
-        # HH 10
-        Event("Incub to hh8",   dissection_time - timedelta(hours=9) - timedelta(hours=2) - timedelta(hours=30), timedelta(hours=30), group="HH10", resource="Blue"),
-        Event("Harvest & Epor",   dissection_time - timedelta(hours=9) - timedelta(hours=2),  timedelta(hours=2), group="HH10", resource="Red", linkGroup="HH10"),
-        Event("Epor Incub",      dissection_time - timedelta(hours=9), timedelta(hours=9), group="HH10", resource="Blue", linkGroup="HH10"),
-        # HH 15
-        Event("Incub to hh11",   dissection_time - timedelta(hours=17) - timedelta(hours=2) - timedelta(hours=42),  timedelta(hours=42), group="HH15", resource="Blue", linkGroup="HH15"),
-        Event("Harvest & Epor",   dissection_time - timedelta(hours=17) - timedelta(hours=2),  timedelta(hours=2), group="HH15", resource="Red", linkGroup="HH15"),
-        Event("Epor Incub",      dissection_time - timedelta(hours=17), timedelta(hours=17), group="HH15", resource="Blue", linkGroup="HH15"),
+        # # HH 10
+        # Event("Incub to hh8",   dissection_time - timedelta(hours=9) - timedelta(hours=2) - timedelta(hours=30), timedelta(hours=30), group="HH10", resource="Blue"),
+        # Event("Harvest & Epor",   dissection_time - timedelta(hours=9) - timedelta(hours=2),  timedelta(hours=2), group="HH10", resource="Red", linkGroup="HH10"),
+        # Event("Epor Incub",      dissection_time - timedelta(hours=9), timedelta(hours=9), group="HH10", resource="Blue", linkGroup="HH10"),
+        # # HH 15
+        # Event("Incub to hh11",   dissection_time - timedelta(hours=17) - timedelta(hours=2) - timedelta(hours=42),  timedelta(hours=42), group="HH15", resource="Blue", linkGroup="HH15"),
+        # Event("Harvest & Epor",   dissection_time - timedelta(hours=17) - timedelta(hours=2),  timedelta(hours=2), group="HH15", resource="Red", linkGroup="HH15"),
+        # Event("Epor Incub",      dissection_time - timedelta(hours=17), timedelta(hours=17), group="HH15", resource="Blue", linkGroup="HH15"),
         # HH 18
         Event("Incub to hh11",   dissection_time - timedelta(hours=34) - timedelta(hours=2) - timedelta(hours=42),  timedelta(hours=42), group="HH18", resource="Blue", linkGroup="HH18"),
         Event("Harvest & Epor",   dissection_time - timedelta(hours=34) - timedelta(hours=2),  timedelta(hours=2), group="HH18", resource="Red", linkGroup="HH18"),
         Event("Epor Incub",      dissection_time - timedelta(hours=34), timedelta(hours=34),group="HH18", resource="Blue", linkGroup="HH18"),
         # Dissect & Dissociate
-        Event("Dissect",      dissection_time, timedelta(minutes=45) ,group="HH10", resource="Red"),
-        Event("Dissociate",   datetime(2025,6,5,10,30),  timedelta(hours=1.5), group="HH10", resource="Red"),
+        Event("Dissect",      dissection_time, timedelta(minutes=45) ,group="HH18", resource="Red"),
+        # Event("Dissociate",   datetime(2025,6,5,10,30),  timedelta(hours=1.5), group="HH10", resource="Red"),
+
     ]
 
-    cal = Calendar(events)
-    return cal, dissection_time, events
+
+    ### Nights - Dead hours to avoid (Generated)
+    # We define the start time (10 PM) and duration (8 hours)
+    night_start_time = time(22, 0)
+    night_duration = timedelta(hours=8)
+
+    # List comprehension to generate dead hours for 4 nights leading up to dissection
+    # range(1, 5) will loop for i = 1, 2, 3, 4
+    dead_hours = [
+        Event(
+            "Night",  # Event name
+            datetime.combine(dissection_time_.date() - timedelta(days=i), night_start_time), # Start time: 10 PM on the day i days before
+            night_duration, # Duration: 8 hours (10 PM to 6 AM)
+            group="Dead",
+            resource="Black",
+            linkGroup="Dead"
+        )
+        for i in range(1, 5) # Generates for 1, 2, 3, and 4 days prior
+    ]
+
+    cal = Calendar(events + dead_hours)
+    return (cal,)
 
 
 @app.cell
