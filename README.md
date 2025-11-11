@@ -4,7 +4,9 @@ helper files
 
 # Install
 
-`uv pip install git+https://github.com/eigenP/utils.git`
+```
+uv pip install git+https://github.com/eigenP/utils.git
+```
 
 
 # License
