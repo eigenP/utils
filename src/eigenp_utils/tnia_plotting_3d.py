@@ -399,22 +399,22 @@ def show_xyz_max_slice_interactive(
             vmin=vmin, vmax=vmax, gamma=gamma, colors=colors
         )
 
-        if show_crosshair:
-            # XY
-            fig.axes[0].axvline(x_lims[0]*sxy + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[0].axhline(y_lims[0]*sxy + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[0].axvline(x_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[0].axhline(y_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3)
-            # ZY
-            fig.axes[1].axvline(z_lims[0]*sz + 0.5*sz, color='r', ls=':', alpha=0.3)
-            fig.axes[1].axhline(y_lims[0]*sxy + 0.5,     color='r', ls=':', alpha=0.3)
-            fig.axes[1].axvline(z_lims[1]*sz + 0.5*sz, color='r', ls=':', alpha=0.3)
-            fig.axes[1].axhline(y_lims[1]*sxy + 0.5,     color='r', ls=':', alpha=0.3)
-            # XZ
-            fig.axes[2].axvline(x_lims[0]*sxy + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[2].axhline(z_lims[0]*sz + 0.5*sz, color='r', ls=':', alpha=0.3)
-            fig.axes[2].axvline(x_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[2].axhline(z_lims[1]*sz + 0.5*sz, color='r', ls=':', alpha=0.3)
+        zorder = 2 if show_crosshair else -1
+        # XY
+        fig.axes[0].axvline(x_lims[0]*sxy + 0.5, color='r', ls=':', alpha=0.3, zorder=zorder)
+        fig.axes[0].axhline(y_lims[0]*sxy + 0.5, color='r', ls=':', alpha=0.3, zorder=zorder)
+        fig.axes[0].axvline(x_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3, zorder=zorder)
+        fig.axes[0].axhline(y_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3, zorder=zorder)
+        # ZY
+        fig.axes[1].axvline(z_lims[0]*sz + 0.5*sz, color='r', ls=':', alpha=0.3, zorder=zorder)
+        fig.axes[1].axhline(y_lims[0]*sxy + 0.5,     color='r', ls=':', alpha=0.3, zorder=zorder)
+        fig.axes[1].axvline(z_lims[1]*sz + 0.5*sz, color='r', ls=':', alpha=0.3, zorder=zorder)
+        fig.axes[1].axhline(y_lims[1]*sxy + 0.5,     color='r', ls=':', alpha=0.3, zorder=zorder)
+        # XZ
+        fig.axes[2].axvline(x_lims[0]*sxy + 0.5, color='r', ls=':', alpha=0.3, zorder=zorder)
+        fig.axes[2].axhline(z_lims[0]*sz + 0.5*sz, color='r', ls=':', alpha=0.3, zorder=zorder)
+        fig.axes[2].axvline(x_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3, zorder=zorder)
+        fig.axes[2].axhline(z_lims[1]*sz + 0.5*sz, color='r', ls=':', alpha=0.3, zorder=zorder)
 
         plt.show()
 
@@ -916,18 +916,18 @@ def show_xyz_max_scatter_interactive(
             axZY.set_xlim([zmin*sz,  (zmax+1)*sz ]); axZY.set_ylim([(ymax+1)*sxy, ymin*sxy])
 
             # Optional crosshair box for slabs
-            if show_crosshair:
-                # XY box = x_lims × y_lims
-                axXY.vlines([x_lims[0]*sxy, (x_lims[1]+1)*sxy], ymin*sxy, (ymax+1)*sxy, colors='r', linestyles=':', alpha=0.3)
-                axXY.hlines([y_lims[0]*sxy, (y_lims[1]+1)*sxy], xmin*sxy, (xmax+1)*sxy, colors='r', linestyles=':', alpha=0.3)
-                # ZY box = z_lims × y_lims
-                axZY.vlines([z_lims[0]*sz, (z_lims[1]+1)*sz], ymin*sxy, (ymax+1)*sxy, colors='r', linestyles=':', alpha=0.3)
-                axZY.hlines([y_lims[0]*sxy, (y_lims[1]+1)*sxy], zmin*sz, (zmax+1)*sz, colors='r', linestyles=':', alpha=0.3)
-                # XZ box = x_lims × z_lims
-                axXZ.vlines([x_lims[0]*sxy, (x_lims[1]+1)*sxy], zmin*sz, (zmax+1)*sz, colors='r', linestyles=':', alpha=0.3)
-                axXZ.hlines([z_lims[0]*sz, (z_lims[1]+1)*sz], xmin*sxy, (xmax+1)*sxy, colors='r', linestyles=':', alpha=0.3)
+            zorder = 2 if show_crosshair else -1
+            # XY box = x_lims × y_lims
+            axXY.vlines([x_lims[0]*sxy, (x_lims[1]+1)*sxy], ymin*sxy, (ymax+1)*sxy, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
+            axXY.hlines([y_lims[0]*sxy, (y_lims[1]+1)*sxy], xmin*sxy, (xmax+1)*sxy, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
+            # ZY box = z_lims × y_lims
+            axZY.vlines([z_lims[0]*sz, (z_lims[1]+1)*sz], ymin*sxy, (ymax+1)*sxy, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
+            axZY.hlines([y_lims[0]*sxy, (y_lims[1]+1)*sxy], zmin*sz, (zmax+1)*sz, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
+            # XZ box = x_lims × z_lims
+            axXZ.vlines([x_lims[0]*sxy, (x_lims[1]+1)*sxy], zmin*sz, (zmax+1)*sz, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
+            axXZ.hlines([z_lims[0]*sz, (z_lims[1]+1)*sz], xmin*sxy, (xmax+1)*sxy, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
 
-            for ax in fig.axes: 
+            for ax in fig.axes:
                 ax.set_facecolor("black")
 
             # Simple scale bar in axBar (reuse your style)
@@ -953,21 +953,22 @@ def show_xyz_max_scatter_interactive(
                        ha='center', va='top', color='gray', fontsize=fontsize_pt)
 
         # Overlay crosshair lines for density mode using the image axes from show_xyz
-        if render == 'density' and show_crosshair:
+        if render == 'density':
+            zorder = 2 if show_crosshair else -1
             # Access in same order as show_xyz: [XY, ZY, XZ, Bar]
             axXY, axZY, axXZ = fig.axes[0], fig.axes[1], fig.axes[2]
             # XY slab box
-            axXY.vlines([x_lims[0]*sxy + 0.5, (x_lims[1]+1)*sxy + 0.5], ymin*sxy, (ymax+1)*sxy, colors='r', linestyles=':', alpha=0.3)
-            axXY.hlines([y_lims[0]*sxy + 0.5, (y_lims[1]+1)*sxy + 0.5], xmin*sxy, (xmax+1)*sxy, colors='r', linestyles=':', alpha=0.3)
+            axXY.vlines([x_lims[0]*sxy + 0.5, (x_lims[1]+1)*sxy + 0.5], ymin*sxy, (ymax+1)*sxy, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
+            axXY.hlines([y_lims[0]*sxy + 0.5, (y_lims[1]+1)*sxy + 0.5], xmin*sxy, (xmax+1)*sxy, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
             # ZY slab box
-            axZY.vlines([z_lims[0]*sz + 0.5*sz, (z_lims[1]+1)*sz + 0.5*sz], ymin*sxy, (ymax+1)*sxy, colors='r', linestyles=':', alpha=0.3)
-            axZY.hlines([y_lims[0]*sxy + 0.5,       (y_lims[1]+1)*sxy + 0.5], zmin*sz, (zmax+1)*sz, colors='r', linestyles=':', alpha=0.3)
+            axZY.vlines([z_lims[0]*sz + 0.5*sz, (z_lims[1]+1)*sz + 0.5*sz], ymin*sxy, (ymax+1)*sxy, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
+            axZY.hlines([y_lims[0]*sxy + 0.5,       (y_lims[1]+1)*sxy + 0.5], zmin*sz, (zmax+1)*sz, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
             # XZ slab box
-            axXZ.vlines([x_lims[0]*sxy + 0.5, (x_lims[1]+1)*sxy + 0.5], zmin*sz, (zmax+1)*sz, colors='r', linestyles=':', alpha=0.3)
-            axXZ.hlines([z_lims[0]*sz + 0.5*sz, (z_lims[1]+1)*sz + 0.5*sz], xmin*sxy, (xmax+1)*sxy, colors='r', linestyles=':', alpha=0.3)
+            axXZ.vlines([x_lims[0]*sxy + 0.5, (x_lims[1]+1)*sxy + 0.5], zmin*sz, (zmax+1)*sz, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
+            axXZ.hlines([z_lims[0]*sz + 0.5*sz, (z_lims[1]+1)*sz + 0.5*sz], xmin*sxy, (xmax+1)*sxy, colors='r', linestyles=':', alpha=0.3, zorder=zorder)
 
 
-        for ax in fig.axes: 
+        for ax in fig.axes:
             ax.set_facecolor("black")
         plt.show()
 
