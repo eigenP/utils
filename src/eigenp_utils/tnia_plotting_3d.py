@@ -273,11 +273,53 @@ def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=1
     return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors)
 
 
-from ipywidgets import interact, IntSlider, FloatRangeSlider, Layout
+from ipywidgets import interact, interactive, IntSlider, FloatRangeSlider, Layout, Text, Button, VBox, HBox
+import functools
+
+def add_save_ui(func):
+    """
+    Decorator that wraps a function returning an ipywidgets.interactive object.
+    It appends a filename text box and a 'Save as SVG' button to the UI.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # The wrapped function must return an `interactive` widget
+        w = func(*args, **kwargs)
+
+        # Create UI elements for saving
+        fname_box = Text(value='filepath_save.svg', description='Filename:')
+        save_btn = Button(description='Save as SVG')
+
+        def on_save_click(b):
+            # The figure is stored in w.result
+            fig = w.result
+            if fig is None:
+                print("No figure to save yet.")
+                return
+
+            filename = fname_box.value
+            # Ensure proper extension if not present? Or just trust user?
+            # User said "suggest filepath_save.svg"
+
+            try:
+                fig.savefig(filename, format='svg', dpi=300, bbox_inches='tight')
+                print(f"Saved to {filename}")
+            except Exception as e:
+                print(f"Error saving file: {e}")
+
+        save_btn.on_click(on_save_click)
+
+        # Return a container with the original widget + save controls
+        # Using VBox to stack them
+        ui = VBox([w, HBox([fname_box, save_btn])])
+        return ui
+
+    return wrapper
 
 
 ### New function
 
+@add_save_ui
 def show_xyz_max_slice_interactive(
     im,
     sxy=1, sz=1,
@@ -416,9 +458,10 @@ def show_xyz_max_slice_interactive(
             fig.axes[2].axvline(x_lims[1]*sxy + 0.5, color='r', ls=':', alpha=0.3)
             fig.axes[2].axhline(z_lims[1]*sz + 0.5*sz, color='r', ls=':', alpha=0.3)
 
-        plt.show()
+        # plt.show()
+        return fig
 
-    interact(
+    return interactive(
         _display,
         _x_s=x_slider, _y_s=y_slider, _z_s=z_slider,
         _x_t=x_thick_slider, _y_t=y_thick_slider, _z_t=z_thick_slider
@@ -661,6 +704,7 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
     return np.clip(colors, 0, 1)
 
+@add_save_ui
 def show_xyz_max_scatter_interactive(
     X, Y, Z,
     channels=None,                 # None | int-array (IDs) | float-array (continuous) | list of arrays (IDs or continuous)
@@ -1029,9 +1073,10 @@ def show_xyz_max_scatter_interactive(
         for ax in fig.axes:
             ax.set_facecolor('black')
 
-        plt.show()
+        # plt.show()
+        return fig
 
-    interact(
+    return interactive(
         _display,
         _x_s=x_slider, _y_s=y_slider, _z_s=z_slider,
         _x_t=x_thick_slider, _y_t=y_thick_slider, _z_t=z_thick_slider
