@@ -13,7 +13,9 @@ dependencies = [
     "scikit-image",
     "ipywidgets",
     "pandas",
-    "tqdm"
+    "tqdm",
+    "numpy",
+    "scipy"
 ]
 
 [tool.hatch.build.targets.wheel]
