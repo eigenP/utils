@@ -31,8 +31,8 @@ def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
     # Get the time dimension
     time_dimension = image.shape[0]
 
-    # Initialize an empty array to store the colored frames (time, y, x, channels)
-    colored_frames = np.zeros((time_dimension, image.shape[1], image.shape[2], 3), dtype=np.float32)
+    # Initialize the result array (y, x, 3) for the maximum intensity projection
+    rgb_image = np.zeros((image.shape[1], image.shape[2], 3), dtype=np.float32)
 
     # Loop through the time dimension and apply the colormap
     for t in range(time_dimension):
@@ -45,11 +45,15 @@ def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
         # Get the corresponding color value from the colormap based on the current time index
         color_value = cmap(t / (time_dimension - 1))[:3]
 
-        # Modulate the color value by the intensity factor of each pixel and store in the colored frames array
-        for c in range(3): # Loop through the RGB channels
-            colored_frames[t, :, :, c] = frame_normalized * color_value[c]
+        # Modulate the color value by the intensity factor and update max projection
+        # Optimization: We update rgb_image iteratively to avoid allocating the large (time, y, x, 3) array.
+        # We also loop over channels to avoid allocating a full (y, x, 3) temporary for the current frame.
+        for c in range(3):  # Loop through the RGB channels
+            # Compute this channel's contribution for the current time point
+            # This allocates a temporary (y, x) array which is much smaller
+            channel_component = frame_normalized * color_value[c]
 
-    # Take the maximum intensity projection across the time axis
-    rgb_image = colored_frames.max(axis=0)
+            # Update the max projection in-place
+            np.maximum(rgb_image[:, :, c], channel_component, out=rgb_image[:, :, c])
 
     return rgb_image
