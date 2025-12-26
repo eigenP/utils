@@ -110,7 +110,7 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
         xy, xz, zy = create_multichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colors = colors)
 
         # Set those back to default bcs they are dealt with in the RGB function
-        vmin, vmax, gamma = None, None, 1
+        vmax, gamma = None, 1
 
 
     if use_plt:
