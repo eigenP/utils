@@ -1,3 +1,9 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "numpy",
+# ]
+# ///
 import numpy as np
 from functools import wraps
 from itertools import product

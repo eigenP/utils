@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "numpy",
+#     "scikit-image",
+# ]
+# ///
 #@markdown `def equalize_adapthist_(image, kernel_size=None, clip_limit=0.01, nbins=256, output_float_dtype = np.float16):`
 
 """

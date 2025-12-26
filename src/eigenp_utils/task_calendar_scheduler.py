@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "marimo",
+#     "pandas",
+#     "plotly",
+# ]
+# ///
 import marimo
 
 __generated_with = "unknown"
@@ -54,17 +62,17 @@ def _(pd):
         def __post_init__(self):
             # 1) Normalize end if it was provided as a duration
             if isinstance(self.end, timedelta):
-                self.end = self.start + self.end  
+                self.end = self.start + self.end
 
             # 2) Default linkGroup to group if not explicitly set
             if self.linkGroup is None:
-                self.linkGroup = self.group  
+                self.linkGroup = self.group
 
             # 3) Compute duration in hours and store as description
-            total_seconds = (self.end - self.start).total_seconds()  
-            duration_hours = total_seconds / 3600                      
+            total_seconds = (self.end - self.start).total_seconds()
+            duration_hours = total_seconds / 3600
             # Format: e.g. "8.0h" or round as needed
-            self.description = f"duration: {duration_hours:.2f}h"               
+            self.description = f"duration: {duration_hours:.2f}h"
 
 
     def events_to_dataframe(events: List[Event]) -> pd.DataFrame:
@@ -125,17 +133,17 @@ def _(Calendar, events_to_dataframe):
         Falls back to standard coloring if resource names are not valid colors.
         """
         df = events_to_dataframe(calendar.events)
-    
+
         try:
             # --- Attempt 1: Use resource names as colors ---
-        
+
             # 1. Create the color map from unique resource names
             #    This assumes resource names are valid color strings (e.g., "Red", "black", "blue")
             unique_resources = df['resource'].unique()
             color_map = {res: res for res in unique_resources}
-        
+
             print("Attempting to apply color palette from resource names...")
-        
+
             # 2. Try to plot using this map for the 'color_discrete_map' argument
             #    This line will fail if any name in 'color_map' is not a valid color.
             fig = px.timeline(
@@ -151,12 +159,12 @@ def _(Calendar, events_to_dataframe):
 
         except Exception as e:
             # --- Attempt 2: Fallback to standard coloring ---
-        
+
             print(f"\n--- PLOTTING WARNING ---")
             print(f"Failed to apply custom palette from resource names. Error: {e}")
             print("This likely means a 'resource' name isn't a valid color (e.g., 'Incubator1' instead of 'red').")
             print("Falling back to standard Plotly coloring.\n")
-        
+
             # Plot again, but without the 'color_discrete_map' argument
             fig = px.timeline(
                 df,
@@ -170,10 +178,10 @@ def _(Calendar, events_to_dataframe):
         # --- Common layout updates ---
         fig.update_yaxes(autorange="reversed")
         fig.update_layout(title="Linked Event Schedule", xaxis_title="Time", yaxis_title="Group")
-    
+
         if show:
             fig.show()
-        
+
         return fig
     return (plot_calendar,)
 

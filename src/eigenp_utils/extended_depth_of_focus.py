@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "numpy",
+#     "scikit-image",
+#     "scipy",
+# ]
+# ///
 ### extended depth of focus with patch blending
 
 import numpy as np
@@ -142,4 +150,3 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         return final_img, height_map_full
 
     return final_img
-
