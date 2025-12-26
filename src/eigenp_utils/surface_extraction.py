@@ -7,6 +7,12 @@
 # ]
 # ///
 
+
+
+### References ###
+# https://forum.image.sc/t/surface-peeler-fiji-macro-for-fast-near-real-time-3d-surface-identification-and-extraction/61966
+##################
+
 import numpy as np
 from scipy import ndimage
 from scipy.ndimage import binary_erosion, binary_dilation
