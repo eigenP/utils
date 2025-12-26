@@ -29,10 +29,25 @@ def extract_surface(
     sz, sy, sx = s_tup
 
     # --- 2. BINNING & DOWNSAMPLING ---
-    img_reduced = ndimage.uniform_filter(
-        image, size=s_tup, mode='reflect', output=np.float32
+    # Optimized to avoid large intermediate allocation and redundant computation
+    # Uses block averaging (binning) instead of dense convolution + subsampling
+
+    pad_z = (sz - image.shape[0] % sz) % sz
+    pad_y = (sy - image.shape[1] % sy) % sy
+    pad_x = (sx - image.shape[2] % sx) % sx
+
+    if pad_z or pad_y or pad_x:
+        image_padded = np.pad(image, ((0, pad_z), (0, pad_y), (0, pad_x)), mode='reflect')
+    else:
+        image_padded = image
+
+    new_d = image_padded.shape[0] // sz
+    new_h = image_padded.shape[1] // sy
+    new_w = image_padded.shape[2] // sx
+
+    img_reduced = image_padded.reshape(new_d, sz, new_h, sy, new_w, sx).mean(
+        axis=(1, 3, 5), dtype=np.float32
     )
-    img_reduced = img_reduced[::sz, ::sy, ::sx]
 
     # --- 3. SMOOTHING ---
     img_blurred = ndimage.gaussian_filter(
