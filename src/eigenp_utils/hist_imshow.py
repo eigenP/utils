@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "numpy",
+#     "matplotlib",
+# ]
+# ///
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import PowerNorm

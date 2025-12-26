@@ -1,3 +1,12 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "numpy",
+#     "pandas",
+#     "scikit-image",
+#     "tqdm",
+# ]
+# ///
 #@markdown `maxproj_registration.py`
 
 ### Imports

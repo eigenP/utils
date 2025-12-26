@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "numpy",
+#     "matplotlib",
+# ]
+# ///
 # def color_coded_projection(image: np.ndarray, color_map = 'plasma') -> np.ndarray:
 
 from matplotlib import colormaps as mpl_colormaps
@@ -46,4 +53,3 @@ def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
     rgb_image = colored_frames.max(axis=0)
 
     return rgb_image
-

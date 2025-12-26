@@ -1,3 +1,12 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "ipywidgets",
+#     "matplotlib",
+#     "numpy",
+#     "scikit-image",
+# ]
+# ///
 #@title `TNIA plotting functions`
 
 # try:
@@ -1081,4 +1090,3 @@ def show_xyz_max_scatter_interactive(
         _x_s=x_slider, _y_s=y_slider, _z_s=z_slider,
         _x_t=x_thick_slider, _y_t=y_thick_slider, _z_t=z_thick_slider
     )
-

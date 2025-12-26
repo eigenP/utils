@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "numpy",
+#     "scikit-image",
+#     "scipy",
+# ]
+# ///
 
 import numpy as np
 from scipy import ndimage
