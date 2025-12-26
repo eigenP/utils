@@ -1,5 +1,4 @@
-
-## 2025-02-14 - Optimized Surface Extraction Downsampling
-**Learning:** `ndimage.uniform_filter` computes a centered window average at every pixel, which is extremely wasteful (runtime and memory) when immediately followed by subsampling.
-**Action:** Replaced with block averaging (reshaping + mean) which computes averages only for the non-overlapping blocks. This aligns with the "binning" intent and is ~10x faster and uses ~64x less memory (for 4x downscaling) by avoiding the allocation of a full-size float32 array.
-**Note:** `uniform_filter` uses a centered window (e.g. `[-1, 0, 1, 2]`), whereas block binning uses `[0, 1, 2, 3]`. This introduces a shift of ~sz/2 pixels. In surface extraction context, this is acceptable or even more correct ("binning").
+## 2025-02-14 - Optimized Color Coded Projection Memory
+**Learning:** Pre-allocating a large 4D array `(T, Y, X, 3)` for accumulating a max-projection result is highly memory inefficient (O(T*Y*X)).
+**Action:** Replaced with iterative accumulation. Initialized a `(Y, X, 3)` result array and updated it in-place inside the loop using `np.maximum`.
+**Note:** Also iterated over channels `c` inside the loop to compute `colored_frame = frame_normalized * color[c]` and update the specific channel of the result. This avoids allocating even a `(Y, X, 3)` temporary buffer, reducing it to `(Y, X)`. Peak memory dropped from ~600MB to ~24MB for a 50-frame 1k x 1k input.
