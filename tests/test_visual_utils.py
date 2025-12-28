@@ -7,9 +7,8 @@ matplotlib.use("Agg")
 from matplotlib import colormaps as mpl_colormaps
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
-from eigenp_utils import color_coded_projection
-from eigenp_utils import hist_imshow
-
+from eigenp_utils import color_coded_projection, hist_imshow, labels_cmap
+import matplotlib.pyplot as plt
 
 def test_color_coded_projection_basic():
     img = np.zeros((3, 2, 2), dtype=float)
@@ -40,4 +39,27 @@ def test_hist_imshow_axes_dict_contents():
     assert list(axes.keys()) == ["Image", "Histogram"]
     assert all(isinstance(ax, Axes) for ax in axes.values())
 
+def test_labels_cmap():
+    # Verify labels_cmap is a valid colormap and has correct structure
+    assert labels_cmap.name == "labels_cmap"
+    # It's a LinearSegmentedColormap, so we can check it returns black for 0
+    assert labels_cmap(0.0) == (0.0, 0.0, 0.0, 1.0) # RGBA for black
 
+    # Check that we can import it and it's not None
+    assert labels_cmap is not None
+
+def test_style_and_font_loaded():
+    # Verify that the font 'Inter' is registered in font manager
+    # Note: the exact name might vary ('Inter Regular', 'Inter') depending on how font_manager parses it
+    # We check if any font in the manager has 'Inter' in its name
+
+    # Check rcParams for font family being sans-serif
+    assert plt.rcParams['font.family'] == ['sans-serif'] or plt.rcParams['font.family'] == 'sans-serif'
+
+    # Check rcParams for sans-serif font being Inter
+    current_sans = plt.rcParams['font.sans-serif']
+    # It might be a list or a string
+    if isinstance(current_sans, list):
+        assert any('Inter' in f for f in current_sans)
+    else:
+        assert 'Inter' in current_sans

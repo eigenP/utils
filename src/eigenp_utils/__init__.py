@@ -1,7 +1,10 @@
 """Utility functions for eigenp workflows."""
 
-from .color_coded_projection import color_coded_projection
-from .hist_imshow import hist_imshow
+from .plotting_utils import (
+    color_coded_projection,
+    hist_imshow,
+    labels_cmap,
+)
 from .dimensionality_parser import parse_slice, dimensionality_parser
 from .tnia_plotting_3d import (
     show_xyz_slice,
@@ -22,6 +25,7 @@ from .extended_depth_of_focus import apply_median_filter, best_focus_image
 __all__ = [
     "color_coded_projection",
     "hist_imshow",
+    "labels_cmap",
     "parse_slice",
     "dimensionality_parser",
     "show_xyz_slice",
