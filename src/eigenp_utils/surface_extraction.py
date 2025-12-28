@@ -82,7 +82,7 @@ def extract_surface(
     thresh = filters.threshold_otsu(img_proc)
     img_mask = img_proc > thresh
 
-    # FIX: define has_surface
+    # Identify columns with valid surface (at least one foreground pixel)
     has_surface = np.any(img_mask, axis=0)
 
     # First True along Z (safe because masked later)
