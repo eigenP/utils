@@ -71,20 +71,53 @@ def _2D_weighted_image(image, overlap):
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3
 
-    # Initialize weight matrix with ones
-    weight_2d = np.ones_like(image, dtype = np.float16)
+    H, W = image.shape
 
-    # Apply weight function to the top, bottom, left, and right overlap regions
-    for i in range(overlap):
-        weight = weight_1d(i / (overlap - 1))
-        weight_2d[i, :] *= weight
-        weight_2d[-(i + 1), :] *= weight
-        weight_2d[:, i] *= weight
-        weight_2d[:, -(i + 1)] *= weight
+    if overlap <= 0:
+        return image.astype(np.float16, copy=True) if image.dtype != np.float16 else image.copy()
 
-    weighted_image = image * weight_2d
+    # Precompute weights for the overlap region
+    if overlap > 1:
+        steps = np.arange(overlap)
+        x = steps / (overlap - 1)
+        weights = weight_1d(x).astype(np.float16)
+    else:
+        weights = np.array([0.0], dtype=np.float16)
 
-    return weighted_image
+    # Initialize 1D profiles with ones
+    y_profile = np.ones(H, dtype=np.float16)
+    x_profile = np.ones(W, dtype=np.float16)
+
+    # Apply weights to the ends of the profiles
+    # We assume overlap <= dimension // 3, so the regions [0:overlap] and [-overlap:] do not intersect.
+
+    # Handle Y axis
+    if H >= 2 * overlap:
+        y_profile[:overlap] = weights
+        y_profile[-overlap:] = weights[::-1]
+    else:
+        # Fallback for very small images relative to overlap (should be rare given usage)
+        # We blend the weights.
+        # But `estimate_drift_2D` sets overlap = min_size // 3, so this branch is theoretically unreachable.
+        # Just in case:
+        y_profile[:overlap] *= weights
+        y_profile[-overlap:] *= weights[::-1]
+
+    # Handle X axis
+    if W >= 2 * overlap:
+        x_profile[:overlap] = weights
+        x_profile[-overlap:] = weights[::-1]
+    else:
+        x_profile[:overlap] *= weights
+        x_profile[-overlap:] *= weights[::-1]
+
+    # Compute 2D mask via broadcasting and apply to image
+    # mask = y_profile[:, None] * x_profile[None, :]
+    # weighted_image = image * mask
+
+    # Efficient calculation
+    return image * (y_profile[:, None] * x_profile[None, :])
+
 
 def estimate_drift_2D(frame1, frame2, return_ccm = False):
     """
