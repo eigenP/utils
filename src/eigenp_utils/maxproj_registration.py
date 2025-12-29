@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from skimage.registration import phase_cross_correlation
 from skimage.registration._phase_cross_correlation import _upsampled_dft
+from scipy.ndimage import shift
 # from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 
@@ -72,15 +73,29 @@ def _2D_weighted_image(image, overlap):
         return 3 * x**2 - 2 * x**3
 
     # Initialize weight matrix with ones
-    weight_2d = np.ones_like(image, dtype = np.float16)
+    # Using float32 for better performance on CPU compared to float16,
+    # unless memory is strictly constrained (which for 2D images is usually fine)
+    weight_2d = np.ones_like(image, dtype=np.float32)
 
-    # Apply weight function to the top, bottom, left, and right overlap regions
-    for i in range(overlap):
-        weight = weight_1d(i / (overlap - 1))
-        weight_2d[i, :] *= weight
-        weight_2d[-(i + 1), :] *= weight
-        weight_2d[:, i] *= weight
-        weight_2d[:, -(i + 1)] *= weight
+    if overlap > 0:
+        # Generate the 1D weight profile
+        # Use linspace to match original logic: i / (overlap - 1)
+        if overlap > 1:
+            w = weight_1d(np.linspace(0, 1, overlap))
+        else:
+            w = np.array([0.0])
+
+        # Apply weight function to the top, bottom, left, and right overlap regions
+        # using vectorized broadcasting instead of a loop.
+
+        # Top
+        weight_2d[:overlap, :] *= w[:, None]
+        # Bottom
+        weight_2d[-overlap:, :] *= w[::-1, None]
+        # Left
+        weight_2d[:, :overlap] *= w[None, :]
+        # Right
+        weight_2d[:, -overlap:] *= w[None, ::-1]
 
     weighted_image = image * weight_2d
 
@@ -301,20 +316,8 @@ def apply_subpixel_drift_correction(image, drift):
     image = np.asarray(image)
     min_value = image.min()
 
-    # Generate the coordinates grid
-    coords = np.array(np.meshgrid(
-        np.arange(image.shape[0]),
-        np.arange(image.shape[1]),
-        np.arange(image.shape[2]),
-        indexing='ij'
-    ), dtype=float)  # change to float type
-
-
-    # Apply the drift
-    for i in range(3):  # loop over x, y, z
-        coords[i, ...] -= drift[i]
-
-    # Perform bicubic interpolation
-    corrected_image = map_coordinates(image, coords, order=3, mode='constant', cval = min_value )
+    # Efficiently apply subpixel shift using scipy.ndimage.shift
+    # This avoids creating a full coordinate grid (O(N) memory savings)
+    corrected_image = shift(image, shift=drift, order=3, mode='constant', cval=min_value)
 
     return corrected_image

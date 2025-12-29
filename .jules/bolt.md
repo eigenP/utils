@@ -1,4 +1,3 @@
-## 2025-02-14 - Optimized Color Coded Projection Memory
-**Learning:** Pre-allocating a large 4D array `(T, Y, X, 3)` for accumulating a max-projection result is highly memory inefficient (O(T*Y*X)).
-**Action:** Replaced with iterative accumulation. Initialized a `(Y, X, 3)` result array and updated it in-place inside the loop using `np.maximum`.
-**Note:** Also iterated over channels `c` inside the loop to compute `colored_frame = frame_normalized * color[c]` and update the specific channel of the result. This avoids allocating even a `(Y, X, 3)` temporary buffer, reducing it to `(Y, X)`. Peak memory dropped from ~600MB to ~24MB for a 50-frame 1k x 1k input.
+## 2025-02-14 - Optimized Subpixel Drift Correction and Weighting
+**Learning:** `np.meshgrid` combined with `map_coordinates` for simple translations is extremely memory inefficient ($O(3 \cdot N_{pixels})$ additional allocation). For subpixel shifts, `scipy.ndimage.shift` is functionally equivalent and vastly more memory-efficient.
+**Action:** Replaced the meshgrid approach with `scipy.ndimage.shift`. Also vectorized a slow Python loop in `_2D_weighted_image` using broadcasting, speeding up weighting by ~5x.
