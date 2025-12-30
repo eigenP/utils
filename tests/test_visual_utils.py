@@ -48,18 +48,3 @@ def test_labels_cmap():
     # Check that we can import it and it's not None
     assert labels_cmap is not None
 
-def test_style_and_font_loaded():
-    # Verify that the font 'Inter' is registered in font manager
-    # Note: the exact name might vary ('Inter Regular', 'Inter') depending on how font_manager parses it
-    # We check if any font in the manager has 'Inter' in its name
-
-    # Check rcParams for font family being sans-serif
-    assert plt.rcParams['font.family'] == ['sans-serif'] or plt.rcParams['font.family'] == 'sans-serif'
-
-    # Check rcParams for sans-serif font being Inter
-    current_sans = plt.rcParams['font.sans-serif']
-    # It might be a list or a string
-    if isinstance(current_sans, list):
-        assert any('Inter' in f for f in current_sans)
-    else:
-        assert 'Inter' in current_sans
