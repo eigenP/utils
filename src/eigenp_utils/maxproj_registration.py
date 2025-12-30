@@ -67,37 +67,34 @@ def _2D_weighted_image(image, overlap):
     # Example usage
     # _2D_window = _2D_weight(image, overlap)
     '''
+    if overlap <= 0:
+        return image.astype(np.float32)
 
     # 1D weight function based on cubic spline
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3
 
-    # Initialize weight matrix with ones
-    # Using float32 for better performance on CPU compared to float16,
-    # unless memory is strictly constrained (which for 2D images is usually fine)
-    weight_2d = np.ones_like(image, dtype=np.float32)
+    H, W = image.shape
 
-    if overlap > 0:
-        # Generate the 1D weight profile
-        # Use linspace to match original logic: i / (overlap - 1)
-        if overlap > 1:
-            w = weight_1d(np.linspace(0, 1, overlap))
-        else:
-            w = np.array([0.0])
+    # Generate the 1D taper profile
+    # Using float32 for better precision than float16, avoiding accumulation errors
+    x = np.linspace(0, 1, overlap)
+    taper = weight_1d(x).astype(np.float32)
 
-        # Apply weight function to the top, bottom, left, and right overlap regions
-        # using vectorized broadcasting instead of a loop.
+    # Construct 1D profiles for Y and X axes
+    # The profile is 1.0 in the center and tapers to 0.0 at the edges
+    profile_y = np.ones(H, dtype=np.float32)
+    profile_y[:overlap] = taper
+    profile_y[-overlap:] = taper[::-1]
 
-        # Top
-        weight_2d[:overlap, :] *= w[:, None]
-        # Bottom
-        weight_2d[-overlap:, :] *= w[::-1, None]
-        # Left
-        weight_2d[:, :overlap] *= w[None, :]
-        # Right
-        weight_2d[:, -overlap:] *= w[None, ::-1]
+    profile_x = np.ones(W, dtype=np.float32)
+    profile_x[:overlap] = taper
+    profile_x[-overlap:] = taper[::-1]
 
-    weighted_image = image * weight_2d
+    # Apply weights using broadcasting
+    # (H, W) * (H, 1) * (1, W)
+    # This avoids allocating a full (H, W) weight matrix, saving memory
+    weighted_image = image * profile_y[:, None] * profile_x[None, :]
 
     return weighted_image
 

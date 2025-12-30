@@ -8,6 +8,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as font_manager
+import matplotlib.colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap, PowerNorm
 from matplotlib import colormaps as mpl_colormaps
 from pathlib import Path
@@ -202,3 +203,19 @@ def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
             np.maximum(rgb_image[:, :, c], channel_component, out=rgb_image[:, :, c])
 
     return rgb_image
+
+
+
+
+
+# Function to adjust colormaps
+def adjust_colormap(cmap_name, start_ = 0.25, end_ = 1.0, start_color = [0.9, 0.9, 0.9, 1]):
+    '''
+        # Use colormap from 25% to 100% (just the color part)
+        # start_color = [0.9, 0.9, 0.9, 1] # gray
+    '''
+    cmap = plt.get_cmap(cmap_name)
+    colors = cmap(np.linspace(start_, end_, 256))  # Use colormap from 25% to 100% (just the color part)
+    colors = np.vstack((start_color, colors))  # Adding faint gray for underflow
+    new_cmap = mcolors.LinearSegmentedColormap.from_list(f"{cmap_name}_adjusted", colors)
+    return new_cmap
