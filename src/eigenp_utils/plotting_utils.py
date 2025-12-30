@@ -19,26 +19,29 @@ font_path = ROOT_DIR / 'Inter-Regular.ttf'
 style_path = ROOT_DIR / 'scientific.mplstyle'
 
 # Load Style
-try:
-    if style_path.exists():
-        plt.style.use(str(style_path))
-    else:
-        print(f"Warning: Style file not found at {style_path}")
-except Exception as e:
-    print(f"Warning: Failed to load style from {style_path}: {e}")
 
-# Load Font
-try:
-    if font_path.exists():
-        font_manager.fontManager.addfont(str(font_path))
-        prop = font_manager.FontProperties(fname=str(font_path))
-        plt.rcParams['font.family'] = 'sans-serif'
-        plt.rcParams['font.sans-serif'] = prop.get_name()
-    else:
-        # Fallback if file not found, though it should be there
-        print(f"Warning: Font file not found at {font_path}")
-except Exception as e:
-    print(f"Warning: Failed to load font from {font_path}: {e}")
+def set_plotting_style():
+    # Load Style
+    try:
+        if style_path.exists():
+            plt.style.use(str(style_path))
+        else:
+            print(f"Warning: Style file not found at {style_path}")
+    except Exception as e:
+        print(f"Warning: Failed to load style from {style_path}: {e}")
+    
+    # Load Font
+    try:
+        if font_path.exists():
+            font_manager.fontManager.addfont(str(font_path))
+            prop = font_manager.FontProperties(fname=str(font_path))
+            plt.rcParams['font.family'] = 'sans-serif'
+            plt.rcParams['font.sans-serif'] = prop.get_name()
+        else:
+            # Fallback if file not found, though it should be there
+            print(f"Warning: Font file not found at {font_path}")
+    except Exception as e:
+        print(f"Warning: Failed to load font from {font_path}: {e}")
 
 
 # --- Initialization: Create labels_cmap ---
