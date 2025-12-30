@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from skimage.registration import phase_cross_correlation
 from skimage.registration._phase_cross_correlation import _upsampled_dft
+from scipy.ndimage import shift
 # from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 
@@ -312,20 +313,8 @@ def apply_subpixel_drift_correction(image, drift):
     image = np.asarray(image)
     min_value = image.min()
 
-    # Generate the coordinates grid
-    coords = np.array(np.meshgrid(
-        np.arange(image.shape[0]),
-        np.arange(image.shape[1]),
-        np.arange(image.shape[2]),
-        indexing='ij'
-    ), dtype=float)  # change to float type
-
-
-    # Apply the drift
-    for i in range(3):  # loop over x, y, z
-        coords[i, ...] -= drift[i]
-
-    # Perform bicubic interpolation
-    corrected_image = map_coordinates(image, coords, order=3, mode='constant', cval = min_value )
+    # Efficiently apply subpixel shift using scipy.ndimage.shift
+    # This avoids creating a full coordinate grid (O(N) memory savings)
+    corrected_image = shift(image, shift=drift, order=3, mode='constant', cval=min_value)
 
     return corrected_image
