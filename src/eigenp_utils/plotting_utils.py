@@ -8,6 +8,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as font_manager
+import matplotlib.colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap, PowerNorm
 from matplotlib import colormaps as mpl_colormaps
 from pathlib import Path
