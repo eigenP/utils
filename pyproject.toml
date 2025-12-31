@@ -18,6 +18,15 @@ dependencies = [
     "scipy"
 ]
 
+[project.optional-dependencies]
+single-cell = [
+    "pacmap",
+    "scanpy",
+    "esda",
+    "libpysal",
+    "triku"
+]
+
 [tool.hatch.build.targets.wheel]
 # Tell hatch where your package code lives (src-layout)
 packages = ["src/eigenp_utils"]
