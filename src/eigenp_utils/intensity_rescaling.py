@@ -60,17 +60,18 @@ def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=No
         # Fallback for other types
         return normalized_image.astype(dtype)
 
-def adjust_gamma_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_AXIS=False):
+def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_AXIS=False, method='gamma'):
     """
-    Adjusts the gamma of each slice in a 3D image along the Z-axis.
+    Adjusts the brightness of each slice in a 3D image along the Z-axis.
 
-    If gamma_fit_func is None, it uses a linear ramp from 1.0 to final_gamma.
-    If gamma_fit_func is provided, it fits the slice intensity decay and calculates
-    gamma values to restore intensity to the reference (max fitted) level.
+    Can use Gamma correction or Linear Gain to restore intensity based on a decay model.
 
     Args:
         image (numpy.ndarray): The 3D image array in Z, Y, X order.
-        final_gamma (float, optional): The gamma value for the last slice (used only if gamma_fit_func is None). Defaults to 0.8.
+        final_gamma (float, optional):
+            If method='gamma', this is the gamma value for the last slice (default 0.8 brightens).
+            If method='gain', this is the gain factor for the last slice (default 0.8 darkens).
+            Only used if gamma_fit_func is None.
         gamma_fit_func (str or callable, optional):
             Method to fit intensity decay.
             'exponential' fits y = a * exp(b * x).
@@ -79,13 +80,16 @@ def adjust_gamma_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_A
             If None (default), manual linear ramp is used.
         FLIP_Z_AXIS (bool): Whether to flip the Z-axis for manual gamma ramp application.
                             Ignored or handled implicitly if gamma_fit_func is used.
+        method (str): Adjustment method. 'gamma' (default) or 'gain' (linear multiplication).
 
     Returns:
-        numpy.ndarray: A new 3D image array with adjusted gamma values per slice.
+        numpy.ndarray: A new 3D image array with adjusted brightness values per slice.
     """
     # Validate inputs
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
+
+    print(f"Adjusting brightness using method: {method} (default: gamma)")
 
     # Get the number of slices
     num_slices = image.shape[0]
@@ -93,19 +97,33 @@ def adjust_gamma_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_A
     # Create an output image array
     adjusted_image = np.empty_like(image)
 
+    # Pre-calculate global max for clipping logic if needed
+    is_integer = np.issubdtype(image.dtype, np.integer)
+    max_dtype_val = None
+    if is_integer:
+        max_dtype_val = np.iinfo(image.dtype).max
+
+    # For float images, check range once to decide clipping behavior
+    should_clip_float = False
+    if not is_integer:
+        # If the image is normalized (max <= 1.0), we clip to 1.0 after gain.
+        # If it's arbitrary float, we might not want to clip, or clip to max?
+        # Standard skimage practice: if float and range is [0,1], keep it [0,1].
+        if np.max(image) <= 1.0:
+            should_clip_float = True
+
     if gamma_fit_func is not None:
-        # Automatic gamma finding logic
+        # Automatic brightness finding logic
 
         # 1. Calculate stats (99th percentile) for each slice
         x_data = np.arange(num_slices)
         y_data = np.array([np.percentile(image[i], 99) for i in range(num_slices)])
 
         # 2. Normalize y_data to [0, 1] based on dtype
-        dtype = image.dtype
-        if np.issubdtype(dtype, np.integer):
-            max_val = np.iinfo(dtype).max
-        elif np.issubdtype(dtype, np.floating):
-            max_val = 1.0 # Assuming standard float images 0-1. Could use max(image) if unnormalized.
+        if is_integer:
+            max_val = max_dtype_val
+        elif np.issubdtype(image.dtype, np.floating):
+            max_val = 1.0 # Assuming standard float images 0-1.
         else:
             max_val = np.max(image) # Fallback
 
@@ -130,66 +148,76 @@ def adjust_gamma_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_A
                 raise ValueError(f"Unknown gamma_fit_func string: {gamma_fit_func}")
         elif callable(gamma_fit_func):
             model = gamma_fit_func
-            p0 = None # Let curve_fit estimate or user should have provided partial?
-                      # curve_fit doesn't take p0 via wrapper easily unless we inspect.
-                      # We'll assume curve_fit can handle it or fail.
+            p0 = None
         else:
              raise ValueError("gamma_fit_func must be a string or callable")
 
         try:
-            # For exponential fit on potentially noisy data, we might want to ensure positive inputs if taking logs,
-            # but curve_fit works on raw data.
             params, _ = curve_fit(model, x_data, y_data_norm, p0=p0, maxfev=10000)
             y_fit_norm = model(x_data, *params)
         except Exception as e:
-            # Fallback or re-raise?
             print(f"Warning: Curve fit failed: {e}. Returning original image.")
             return image
 
-        # 4. Calculate gamma values
-        # We want: y_fit_norm[i] ** gamma[i] = y_ref_norm
-        # y_ref_norm is the "target" intensity (e.g., the max of the fitted curve)
+        # 4. Calculate correction factors (gamma or gain)
         y_ref_norm = np.max(y_fit_norm)
 
         # Avoid mathematical errors
-        y_fit_norm = np.clip(y_fit_norm, 1e-9, 1.0) # Clip low values
+        y_fit_norm = np.clip(y_fit_norm, 1e-9, 1.0)
         y_ref_norm = np.clip(y_ref_norm, 1e-9, 1.0)
 
-        # gamma = log(target) / log(current)
-        # Note: log(x) < 0 for x < 1.
-        # If current < target, we expect gamma < 1 (brightening).
-        # Example: current=0.5, target=1.0 -> log(1)=0 -> gamma=0.
-        # Wait, if target=1.0, 0.5^0 = 1. Correct.
+        if method == 'gamma':
+            # gamma = log(target) / log(current)
+            gamma_values = np.zeros_like(y_fit_norm)
+            log_y_fit = np.log(y_fit_norm)
+            log_y_ref = np.log(y_ref_norm)
 
-        # If y_ref_norm is 1.0 (log is 0), and y_fit_norm < 1.0 (log is neg), gamma is 0.
-        # If y_ref_norm < 1.0, say 0.8. y_fit_norm 0.4.
-        # log(0.8)/log(0.4) = -0.22 / -0.91 = 0.24.
+            mask_valid = np.abs(log_y_fit) > 1e-9
+            gamma_values[mask_valid] = log_y_ref / log_y_fit[mask_valid]
+            gamma_values[~mask_valid] = 1.0
 
-        gamma_values = np.zeros_like(y_fit_norm)
+            # Clip gammas
+            factors = np.clip(gamma_values, 0.1, 10.0)
 
-        log_y_fit = np.log(y_fit_norm)
-        log_y_ref = np.log(y_ref_norm)
+        elif method == 'gain':
+            # gain = target / current
+            gain_values = y_ref_norm / y_fit_norm
+            # Clip gain to avoid extreme noise amplification (e.g., max 100x gain)
+            factors = np.clip(gain_values, 0.1, 100.0)
 
-        # Handle cases where y_fit is 1.0 (log 0)
-        mask_valid = np.abs(log_y_fit) > 1e-9
-        gamma_values[mask_valid] = log_y_ref / log_y_fit[mask_valid]
-        gamma_values[~mask_valid] = 1.0 # If fit is 1.0, gamma 1.0
-
-        # Clip gammas to avoid extreme values
-        gamma_values = np.clip(gamma_values, 0.1, 10.0)
+        else:
+            raise ValueError(f"Unknown method: {method}")
 
     else:
         # Manual linear ramp mode
-        gamma_values = np.linspace(1.0, final_gamma, num_slices)
+        factors = np.linspace(1.0, final_gamma, num_slices)
 
         if FLIP_Z_AXIS:
-            gamma_values = gamma_values[::-1]
+            factors = factors[::-1]
 
-    # Apply gamma adjustment slice by slice
+    # Apply adjustment slice by slice
     for i in range(num_slices):
-        adjusted_image[i, :, :] = adjust_gamma(image[i, :, :], gamma=gamma_values[i])
+        if method == 'gamma':
+            adjusted_image[i, :, :] = adjust_gamma(image[i, :, :], gamma=factors[i])
+        elif method == 'gain':
+            # Linear multiplication
+            # Note: image is already typically loaded as is.
+            img_slice = image[i, :, :].astype(np.float32)
+            img_slice = img_slice * factors[i]
+
+            if is_integer:
+                img_slice = np.clip(img_slice, 0, max_dtype_val)
+                adjusted_image[i, :, :] = img_slice.astype(image.dtype)
+            else:
+                # Float image clipping
+                if should_clip_float:
+                    img_slice = np.clip(img_slice, 0, 1.0)
+                adjusted_image[i, :, :] = img_slice.astype(image.dtype)
 
     return adjusted_image
+
+# Alias for backward compatibility
+adjust_gamma_per_slice = adjust_brightness_per_slice
 
 def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z_AXIS=False):
     """
