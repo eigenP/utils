@@ -48,18 +48,20 @@ def _2D_weight(patch_size, overlap):
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3
 
-    # Initialize weight matrix with ones
-    weight_2d = np.ones((patch_size, patch_size))
+    if overlap <= 0:
+        return np.ones((patch_size, patch_size))
 
-    # Apply weight function to the top, bottom, left, and right overlap regions
-    for i in range(overlap):
-        weight = weight_1d(i / (overlap - 1))
-        weight_2d[i, :] *= weight
-        weight_2d[-(i + 1), :] *= weight
-        weight_2d[:, i] *= weight
-        weight_2d[:, -(i + 1)] *= weight
+    # Generate the 1D taper profile
+    x = np.linspace(0, 1, overlap)
+    taper = weight_1d(x)
 
-    return weight_2d
+    # Construct 1D profiles for Y and X axes
+    # The profile is 1.0 in the center and tapers to 0.0 at the edges
+    profile = np.ones(patch_size)
+    profile[:overlap] *= taper
+    profile[-overlap:] *= taper[::-1]
+
+    return np.outer(profile, profile)
 
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
