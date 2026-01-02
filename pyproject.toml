@@ -26,6 +26,10 @@ single-cell = [
     "libpysal",
     "triku"
 ]
+widgets = [
+    "anywidget",
+    "traitlets"
+]
 
 [tool.hatch.build.targets.wheel]
 # Tell hatch where your package code lives (src-layout)
