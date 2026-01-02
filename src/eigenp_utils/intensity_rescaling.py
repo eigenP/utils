@@ -60,16 +60,25 @@ def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=No
         # Fallback for other types
         return normalized_image.astype(dtype)
 
-def adjust_gamma_per_slice(image, final_gamma=0.8, find_gamma_corr=False, FLIP_Z_AXIS=False):
+def adjust_gamma_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_AXIS=False):
     """
     Adjusts the gamma of each slice in a 3D image along the Z-axis.
-    Gamma starts at 1.0 for the first slice and smoothly changes to 'final_gamma' for the last slice.
+
+    If gamma_fit_func is None, it uses a linear ramp from 1.0 to final_gamma.
+    If gamma_fit_func is provided, it fits the slice intensity decay and calculates
+    gamma values to restore intensity to the reference (max fitted) level.
 
     Args:
         image (numpy.ndarray): The 3D image array in Z, Y, X order.
-        final_gamma (float, optional): The gamma value for the last slice. Defaults to 0.8.
-        find_gamma_corr (bool): Placeholder for auto-gamma finding.
-        FLIP_Z_AXIS (bool): Whether to flip the Z-axis for gamma ramp application.
+        final_gamma (float, optional): The gamma value for the last slice (used only if gamma_fit_func is None). Defaults to 0.8.
+        gamma_fit_func (str or callable, optional):
+            Method to fit intensity decay.
+            'exponential' fits y = a * exp(b * x).
+            'linear' fits y = m * x + c.
+            Can also be a callable model function to be passed to curve_fit.
+            If None (default), manual linear ramp is used.
+        FLIP_Z_AXIS (bool): Whether to flip the Z-axis for manual gamma ramp application.
+                            Ignored or handled implicitly if gamma_fit_func is used.
 
     Returns:
         numpy.ndarray: A new 3D image array with adjusted gamma values per slice.
@@ -78,27 +87,103 @@ def adjust_gamma_per_slice(image, final_gamma=0.8, find_gamma_corr=False, FLIP_Z
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
 
-    if find_gamma_corr:
-        # TODO: Implement gamma correction finding logic
-        # Original code reference:
-        # def model(x, a, b):
-        #     return a * np.exp(b * x)
-        # params, covariance = curve_fit(model, x_data, np.log(y_data))
-        # a = np.exp(params[0])
-        # b = params[1]
-        pass
-
     # Get the number of slices
     num_slices = image.shape[0]
 
     # Create an output image array
     adjusted_image = np.empty_like(image)
 
-    # Calculate the gamma values for each slice
-    gamma_values = np.linspace(1.0, final_gamma, num_slices)
+    if gamma_fit_func is not None:
+        # Automatic gamma finding logic
 
-    if FLIP_Z_AXIS:
-        gamma_values = gamma_values[::-1]
+        # 1. Calculate stats (99th percentile) for each slice
+        x_data = np.arange(num_slices)
+        y_data = np.array([np.percentile(image[i], 99) for i in range(num_slices)])
+
+        # 2. Normalize y_data to [0, 1] based on dtype
+        dtype = image.dtype
+        if np.issubdtype(dtype, np.integer):
+            max_val = np.iinfo(dtype).max
+        elif np.issubdtype(dtype, np.floating):
+            max_val = 1.0 # Assuming standard float images 0-1. Could use max(image) if unnormalized.
+        else:
+            max_val = np.max(image) # Fallback
+
+        # Avoid division by zero
+        if max_val == 0:
+            max_val = 1.0
+
+        y_data_norm = y_data / max_val
+
+        # 3. Fit the model
+        if isinstance(gamma_fit_func, str):
+            if gamma_fit_func == 'exponential':
+                def model(x, a, b):
+                    return a * np.exp(b * x)
+                # Initial guess: a=start value, b=small decay
+                p0 = [y_data_norm[0], -0.1]
+            elif gamma_fit_func == 'linear':
+                def model(x, m, c):
+                    return m * x + c
+                p0 = [-0.01, y_data_norm[0]]
+            else:
+                raise ValueError(f"Unknown gamma_fit_func string: {gamma_fit_func}")
+        elif callable(gamma_fit_func):
+            model = gamma_fit_func
+            p0 = None # Let curve_fit estimate or user should have provided partial?
+                      # curve_fit doesn't take p0 via wrapper easily unless we inspect.
+                      # We'll assume curve_fit can handle it or fail.
+        else:
+             raise ValueError("gamma_fit_func must be a string or callable")
+
+        try:
+            # For exponential fit on potentially noisy data, we might want to ensure positive inputs if taking logs,
+            # but curve_fit works on raw data.
+            params, _ = curve_fit(model, x_data, y_data_norm, p0=p0, maxfev=10000)
+            y_fit_norm = model(x_data, *params)
+        except Exception as e:
+            # Fallback or re-raise?
+            print(f"Warning: Curve fit failed: {e}. Returning original image.")
+            return image
+
+        # 4. Calculate gamma values
+        # We want: y_fit_norm[i] ** gamma[i] = y_ref_norm
+        # y_ref_norm is the "target" intensity (e.g., the max of the fitted curve)
+        y_ref_norm = np.max(y_fit_norm)
+
+        # Avoid mathematical errors
+        y_fit_norm = np.clip(y_fit_norm, 1e-9, 1.0) # Clip low values
+        y_ref_norm = np.clip(y_ref_norm, 1e-9, 1.0)
+
+        # gamma = log(target) / log(current)
+        # Note: log(x) < 0 for x < 1.
+        # If current < target, we expect gamma < 1 (brightening).
+        # Example: current=0.5, target=1.0 -> log(1)=0 -> gamma=0.
+        # Wait, if target=1.0, 0.5^0 = 1. Correct.
+
+        # If y_ref_norm is 1.0 (log is 0), and y_fit_norm < 1.0 (log is neg), gamma is 0.
+        # If y_ref_norm < 1.0, say 0.8. y_fit_norm 0.4.
+        # log(0.8)/log(0.4) = -0.22 / -0.91 = 0.24.
+
+        gamma_values = np.zeros_like(y_fit_norm)
+
+        log_y_fit = np.log(y_fit_norm)
+        log_y_ref = np.log(y_ref_norm)
+
+        # Handle cases where y_fit is 1.0 (log 0)
+        mask_valid = np.abs(log_y_fit) > 1e-9
+        gamma_values[mask_valid] = log_y_ref / log_y_fit[mask_valid]
+        gamma_values[~mask_valid] = 1.0 # If fit is 1.0, gamma 1.0
+
+        # Clip gammas to avoid extreme values
+        gamma_values = np.clip(gamma_values, 0.1, 10.0)
+
+    else:
+        # Manual linear ramp mode
+        gamma_values = np.linspace(1.0, final_gamma, num_slices)
+
+        if FLIP_Z_AXIS:
+            gamma_values = gamma_values[::-1]
 
     # Apply gamma adjustment slice by slice
     for i in range(num_slices):

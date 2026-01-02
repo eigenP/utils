@@ -922,3 +922,208 @@ def tl_pacmap(
     # 4. Store Result
     adata.obsm["X_pacmap"] = X_embedded
     print(f"PaCMAP embedding finished. Result stored in `adata.obsm['X_pacmap']`.")
+    
+    
+# ------------------------- Multiscale Coarsening -------------------------
+
+def multiscale_coarsening(
+    adata: sc.AnnData,
+    resolutions: Optional[List[float]] = None,
+    use_rep: str = "X_pca",
+    store_in_uns: bool = False,
+    uns_key: str = "multiscale_hierarchy",
+    return_output: bool = True,
+    random_state: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Perform multiscale Leiden clustering and establish a hierarchy between resolutions.
+
+    Clusters the data at multiple resolutions (independent Leiden runs) and links clusters
+    across scales based on overlap (majority vote). Also calculates centroids and checks for
+    lineage inconsistencies.
+
+    Args:
+        adata: Annotated data matrix.
+        resolutions: List of resolutions for Leiden clustering.
+                     Defaults to [0.5, 1.0, 10.0, 100.0].
+        use_rep: Representation to use for clustering and centroid calculation (e.g., 'X_pca').
+                 If 'X', uses adata.X.
+        store_in_uns: Whether to store the results in .
+        uns_key: Key under which to store results in .
+        return_output: Whether to return the results dictionary.
+        random_state: Random seed for Leiden clustering.
+
+    Returns:
+        A dictionary containing:
+        - 'clustering': Dict of {resolution: pandas.Series of cluster labels}.
+        - 'centroids': Dict of {resolution: pandas.DataFrame of centroids}.
+        - 'hierarchy': Dict containing:
+            - 'tree': Mapping of {(fine_res, coarse_res): {fine_cluster: coarse_cluster}}.
+            - 'purity': Mapping of {(fine_res, coarse_res): {fine_cluster: purity_score}}.
+              Purity is the fraction of cells in the fine cluster that belong to the assigned coarse cluster.
+        - 'consistency': DataFrame flagging clusters with lineage inconsistencies (direct vs indirect parent mismatch).
+    """
+
+    # 1. Validation & Setup
+    if resolutions is None:
+        resolutions = [0.5, 1.0, 10.0, 100.0]
+
+    # Sort resolutions: Low (coarse) -> High (fine)
+    resolutions = sorted(list(set(resolutions)))
+
+    if use_rep != "X" and use_rep not in adata.obsm:
+        warnings.warn(f"Representation '{use_rep}' not found in adata.obsm. Using 'X' (data matrix).")
+        use_rep = "X"
+
+    # Ensure neighbors exist if we are going to run leiden
+    if "connectivities" not in adata.obsp:
+        print("Computing neighbors for Leiden clustering...")
+        sc.pp.neighbors(adata, use_rep=use_rep if use_rep != "X" else None)
+
+    # 2. Run Clustering
+    clustering_results = {}
+    obs_keys = []
+
+    print(f"Running multiscale clustering on resolutions: {resolutions}")
+    for res in resolutions:
+        key = f"leiden_res_{res}"
+        sc.tl.leiden(adata, resolution=res, key_added=key, random_state=random_state)
+        clustering_results[res] = adata.obs[key].copy()
+        obs_keys.append(key)
+
+    # 3. Calculate Centroids
+    centroids = {}
+
+    # Get the data matrix for centroids
+    if use_rep == "X":
+        if sp.issparse(adata.X):
+             data_matrix = adata.X.toarray()
+        else:
+             data_matrix = adata.X
+    else:
+        data_matrix = adata.obsm[use_rep]
+
+    for res in resolutions:
+        clusters = clustering_results[res]
+        unique_clusters = clusters.unique().sort_values() # Categories are usually strings '0', '1'...
+
+        # We need to ensure we iterate in a stable order corresponding to the cluster labels
+        # Leiden labels are categorical strings.
+
+        res_centroids = []
+        for cluster_id in unique_clusters:
+            mask = (clusters == cluster_id).to_numpy()
+            if mask.any():
+                centroid = data_matrix[mask].mean(axis=0)
+                res_centroids.append(centroid)
+            else:
+                # Should not happen for existing clusters
+                res_centroids.append(np.zeros(data_matrix.shape[1]))
+
+        # Store as DataFrame for better labeling, or just array?
+        # Array is cleaner for pure math, but DataFrame keeps indices.
+        # Let's return a DataFrame indexed by cluster ID.
+        centroids[res] = pd.DataFrame(
+            np.array(res_centroids),
+            index=unique_clusters,
+            columns=[f"dim_{i}" for i in range(data_matrix.shape[1])]
+        )
+
+    # 4. Build Hierarchy & Linkage (All-to-All)
+    hierarchy_tree = {}
+    purity_scores = {}
+
+    # Compare every fine resolution to every coarser resolution
+    for i, res_fine in enumerate(resolutions):
+        for j in range(i): # 0 to i-1 are coarser
+            res_coarse = resolutions[j]
+
+            fine_labels = clustering_results[res_fine]
+            coarse_labels = clustering_results[res_coarse]
+
+            # Confusion Matrix: Rows = Fine, Cols = Coarse
+            confusion = pd.crosstab(fine_labels, coarse_labels)
+
+            # For each fine cluster, find the coarse cluster with max overlap
+            mapping = {}
+            purity = {}
+
+            for f_clust in confusion.index:
+                # Row for this fine cluster
+                counts = confusion.loc[f_clust]
+                if counts.sum() == 0:
+                    continue
+
+                # Dominant parent
+                best_parent = counts.idxmax()
+                max_count = counts.max()
+                total_count = counts.sum()
+
+                mapping[f_clust] = best_parent
+                purity[f_clust] = max_count / total_count
+
+            hierarchy_tree[(res_fine, res_coarse)] = mapping
+            purity_scores[(res_fine, res_coarse)] = purity
+
+    # 5. Consistency Check (Lineage Analysis)
+    # We check triplets: Fine -> Mid -> Coarse
+    # Direct: Fine -> Coarse (mapped directly)
+    # Indirect: Fine -> Mid (mapped) -> Coarse (mapped)
+
+    inconsistencies = []
+
+    for i in range(2, len(resolutions)):
+        res_fine = resolutions[i]
+        for j in range(1, i):
+            res_mid = resolutions[j]
+            for k in range(j):
+                res_coarse = resolutions[k]
+
+                # Maps
+                map_fine_mid = hierarchy_tree.get((res_fine, res_mid), {})
+                map_mid_coarse = hierarchy_tree.get((res_mid, res_coarse), {})
+                map_fine_coarse_direct = hierarchy_tree.get((res_fine, res_coarse), {})
+
+                for f_clust, mid_parent in map_fine_mid.items():
+                    # Indirect path
+                    if mid_parent in map_mid_coarse:
+                        indirect_grandparent = map_mid_coarse[mid_parent]
+                    else:
+                        continue # Should not happen if maps are complete
+
+                    # Direct path
+                    direct_grandparent = map_fine_coarse_direct.get(f_clust)
+
+                    if direct_grandparent != indirect_grandparent:
+                        inconsistencies.append({
+                            "fine_res": res_fine,
+                            "mid_res": res_mid,
+                            "coarse_res": res_coarse,
+                            "fine_cluster": f_clust,
+                            "mid_parent": mid_parent,
+                            "direct_grandparent": direct_grandparent,
+                            "indirect_grandparent": indirect_grandparent,
+                            "purity_fine_mid": purity_scores[(res_fine, res_mid)].get(f_clust, 0),
+                            "purity_mid_coarse": purity_scores[(res_mid, res_coarse)].get(mid_parent, 0),
+                            "purity_fine_coarse": purity_scores[(res_fine, res_coarse)].get(f_clust, 0)
+                        })
+
+    consistency_df = pd.DataFrame(inconsistencies)
+
+    results = {
+        "clustering": clustering_results,
+        "centroids": centroids,
+        "hierarchy": {
+            "tree": hierarchy_tree,
+            "purity": purity_scores
+        },
+        "consistency": consistency_df,
+        "resolutions": resolutions
+    }
+
+    if store_in_uns:
+        adata.uns[uns_key] = results
+
+    if return_output:
+        return results
+    return None

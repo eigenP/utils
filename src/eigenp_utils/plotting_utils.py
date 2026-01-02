@@ -8,6 +8,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as font_manager
+import matplotlib.colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap, PowerNorm
 from matplotlib import colormaps as mpl_colormaps
 from pathlib import Path
@@ -18,26 +19,29 @@ font_path = ROOT_DIR / 'Inter-Regular.ttf'
 style_path = ROOT_DIR / 'scientific.mplstyle'
 
 # Load Style
-try:
-    if style_path.exists():
-        plt.style.use(str(style_path))
-    else:
-        print(f"Warning: Style file not found at {style_path}")
-except Exception as e:
-    print(f"Warning: Failed to load style from {style_path}: {e}")
 
-# Load Font
-try:
-    if font_path.exists():
-        font_manager.fontManager.addfont(str(font_path))
-        prop = font_manager.FontProperties(fname=str(font_path))
-        plt.rcParams['font.family'] = 'sans-serif'
-        plt.rcParams['font.sans-serif'] = prop.get_name()
-    else:
-        # Fallback if file not found, though it should be there
-        print(f"Warning: Font file not found at {font_path}")
-except Exception as e:
-    print(f"Warning: Failed to load font from {font_path}: {e}")
+def set_plotting_style():
+    # Load Style
+    try:
+        if style_path.exists():
+            plt.style.use(str(style_path))
+        else:
+            print(f"Warning: Style file not found at {style_path}")
+    except Exception as e:
+        print(f"Warning: Failed to load style from {style_path}: {e}")
+    
+    # Load Font
+    try:
+        if font_path.exists():
+            font_manager.fontManager.addfont(str(font_path))
+            prop = font_manager.FontProperties(fname=str(font_path))
+            plt.rcParams['font.family'] = 'sans-serif'
+            plt.rcParams['font.sans-serif'] = prop.get_name()
+        else:
+            # Fallback if file not found, though it should be there
+            print(f"Warning: Font file not found at {font_path}")
+    except Exception as e:
+        print(f"Warning: Failed to load font from {font_path}: {e}")
 
 
 # --- Initialization: Create labels_cmap ---
@@ -202,3 +206,19 @@ def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
             np.maximum(rgb_image[:, :, c], channel_component, out=rgb_image[:, :, c])
 
     return rgb_image
+
+
+
+
+
+# Function to adjust colormaps
+def adjust_colormap(cmap_name, start_ = 0.25, end_ = 1.0, start_color = [0.9, 0.9, 0.9, 1]):
+    '''
+        # Use colormap from 25% to 100% (just the color part)
+        # start_color = [0.9, 0.9, 0.9, 1] # gray
+    '''
+    cmap = plt.get_cmap(cmap_name)
+    colors = cmap(np.linspace(start_, end_, 256))  # Use colormap from 25% to 100% (just the color part)
+    colors = np.vstack((start_color, colors))  # Adding faint gray for underflow
+    new_cmap = mcolors.LinearSegmentedColormap.from_list(f"{cmap_name}_adjusted", colors)
+    return new_cmap
