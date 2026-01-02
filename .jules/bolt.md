@@ -7,3 +7,8 @@
 **Learning:** Python loops iterating over pixel overlap regions to apply a weight window are slow (O(overlap)) and `float16` accumulation leads to precision errors.
 **Action:** Replaced with vectorized 1D profile broadcasting: `image * profile_y[:, None] * profile_x[None, :]`.
 **Note:** Used `float32` for profiles to improve precision. Speedup ~10x, memory usage reduced by avoiding full 2D mask allocation.
+
+## 2025-02-14 - Reduced Allocation in Drift Correction
+**Learning:** `apply_drift_correction_2D` was allocating a new array for every frame in `zero_shift_multi_dimensional`, then copying it into the pre-allocated result array.
+**Action:** Modified `zero_shift_multi_dimensional` to accept an `out` parameter and write directly into the destination buffer.
+**Note:** Saves one full-frame allocation and copy per time point. Reduces memory churn and pressure, particularly for large datasets.
