@@ -67,20 +67,23 @@ def _(mo):
 def _():
     import matplotlib.pyplot as plt
     import numpy as np
-    from skimage import data
+    from skimage.io import imread
+
     from eigenp_utils.plotting_utils import (
         hist_imshow,
         color_coded_projection,
-        set_plotting_style
+        set_plotting_style,
     )
+    from eigenp_utils.io import download_file
 
     # Try to set style (might fail if files missing in checkout, but good to call)
     set_plotting_style()
 
     return (
         color_coded_projection,
-        data,
+        download_file,
         hist_imshow,
+        imread,
         np,
         plt,
         set_plotting_style,
@@ -88,8 +91,15 @@ def _():
 
 
 @app.cell
-def _(data):
-    cells = data.cells3d()
+def _(download_file):
+    url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
+    download_file(url_to_fetch, "./cells3d.tif")
+    return
+
+
+@app.cell
+def _(imread):
+    cells = imread("./cells3d.tif")
     # Normalize for color projection (it expects floats often or handles it)
     # The function docs say "Normalize ... if frame_max > frame_min" internally.
     stack = cells[:, 1, :, :].astype(float)

@@ -68,16 +68,26 @@ def _(mo):
 def _():
     import matplotlib.pyplot as plt
     import numpy as np
-    from skimage import data
+    from skimage.io import imread
+
     from eigenp_utils.surface_extraction import extract_surface
-    return extract_surface, data, np, plt
+    from eigenp_utils.io import download_file
+
+    return extract_surface, download_file, imread, np, plt
 
 
 @app.cell
-def _(data):
+def _(download_file):
+    url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
+    download_file(url_to_fetch, "./cells3d.tif")
+    return
+
+
+@app.cell
+def _(imread):
     # Use cells3d membrane channel
-    cells = data.cells3d()
-    membrane = cells[:, 0, :, :] # ZYX
+    cells = imread("./cells3d.tif")
+    membrane = cells[:, 0, :, :]  # ZYX
     # Crop to a smaller ROI for speed/visualization
     roi = membrane[:, 100:200, 100:200]
     return cells, membrane, roi

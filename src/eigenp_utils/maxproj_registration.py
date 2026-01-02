@@ -20,13 +20,15 @@ from tqdm import tqdm
 
 
 
-def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0):
+def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
     """
     Shift the elements of a multi-dimensional NumPy array along each axis by specified amounts, filling the vacant positions with a specified fill value.
 
     :param arr: A multi-dimensional NumPy array
     :param shifts: A single integer or a list/tuple of integers specifying the shift amounts for each axis
     :param fill_value: An optional value to fill the vacant positions after the shift (default is 0)
+    :param out: A location into which the result is stored. If provided, it must have a shape that the inputs broadcast to.
+                If not provided or None, a freshly-allocated array is returned.
     :return: A new NumPy array with the elements shifted and the specified fill value in the vacant positions
     """
     # Ensure shifts is a list or tuple of integers, or a single integer
@@ -41,7 +43,12 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0):
         raise TypeError("Shifts must be a single integer or a list/tuple of integers.")
 
     # Initialize the result array with the fill value
-    result = np.full_like(arr, fill_value)
+    if out is None:
+        result = np.full_like(arr, fill_value)
+    else:
+        result = out
+        result.fill(fill_value)
+
     # Initialize slices for input and output arrays
     slices_input = [slice(None)] * arr.ndim
     slices_output = [slice(None)] * arr.ndim
@@ -235,7 +242,7 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
             if abs(dx) > x_shape//5:
                 dx = 0
             if abs(dy) > y_shape//5:
-                print('Whaa')
+                # print('Whaa')
                 dy = 0
 
             # Update the cumulative drift
@@ -243,7 +250,12 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
 
             # Apply drift correction to the current frame
             OFFSET = 1 if reverse_time else 0 
-            corrected_data[time_point] = zero_shift_multi_dimensional(video_data[time_point - OFFSET], shifts=(cum_dy, cum_dx), fill_value = min_value)
+            zero_shift_multi_dimensional(
+                video_data[time_point - OFFSET],
+                shifts=(cum_dy, cum_dx),
+                fill_value=min_value,
+                out=corrected_data[time_point]
+            )
 
             # Record the drift values and cumulative drift for the current time point
             drift_records.append({'Time Point': time_point, 'dx': dx, 'dy': dy, 'cum_dx': cum_dx, 'cum_dy': cum_dy})
@@ -274,7 +286,7 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
             if abs(dx) > x_shape//5:
                 dx = 0
             if abs(dy) > y_shape//5:
-                print('Whaa')
+                # print('Whaa')
                 dy = 0
 
             # Update the cumulative drift
@@ -282,7 +294,12 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
 
             # Apply drift correction to the current frame
             OFFSET = 1 if reverse_time else 0 
-            corrected_data[time_point] = zero_shift_multi_dimensional(video_data[time_point - OFFSET], shifts=(cum_dy, cum_dx), fill_value = min_value)
+            zero_shift_multi_dimensional(
+                video_data[time_point - OFFSET],
+                shifts=(cum_dy, cum_dx),
+                fill_value=min_value,
+                out=corrected_data[time_point]
+            )
 
             # Record the drift values and cumulative drift for the current time point
             drift_records.append({'Time Point': time_point, 'dx': dx, 'dy': dy, 'cum_dx': cum_dx, 'cum_dy': cum_dy})

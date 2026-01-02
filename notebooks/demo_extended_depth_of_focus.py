@@ -68,16 +68,26 @@ def _(mo):
 def _():
     import matplotlib.pyplot as plt
     import numpy as np
-    from skimage import data
+    from skimage.io import imread
+
     from eigenp_utils.extended_depth_of_focus import best_focus_image
-    return best_focus_image, data, np, plt
+    from eigenp_utils.io import download_file
+
+    return best_focus_image, download_file, imread, np, plt
 
 
 @app.cell
-def _(data):
+def _(download_file):
+    url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
+    download_file(url_to_fetch, "./cells3d.tif")
+    return
+
+
+@app.cell
+def _(imread):
     # Use cells3d, membrane channel (channel 0)
     # cells3d shape: (60, 2, 256, 256) -> (Z, C, Y, X)
-    cells = data.cells3d()
+    cells = imread("./cells3d.tif")
     membrane_stack = cells[:, 0, :, :]
     return cells, membrane_stack
 

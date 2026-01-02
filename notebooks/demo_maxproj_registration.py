@@ -70,16 +70,19 @@ def _(mo):
 def _():
     import matplotlib.pyplot as plt
     import numpy as np
-    from skimage import data
+    from skimage.io import imread
     from scipy.ndimage import shift
     from eigenp_utils.maxproj_registration import (
         estimate_drift_2D,
-        apply_drift_correction_2D
+        apply_drift_correction_2D,
     )
+    from eigenp_utils.io import download_file
+
     return (
         apply_drift_correction_2D,
-        data,
+        download_file,
         estimate_drift_2D,
+        imread,
         np,
         plt,
         shift,

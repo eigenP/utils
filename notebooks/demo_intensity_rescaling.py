@@ -71,16 +71,20 @@ def _(mo):
 def _():
     import matplotlib.pyplot as plt
     import numpy as np
-    from skimage import data
+    from skimage.io import imread
+
     from eigenp_utils.intensity_rescaling import (
         contrast_stretching,
         adjust_brightness_per_slice,
-        normalize_image
+        normalize_image,
     )
+    from eigenp_utils.io import download_file
+
     return (
         adjust_brightness_per_slice,
         contrast_stretching,
-        data,
+        download_file,
+        imread,
         normalize_image,
         np,
         plt,

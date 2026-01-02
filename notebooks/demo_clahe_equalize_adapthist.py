@@ -67,16 +67,26 @@ def _(mo):
 def _():
     import matplotlib.pyplot as plt
     import numpy as np
-    from skimage import data
+    from skimage.io import imread
+
     from eigenp_utils.clahe_equalize_adapthist import _my_clahe_
-    return _my_clahe_, data, np, plt
+    from eigenp_utils.io import download_file
+
+    return _my_clahe_, download_file, imread, np, plt
 
 
 @app.cell
-def _(data):
-    # Use cells3d nuclei channel (channel 1 is nuclei, 0 is membrane usually... let's check doc or just pick one)
-    # cells3d shape: (Z, C, Y, X). C=0 membrane, C=1 nuclei.
-    cells = data.cells3d()
+def _(download_file):
+    url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
+    download_file(url_to_fetch, "./cells3d.tif")
+    return
+
+
+@app.cell
+def _(imread):
+    cells = imread("./cells3d.tif")
+    # cells3d shape: (60, 2, 256, 256) -> (Z, C, Y, X)
+    # Channel 1 is nuclei, 0 is membrane usually
     # Pick a middle slice of the membrane channel
     membrane_slice = cells[30, 1, :, :]
     return cells, membrane_slice
