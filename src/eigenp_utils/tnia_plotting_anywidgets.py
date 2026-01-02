@@ -18,10 +18,16 @@ import numpy as np
 import io
 import base64
 from .tnia_plotting_3d import show_xyz_max_slabs, show_xyz, create_multichannel_rgb, blend_colors, black_to
+import importlib.resources as ir
+
+
 
 class TNIAWidgetBase(anywidget.AnyWidget):
-    _esm = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.js"
-    _css = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.css"
+    # _esm = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.js"
+    # _css = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.css"
+    _esm = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.js")
+    _css = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.css")
+
 
     # Data traits
     image_data = traitlets.Unicode(sync=True)
