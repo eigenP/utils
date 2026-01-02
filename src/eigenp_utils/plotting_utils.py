@@ -3,6 +3,7 @@
 # dependencies = [
 #     "numpy",
 #     "matplotlib",
+#     "pandas",
 # ]
 # ///
 import numpy as np
@@ -12,6 +13,8 @@ import matplotlib.colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap, PowerNorm
 from matplotlib import colormaps as mpl_colormaps
 from pathlib import Path
+import pandas as pd
+import itertools
 
 # --- Initialization: Load Font and Style ---
 ROOT_DIR = Path(__file__).parent
@@ -208,7 +211,205 @@ def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
     return rgb_image
 
 
+def raincloud_plot(data,
+                   x_label=None,
+                   y_label=None,
+                   title=None,
+                   ax=None,
+                   orientation='vertical',
+                   palette=None,
+                   figsize=(4, 4)):
+    """
+    Creates a raincloud plot (half-violin + boxplot + jittered scatter).
 
+    Parameters
+    ----------
+    data : array-like, dict, or pd.DataFrame
+        Input data. Can be:
+        - Single array/list.
+        - List of arrays/lists.
+        - Dictionary {label: array}.
+        - DataFrame (columns are groups).
+    x_label : str, optional
+        Label for x-axis.
+    y_label : str, optional
+        Label for y-axis.
+    title : str, optional
+        Plot title.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes to plot on.
+    orientation : {'vertical', 'horizontal'}, default 'vertical'
+        Orientation of the plot.
+    palette : list of colors or str, optional
+        Colors to use.
+    figsize : tuple, default (4, 4)
+        Figure size if creating a new figure.
+
+    Returns
+    -------
+    dict
+        {'fig': figure, 'axes': ax}
+    """
+
+    # --- 1. Normalize Input Data ---
+    plot_data = [] # List of (label, values)
+
+    if isinstance(data, pd.DataFrame):
+        for col in data.columns:
+            vals = data[col].dropna().values
+            plot_data.append((str(col), vals))
+    elif isinstance(data, dict):
+        for label, values in data.items():
+            vals = np.asarray(values)
+            vals = vals[~np.isnan(vals)] # Remove NaNs
+            plot_data.append((str(label), vals))
+    elif isinstance(data, (list, np.ndarray)):
+        # Check if it's a list of arrays (multiple groups) or a single array
+        data_arr = np.asarray(data, dtype=object)
+
+        # Logic to determine if it's a single group or multiple:
+        # 1. If it's a 1D array of numbers -> Single group
+        # 2. If it's a list of lists/arrays -> Multiple groups
+        # 3. If it's a 2D array -> Multiple groups (rows or cols? assume rows are groups)
+
+        is_multiple = False
+
+        # Try to convert to a numeric array
+        try:
+            numeric_arr = np.asarray(data, dtype=float)
+            # If successful conversion
+            if numeric_arr.ndim > 1:
+                # 2D+ array -> treat as multiple groups (iterate over first dimension)
+                is_multiple = True
+            else:
+                # 1D array -> single group
+                is_multiple = False
+        except (ValueError, TypeError):
+            # Could not convert to a regular float array (likely jagged list of lists)
+            # Treat as multiple groups
+            is_multiple = True
+
+        if is_multiple:
+            for i, d in enumerate(data):
+                vals = np.asarray(d, dtype=float)
+                vals = vals[~np.isnan(vals)]
+                plot_data.append((str(i), vals))
+        else:
+            # Single group
+            vals = np.asarray(data, dtype=float)
+            vals = vals[~np.isnan(vals)]
+            plot_data.append(("Data", vals))
+    else:
+        raise ValueError("Unsupported data type")
+
+    # --- 2. Setup Figure/Axes ---
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    # --- 3. Colors ---
+    n_groups = len(plot_data)
+    if palette is None:
+        # Default color
+        colors = ["#4C78A8"] * n_groups
+    elif isinstance(palette, str):
+         # If single color string
+        colors = [palette] * n_groups
+    else:
+        # List of colors
+        colors = list(itertools.islice(itertools.cycle(palette), n_groups))
+
+    # --- 4. Plotting Loop ---
+    vert = (orientation == 'vertical')
+
+    # Iterate over groups
+    for i, (label, vals) in enumerate(plot_data):
+        col = colors[i]
+        pos = i # Position on categorical axis
+
+        # A. Violin
+        parts = ax.violinplot(vals, positions=[pos], widths=0.8,
+                              showextrema=False, vert=vert)
+
+        for pc in parts["bodies"]:
+            pc.set_facecolor(col)
+            pc.set_edgecolor(col)
+            pc.set_alpha(0.8)
+
+            # Clipping to half
+            # get_paths()[0].vertices is (N, 2) array of (x, y)
+            verts = pc.get_paths()[0].vertices
+
+            if vert:
+                # Vertical: x is dim 0. Center is 'pos'.
+                # To keep left half, we want x <= mean_x (or pos).
+                # The violinplot draws symmetrically around 'pos'.
+                # mean_x should be approx 'pos'.
+                # We clip the Right side to the center, effectively removing it?
+                # Original code: verts[:, 0] = np.clip(verts[:, 0], None, mean_x)
+                # This clips x to (-inf, mean). So it keeps the left side.
+                mean_val = verts[:, 0].mean()
+                verts[:, 0] = np.clip(verts[:, 0], None, mean_val)
+            else:
+                # Horizontal: y is dim 1. Center is 'pos'.
+                # Violin is drawn along y-axis centered at pos.
+                # To keep "bottom" half (y < pos), or top?
+                # Let's keep "bottom" half (visual bottom).
+                mean_val = verts[:, 1].mean()
+                verts[:, 1] = np.clip(verts[:, 1], None, mean_val)
+
+        # B. Scatter (Rain)
+        rng = np.random.default_rng(0)
+        jitter_vals = rng.normal(loc=0, scale=0.04, size=len(vals))
+
+        # Scatter needs to be offset to the "right" (or top) of the violin
+        # Violin is on the "left" (or bottom)
+        offset = 0.20
+
+        if vert:
+            x_scatter = pos + offset + jitter_vals
+            y_scatter = vals
+        else:
+            x_scatter = vals
+            y_scatter = pos + offset + jitter_vals
+
+        ax.scatter(x_scatter, y_scatter, color=col, alpha=0.50,
+                   edgecolor="black", linewidth=0.5, s=40)
+
+        # C. Boxplot Elements (Median + IQR)
+        q1, med, q3 = np.percentile(vals, [25, 50, 75])
+
+        if vert:
+            # Vertical line for IQR at x=pos
+            ax.vlines(pos, q1, q3, color="k", linewidth=5, zorder=2)
+            # Dot for median
+            ax.scatter(pos, med, color="white", edgecolor="k", linewidth=2, s=90, zorder=3)
+        else:
+            # Horizontal line for IQR at y=pos
+            ax.hlines(pos, q1, q3, color="k", linewidth=5, zorder=2)
+            ax.scatter(med, pos, color="white", edgecolor="k", linewidth=2, s=90, zorder=3)
+
+    # --- 5. Cosmetics ---
+    labels = [p[0] for p in plot_data]
+    ticks = np.arange(len(plot_data))
+
+    if vert:
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(labels)
+        if x_label: ax.set_xlabel(x_label) # Use xlabel if provided (original used xticklabels header)
+        if y_label: ax.set_ylabel(y_label)
+    else:
+        ax.set_yticks(ticks)
+        ax.set_yticklabels(labels)
+        if x_label: ax.set_xlabel(x_label)
+        if y_label: ax.set_ylabel(y_label)
+
+    if title:
+        ax.set_title(title)
+
+    plt.tight_layout()
+    return {"fig": fig, "axes": ax}
 
 
 # Function to adjust colormaps
