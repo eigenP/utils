@@ -49,7 +49,7 @@ async def _(mo):
         import subprocess, sys, shutil
 
         if shutil.which("uv"):
-            subprocess.check_call(["uv", "pip", "install", url])
+            subprocess.check_call(["uv", "pip", "install", "--system", url])
         else:
             subprocess.check_call([sys.executable, "-m", "pip", "install", url])
 
