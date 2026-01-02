@@ -31,6 +31,12 @@ widgets = [
     "traitlets"
 ]
 
+[tool.setuptools.package-data]
+eigenp_utils = [
+  "tnia_plotting_anywidgets.js",
+  "tnia_plotting_anywidgets.css"
+]
+
 [tool.hatch.build.targets.wheel]
 # Tell hatch where your package code lives (src-layout)
 packages = ["src/eigenp_utils"]
