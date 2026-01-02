@@ -48,16 +48,25 @@ def _2D_weight(patch_size, overlap):
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3
 
-    # Initialize weight matrix with ones
-    weight_2d = np.ones((patch_size, patch_size))
+    # Generate the 1D taper profile
+    x = np.linspace(0, 1, overlap)
+    taper = weight_1d(x)
 
-    # Apply weight function to the top, bottom, left, and right overlap regions
-    for i in range(overlap):
-        weight = weight_1d(i / (overlap - 1))
-        weight_2d[i, :] *= weight
-        weight_2d[-(i + 1), :] *= weight
-        weight_2d[:, i] *= weight
-        weight_2d[:, -(i + 1)] *= weight
+    # Construct 1D profiles for Y and X axes
+    # The profile is 1.0 in the center and tapers to 0.0 at the edges
+    # We use multiplicative updates to handle cases where overlap regions intersect (overlap > patch_size/2)
+    profile_y = np.ones(patch_size, dtype=np.float64)
+    profile_y[:overlap] *= taper
+    profile_y[-overlap:] *= taper[::-1]
+
+    profile_x = np.ones(patch_size, dtype=np.float64)
+    profile_x[:overlap] *= taper
+    profile_x[-overlap:] *= taper[::-1]
+
+    # Apply weights using broadcasting
+    # (H, W) * (H, 1) * (1, W)
+    # This avoids allocating a full (H, W) weight matrix initialised with ones and then modified in a loop
+    weight_2d = profile_y[:, None] * profile_x[None, :]
 
     return weight_2d
 
