@@ -20,33 +20,56 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _():
-    import os, sys, subprocess, shutil
-    from pathlib import Path
-
-    OWNER, REPO, REF = "eigenP", "utils", "main"  # or a tag/branch/commit
-    work = Path.cwd() / "_ext" / f"{REPO}-{REF}"
-    src = work / "src"
-
-    # clean old checkout
-    if work.exists():
-        shutil.rmtree(work, ignore_errors=True)
-
-    # shallow clone at the desired ref
-    subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", REF, f"https://github.com/{OWNER}/{REPO}.git", str(work)],
-        check=True
+async def _(mo):
+    mo.md(
+        """
+        ## Setup
+        Installing the package from GitHub...
+        """
     )
 
-    # ensure src is importable
-    p = str(src.resolve())
-    if p not in sys.path:
-        sys.path.insert(0, p)
+    import sys
 
-    import eigenp_utils  # noqa: E402
+    def in_wasm():
+        return sys.platform in ("emscripten", "wasi")
+
+    OWNER, REPO, REF = "eigenP", "utils", "main"
+    GIT_URL = f"git+https://github.com/{OWNER}/{REPO}.git@{REF}"
+
+    def install_local(url):
+        import subprocess, sys, shutil
+
+        if shutil.which("uv"):
+            subprocess.check_call(["uv", "pip", "install", url])
+        else:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", url])
+
+    def install_github():
+        if in_wasm():
+            import micropip
+            return micropip.install(GIT_URL)
+        else:
+            install_local(GIT_URL)
+
+    res = install_github()
+    if res is not None:
+        await res
+
+    import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
 
-    return
+    return (
+        GIT_URL,
+        OWNER,
+        REF,
+        REPO,
+        eigenp_utils,
+        in_wasm,
+        install_github,
+        install_local,
+        res,
+        sys,
+    )
 
 
 @app.cell
