@@ -354,10 +354,10 @@ def raincloud_plot(data,
             else:
                 # Horizontal: y is dim 1. Center is 'pos'.
                 # Violin is drawn along y-axis centered at pos.
-                # To keep "bottom" half (y < pos), or top?
-                # Let's keep "bottom" half (visual bottom).
+                # User wants violin "atop" (Y >= pos).
+                # To keep "top" half (y >= mean), we clip (mean, None).
                 mean_val = verts[:, 1].mean()
-                verts[:, 1] = np.clip(verts[:, 1], None, mean_val)
+                verts[:, 1] = np.clip(verts[:, 1], mean_val, None)
 
         # B. Scatter (Rain)
         rng = np.random.default_rng(0)
@@ -372,7 +372,8 @@ def raincloud_plot(data,
             y_scatter = vals
         else:
             x_scatter = vals
-            y_scatter = pos + offset + jitter_vals
+            # Horizontal: Violin is "atop" (above), so Scatter is "below" (pos - offset)
+            y_scatter = pos - offset + jitter_vals
 
         ax.scatter(x_scatter, y_scatter, color=col, alpha=0.50,
                    edgecolor="black", linewidth=0.5, s=40)
