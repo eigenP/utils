@@ -6,6 +6,8 @@
 #     "numpy",
 #     "matplotlib",
 #     "scipy",
+#     "anywidget",
+#     "traitlets",
 #     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main",
 # ]
 # ///
@@ -101,6 +103,7 @@ def _():
         adjust_brightness_per_slice,
         normalize_image
     )
+    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
     return (
         adjust_brightness_per_slice,
         contrast_stretching,
@@ -109,6 +112,7 @@ def _():
         normalize_image,
         np,
         plt,
+        show_xyz_max_slice_interactive,
     )
 
 
@@ -132,6 +136,14 @@ def _(imread, np):
 
 
 @app.cell
+def _(cells, show_xyz_max_slice_interactive):
+    nuclei = cells[:, 1, :, :]
+    membrane = cells[:, 0, :, :]
+    show_xyz_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    return membrane, nuclei
+
+
+@app.cell
 def _(mo):
     mo.md("## Contrast Stretching")
     p_min = mo.ui.slider(0, 50, value=2, label="P Min")
@@ -146,6 +158,12 @@ def _(contrast_stretching, decayed_stack, p_max, p_min):
     mid_slice = decayed_stack[30]
     stretched = contrast_stretching(mid_slice, p_min=p_min.value, p_max=p_max.value)
     return mid_slice, stretched
+
+
+@app.cell
+def _(decayed_stack, show_xyz_max_slice_interactive):
+    show_xyz_max_slice_interactive(decayed_stack)
+    return
 
 
 @app.cell
@@ -180,6 +198,12 @@ def _(adjust_brightness_per_slice, decayed_stack, method_dropdown):
         final_gamma=0.5 # Used if None (manual ramp)
     )
     return (corrected_stack,)
+
+
+@app.cell
+def _(corrected_stack, show_xyz_max_slice_interactive):
+    show_xyz_max_slice_interactive(corrected_stack)
+    return
 
 
 @app.cell
