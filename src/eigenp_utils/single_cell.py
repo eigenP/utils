@@ -8,6 +8,7 @@
 #     "pandas",
 #     "scipy",
 #     "matplotlib",
+#     "pacmap",
 # ]
 # ///
 
@@ -820,6 +821,109 @@ def filter_marker_dict_by_triku(
         out[t] = kept
     return out
 
+
+# ------------------------- PaCMAP Tools -------------------------
+
+def tl_pacmap(
+    adata: sc.AnnData,
+    n_neighbors: Optional[int] = None,
+    MN_ratio: float = 0.5,
+    FP_ratio: float = 2.0,
+    n_components: int = 2,
+    use_rep: str = "X_pca",
+    random_state: int = 42,
+    **kwargs,
+) -> None:
+    """
+    Compute PaCMAP embedding.
+
+    Parameters
+    ----------
+    adata
+        Annotated data matrix.
+    n_neighbors
+        Number of neighbors for PaCMAP. If None, PaCMAP defaults are used (usually 10-30 depending on n).
+    MN_ratio
+        Ratio of mid-near pairs to near pairs.
+    FP_ratio
+        Ratio of far pairs to near pairs.
+    n_components
+        The dimension of the embedding.
+    use_rep
+        Representation to use for computing the embedding.
+        Default is 'X_pca'. If 'X_pca' is not present, it will fall back to .X.
+    random_state
+        Random seed for reproducibility.
+    **kwargs
+        Additional arguments passed to pacmap.PaCMAP.
+
+    Returns
+    -------
+    None
+        Updates adata.obsm['X_pacmap'] with the embedding.
+    """
+    try:
+        import pacmap
+    except ImportError:
+        raise ImportError(
+            "PaCMAP is not installed. Please install it using: `uv pip install pacmap`"
+        )
+
+    # 1. Print Parameters
+    print(f"Computing PaCMAP with parameters:")
+    print(f"  n_neighbors: {n_neighbors}")
+    print(f"  MN_ratio: {MN_ratio}")
+    print(f"  FP_ratio: {FP_ratio}")
+    print(f"  n_components: {n_components}")
+    print(f"  use_rep: {use_rep}")
+    print(f"  random_state: {random_state}")
+    if kwargs:
+        print(f"  kwargs: {kwargs}")
+
+    # 2. Extract Data
+    if use_rep in adata.obsm:
+        X_in = adata.obsm[use_rep]
+        print(f"Using representation '{use_rep}' from adata.obsm.")
+    elif use_rep == "X":
+        X_in = adata.X
+        print(f"Using adata.X directly.")
+    else:
+        warnings.warn(
+            f"Representation '{use_rep}' not found in adata.obsm. Falling back to adata.X."
+        )
+        X_in = adata.X
+
+    # Handle sparse input if necessary (PaCMAP usually expects dense or handles sparse internally?
+    # PaCMAP documentation says it accepts numpy arrays. It might handle sparse, but safer to densify if small enough,
+    # or let PaCMAP handle it if it supports it. Let's convert to array if sparse to be safe as PaCMAP is numba based)
+    if sp.issparse(X_in):
+        print("Input is sparse, converting to dense array for PaCMAP...")
+        X_in = X_in.toarray()
+
+    # 3. Initialize and Fit
+    # Filter out None values from kwargs to let defaults shine
+    pmap_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+    # Pass n_neighbors only if not None
+    if n_neighbors is not None:
+        pmap_kwargs["n_neighbors"] = n_neighbors
+
+    embedder = pacmap.PaCMAP(
+        n_components=n_components,
+        MN_ratio=MN_ratio,
+        FP_ratio=FP_ratio,
+        random_state=random_state,
+        **pmap_kwargs
+    )
+
+    print("Fitting PaCMAP...")
+    X_embedded = embedder.fit_transform(X_in, init="pca") # init='pca' is often robust
+
+    # 4. Store Result
+    adata.obsm["X_pacmap"] = X_embedded
+    print(f"PaCMAP embedding finished. Result stored in `adata.obsm['X_pacmap']`.")
+    
+    
 # ------------------------- Multiscale Coarsening -------------------------
 
 def multiscale_coarsening(
