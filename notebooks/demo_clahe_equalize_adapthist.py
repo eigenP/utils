@@ -44,9 +44,17 @@ async def _(mo):
         import subprocess, sys, shutil
 
         if shutil.which("uv"):
-            subprocess.check_call(["uv", "pip", "install", "--system", url])
-        else:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", url])
+            try:
+                subprocess.check_call([
+                    "uv", "pip", "install",
+                    "--python", sys.executable,
+                    url,
+                ])
+                return
+            except subprocess.CalledProcessError:
+                pass  # fall back to pip
+
+        subprocess.check_call([sys.executable, "-m", "pip", "install", url])
 
     def install_github():
         if in_wasm():
