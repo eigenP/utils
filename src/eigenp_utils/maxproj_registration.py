@@ -214,6 +214,26 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
 
     min_value = video_data.min()
 
+    # Pre-calculate weighted projections for all frames to avoid re-computation inside the loop
+    # This speeds up the process by O(T) since each frame is accessed multiple times
+    # and _2D_weighted_image allocates a full-size float32 array each time.
+    min_size_pixels = min(x_shape, y_shape)
+    overlap = min_size_pixels // 3
+
+    # Store projections: (T, W) and (T, H)
+    projections_x = []
+    projections_y = []
+
+    # Iterate once to compute all projections
+    for t in range(t_shape):
+        w_frame = _2D_weighted_image(video_data[t], overlap)
+        projections_x.append(np.max(w_frame, axis=0))
+        projections_y.append(np.max(w_frame, axis=1))
+
+    # Convert to arrays for easy indexing
+    projections_x = np.array(projections_x)
+    projections_y = np.array(projections_y)
+
     # Loop through each time point in the video data, starting from the second frame
     # Wrap the range function with tqdm for a progress bar
 
@@ -224,16 +244,17 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
 
 
         for time_point in tqdm(range_values, desc='Applying Drift Correction'):
-            # for time_point in range(1, t):
             # Estimate the drift between the current frame and the previous frame
-            dx_backward, dy_backward = estimate_drift_2D(video_data[time_point - 1], video_data[time_point])
-            dx_backward, dy_backward = dx_backward, dy_backward
 
-            dx_forward, dy_forward = estimate_drift_2D(video_data[time_point], video_data[time_point-1])
-            dx_forward, dy_forward = dx_forward, dy_forward
+            # Use precomputed projections
+            shift_x_back, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point])
+            shift_y_back, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point])
+            dx_backward, dy_backward = shift_x_back[0], shift_y_back[0]
 
+            shift_x_fwd, _, _ = phase_cross_correlation(projections_x[time_point], projections_x[time_point - 1])
+            shift_y_fwd, _, _ = phase_cross_correlation(projections_y[time_point], projections_y[time_point - 1])
+            dx_forward, dy_forward = shift_x_fwd[0], shift_y_fwd[0]
 
-            # print(dx_forward, dx_backward)
             dx = (dx_forward - dx_backward) / 2
             dy = (dy_forward - dy_backward) / 2
 
@@ -277,9 +298,13 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
             corrected_data[-1] = video_data[-1]
 
         for time_point in tqdm(range_values, desc='Applying Drift Correction'):
-            # for time_point in range(1, t):
             # Estimate the drift between the current frame and the previous frame
-            dx, dy = estimate_drift_2D(video_data[time_point - 1], video_data[time_point])
+
+            # Use precomputed projections
+            shift_x, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point])
+            shift_y, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point])
+            dx, dy = shift_x[0], shift_y[0]
+
             dx, dy = dx * DRIFT_SIGN, dy * DRIFT_SIGN
 
             ##### if too large, then keep as zero ####
