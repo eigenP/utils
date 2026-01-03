@@ -6,6 +6,8 @@
 #     "numpy",
 #     "matplotlib",
 #     "scipy",
+#     "anywidget",
+#     "traitlets",
 #     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main",
 # ]
 # ///
@@ -94,7 +96,15 @@ def _():
     from skimage.io import imread
     from eigenp_utils.io import download_file
     from eigenp_utils.extended_depth_of_focus import best_focus_image
-    return best_focus_image, download_file, imread, np, plt
+    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+    return (
+        best_focus_image,
+        download_file,
+        imread,
+        np,
+        plt,
+        show_xyz_max_slice_interactive,
+    )
 
 
 @app.cell
@@ -111,6 +121,14 @@ def _(imread):
     cells = imread("./cells3d.tif")
     membrane_stack = cells[:, 0, :, :]
     return cells, membrane_stack
+
+
+@app.cell
+def _(cells, show_xyz_max_slice_interactive):
+    nuclei = cells[:, 1, :, :]
+    membrane = cells[:, 0, :, :]
+    show_xyz_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    return membrane, nuclei
 
 
 @app.cell

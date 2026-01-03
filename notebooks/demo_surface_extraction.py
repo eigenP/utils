@@ -6,6 +6,8 @@
 #     "numpy",
 #     "matplotlib",
 #     "scipy",
+#     "anywidget",
+#     "traitlets",
 #     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main",
 # ]
 # ///
@@ -94,7 +96,15 @@ def _():
     from skimage.io import imread
     from eigenp_utils.io import download_file
     from eigenp_utils.surface_extraction import extract_surface
-    return extract_surface, download_file, imread, np, plt
+    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+    return (
+        extract_surface,
+        download_file,
+        imread,
+        np,
+        plt,
+        show_xyz_max_slice_interactive,
+    )
 
 
 @app.cell
@@ -115,6 +125,13 @@ def _(imread):
 
 
 @app.cell
+def _(cells, membrane, show_xyz_max_slice_interactive):
+    nuclei = cells[:, 1, :, :]
+    show_xyz_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    return (nuclei,)
+
+
+@app.cell
 def _(mo):
     sigma_slider = mo.ui.slider(1.0, 10.0, step=0.5, value=4.0, label="Gaussian Sigma")
     downscale_slider = mo.ui.slider(1, 8, step=1, value=2, label="Downscale Factor")
@@ -131,6 +148,12 @@ def _(downscale_slider, extract_surface, roi, sigma_slider):
         gaussian_sigma=sigma_slider.value
     )
     return (surface_mask,)
+
+
+@app.cell
+def _(roi, show_xyz_max_slice_interactive, surface_mask):
+    show_xyz_max_slice_interactive([roi, surface_mask], colors=['gray', 'yellow'])
+    return
 
 
 @app.cell
