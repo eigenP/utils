@@ -745,47 +745,115 @@ def run_triku(
     n_features: int = 2000,
     n_neighbors: int = 15,
     n_pcs_for_knn: int = 30,
+    max_genes_for_triku: int = 20000,
 ) -> pd.DataFrame:
     """
     Run Triku in-place and return a tidy DataFrame with scores.
+
+    To avoid memory issues or warnings with large gene sets, this function:
+      1. Creates a temporary subset of genes (filtering < 3 cells and keeping top
+         `max_genes_for_triku` by total counts).
+      2. Runs Triku on this subset (using a copy to protect the original adata).
+      3. Maps the results back to `adata.var` (setting unselected genes to False/NaN).
     """
     if tk is None:
         raise ImportError("The 'triku' package is required for this function. Please install it.")
 
-    sc.pp.filter_genes(adata, min_cells=3)
+    # --- 1. Identify genes to process (Heuristic Filtering) ---
+
+    # Calculate basic QC metrics if not present (to filter min_cells and sort by counts)
+    # We do this manually to avoid modifying adata.var with sc.pp.calculate_qc_metrics
+    if sp.issparse(adata.X):
+        n_cells_per_gene = adata.X.getnnz(axis=0)
+        total_counts_per_gene = np.asarray(adata.X.sum(axis=0)).ravel()
+    else:
+        n_cells_per_gene = np.count_nonzero(adata.X, axis=0)
+        total_counts_per_gene = np.asarray(adata.X.sum(axis=0)).ravel()
+
+    # Step A: Filter genes with < 3 cells (temporary)
+    keep_mask = n_cells_per_gene >= 3
+
+    # Step B: If still too many genes, keep top `max_genes_for_triku` by total counts
+    n_remaining = np.sum(keep_mask)
+    if n_remaining > max_genes_for_triku:
+        print(f"Filtering genes for Triku: reducing from {n_remaining} to {max_genes_for_triku} by total counts.")
+        # Get indices of genes that passed the first mask
+        valid_indices = np.where(keep_mask)[0]
+        # Get their counts
+        valid_counts = total_counts_per_gene[valid_indices]
+        # Sort indices by count descending
+        sorted_local_indices = np.argsort(valid_counts)[::-1]
+        # Keep top N
+        top_local_indices = sorted_local_indices[:max_genes_for_triku]
+        # Map back to global indices
+        final_indices = valid_indices[top_local_indices]
+
+        # Create final mask
+        final_mask = np.zeros(adata.n_vars, dtype=bool)
+        final_mask[final_indices] = True
+        keep_mask = final_mask
+
+    # --- 2. Create Temporary Adata for Triku ---
+
+    # We create a copy of the subset to ensure Triku runs in isolation
+    # (protecting original adata from inplace changes like PCA/Neighbors/filtering)
+    adata_triku = adata[:, keep_mask].copy()
 
     # If a layer is specified (recommended: "log1p"), set it as active for selection/knn
     if layer is not None:
-        if layer not in adata.layers:
+        if layer not in adata_triku.layers:
+            # If layer is missing in copy, check original.
+            # Note: slicing adata[:, mask] should preserve layers.
             raise KeyError(f"Requested layer '{layer}' not found. Build it before Triku.")
-        _X_backup = adata.X
-        adata.X = adata.layers[layer].copy()
-    else:
-        _X_backup = None
+        adata_triku.X = adata_triku.layers[layer].copy()
 
     # KNN graph for Triku on the current X (log1p); use PCA for stability/speed
     # This avoids the earlier "X_pca doesn't exist" issue.
-    sc.tl.pca(adata, n_comps=min(50, adata.n_vars - 1), random_state=0)  # small, temporary PCA
-    ensure_neighbors(adata, n_neighbors=n_neighbors, use_rep=None, n_pcs=n_pcs_for_knn)
+    # Note: We run this on the *subset* (adata_triku), which is faster.
+    sc.tl.pca(adata_triku, n_comps=min(50, adata_triku.n_vars - 1), random_state=0)
+    ensure_neighbors(adata_triku, n_neighbors=n_neighbors, use_rep=None, n_pcs=n_pcs_for_knn)
 
+    # Run Triku on the subset
     tk.tl.triku(
-        adata,
+        adata_triku,
         n_features=n_features,
         use_raw=use_raw,
     )
-    out = adata.var[["triku_highly_variable", "triku_distance"]].copy()
+
+    # --- 3. Map Results Back to Original Adata ---
+
+    # Initialize columns in original adata
+    adata.var["triku_highly_variable"] = False
+    adata.var["triku_distance"] = np.nan # Or 0.0, but NaN distinguishes "not calculated" from "low score"
+
+    # Map values from the subset back to the original using index (gene names)
+    # adata_triku.var contains the results. We align by index.
+
+    # Update boolean mask
+    # We can rely on pandas index alignment
+    adata.var.update(adata_triku.var[["triku_highly_variable"]])
+    # Note: update works in place. "triku_highly_variable" in adata_triku is likely boolean.
+    # We should ensure the column in adata is boolean (though NaNs might force object/float if not careful, but update handles overlap)
+    # Actually, pandas update doesn't add new rows, it updates existing.
+
+    # For safe updates:
+    # 1. Extract the series
+    hv_series = adata_triku.var["triku_highly_variable"]
+    dist_series = adata_triku.var["triku_distance"]
+
+    # 2. Assign to original adata at the specific gene locations
+    # Using .loc to align by gene name
+    adata.var.loc[hv_series.index, "triku_highly_variable"] = hv_series
+    adata.var.loc[dist_series.index, "triku_distance"] = dist_series
+
+    # Ensure boolean type for highly_variable (NaNs might have cast it to object/float if alignment failed, but we initialized with False)
+    adata.var["triku_highly_variable"] = adata.var["triku_highly_variable"].astype(bool)
+
+    # Construct the return DataFrame
+    # Returning the subset of results (sorted) is usually most useful
+    out = adata.var.loc[adata_triku.var_names, ["triku_highly_variable", "triku_distance"]].copy()
     out.index.name = "gene"
     out.sort_values("triku_distance", ascending=False, inplace=True)
-
-    # restore X if we changed it
-    if _X_backup is not None:
-        adata.X = _X_backup
-        # Drop the temp PCA/KNN computed for triku to avoid confusion
-        for k in ("X_pca",):
-            if k in adata.obsm: del adata.obsm[k]
-        for k in ("neighbors", "distances", "connectivities"):
-            if k in adata.uns: del adata.uns[k]
-            if k in adata.obsp: del adata.obsp[k]
 
     return out
 
