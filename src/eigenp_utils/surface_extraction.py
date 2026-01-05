@@ -124,13 +124,15 @@ def extract_surface(
     Z, Y, X = image.shape
     surface_upscaled = np.zeros((Z, Y, X), dtype=bool)
 
-    yy, xx = np.indices(surface_z_full.shape)
+    # Optimization: Use nonzero indices instead of creating full 2D meshgrids (np.indices)
+    # This avoids allocating two (Y, X) arrays, saving O(Y*X) memory (e.g., ~64MB for 2k x 2k)
     valid = (surface_z_full >= 0) & (surface_z_full < Z)
+    y_idxs, x_idxs = np.nonzero(valid)
 
     surface_upscaled[
         surface_z_full[valid],
-        yy[valid],
-        xx[valid]
+        y_idxs,
+        x_idxs
     ] = True
 
     return surface_upscaled
