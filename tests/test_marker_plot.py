@@ -35,10 +35,10 @@ def test_plot_marker_genes_dict_on_embedding():
 
     # Assertions
     assert isinstance(axes_list, list)
-    # TissueA has 2 valid genes -> 2 plots
-    # TissueB has 1 valid gene -> 1 plot
-    # Total = 3
-    assert len(axes_list) == 3, f"Expected 3 axes, got {len(axes_list)}"
+    # TissueA has 2 valid genes + 1 score -> 3 plots
+    # TissueB has 1 valid gene + 1 score -> 2 plots
+    # Total = 5
+    assert len(axes_list) == 5, f"Expected 5 axes, got {len(axes_list)}"
 
     for ax in axes_list:
         assert isinstance(ax, plt.Axes)
