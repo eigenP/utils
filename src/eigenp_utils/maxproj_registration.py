@@ -87,22 +87,18 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
 
     return result
 
-def _2D_weighted_image(image, overlap):
-    '''
-    # image := image shape
-    # overlap := in pixels
+def _get_weight_profiles(shape, overlap):
+    """
+    Generate 1D weight profiles for Y and X axes.
+    """
+    H, W = shape
 
-    # Example usage
-    # _2D_window = _2D_weight(image, overlap)
-    '''
     if overlap <= 0:
-        return image.astype(np.float32)
+        return np.ones(H, dtype=np.float32), np.ones(W, dtype=np.float32)
 
     # 1D weight function based on cubic spline
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3
-
-    H, W = image.shape
 
     # Generate the 1D taper profile
     # Using float32 for better precision than float16, avoiding accumulation errors
@@ -118,6 +114,26 @@ def _2D_weighted_image(image, overlap):
     profile_x = np.ones(W, dtype=np.float32)
     profile_x[:overlap] = taper
     profile_x[-overlap:] = taper[::-1]
+
+    return profile_y, profile_x
+
+
+def _2D_weighted_image(image, overlap, profiles=None):
+    '''
+    # image := image shape
+    # overlap := in pixels
+    # profiles := optional pre-calculated (profile_y, profile_x)
+
+    # Example usage
+    # _2D_window = _2D_weight(image, overlap)
+    '''
+    if overlap <= 0:
+        return image.astype(np.float32)
+
+    if profiles is None:
+        profile_y, profile_x = _get_weight_profiles(image.shape, overlap)
+    else:
+        profile_y, profile_x = profiles
 
     # Apply weights using broadcasting
     # (H, W) * (H, 1) * (1, W)
@@ -241,13 +257,16 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
     min_size_pixels = min(x_shape, y_shape)
     overlap = min_size_pixels // 3
 
+    # Pre-calculate weight profiles once
+    profiles = _get_weight_profiles((x_shape, y_shape), overlap)
+
     # Store projections: (T, W) and (T, H)
     projections_x = []
     projections_y = []
 
     # Iterate once to compute all projections
     for t in range(t_shape):
-        w_frame = _2D_weighted_image(video_data[t], overlap)
+        w_frame = _2D_weighted_image(video_data[t], overlap, profiles=profiles)
         projections_x.append(np.max(w_frame, axis=0))
         projections_y.append(np.max(w_frame, axis=1))
 
