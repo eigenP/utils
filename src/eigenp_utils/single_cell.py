@@ -1132,8 +1132,19 @@ def tl_pacmap(
         **pmap_kwargs
     )
 
-    print("Fitting PaCMAP...")
-    X_embedded = embedder.fit_transform(X_in, init="pca") # init='pca' is often robust
+    # Check feature count to determine initialization method
+    n_features = X_in.shape[1]
+    init_method = "pca"
+
+    if n_features <= 100:
+        warnings.warn(
+            f"Input data has {n_features} features, which is <= 100. "
+            "Switching initialization from 'pca' to 'random' to avoid potential issues."
+        )
+        init_method = "random"
+
+    print(f"Fitting PaCMAP using init='{init_method}'...")
+    X_embedded = embedder.fit_transform(X_in, init=init_method)
 
     # 4. Store Result
     adata.obsm["X_pacmap"] = X_embedded
