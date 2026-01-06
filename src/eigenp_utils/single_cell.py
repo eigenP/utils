@@ -9,12 +9,15 @@
 #     "scipy",
 #     "matplotlib",
 #     "pacmap",
+#     "scikit-learn",
 # ]
 # ///
 
 from __future__ import annotations
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any
 import warnings
+from collections import defaultdict
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -22,6 +25,7 @@ import scanpy as sc
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
 import matplotlib.pyplot as plt
+from sklearn.metrics import adjusted_rand_score
 from .plotting_utils import adjust_colormap
 
 # Try importing third-party libraries that might be installed via the inline dependencies
@@ -1362,3 +1366,583 @@ def multiscale_coarsening(
         return results
     return None
 
+# ------------------------- Cell Type Annotation -------------------------
+
+def _normalize_symbol(s: str) -> str:
+    """Robust normalization for matching gene symbols."""
+    return str(s).strip().upper().replace("_", "-")
+
+
+def _dedupe_preserve_order(seq: Iterable) -> List:
+    """Deduplicate sequence while preserving original order."""
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+
+def _build_norm_map(adata: sc.AnnData, extra_cols: Optional[List[str]] = None) -> Dict[str, str]:
+    """
+    Build a mapping from normalized symbol -> actual var_name in `adata`.
+    Includes var_names and (if present) selected alternate symbol columns.
+    """
+    if extra_cols is None:
+        extra_cols = [
+            "gene_symbol", "gene_symbols", "gene_name", "Gene", "Symbol",
+            "feature_name", "features", "name"
+        ]
+    norm_map = {}
+
+    # 1) var_names / index
+    for var_name in adata.var_names:
+        norm_map[_normalize_symbol(var_name)] = var_name
+
+    # 2) alternate columns (row-aligned)
+    for col in extra_cols:
+        if col in adata.var.columns:
+            col_series = adata.var[col]
+            # tolerate non-string / NaN
+            for idx, val in col_series.items():
+                if val is None:
+                    continue
+                sval = str(val).strip()
+                if sval == "" or sval.lower() == "nan":
+                    continue
+                norm_map[_normalize_symbol(sval)] = str(idx)  # idx is var_name for that row
+
+    return norm_map
+
+
+def filter_markers_to_adata(
+    marker_genes: Dict[str, List[str]],
+    adata: sc.AnnData,
+    extra_cols: Optional[List[str]] = None,
+    verbose: bool = True
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, Dict[str, str]]]:
+    """
+    Filter marker genes to those present in `adata`.
+
+    Parameters
+    ----------
+    marker_genes
+        Dictionary of {cell_type: [gene_list]}.
+    adata
+        Annotated data matrix.
+    extra_cols
+        List of column names in `adata.var` to check for alternative gene symbols.
+    verbose
+        Whether to print a summary of removed/replaced markers.
+
+    Returns
+    -------
+    cleaned
+        Filtered marker dictionary with valid gene names.
+    removed
+        Dictionary of {cell_type: [removed_genes]}.
+    replacements
+        Dictionary of {cell_type: {original_gene: matched_var_name}}.
+    """
+    norm_map = _build_norm_map(adata, extra_cols=extra_cols)
+
+    cleaned = {}
+    removed = defaultdict(list)
+    replacements = defaultdict(dict)  # original -> matched var_name (if case/alias fix)
+
+    for tissue, genes in marker_genes.items():
+        keep = []
+        for g in genes:
+            key = _normalize_symbol(g)
+            hit = norm_map.get(key, None)
+            if hit is not None:
+                keep.append(hit)
+                if hit != g:
+                    replacements[tissue][g] = hit
+            else:
+                removed[tissue].append(g)
+
+        cleaned[tissue] = _dedupe_preserve_order(keep)
+
+    # prune empties from reporting dicts
+    removed = {k: v for k, v in removed.items() if len(v) > 0}
+    replacements = {k: v for k, v in replacements.items() if len(v) > 0}
+
+    if verbose:
+        total_removed = sum(len(v) for v in removed.values())
+        print(f"[marker filter] {total_removed} markers removed across {len(removed)} categories.")
+        if replacements:
+            print("[marker filter] Case/alias replacements (original -> adata var_name):")
+            for k, m in replacements.items():
+                print(f"  - {k}: {m}")
+        if removed:
+            print("[marker filter] Removed (not found in adata):")
+            for k, lost in removed.items():
+                print(f"  - {k} ({len(lost)}): {lost}")
+
+    return cleaned, removed, replacements
+
+
+def filter_markers_by_moran(
+    filtered: Dict[str, List[str]],
+    df_top_dict: pd.DataFrame,
+    *,
+    gene_col: str = "gene",
+    score_col: str = "I",
+    threshold: float = 0.10,
+    top_k: int = 5,
+    min_k: int = 3,
+    fallback_to_min_k: bool = True,
+    case_insensitive: bool = True,
+    verbose: bool = True,
+) -> Tuple[Dict[str, List[str]], Dict[str, Any]]:
+    """
+    From `filtered` (category -> [genes]) keep only genes found in `df_top_dict`
+    with Moran's I >= `threshold`, then return top_k by Moran's I (desc).
+    If fewer than `min_k` pass the threshold and `fallback_to_min_k` is True,
+    backfill with the best-scoring genes (even if below threshold) until min_k.
+
+    Returns
+    -------
+    filtered_by_moran : dict
+        {category: [genes]}
+    report : dict
+        Per-category details: missing_in_df, below_threshold, used_fallback
+    """
+
+    # Build score lookup
+    # If the DF has duplicates, keep the maximum score per gene.
+    df = df_top_dict[[gene_col, score_col]].copy()
+    # normalize gene key
+    def norm(x):
+        return str(x).upper() if case_insensitive else str(x)
+
+    df["_key"] = df[gene_col].map(norm)
+    # best score per gene
+    best = df.sort_values(score_col, ascending=False).drop_duplicates("_key")
+    score_map = dict(zip(best["_key"], best[score_col]))
+    # also map canonical name to return (use the 'gene' from DF if case differs)
+    canon_map = dict(zip(best["_key"], best[gene_col]))
+
+    filtered_by_moran = {}
+    report = {}
+
+    for cat, genes in filtered.items():
+        # normalize and gather scores
+        present = []
+        missing_in_df = []
+        for g in genes:
+            key = norm(g)
+            if key in score_map and pd.notna(score_map[key]):
+                # keep original symbol from filtered if it matches canon ignoring case,
+                # otherwise use DF's canon (helps unify case/alias differences)
+                out_name = g if norm(g) == norm(canon_map[key]) else canon_map[key]
+                present.append((out_name, float(score_map[key])))
+            else:
+                missing_in_df.append(g)
+
+        # sort by Moran's I desc
+        present.sort(key=lambda x: (x[1], x[0]), reverse=True)
+
+        # apply threshold
+        above = [(g, s) for (g, s) in present if s >= threshold]
+        below = [(g, s) for (g, s) in present if s < threshold]
+
+        picked = above[:top_k]
+        used_fallback = False
+        if len(picked) < min_k and fallback_to_min_k:
+            need = min_k - len(picked)
+            # take best from below to reach min_k (avoid duplicates)
+            for g, s in below:
+                if g not in [x[0] for x in picked]:
+                    picked.append((g, s))
+                    need -= 1
+                    if need == 0:
+                        break
+            used_fallback = True if len(above) < min_k else False
+
+        # store only gene names
+        filtered_by_moran[cat] = [g for g, _ in picked]
+
+        report[cat] = {
+            "n_input": len(genes),
+            "n_present_in_df": len(present),
+            "n_above_threshold": len(above),
+            "missing_in_df": missing_in_df,
+            "below_threshold": [g for g, _ in below],
+            "used_fallback": used_fallback,
+        }
+
+    if verbose:
+        total_missing = sum(len(r["missing_in_df"]) for r in report.values())
+        total_below = sum(len(r["below_threshold"]) for r in report.values())
+        print(f"[moran filter] threshold={threshold}, top_k={top_k}, min_k={min_k}")
+        print(f"[moran filter] Missing in df_top_dict: {total_missing} genes across categories.")
+        print(f"[moran filter] Below threshold: {total_below} genes across categories.")
+        fb_cats = [k for k, r in report.items() if r["used_fallback"]]
+        if fb_cats:
+            print(f"[moran filter] Fallback to min_k used for: {fb_cats}")
+
+    return filtered_by_moran, report
+# ------------------------- Annotation Core -------------------------
+
+def score_celltypes(
+    adata: sc.AnnData,
+    cell_type_markers_dict: Dict[str, Sequence[str]],
+    layer: Optional[str] = None,
+    use_raw: bool = True,
+    zscore: bool = True,  # kept for API compat; ignored
+    min_markers: int = 1,
+) -> pd.DataFrame:
+    """
+    Compute per-cell scores for each cell type using sc.tl.score_genes.
+    Notes:
+      - `zscore` is ignored (kept only for backward compatibility).
+      - If fewer than `min_markers` genes are present, that cell type's score is NaN.
+    """
+    warnings.warn(
+        "score_celltypes now uses sc.tl.score_genes; the `zscore` parameter is ignored.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+    # Determine gene universe for presence/missing checks
+    if use_raw and getattr(adata, "raw", None) is not None and adata.raw is not None:
+        gene_universe = set(map(str, adata.raw.var_names))
+    else:
+        gene_universe = set(map(str, adata.var_names))
+
+    scores = {}
+    missing_report = {}
+    tmp_cols = []
+
+    for ct, markers in cell_type_markers_dict.items():
+        markers = [str(g) for g in markers]
+        present = [g for g in markers if g in gene_universe]
+        missing = [g for g in markers if g not in gene_universe]
+        missing_report[ct] = missing
+
+        if len(present) < min_markers:
+            scores[ct] = np.full(adata.n_obs, np.nan, dtype=float)
+            continue
+
+        tmp_name = f"__ctscore__{ct}__{uuid4().hex}"
+        sc.tl.score_genes(
+            adata,
+            gene_list=present,
+            score_name=tmp_name,
+            use_raw=use_raw,
+            layer=layer,
+        )
+        scores[ct] = adata.obs[tmp_name].to_numpy()
+        tmp_cols.append(tmp_name)
+
+    # Assemble result DF and clean up temp columns
+    df = pd.DataFrame(scores, index=adata.obs_names)
+    if tmp_cols:
+        adata.obs.drop(columns=[c for c in tmp_cols if c in adata.obs.columns], inplace=True, errors="ignore")
+
+    # Merge missing-gene report into .uns
+    adata.uns.setdefault("marker_missing_report", {})
+    adata.uns["marker_missing_report"].update(missing_report)
+
+    return df
+
+
+def annotate_clusters_by_markers(
+    adata: sc.AnnData,
+    cluster_key: str,
+    cell_type_markers_dict: Optional[Dict[str, Sequence[str]]] = None,
+    layer: Optional[str] = None,
+    use_raw: bool = True,
+    beta: float = 2.0,
+    min_markers: int = 1,
+    zscore: bool = True,  # ignored by score_celltypes
+    write_to_obs: bool = True,
+    obs_prefix: Optional[str] = None,
+    scores: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """
+    If `scores` is provided, it must be a DataFrame with index == adata.obs_names
+    and columns == cell types. Otherwise, scores are computed once here.
+    """
+    # Get per-cell scores S only if not provided
+    if scores is None:
+        if cell_type_markers_dict is None:
+            raise ValueError("Provide `cell_type_markers_dict` when `scores` is None.")
+        S = score_celltypes(
+            adata,
+            cell_type_markers_dict,
+            layer=layer,
+            use_raw=use_raw,
+            zscore=zscore,  # ignored downstream
+            min_markers=min_markers,
+        )
+    else:
+        S = scores
+        # Align/validate
+        if not S.index.equals(adata.obs_names):
+            S = S.reindex(adata.obs_names)
+
+    cts = list(S.columns)
+    clabs = adata.obs[cluster_key].astype(str)
+
+    # Compute per-cluster medians for all cell types in one shot
+    med_by_cluster = S.groupby(clabs).median()  # rows=clusters, cols=cell types
+
+    # Per-cell best type once (used for consensus_frac)
+    arr = S.to_numpy()
+    all_nan = np.all(np.isnan(arr), axis=1)
+    # nanargmax fails on all-NaN rows, so safe compute:
+    argmax = np.zeros(arr.shape[0], dtype=int)
+    argmax[~all_nan] = np.nanargmax(arr[~all_nan], axis=1)
+    argmax[all_nan] = -1
+    cell_best = np.array([cts[j] if j >= 0 else None for j in argmax], dtype=object)
+
+    rows = []
+    per_cluster_label, per_cluster_softmaxp, per_cluster_unc = {}, {}, {}
+
+    for g, med in med_by_cluster.iterrows():
+        order = med.sort_values(ascending=False)
+
+        if order.size == 0 or np.all(~np.isfinite(order.values)):
+            top1_ct, top1, top2 = None, np.nan, np.nan
+            margin = np.nan
+            consensus_frac = np.nan
+            softmax_p = np.nan
+            uncertainty = np.nan
+        else:
+            top1_ct = order.index[0]
+            top1 = order.iloc[0]
+            top2 = order.iloc[1] if order.size > 1 else np.nan
+            margin = (top1 - top2) if np.isfinite(top1) and np.isfinite(top2) else np.nan
+
+            # consensus among cell-wise winners within the cluster
+            mask = (clabs == g).values
+            winners = cell_best[mask]
+            consensus_frac = np.mean(winners == top1_ct) if winners.size else np.nan
+
+            # softmax over median scores within the cluster
+            v = med.values.astype(float)
+            if np.all(~np.isfinite(v)):
+                softmax_p = np.nan
+            else:
+                v = v - np.nanmax(v)
+                sm = np.exp(beta * np.nan_to_num(v, nan=-np.inf))
+                sm[~np.isfinite(med.values)] = 0.0
+                Z = sm.sum()
+                idx_top1 = list(med.index).index(top1_ct) if top1_ct in med.index else None
+                softmax_p = float(sm[idx_top1] / Z) if (Z > 0 and idx_top1 is not None) else np.nan
+
+            uncertainty = 1.0 - (softmax_p * consensus_frac) if (np.isfinite(softmax_p) and np.isfinite(consensus_frac)) else np.nan
+
+        rows.append({
+            "cluster": g,
+            "assigned_cell_type": top1_ct,
+            "top1_score": top1,
+            "top2_score": top2,
+            "margin": margin,
+            "consensus_frac": consensus_frac,
+            "softmax_p": softmax_p,
+            "uncertainty": uncertainty,
+            **{f"median_{ct}": med.get(ct, np.nan) for ct in cts},
+        })
+        per_cluster_label[g] = top1_ct
+        per_cluster_softmaxp[g] = softmax_p
+        per_cluster_unc[g] = uncertainty
+
+    cluster_df = pd.DataFrame(rows).set_index("cluster").sort_index()
+
+    if write_to_obs:
+        prefix = obs_prefix or cluster_key
+        adata.obs[f"{prefix}_cell_type"] = clabs.map(per_cluster_label).astype("category")
+        adata.obs[f"{prefix}_ctype_softmaxp"] = clabs.map(per_cluster_softmaxp).astype(float)
+        adata.obs[f"{prefix}_ctype_uncertainty"] = clabs.map(per_cluster_unc).astype(float)
+
+    return cluster_df
+
+
+def sweep_leiden_and_annotate(
+    adata: sc.AnnData,
+    cell_type_markers_dict: Dict[str, Sequence[str]],
+    resolutions: Sequence[float] = (0.2, 0.5, 1.0, 2.0, 5.0),
+    neighbors_already_computed: bool = True,
+    random_state: int = 0,
+    layer: Optional[str] = None,
+    use_raw: bool = True,
+    zscore: bool = True,  # ignored by score_celltypes
+    min_markers: int = 1,
+    beta: float = 2.0,
+    leiden_key_prefix: str = "leiden",
+) -> Dict[str, Any]:
+    """
+    For a fixed graph (recommended), run Leiden at multiple `resolutions`,
+    annotate clusters at each resolution, and compute agreement between
+    per-cell assigned cell types across adjacent resolutions.
+
+    Scores are computed ONCE and reused across all resolutions.
+    """
+    if not neighbors_already_computed and "connectivities" not in adata.obsp:
+        raise ValueError("Please compute neighbors once (sc.pp.neighbors) before sweeping or ensure they exist.")
+
+    # --- compute once ---
+    S = score_celltypes(
+        adata,
+        cell_type_markers_dict,
+        layer=layer,
+        use_raw=use_raw,
+        zscore=zscore,
+        min_markers=min_markers,
+    )
+
+    res_list = [float(r) for r in resolutions]
+    cluster_annotations = {}
+    celltype_labels = {}
+
+    for r in res_list:
+        key = f"{leiden_key_prefix}_{r:.1f}"
+        # We check if leiden key exists or compute it if missing?
+        # The user snippet raised ValueError. I will modify to compute if missing for convenience, or match intent.
+        # "sweep_leiden" implies it might run it.
+        # The user's snippet raised: "Please compute leiden before sweeping." if key missing.
+        # But earlier "multiscale_coarsening" computes it.
+        # Let's compute it if missing, as it is helpful.
+        if key not in adata.obs:
+            print(f"Computing Leiden resolution {r:.1f}...")
+            sc.tl.leiden(adata, resolution=r, key_added=key, random_state=random_state)
+
+        cdf = annotate_clusters_by_markers(
+            adata,
+            cluster_key=key,
+            cell_type_markers_dict=None,  # not needed since we pass scores
+            layer=layer,
+            use_raw=use_raw,
+            zscore=zscore,
+            min_markers=min_markers,
+            beta=beta,
+            write_to_obs=True,
+            obs_prefix=key,
+            scores=S,  # <- reuse
+        )
+        cluster_annotations[r] = cdf
+        celltype_labels[r] = adata.obs[f"{key}_cell_type"].astype(str).copy()
+
+    # ARI across resolutions for per-cell TYPE labels (not cluster IDs)
+    R = np.zeros((len(res_list), len(res_list)))
+    for i, ri in enumerate(res_list):
+        for j, rj in enumerate(res_list):
+            R[i, j] = adjusted_rand_score(celltype_labels[ri], celltype_labels[rj])
+
+    all_pair_ARI = pd.DataFrame(R, index=res_list, columns=res_list)
+
+    # Adjacent pairs
+    rows = []
+    for i in range(len(res_list) - 1):
+        ri, rj = res_list[i], res_list[i + 1]
+        ari = adjusted_rand_score(celltype_labels[ri], celltype_labels[rj])
+        rows.append({"res_i": ri, "res_j": rj, "ARI": ari})
+    adjacent_ARI = pd.DataFrame(rows)
+
+    return {
+        "cluster_annotations": cluster_annotations,
+        "celltype_labels": celltype_labels,
+        "adjacent_ARI": adjacent_ARI,
+        "all_pair_ARI": all_pair_ARI,
+    }
+# ------------------------- Visualization & Export -------------------------
+
+def plot_celltype_ari(all_pair_ARI: pd.DataFrame) -> Tuple[plt.Figure, plt.Axes]:
+    """
+    Plot ARI heatmap using standard matplotlib.
+    """
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(all_pair_ARI, cmap="viridis", vmin=0, vmax=1)
+
+    # We want to show the ticks as the resolutions
+    res_labels = [str(r) for r in all_pair_ARI.index]
+
+    ax.set_xticks(np.arange(len(res_labels)))
+    ax.set_yticks(np.arange(len(res_labels)))
+    ax.set_xticklabels(res_labels)
+    ax.set_yticklabels(res_labels)
+
+    ax.set_xlabel("resolution")
+    ax.set_ylabel("resolution")
+    ax.set_title("ARI of per-cell TYPE labels across resolutions")
+
+    # Add colorbar
+    fig.colorbar(im, ax=ax)
+
+    plt.tight_layout()
+    return fig, ax
+
+
+def barplot_cluster_uncertainty(cluster_df: pd.DataFrame, top_k: int = 25) -> Tuple[plt.Figure, plt.Axes]:
+    """
+    Bar plot of cluster uncertainty.
+    """
+    df = cluster_df.sort_values("uncertainty").head(top_k)
+    fig, ax = plt.subplots(figsize=(7, 3 + 0.25 * len(df)))
+    ax.barh(df.index.astype(str), df["uncertainty"], color="#4444aa")
+    ax.invert_yaxis()
+    ax.set_xlabel("Uncertainty (lower is better)")
+    ax.set_ylabel("Cluster")
+    ax.set_title("Cluster annotation uncertainty")
+    plt.tight_layout()
+    return fig, ax
+
+
+def export_cell_type_annotations(
+    adata: sc.AnnData,
+    annotation_key: str,
+    output_path: Optional[str] = None,
+    color_key: Optional[str] = None
+) -> None:
+    """
+    Export cell type annotations to CSV.
+    """
+    from pathlib import Path
+
+    # 1. Define your column names
+    if color_key is None:
+        color_key = annotation_key + '_colors'
+
+    # 2. Create a temporary dataframe with the cell type
+    # We explicitly copy the index to a column to ensure the Barcode is preserved
+    if annotation_key not in adata.obs:
+         raise ValueError(f"Annotation key '{annotation_key}' not found in adata.obs")
+
+    df_export = adata.obs[[annotation_key]].copy()
+
+    # 3. Map the colors from adata.uns to the individual cells
+    # (Scanpy stores colors in .uns in the same order as the categories)
+    if color_key in adata.uns:
+        # Create a dictionary: { 'T-cell': '#1f77b4', 'B-cell': '#ff7f0e', ... }
+        categories = adata.obs[annotation_key].cat.categories
+        colors = adata.uns[color_key]
+        if len(categories) == len(colors):
+            category_map = dict(zip(categories, colors))
+            # Map this to a new column in the dataframe
+            df_export[color_key] = df_export[annotation_key].map(category_map)
+        else:
+            print(f"Warning: Number of colors in '{color_key}' does not match categories in '{annotation_key}'. Colors not exported.")
+    else:
+        print(f"Warning: '{color_key}' not found in adata.uns. Colors not exported.")
+
+    # 4. Rename the index to 'Cell_ID' for clarity
+    df_export.index.name = 'Cell_ID'
+
+    # 5. Export to CSV
+    if output_path is None:
+        out_file = Path('cell_type_export.csv')
+    else:
+        out_file = Path(output_path)
+        if not out_file.suffix.lower() == '.csv':
+            out_file = out_file.with_suffix('.csv')
+
+    print(f'Saving at {out_file.resolve()}')
+    df_export.to_csv(out_file)
+
+    # Verify the output
+    print(df_export.head())
