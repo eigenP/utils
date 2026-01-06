@@ -3,47 +3,73 @@ import pytest
 import scanpy as sc
 import numpy as np
 import pandas as pd
+from anndata import AnnData
 import matplotlib.pyplot as plt
 from eigenp_utils.single_cell import plot_marker_genes_dict_on_embedding
 
 def test_plot_marker_genes_dict_on_embedding():
-    # 1. Create a dummy AnnData object
+    # Setup dummy AnnData
     n_obs = 100
     n_vars = 50
-    adata = sc.AnnData(np.random.rand(n_obs, n_vars))
+    X = np.random.rand(n_obs, n_vars)
+    obs = pd.DataFrame(index=[f"cell_{i}" for i in range(n_obs)])
+    var = pd.DataFrame(index=[f"gene_{i}" for i in range(n_vars)])
+    adata = AnnData(X=X, obs=obs, var=var)
 
-    # Add fake gene names
-    adata.var_names = [f"gene_{i}" for i in range(n_vars)]
+    # Add dummy UMAP
+    adata.obsm["X_umap"] = np.random.rand(n_obs, 2)
 
-    # Add fake UMAP embedding
-    adata.obsm['X_umap'] = np.random.rand(n_obs, 2)
-
-    # Add fake clusters
-    adata.obs['leiden'] = np.random.choice(['0', '1', '2'], size=n_obs)
-
-    # 2. Define a marker dictionary
-    marker_dict = {
-        "Group A": ["gene_0", "gene_1"],
-        "Group B": ["gene_2"]
+    # Define marker genes (some existing, some missing to test check_gene_adata implicitly)
+    marker_genes = {
+        "TissueA": ["gene_0", "gene_1"],
+        "TissueB": ["gene_2", "gene_missing"]
     }
 
-    # 3. Call the function
-    axes = plot_marker_genes_dict_on_embedding(
+    # Run function
+    axes_list = plot_marker_genes_dict_on_embedding(
         adata,
-        marker_dict,
-        use_rep="X_umap",
-        show=False
+        marker_genes,
+        basis="X_umap",
+        show=False # Ensure it doesn't block
     )
 
-    # 4. Verify output
-    assert isinstance(axes, list)
-    assert len(axes) > 0
-    # Expected number of plots: 3 genes = 3 plots
-    # But wait, sc.pl.embedding with color=list plots multiple panels.
-    # The function iterates over groups.
-    # Group A: 2 genes -> 2 panels? Or 1? scanpy plots each gene in a panel.
-    # Group B: 1 gene -> 1 panel.
-    # Total panels: 3.
-    assert len(axes) == 3
-    for ax in axes:
+    # Assertions
+    assert isinstance(axes_list, list)
+    # TissueA has 2 valid genes -> 2 plots
+    # TissueB has 1 valid gene -> 1 plot
+    # Total = 3
+    assert len(axes_list) == 3, f"Expected 3 axes, got {len(axes_list)}"
+
+    for ax in axes_list:
         assert isinstance(ax, plt.Axes)
+        # Check if title or label logic worked (optional, but good)
+        # We can check if ylabel is set as expected (Tissue Name + \n)
+
+    print("Test passed successfully!")
+
+def test_missing_basis():
+    n_obs = 10
+    n_vars = 10
+    adata = AnnData(X=np.random.rand(n_obs, n_vars))
+    marker_genes = {"A": ["gene_0"]}
+
+    try:
+        plot_marker_genes_dict_on_embedding(adata, marker_genes, basis="X_pca")
+    except ValueError as e:
+        assert "compute it and add in obsm, or choose from available keys" in str(e)
+        print("Missing basis test passed!")
+        return
+
+    raise AssertionError("Did not raise ValueError for missing basis")
+
+if __name__ == "__main__":
+    # Manually running checks if not using pytest directly,
+    # but we will likely run with pytest or python
+    try:
+        test_plot_marker_genes_dict_on_embedding()
+        test_missing_basis()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Test failed: {repr(e)}")
+        exit(1)
