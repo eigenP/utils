@@ -141,8 +141,31 @@ def plot_marker_genes_dict_on_embedding(
             print(f"Skipping {tissue}: No valid marker genes found.")
             continue
 
+        # Calculate module score
+        score_name = f"{tissue}_score"
+        # Check if use_raw is in pl_kwargs to pass to score_genes
+        use_raw = pl_kwargs.get("use_raw", None)
+
+        score_computed = False
+        try:
+            sc.tl.score_genes(
+                adata,
+                gene_list=genes,
+                score_name=score_name,
+                use_raw=use_raw
+            )
+            score_computed = True
+        except Exception as e:
+            print(f"Could not compute score for {tissue}: {e}")
+            score_name = None
+
         current_cmap_name = colormaps[idx_i % len(colormaps)]
         current_cmap = adjusted_colormaps[current_cmap_name]
+
+        # Prepare items to plot
+        items_to_plot = list(genes)
+        if score_computed and score_name:
+            items_to_plot.append(score_name)
 
         # sc.pl.embedding returns a list of axes if show=False and multiple genes are plotted,
         # or a single axis if one gene. Or None if show=True.
@@ -150,10 +173,14 @@ def plot_marker_genes_dict_on_embedding(
         res = sc.pl.embedding(
             adata,
             basis=basis,
-            color=genes,
+            color=items_to_plot,
             cmap=current_cmap,
             **pl_kwargs
         )
+
+        # Remove the score column from obs
+        if score_computed and score_name in adata.obs:
+            del adata.obs[score_name]
 
         # Normalize result to a single axis or list of axes
         # Scanpy's embedding returns: Union[Axes, List[Axes], None]
