@@ -42,18 +42,19 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
     else:
         raise TypeError("Shifts must be a single integer or a list/tuple of integers.")
 
-    # Initialize the result array with the fill value
+    # Initialize the result array
+    # If out is None, we need to create a new array. We use empty_like to avoid
+    # unnecessary initialization since we will overwrite most/all of it.
     if out is None:
-        result = np.full_like(arr, fill_value)
+        result = np.empty_like(arr)
     else:
         result = out
-        result.fill(fill_value)
 
     # Initialize slices for input and output arrays
     slices_input = [slice(None)] * arr.ndim
     slices_output = [slice(None)] * arr.ndim
 
-    # Apply the shifts
+    # Apply the shifts calculation
     for axis, shift in enumerate(shifts):
         if shift > 0:
             slices_input[axis] = slice(None, -shift)
@@ -62,8 +63,28 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
             slices_input[axis] = slice(-shift, None)
             slices_output[axis] = slice(None, shift)
 
-    # Perform the shift and fill in the result array
+    # Perform the shift (copy data from input to output location)
+    # This overwrites the central part of the array
     result[tuple(slices_output)] = arr[tuple(slices_input)]
+
+    # Fill the exposed gaps with fill_value
+    # We iterate over axes and fill the strip that was "exposed" by the shift.
+    # The union of these strips and the copied central part covers the entire array.
+    for axis, shift in enumerate(shifts):
+        if shift == 0:
+            continue
+
+        # Construct slice for the gap along this axis
+        # If shift > 0, the gap is at the beginning (0 to shift)
+        # If shift < 0, the gap is at the end (shift to end)
+        gap_slices = [slice(None)] * arr.ndim
+        if shift > 0:
+            gap_slices[axis] = slice(None, shift)
+        else:
+            gap_slices[axis] = slice(shift, None)
+
+        result[tuple(gap_slices)] = fill_value
+
     return result
 
 def _2D_weighted_image(image, overlap):
