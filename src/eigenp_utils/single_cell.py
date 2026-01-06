@@ -1120,6 +1120,9 @@ def tl_pacmap(
     # Filter out None values from kwargs to let defaults shine
     pmap_kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
+    # Extract 'init' if present, so it's not passed to the constructor
+    user_init = pmap_kwargs.pop("init", None)
+
     # Pass n_neighbors only if not None
     if n_neighbors is not None:
         pmap_kwargs["n_neighbors"] = n_neighbors
@@ -1132,16 +1135,20 @@ def tl_pacmap(
         **pmap_kwargs
     )
 
-    # Check feature count to determine initialization method
-    n_features = X_in.shape[1]
-    init_method = "pca"
+    # Determine initialization method
+    if user_init is not None:
+        init_method = user_init
+    else:
+        # Check feature count to determine initialization method
+        n_features = X_in.shape[1]
+        init_method = "pca"
 
-    if n_features <= 100:
-        warnings.warn(
-            f"Input data has {n_features} features, which is <= 100. "
-            "Switching initialization from 'pca' to 'random' to avoid potential issues."
-        )
-        init_method = "random"
+        if n_features <= 100:
+            warnings.warn(
+                f"Input data has {n_features} features, which is <= 100. "
+                "Switching initialization from 'pca' to 'random' to avoid potential issues."
+            )
+            init_method = "random"
 
     print(f"Fitting PaCMAP using init='{init_method}'...")
     X_embedded = embedder.fit_transform(X_in, init=init_method)
