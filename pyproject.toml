@@ -30,6 +30,9 @@ widgets = [
     "anywidget",
     "traitlets"
 ]
+dev = [
+    "pytest>=7.0.0"
+]
 
 [tool.setuptools.package-data]
 eigenp_utils = [
