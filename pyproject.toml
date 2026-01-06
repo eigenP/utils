@@ -24,7 +24,8 @@ single-cell = [
     "scanpy",
     "esda",
     "libpysal",
-    "triku"
+    "triku",
+    "leidenalg"
 ]
 widgets = [
     "anywidget",
