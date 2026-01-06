@@ -22,6 +22,7 @@ import scanpy as sc
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
 import matplotlib.pyplot as plt
+from .plotting_utils import adjust_colormap
 
 # Try importing third-party libraries that might be installed via the inline dependencies
 try:
@@ -52,6 +53,153 @@ CELL_CYCLE_GENES = [
 ]
 
 # ------------------------- General Utilities -------------------------
+
+def plot_marker_genes_dict_on_embedding(
+    adata,
+    marker_genes: Dict[str, List[str] | str],
+    basis: str = 'X_umap',
+    colormaps: Optional[List[str]] = None,
+    **pl_kwargs
+) -> List[plt.Axes]:
+    """
+    Plot marker genes defined in a dictionary {tissue: [genes]} on an embedding (e.g. UMAP).
+
+    Parameters
+    ----------
+    adata
+        Annotated data matrix.
+    marker_genes
+        Dictionary where keys are tissue names (or categories) and values are lists of gene names.
+    basis
+        The basis to plot on (e.g., 'X_umap', 'X_pca'). Defaults to 'X_umap'.
+    colormaps
+        List of colormap names to cycle through for different tissues.
+    **pl_kwargs
+        Additional keyword arguments passed to `sc.pl.embedding`.
+        Defaults set: s=50, show=False, frameon=False.
+
+    Returns
+    -------
+    List[plt.Axes]
+        A list of matplotlib Axes objects containing the plots.
+    """
+
+    # 1. Validate Basis
+    key_to_check = f"X_{basis}" if not basis.startswith("X_") else basis
+    # Scanpy usually looks for 'X_basis' if 'basis' is passed as argument 'basis'.
+    # e.g., sc.pl.embedding(..., basis='umap') looks for 'X_umap'.
+    # Here we check if the relevant key exists in obsm.
+
+    # Common behavior: user passes 'umap', expects 'X_umap'.
+    # Or user passes 'X_umap', expects 'X_umap'.
+    possible_keys = [basis, f"X_{basis}" if not basis.startswith("X_") else basis]
+
+    # Actually, scanpy's sc.pl.embedding `basis` argument handles the X_ prefix automatically.
+    # But for our explicit check as requested:
+    # We check if the likely key exists.
+
+    basis_key_exists = False
+    for k in possible_keys:
+        if k in adata.obsm:
+            basis_key_exists = True
+            break
+
+    if not basis_key_exists:
+        raise ValueError(
+            f"Basis '{basis}' (checked {possible_keys}) not found in adata.obsm. "
+            f"Please compute it and add in obsm, or choose from available keys: {list(adata.obsm.keys())}"
+        )
+
+    # 2. Check Genes
+    # Updates the marker_genes dict to only include found genes
+    marker_genes = check_gene_adata(adata, marker_genes)
+
+    # 3. Setup Colormaps
+    if colormaps is None:
+        colormaps = [
+            'Blues', 'Reds', 'Purples', 'Oranges',
+            'Greens', 'Greens', 'YlOrBr', 'Greens',
+            'RdPu', 'Oranges', 'PuRd', 'YlOrBr',
+        ]
+
+    adjusted_colormaps = {cmap: adjust_colormap(cmap) for cmap in set(colormaps)}
+
+    # 4. Default Kwargs
+    pl_kwargs.setdefault('s', 50)
+    pl_kwargs.setdefault('show', False)
+    pl_kwargs.setdefault('frameon', False)
+
+    # 5. Plotting Loop
+    axes_list = []
+
+    for idx_i, (tissue, genes) in enumerate(marker_genes.items()):
+        if not genes:
+            print(f"Skipping {tissue}: No valid marker genes found.")
+            continue
+
+        current_cmap_name = colormaps[idx_i % len(colormaps)]
+        current_cmap = adjusted_colormaps[current_cmap_name]
+
+        # sc.pl.embedding returns a list of axes if show=False and multiple genes are plotted,
+        # or a single axis if one gene. Or None if show=True.
+        # Here 'color' is a list of genes.
+        res = sc.pl.embedding(
+            adata,
+            basis=basis,
+            color=genes,
+            cmap=current_cmap,
+            **pl_kwargs
+        )
+
+        # Normalize result to a single axis or list of axes
+        # Scanpy's embedding returns: Union[Axes, List[Axes], None]
+        # If multiple genes, it returns List[Axes].
+
+        # The user snippet logic:
+        # ax = axes[0] if isinstance(axes, list) and axes else axes
+        # This implies we want to grab the axis to modify it.
+        # Warning: if multiple genes are passed, sc.pl.embedding creates multiple subplots (one per gene).
+        # The user snippet seems to assume one plot or just modifies the first?
+        # "Plotting UMAPs for each tissue type ... color=genes"
+        # If 'genes' is a list, scanpy plots multiple panels.
+        # The user's code: "ax = axes[0] ... ax.set_ylabel(tissue...)"
+        # This puts the tissue label on the first panel.
+
+        # If 'res' is a list, scanpy returned multiple subplots (one per gene).
+        # If 'res' is a single Axes, scanpy returned one plot (one gene).
+
+        ax = res[0] if isinstance(res, list) and res else res
+
+        # We disabled axis drawing in UMAP to have plots without background and border
+        # so we need to re-enable axis to plot the ylabel
+        # We apply this to the first axis (where we put the ylabel), as per snippet logic.
+
+        if ax:
+            ax.axis("on")
+            ax.tick_params(
+                top="off",
+                bottom="off",
+                left="off",
+                right="off",
+                labelleft="on",
+                labelbottom="off",
+            )
+            ax.set_ylabel(tissue + "\n", rotation=90, fontsize=14)
+            ax.set_xlabel(" ", fontsize=1)
+            ax.set(frame_on=False)
+
+        # Collect axes.
+        # Since we modified the first axis in place, 'res' (if list) or 'res' (if object) still holds it.
+        # But wait: if res is a list, I appended 'ax' (res[0]) in my previous logic, then appended 'res' (the list).
+        # This resulted in [ax, ax, ax2, ax3]. That's bad.
+
+        if isinstance(res, list):
+            axes_list.extend(res)
+        else:
+            axes_list.append(res)
+
+    return axes_list
+
 
 def check_gene_adata(adata, gene):
     """
