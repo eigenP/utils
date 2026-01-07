@@ -118,16 +118,20 @@ def _get_weight_profiles(shape, overlap):
     return profile_y, profile_x
 
 
-def _2D_weighted_image(image, overlap, profiles=None):
+def _2D_weighted_image(image, overlap, profiles=None, out=None):
     '''
     # image := image shape
     # overlap := in pixels
     # profiles := optional pre-calculated (profile_y, profile_x)
+    # out := optional output array for in-place operation
 
     # Example usage
     # _2D_window = _2D_weight(image, overlap)
     '''
     if overlap <= 0:
+        if out is not None:
+            out[:] = image
+            return out
         return image.astype(np.float32)
 
     if profiles is None:
@@ -135,12 +139,24 @@ def _2D_weighted_image(image, overlap, profiles=None):
     else:
         profile_y, profile_x = profiles
 
-    # Apply weights using broadcasting
-    # (H, W) * (H, 1) * (1, W)
-    # This avoids allocating a full (H, W) weight matrix, saving memory
-    weighted_image = image * profile_y[:, None] * profile_x[None, :]
+    if out is None:
+        # Apply weights using broadcasting
+        # (H, W) * (H, 1) * (1, W)
+        # This avoids allocating a full (H, W) weight matrix, saving memory
+        weighted_image = image * profile_y[:, None] * profile_x[None, :]
+        return weighted_image
+    else:
+        # In-place operation to avoid intermediate allocations
+        if out.shape != image.shape:
+            raise ValueError(f"Output shape {out.shape} does not match image shape {image.shape}")
 
-    return weighted_image
+        # Perform multiplication in steps
+        # out = image * profile_y[:, None]
+        np.multiply(image, profile_y[:, None], out=out)
+        # out *= profile_x[None, :]
+        np.multiply(out, profile_x[None, :], out=out)
+
+        return out
 
 def estimate_drift_2D(frame1, frame2, return_ccm = False):
     """
@@ -264,9 +280,14 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
     projections_x = []
     projections_y = []
 
+    # Pre-allocate buffer for weighted frame to avoid repeated allocations
+    # Determine dtype based on input (if int, result is float32 due to weights being float32)
+    w_dtype = np.result_type(video_data.dtype, np.float32)
+    w_frame_buffer = np.empty((x_shape, y_shape), dtype=w_dtype)
+
     # Iterate once to compute all projections
     for t in range(t_shape):
-        w_frame = _2D_weighted_image(video_data[t], overlap, profiles=profiles)
+        w_frame = _2D_weighted_image(video_data[t], overlap, profiles=profiles, out=w_frame_buffer)
         projections_x.append(np.max(w_frame, axis=0))
         projections_y.append(np.max(w_frame, axis=1))
 
