@@ -398,7 +398,7 @@ def plot_marker_genes_dict_on_embedding(
     adata,
     marker_genes: Dict[str, List[str] | str],
     basis: str = 'X_umap',
-    colormaps: Optional[List[str]] = None,
+    colormaps: Optional[List[str] | str | Any] = None,
     **pl_kwargs
 ) -> List[plt.Axes]:
     """
@@ -413,7 +413,8 @@ def plot_marker_genes_dict_on_embedding(
     basis
         The basis to plot on (e.g., 'X_umap', 'X_pca'). Defaults to 'X_umap'.
     colormaps
-        List of colormap names to cycle through for different tissues.
+        List of colormap names (or objects) to cycle through for different tissues.
+        Can also be a single colormap (string or object) which will be used for all.
     **pl_kwargs
         Additional keyword arguments passed to `sc.pl.embedding`.
         Defaults set: s=50, show=False, frameon=False.
@@ -461,8 +462,9 @@ def plot_marker_genes_dict_on_embedding(
             'Greens', 'Greens', 'YlOrBr', 'Greens',
             'RdPu', 'Oranges', 'PuRd', 'YlOrBr',
         ]
-
-    adjusted_colormaps = {cmap: adjust_colormap(cmap) for cmap in set(colormaps)}
+    elif not isinstance(colormaps, (list, tuple)):
+        # If a single colormap (str or object) is passed, wrap it in a list
+        colormaps = [colormaps]
 
     # 4. Default Kwargs
     pl_kwargs.setdefault('s', 50)
@@ -477,8 +479,30 @@ def plot_marker_genes_dict_on_embedding(
             print(f"Skipping {tissue}: No valid marker genes found.")
             continue
 
-        current_cmap_name = colormaps[idx_i % len(colormaps)]
-        current_cmap = adjusted_colormaps[current_cmap_name]
+        # Calculate module score
+        score_name = f"{tissue}_score"
+        # Check if use_raw is in pl_kwargs to pass to score_genes
+        use_raw = pl_kwargs.get("use_raw", None)
+
+        score_computed = False
+        try:
+            sc.tl.score_genes(
+                adata,
+                gene_list=genes,
+                score_name=score_name,
+                use_raw=use_raw
+            )
+            score_computed = True
+        except Exception as e:
+            print(f"Could not compute score for {tissue}: {e}")
+            score_name = None
+
+        current_cmap = colormaps[idx_i % len(colormaps)]
+
+        # Prepare items to plot
+        items_to_plot = list(genes)
+        if score_computed and score_name:
+            items_to_plot.append(score_name)
 
         # sc.pl.embedding returns a list of axes if show=False and multiple genes are plotted,
         # or a single axis if one gene. Or None if show=True.
@@ -486,10 +510,14 @@ def plot_marker_genes_dict_on_embedding(
         res = sc.pl.embedding(
             adata,
             basis=basis,
-            color=genes,
+            color=items_to_plot,
             cmap=current_cmap,
             **pl_kwargs
         )
+
+        # Remove the score column from obs
+        if score_computed and score_name in adata.obs:
+            del adata.obs[score_name]
 
         # Normalize result to a single axis or list of axes
         # Scanpy's embedding returns: Union[Axes, List[Axes], None]
