@@ -26,7 +26,6 @@ import scipy.sparse as sp
 from scipy.cluster import hierarchy
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
-from .plotting_utils import adjust_colormap
 
 # Try importing third-party libraries that might be installed via the inline dependencies
 try:
@@ -62,7 +61,7 @@ def plot_marker_genes_dict_on_embedding(
     adata,
     marker_genes: Dict[str, List[str] | str],
     basis: str = 'X_umap',
-    colormaps: Optional[List[str]] = None,
+    colormaps: Optional[List[str] | str | Any] = None,
     **pl_kwargs
 ) -> List[plt.Axes]:
     """
@@ -77,7 +76,8 @@ def plot_marker_genes_dict_on_embedding(
     basis
         The basis to plot on (e.g., 'X_umap', 'X_pca'). Defaults to 'X_umap'.
     colormaps
-        List of colormap names to cycle through for different tissues.
+        List of colormap names (or objects) to cycle through for different tissues.
+        Can also be a single colormap (string or object) which will be used for all.
     **pl_kwargs
         Additional keyword arguments passed to `sc.pl.embedding`.
         Defaults set: s=50, show=False, frameon=False.
@@ -125,8 +125,9 @@ def plot_marker_genes_dict_on_embedding(
             'Greens', 'Greens', 'YlOrBr', 'Greens',
             'RdPu', 'Oranges', 'PuRd', 'YlOrBr',
         ]
-
-    adjusted_colormaps = {cmap: adjust_colormap(cmap) for cmap in set(colormaps)}
+    elif not isinstance(colormaps, (list, tuple)):
+        # If a single colormap (str or object) is passed, wrap it in a list
+        colormaps = [colormaps]
 
     # 4. Default Kwargs
     pl_kwargs.setdefault('s', 50)
@@ -159,8 +160,7 @@ def plot_marker_genes_dict_on_embedding(
             print(f"Could not compute score for {tissue}: {e}")
             score_name = None
 
-        current_cmap_name = colormaps[idx_i % len(colormaps)]
-        current_cmap = adjusted_colormaps[current_cmap_name]
+        current_cmap = colormaps[idx_i % len(colormaps)]
 
         # Prepare items to plot
         items_to_plot = list(genes)
