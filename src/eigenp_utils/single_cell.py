@@ -26,7 +26,10 @@ import scipy.sparse as sp
 from scipy.cluster import hierarchy
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
-from .plotting_utils import adjust_colormap
+import matplotlib.colors as mcolors
+import matplotlib.patheffects as m_fx
+import re
+from .plotting_utils import adjust_colormap, get_nice_number
 
 # Try importing third-party libraries that might be installed via the inline dependencies
 try:
@@ -57,6 +60,339 @@ CELL_CYCLE_GENES = [
 ]
 
 # ------------------------- General Utilities -------------------------
+
+def find_cluster_keys(adata, pattern=r'leiden_[\d\.]+'):
+    """
+    Helper helper to find clustering columns in adata.obs that match a regex pattern.
+    It automatically sorts them numerically by resolution if numbers are present.
+
+    Args:
+        adata: AnnData object
+        pattern: Regex pattern to match column names (default: 'leiden_' followed by numbers)
+
+    Returns:
+        List of column names sorted by resolution.
+    """
+    # Find matching columns in .obs
+    keys = [c for c in adata.obs.columns if re.match(pattern, c)]
+
+    # Helper to sort by the number inside the string (e.g., 0.5, 1.0, 2.0)
+    def natural_sort_key(text):
+        # Find the first floating point number in the string
+        match = re.search(r'(\d+\.?\d*)', text)
+        if match:
+            return float(match.group(1))
+        return text # Fallback to alphabetical
+
+    return sorted(keys, key=natural_sort_key)
+
+
+def plot_clustering_tree(adata, cluster_keys, title="Clustering Resolution Tree",
+                         min_edge_weight=0.05, edge_color='darkgray',
+                         num_layout_iterations=20):
+    """
+    Generates a clustering tree plot showing how cluster assignments change across resolutions.
+
+    Args:
+        adata: The AnnData object (or an object with an .obs attribute).
+        cluster_keys (list): List of column names in adata.obs corresponding to clustering
+                             resolutions (ordered low to high).
+        title (str): Title of the plot.
+        min_edge_weight (float): Minimum proportion of cells to show an edge.
+                                 Helps clean up the plot by removing tiny overlaps.
+        edge_color (str): Color for the edges (arrows). Can be a single color string
+                          (e.g., 'gray', 'black') or a matplotlib colormap name
+                          (e.g., 'viridis') for a gradient based on proportion.
+        num_layout_iterations (int): Number of iterations for the barycenter layout
+                                     algorithm to stabilize node positions.
+    """
+
+    # 0. Validate Keys
+    # ----------------
+    missing_keys = [k for k in cluster_keys if k not in adata.obs.columns]
+    if missing_keys:
+        raise KeyError(
+            f"The following keys provided are not in adata.obs: {missing_keys}.\n"
+            "Tip: Make sure you are passing the column names (e.g., 'leiden_1.0'), "
+            "not the color keys from .uns (e.g., 'leiden_1.0_colors')."
+        )
+
+    # 1. Prepare Data and Node Metadata
+    # ---------------------------------
+    df = adata.obs[cluster_keys].copy()
+
+    # Ensure all columns are categorical/strings for consistent labeling
+    for col in cluster_keys:
+        df[col] = df[col].astype(str)
+
+    # Structure to hold node info: { (layer_idx, cluster_label): { 'count': int, 'x': float, 'y': float } }
+    nodes = {}
+
+    # Structure to hold edge info: [ { 'u': (l, c1), 'v': (l+1, c2), 'weight': count, 'in_prop': float } ]
+    edges = []
+
+    # Initialize nodes with counts and y-coordinates
+    for i, key in enumerate(cluster_keys):
+        unique_labels = sorted(df[key].unique(), key=lambda x: (len(x), x))
+        for label in unique_labels:
+            count = df[df[key] == label].shape[0]
+            nodes[(i, label)] = {'count': count, 'y': -i, 'x': 0.0} # Initialize x to 0.0
+
+    # Calculate edges (transitions)
+    for i in range(len(cluster_keys) - 1):
+        curr_key = cluster_keys[i]
+        next_key = cluster_keys[i+1]
+
+        ct = pd.crosstab(df[curr_key], df[next_key])
+
+        for parent_label in ct.index:
+            for child_label in ct.columns:
+                weight = ct.loc[parent_label, child_label]
+                child_size = nodes[(i+1, child_label)]['count']
+                in_prop = weight / child_size if child_size > 0 else 0
+
+                if in_prop >= min_edge_weight:
+                    edges.append({
+                        'u': (i, parent_label),
+                        'v': (i+1, child_label),
+                        'weight': weight,
+                        'in_prop': in_prop
+                    })
+
+    # 2. Calculate Layout (Iterative Barycenter Heuristic for vertical alignment)
+    # -------------------------------------------------------------------------
+    # Initial ordering: Sort first layer by label.
+    layer_order = []
+    for i, key in enumerate(cluster_keys):
+        layer_order.append(sorted([k for (l, k) in nodes.keys() if l == i], key=lambda x: (len(x), x)))
+
+    # Assign initial x-coordinates based on sorted order
+    for layer_idx, labels in enumerate(layer_order):
+        for x_idx, label in enumerate(labels):
+            nodes[(layer_idx, label)]['x'] = float(x_idx)
+
+    # Iterative barycenter method
+    for _ in range(num_layout_iterations):
+        # Top-down pass
+        for i in range(len(cluster_keys) - 1):
+            current_layer_labels = layer_order[i]
+            next_layer_labels = layer_order[i+1]
+
+            # Calculate barycenter for children based on parents' positions
+            new_child_x_positions = {label: [] for label in next_layer_labels}
+            for edge in edges:
+                if edge['u'][0] == i:
+                    parent_node = nodes[edge['u']]
+                    child_label = edge['v'][1]
+                    new_child_x_positions[child_label].append(parent_node['x'] * edge['weight'])
+
+            for label in next_layer_labels:
+                if new_child_x_positions[label]:
+                    # Sum weights of all incoming edges for this child
+                    total_incoming_weight = sum(e['weight'] for e in edges if e['v'] == (i+1, label))
+                    if total_incoming_weight > 0:
+                        nodes[(i+1, label)]['x'] = sum(new_child_x_positions[label]) / total_incoming_weight
+
+        # Bottom-up pass
+        for i in range(len(cluster_keys) - 1, 0, -1): # From second to last layer up to first
+            current_layer_labels = layer_order[i]
+            prev_layer_labels = layer_order[i-1]
+
+            # Calculate barycenter for parents based on children's positions
+            new_parent_x_positions = {label: [] for label in prev_layer_labels}
+            for edge in edges:
+                if edge['v'][0] == i:
+                    child_node = nodes[edge['v']]
+                    parent_label = edge['u'][1]
+                    new_parent_x_positions[parent_label].append(child_node['x'] * edge['weight'])
+
+            for label in prev_layer_labels:
+                if new_parent_x_positions[label]:
+                    # Sum weights of all outgoing edges for this parent
+                    total_outgoing_weight = sum(e['weight'] for e in edges if e['u'] == (i-1, label))
+                    if total_outgoing_weight > 0:
+                        nodes[(i-1, label)]['x'] = sum(new_parent_x_positions[label]) / total_outgoing_weight
+
+        # Re-sort nodes within each layer based on updated x-coordinates
+        for layer_idx in range(len(cluster_keys)):
+            layer_labels_with_x = [(label, nodes[(layer_idx, label)]['x'])
+                                   for label in layer_order[layer_idx]]
+            layer_labels_with_x.sort(key=lambda x: x[1])
+            layer_order[layer_idx] = [label for label, _ in layer_labels_with_x]
+
+            # Re-assign discrete x-coords for plotting after sorting
+            for x_idx, label in enumerate(layer_order[layer_idx]):
+                nodes[(layer_idx, label)]['x'] = float(x_idx) # Ensure integer positions for stability
+
+    # Normalize X coordinates to make plot symmetric/centered
+    # Scale to desired width (e.g., -5 to 5 or 0 to max_clusters_in_a_row - 1)
+    max_nodes_in_row = max(len(l) for l in layer_order)
+
+    # Recalculate node positions based on the final sorted order and spread
+    for layer_idx, labels in enumerate(layer_order):
+        # Re-assign positions for the layer, spreading them evenly
+        if len(labels) > 1:
+            step = max_nodes_in_row / (len(labels) - 1) if len(labels) > 1 else 0
+            for x_idx, label in enumerate(labels):
+                nodes[(layer_idx, label)]['x'] = x_idx * step
+        else: # Single node in layer
+             nodes[(layer_idx, labels[0])]['x'] = max_nodes_in_row / 2.0 # Center single node
+
+        # Center the entire layer
+        layer_min_x = min(nodes[(layer_idx, l)]['x'] for l in labels) if labels else 0
+        layer_max_x = max(nodes[(layer_idx, l)]['x'] for l in labels) if labels else 0
+        layer_width = layer_max_x - layer_min_x
+        centering_offset = (max_nodes_in_row - layer_width) / 2.0 - layer_min_x
+
+        for label in labels:
+            nodes[(layer_idx, label)]['x'] += centering_offset
+
+    # 3. Plotting
+    # -----------
+    fig, ax = plt.subplots(figsize=(12, len(cluster_keys) * 1.5 + 2)) # Adjust figsize for better readability
+
+    # -- Define Colors per Node based on adata.uns --
+    fallback_cmap = plt.cm.get_cmap('Spectral', len(cluster_keys))
+    node_colors = {}
+
+    for i, key in enumerate(cluster_keys):
+        uns_key = f"{key}_colors"
+        specific_colors_map = None
+
+        if hasattr(adata, 'uns') and uns_key in adata.uns:
+            try:
+                if hasattr(adata.obs[key], 'cat'):
+                    categories = adata.obs[key].cat.categories
+                    colors_list = adata.uns[uns_key]
+
+                    if len(categories) == len(colors_list):
+                        specific_colors_map = dict(zip(categories, colors_list))
+            except Exception as e:
+                print(f"Warning: Could not map colors for {key}: {e}")
+
+        layer_labels = layer_order[i]
+        fallback_color = mcolors.to_hex(fallback_cmap(i))
+
+        for label in layer_labels:
+            if specific_colors_map and label in specific_colors_map:
+                node_colors[(i, label)] = specific_colors_map[label]
+            else:
+                node_colors[(i, label)] = fallback_color
+
+    # -- Edge Color Logic --
+    edge_cmap = None
+
+    # Priority 1: If it's a valid color string (e.g., 'gray', '#333333'), create a gradient to it
+    # This check must come BEFORE plt.colormaps check because 'gray' is both a color and a colormap.
+    # Matplotlib's 'gray' colormap is black->white (0->1), which is the opposite of what we want
+    # (we want 1.0 to be the strong color).
+    if mcolors.is_color_like(edge_color):
+        try:
+            target_rgb = mcolors.to_rgb(edge_color)
+            # Gradient: White (0.0) -> Target Color (1.0)
+            cdict = {
+                'red':   [(0.0, 1.0, 1.0), (1.0, target_rgb[0], target_rgb[0])],
+                'green': [(0.0, 1.0, 1.0), (1.0, target_rgb[1], target_rgb[1])],
+                'blue':  [(0.0, 1.0, 1.0), (1.0, target_rgb[2], target_rgb[2])]
+            }
+            edge_cmap = mcolors.LinearSegmentedColormap('custom_edge', segmentdata=cdict)
+        except ValueError:
+            pass
+
+    # Priority 2: If not handled as a color, check if it's a named colormap
+    if edge_cmap is None and isinstance(edge_color, str) and edge_color in plt.colormaps:
+        edge_cmap = plt.colormaps[edge_color]
+
+    # Priority 3: Fallback
+    if edge_cmap is None:
+        edge_cmap = plt.cm.gray_r # Inverted gray (white -> black)
+
+    # -- Draw Edges --
+    for edge in edges:
+        u_node = nodes[edge['u']]
+        v_node = nodes[edge['v']]
+
+        alpha = max(0.2, edge['in_prop']) # Minimum visibility
+        width = 1 + (edge['in_prop'] * 4) # Slightly thicker max width
+
+        # Get color from map
+        edge_line_color = edge_cmap(edge['in_prop'])
+
+        ax.annotate("",
+                    xy=(v_node['x'], v_node['y'] + 0.1),
+                    xytext=(u_node['x'], u_node['y'] - 0.1),
+                    arrowprops=dict(arrowstyle="->",
+                                    color=edge_line_color,
+                                    alpha=alpha,
+                                    lw=width,
+                                    shrinkA=5, shrinkB=5,
+                                    connectionstyle="arc3,rad=0.0"))
+
+    # -- Draw Nodes --
+    all_counts = [n['count'] for n in nodes.values()]
+    max_count = max(all_counts) if all_counts else 1
+    size_scale = 1000
+
+    for (layer_idx, label), data in nodes.items():
+        x, y = data['x'], data['y']
+        s = (data['count'] / max_count) * size_scale
+
+        c = node_colors.get((layer_idx, label), 'gray')
+
+        ax.scatter(x, y, s=s, c=c, zorder=10, edgecolor='black', linewidth=0.5)
+
+        font_size = 8 if len(label) < 3 else 6
+        ax.text(x, y, label, ha='center', va='center',
+                fontsize=font_size, color='white', fontweight='bold', zorder=11,
+                path_effects=[m_fx.Stroke(linewidth=1.5, foreground='black'), m_fx.Normal()])
+
+    # 4. Formatting and Legends
+    # -------------------------
+
+    ax.set_yticks([-i for i in range(len(cluster_keys))])
+    ax.set_yticklabels(cluster_keys)
+    ax.set_ylabel("Clustering Resolution / Layer")
+
+    ax.set_xticks([])
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+
+    ax.set_title(title)
+
+    # -- Custom Legend for Sizes (Adaptive Rounding) --
+    # Generate nice numbers: roughly 20%, 50%, 100%
+    raw_sizes = [max_count * 0.2, max_count * 0.5, max_count]
+    nice_sizes = sorted(list(set([get_nice_number(s) for s in raw_sizes if s > 0])))
+
+    legend_handles = []
+    for s_val in nice_sizes:
+        # Calculate size in points for the scatter marker
+        s_point = (s_val / max_count) * size_scale
+        legend_handles.append(plt.scatter([], [], s=s_point,
+                                          c='gray', alpha=0.5, label=f'{s_val:,} cells'))
+
+    legend1 = ax.legend(handles=legend_handles, title="Cluster Size",
+                        bbox_to_anchor=(1.05, 1), loc='upper left', frameon=False,
+                        scatterpoints=1)
+    ax.add_artist(legend1)
+
+    # -- Custom Legend for In-Proportion --
+    props = [0.2, 0.5, 0.8, 1.0]
+    prop_handles = []
+    for p in props:
+        line_color = edge_cmap(p)
+        line = plt.Line2D([0], [0], color=line_color, alpha=p, lw=1+(p*4), label=f'{p:.1f}')
+        prop_handles.append(line)
+
+    ax.legend(handles=prop_handles, title="In-Proportion",
+              bbox_to_anchor=(1.05, 0.6), loc='upper left', frameon=False)
+
+    ax.autoscale_view()
+    plt.subplots_adjust(right=0.75) # Adjust right margin
+    plt.show()
+
 
 def plot_marker_genes_dict_on_embedding(
     adata,

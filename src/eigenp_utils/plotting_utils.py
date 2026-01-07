@@ -15,6 +15,7 @@ from matplotlib import colormaps as mpl_colormaps
 from pathlib import Path
 import pandas as pd
 import itertools
+import math
 
 # --- Initialization: Load Font and Style ---
 ROOT_DIR = Path(__file__).parent
@@ -424,3 +425,27 @@ def adjust_colormap(cmap_name, start_ = 0.25, end_ = 1.0, start_color = [0.9, 0.
     colors = np.vstack((start_color, colors))  # Adding faint gray for underflow
     new_cmap = mcolors.LinearSegmentedColormap.from_list(f"{cmap_name}_adjusted", colors)
     return new_cmap
+
+
+def get_nice_number(value):
+    """
+    Rounds a number to a 'nice' round number for legends.
+    Examples: 4343 -> 4000, 10858 -> 10000, 21717 -> 20000
+    """
+    if value == 0: return 0
+
+    # Calculate magnitude
+    exponent = math.floor(math.log10(value))
+    fraction = value / (10 ** exponent)
+
+    # Round fraction to nice intervals (1, 2, 5, 10)
+    if fraction < 1.5:
+        nice_fraction = 1
+    elif fraction < 3:
+        nice_fraction = 2
+    elif fraction < 7:
+        nice_fraction = 5
+    else:
+        nice_fraction = 10
+
+    return int(nice_fraction * (10 ** exponent))
