@@ -1956,20 +1956,13 @@ def score_celltypes(
     cell_type_markers_dict: Dict[str, Sequence[str]],
     layer: Optional[str] = None,
     use_raw: bool = True,
-    zscore: bool = True,  # kept for API compat; ignored
     min_markers: int = 1,
 ) -> pd.DataFrame:
     """
     Compute per-cell scores for each cell type using sc.tl.score_genes.
     Notes:
-      - `zscore` is ignored (kept only for backward compatibility).
       - If fewer than `min_markers` genes are present, that cell type's score is NaN.
     """
-    warnings.warn(
-        "score_celltypes now uses sc.tl.score_genes; the `zscore` parameter is ignored.",
-        RuntimeWarning,
-        stacklevel=2,
-    )
 
     # Determine gene universe for presence/missing checks
     if use_raw and getattr(adata, "raw", None) is not None and adata.raw is not None:
@@ -2022,14 +2015,20 @@ def annotate_clusters_by_markers(
     use_raw: bool = True,
     beta: float = 2.0,
     min_markers: int = 1,
-    zscore: bool = True,  # ignored by score_celltypes
+    normalize_scores: bool = True,
     write_to_obs: bool = True,
     obs_prefix: Optional[str] = None,
     scores: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
+    Annotate clusters based on cell type scores.
+
     If `scores` is provided, it must be a DataFrame with index == adata.obs_names
     and columns == cell types. Otherwise, scores are computed once here.
+
+    Parameters:
+    - normalize_scores: Whether to apply robust normalization (median/MAD) to the scores. Default is True.
+      Formula: (x - median(x)) / (median(|x - median(x)|) + 1e-8)
     """
     # Get per-cell scores S only if not provided
     if scores is None:
@@ -2040,7 +2039,6 @@ def annotate_clusters_by_markers(
             cell_type_markers_dict,
             layer=layer,
             use_raw=use_raw,
-            zscore=zscore,  # ignored downstream
             min_markers=min_markers,
         )
     else:
@@ -2048,6 +2046,12 @@ def annotate_clusters_by_markers(
         # Align/validate
         if not S.index.equals(adata.obs_names):
             S = S.reindex(adata.obs_names)
+
+    if normalize_scores:
+        if scores is not None:
+             warnings.warn("Scores provided and normalize_scores=True. This may result in double normalization.")
+        # NORMALIZE SCORES (Robust Median/MAD)
+        S = S.apply(lambda x: (x - np.nanmedian(x)) / (np.nanmedian(np.abs(x - np.nanmedian(x))) + 1e-8))
 
     cts = list(S.columns)
     clabs = adata.obs[cluster_key].astype(str)
@@ -2135,7 +2139,7 @@ def sweep_leiden_and_annotate(
     random_state: int = 0,
     layer: Optional[str] = None,
     use_raw: bool = True,
-    zscore: bool = True,  # ignored by score_celltypes
+    normalize_scores: bool = True,
     min_markers: int = 1,
     beta: float = 2.0,
     leiden_key_prefix: str = "leiden",
@@ -2156,9 +2160,11 @@ def sweep_leiden_and_annotate(
         cell_type_markers_dict,
         layer=layer,
         use_raw=use_raw,
-        zscore=zscore,
         min_markers=min_markers,
     )
+
+    if normalize_scores:
+        S = S.apply(lambda x: (x - np.nanmedian(x)) / (np.nanmedian(np.abs(x - np.nanmedian(x))) + 1e-8))
 
     res_list = [float(r) for r in resolutions]
     cluster_annotations = {}
@@ -2182,7 +2188,7 @@ def sweep_leiden_and_annotate(
             cell_type_markers_dict=None,  # not needed since we pass scores
             layer=layer,
             use_raw=use_raw,
-            zscore=zscore,
+            normalize_scores=False, # Already normalized if requested
             min_markers=min_markers,
             beta=beta,
             write_to_obs=True,
