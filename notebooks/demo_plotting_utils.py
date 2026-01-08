@@ -36,7 +36,10 @@ async def _(mo):
         return sys.platform in ("emscripten", "wasi")
 
     OWNER, REPO, REF = "eigenP", "utils", "main"
-    GIT_URL = f"git+https://github.com/{OWNER}/{REPO}.git@{REF}"
+    if in_wasm():
+        GIT_URL = f"https://github.com/{OWNER}/{REPO}/archive/{REF}.zip"
+    else:
+        GIT_URL = f"git+https://github.com/{OWNER}/{REPO}.git@{REF}"
 
     def install_local(url):
         import subprocess, sys, shutil
