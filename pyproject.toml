@@ -1,9 +1,9 @@
 [build-system]
-requires = ["hatchling>=1.24"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "eigenp-utils"           # project (distribution) name on install
+name = "eigenp-utils"
 version = "0.0.1"
 description = "Utilities for EigenP"
 readme = "README.md"
@@ -35,12 +35,14 @@ dev = [
     "pytest>=7.0.0"
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.setuptools.package-data]
 eigenp_utils = [
   "tnia_plotting_anywidgets.js",
   "tnia_plotting_anywidgets.css"
 ]
-
-[tool.hatch.build.targets.wheel]
-# Tell hatch where your package code lives (src-layout)
-packages = ["src/eigenp_utils"]
