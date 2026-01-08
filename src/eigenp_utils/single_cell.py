@@ -59,6 +59,198 @@ CELL_CYCLE_GENES = [
     "CENPE", "CTCF", "NEK2", "G2E3", "GAS2L3", "CBX5", "CENPA"
 ]
 
+# ------------------------- Preprocessing Tools -------------------------
+
+def carry_palette(src_adata, dst_adata, key: str, fallback_color: str = "#BBBBBB"):
+    """
+    Copy colors for `key` from src -> dst, matching by category names.
+    Keeps identical colors for categories present in both; unseen ones get `fallback_color`.
+    """
+    if key not in src_adata.obs or key not in dst_adata.obs:
+        raise KeyError(f"'{key}' must be in .obs of both src and dst")
+
+    # Ensure categoricals & drop unused in the subset
+    src_c = src_adata.obs[key].astype("category")
+    dst_c = dst_adata.obs[key].astype("category").cat.remove_unused_categories()
+    dst_adata.obs[key] = dst_c  # write back (important)
+
+    # Grab source palette
+    pal_key = f"{key}_colors"
+    if pal_key not in src_adata.uns:
+        raise KeyError(f"Source palette '{pal_key}' not found in src_adata.uns")
+
+    src_cats = list(src_c.cat.categories)
+    src_cols = list(src_adata.uns[pal_key])
+    cmap = dict(zip(src_cats, src_cols))
+
+    # Build destination palette in the (possibly new) category order
+    dst_cats = list(dst_c.cat.categories)
+    dst_cols = [cmap.get(cat, fallback_color) for cat in dst_cats]
+    dst_adata.uns[pal_key] = dst_cols
+
+    # Optional sanity check: warn if any cats were missing in source
+    missing = [cat for cat in dst_cats if cat not in cmap]
+    if missing:
+        warnings.warn(f"[carry_palette] No color found in source for: {missing}. Used fallback_color={fallback_color}.")
+
+    return dst_adata
+
+
+def _has_integer_like_counts(X, n_check=200000):
+    if sp.issparse(X):
+        data = X.data
+    else:
+        data = np.ravel(X)
+    if data.size > n_check:
+        rng = np.random.default_rng(0)
+        data = rng.choice(data, size=n_check, replace=False)
+    return np.allclose(data, np.round(data))
+
+
+def _ensure_log1p_layer(
+    A,
+    *,
+    target_layer: str = "log1p",
+    counts_layer: str = "counts",
+    total_count: float = 1e4,
+    force_build: bool = False,
+):
+    """
+    Create A.layers[target_layer] from RAW COUNTS via normalize_total + log1p.
+    Counts source priority (STRICT):
+      1) A.layers[counts_layer]
+      2) A.raw.X
+    No fallback to A.X to avoid double-log issues.
+    """
+    if target_layer in A.layers:
+        return
+
+    # choose counts source
+    if counts_layer in A.layers:
+        C = A.layers[counts_layer]
+        src_name = f"layers['{counts_layer}']"
+    elif A.raw is not None:
+        C = A.raw.X
+        src_name = "raw.X"
+        # cache a copy for future calls
+        A.layers[counts_layer] = A.raw.X.copy()
+    else:
+        raise KeyError(
+            f"Cannot build '{target_layer}': need raw counts in A.layers['{counts_layer}'] or A.raw.X."
+        )
+
+    # sanity check: counts must look integer-like
+    if not force_build and not _has_integer_like_counts(C):
+        raise ValueError(
+            f"{src_name} does not look like raw integer counts. "
+            f"Refusing to create '{target_layer}' to avoid double log-transform. "
+            f"Provide true counts or pass force_build=True if you are certain."
+        )
+
+    # build log1p from counts WITHOUT touching A.X
+    tmp = A.copy()
+    tmp.X = C.copy()
+    sc.pp.normalize_total(tmp, target_sum=total_count)
+    sc.pp.log1p(tmp)
+    A.layers[target_layer] = tmp.X.copy()
+    del tmp
+    warnings.warn(f"[ensure_log1p_layer] Created A.layers['{target_layer}'] from {src_name}.")
+
+
+def preprocess_subset(
+    adata,
+    *,
+    counts_layer: str = "counts",
+    n_top_genes: int = 2500,
+    hvg_flavor: str = "seurat_v3",   # or "triku"
+    batch_key: Optional[str] = None,
+    subset_to_hvgs: bool = True,
+    X_layer_for_pca: str = "log1p",
+    scale_max_value: float = 10.0,
+    n_comps: int = 32,
+    svd_solver: str = "arpack",
+    n_neighbors: int = 15,
+    n_pcs: int = 30,
+    use_rep: Optional[str] = None,
+    cluster_key: str = "leiden",
+    resolution: float = 1.0,
+    random_state: int = 0,
+    copy: bool = False
+):
+    A = adata.copy() if copy else adata
+    sc.pp.filter_genes(A, min_cells=3)
+
+    # ---- Make sure counts/log1p exist BEFORE any var subsetting ----
+    # (prevents shape-mismatch if we need to look at A.raw)
+    if hvg_flavor == "seurat_v3":
+        # seurat_v3 requires raw counts as input to HVG
+        if counts_layer not in A.layers:
+            if A.raw is not None:
+                A.layers[counts_layer] = A.raw.X.copy()
+            else:
+                raise ValueError(
+                    f"flavor='seurat_v3' requires raw counts in A.layers['{counts_layer}'] or A.raw"
+                )
+        if not _has_integer_like_counts(A.layers[counts_layer]):
+            raise ValueError(f"A.layers['{counts_layer}'] does not look like raw integer counts.")
+
+
+    # ensure we have log1p built from true counts
+    _ensure_log1p_layer(
+        A,
+        target_layer="log1p",
+        counts_layer=counts_layer,   # e.g., "counts"
+        total_count=1e4,
+        force_build=False
+    )
+
+    # ---------- HVG selection ----------
+    if hvg_flavor == "triku":
+        # Run Triku on log1p (recommended), then rely on its 'highly_variable' output
+        run_triku(A, layer=X_layer_for_pca, n_features=n_top_genes)
+    else:
+        if batch_key is None and "batch" in A.obs:
+            batch_key = "batch"
+        hvg_kwargs = dict(n_top_genes=n_top_genes, flavor=hvg_flavor, batch_key=batch_key)
+        if hvg_flavor == "seurat_v3":
+            hvg_kwargs["layer"] = counts_layer
+        sc.pp.highly_variable_genes(A, **hvg_kwargs)
+
+    # ---------- subset HVGs (optional but common) ----------
+    if subset_to_hvgs:
+        A._inplace_subset_var(A.var["highly_variable"].values)
+
+    # ---------- set working matrix ----------
+    if X_layer_for_pca not in A.layers:
+        raise KeyError(f"Layer '{X_layer_for_pca}' missing even after construction.")
+    A.X = A.layers[X_layer_for_pca].copy()
+
+    # ---------- scale / PCA on HVGs ----------
+    sc.pp.scale(A, max_value=scale_max_value)
+    sc.tl.pca(
+        A,
+        n_comps=min(n_comps, A.n_vars - 1),
+        use_highly_variable=True,        # mask_var removed; not needed anyway after subsetting
+        svd_solver=svd_solver,
+        random_state=random_state
+    )
+
+    # ---------- neighbors ----------
+    if use_rep is not None:
+        sc.pp.neighbors(A, n_neighbors=n_neighbors, use_rep=use_rep)
+    else:
+        sc.pp.neighbors(A, n_neighbors=n_neighbors, n_pcs=min(n_pcs, A.obsm["X_pca"].shape[1]))
+
+    # ---------- clustering ----------
+    if cluster_key == "leiden":
+        sc.tl.leiden(A, resolution=resolution, key_added="leiden", random_state=random_state)
+    else:
+        if cluster_key not in A.obs:
+            raise KeyError(f"cluster_key '{cluster_key}' not found in .obs.")
+
+    return A
+
+
 # ------------------------- General Utilities -------------------------
 
 def find_cluster_keys(adata, pattern=r'leiden_[\d\.]+'):
