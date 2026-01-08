@@ -44,5 +44,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 eigenp_utils = [
   "tnia_plotting_anywidgets.js",
-  "tnia_plotting_anywidgets.css"
+  "tnia_plotting_anywidgets.css",
+  "scientific.mplstyle",
+  "Inter-Regular.ttf"
 ]
