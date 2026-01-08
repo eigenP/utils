@@ -893,29 +893,6 @@ def morans_i_all_fast(
 
 # ------------------------- Archetype Tools -------------------------
 
-def _pearson_r_vectorized(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    """Calculates row-wise Pearson correlation between two 2D arrays A and B."""
-    if A.shape != B.shape:
-        raise ValueError("Input arrays A and B must have the same shape.")
-    if A.ndim != 2:
-        raise ValueError("Input arrays must be 2D.")
-
-    A_m = A - A.mean(axis=1, keepdims=True)
-    B_m = B - B.mean(axis=1, keepdims=True)
-
-    ssA = (A_m**2).sum(axis=1)
-    ssB = (B_m**2).sum(axis=1)
-
-    # Add epsilon to denominator to avoid division by zero
-    denom = np.sqrt(ssA * ssB) + 1e-9
-
-    dot_prod = (A_m * B_m).sum(axis=1)
-
-    corrs = dot_prod / denom
-    # Clip values to be strictly within [-1, 1]
-    return np.clip(corrs, -1.0, 1.0)
-
-
 def find_expression_archetypes(
     adata: sc.AnnData,
     gene_list: List[str],
@@ -1010,15 +987,48 @@ def find_expression_archetypes(
         for i in range(1, num_clusters + 1)
     ])
 
-    # 7. Calculate Pearson correlations for each gene to its archetype (vectorized)
+    # 7. Calculate Pearson correlations for each gene to its archetype
+    # Optimized to avoid allocating a full (n_genes, n_cells) array for archetypes
+    gene_corrs = np.zeros(sdge.shape[0], dtype=np.float32)
 
-    # Create an (n_genes, n_cells) array where each row is the archetype
-    # corresponding to that gene's cluster.
-    # `clusters` is 1-based, so subtract 1 for 0-based indexing.
-    archetypes_per_gene = archetypes[clusters - 1]
+    for i in range(1, num_clusters + 1):
+        # Indices of genes in this cluster
+        # clusters is 1-based
+        indices = np.where(clusters == i)[0]
+        if indices.size == 0:
+            continue
 
-    # Use the fast vectorized Pearson correlation
-    gene_corrs = _pearson_r_vectorized(sdge, archetypes_per_gene)
+        # Extract genes: (n_genes_in_cluster, n_cells)
+        # Fancy indexing creates a copy, but it is a subset
+        sub_sdge = sdge[indices]
+
+        # Extract archetype: (n_cells,)
+        # archetypes is 0-based, clusters is 1-based
+        arch = archetypes[i - 1]
+
+        # Center data
+        # (n_genes_in_cluster, n_cells)
+        sub_mean = sub_sdge.mean(axis=1, keepdims=True)
+        sub_centered = sub_sdge - sub_mean
+
+        # (n_cells,)
+        arch_mean = arch.mean()
+        arch_centered = arch - arch_mean
+
+        # Sum of squares
+        ss_sub = (sub_centered**2).sum(axis=1)
+        ss_arch = (arch_centered**2).sum()
+
+        # Dot product: (n_genes_in_cluster, n_cells) @ (n_cells,) -> (n_genes_in_cluster,)
+        # This is equivalent to row-wise sum of product
+        dot = np.dot(sub_centered, arch_centered)
+
+        # Denominator with epsilon
+        denom = np.sqrt(ss_sub * ss_arch) + 1e-9
+
+        # Correlation
+        corrs = dot / denom
+        gene_corrs[indices] = np.clip(corrs, -1.0, 1.0)
 
     print('done')
 
