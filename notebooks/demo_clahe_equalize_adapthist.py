@@ -39,7 +39,7 @@ async def _(mo):
 
     OWNER, REPO, REF = "eigenP", "utils", "main"
     if in_wasm():
-        GIT_URL = f"https://github.com/{OWNER}/{REPO}/archive/{REF}.zip"
+        GIT_URL = f"eigenp-utils @ https://github.com/{OWNER}/{REPO}/archive/{REF}.zip"
     else:
         GIT_URL = f"git+https://github.com/{OWNER}/{REPO}.git@{REF}"
 
