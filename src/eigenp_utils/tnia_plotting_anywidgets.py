@@ -41,6 +41,9 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     y_t = traitlets.Int(1).tag(sync=True)
     z_t = traitlets.Int(1).tag(sync=True)
 
+    sxy = traitlets.Float(1.0).tag(sync=True)
+    sz = traitlets.Float(1.0).tag(sync=True)
+
     # Bounds for sliders (computed)
     x_min_pos = traitlets.Int(0).tag(sync=True)
     x_max_pos = traitlets.Int(100).tag(sync=True)
