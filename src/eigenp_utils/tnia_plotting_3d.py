@@ -284,6 +284,7 @@ def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=1
 
 from ipywidgets import interact, interactive, IntSlider, FloatRangeSlider, Layout, Text, Button, VBox, HBox
 import functools
+import warnings
 
 def add_save_ui(func):
     """
@@ -345,6 +346,10 @@ def show_xyz_max_slice_interactive(
     Display an interactive widget to explore a 3D image by showing a slice
     in the x, y, and z directions.
 
+    .. warning::
+        This function is deprecated. Please use the version from
+        `eigenp_utils.tnia_plotting_anywidgets` instead.
+
     Parameters
     ----------
     im : array or list[array]
@@ -365,6 +370,14 @@ def show_xyz_max_slice_interactive(
         OPTIONAL initial half-thicknesses in voxels. If None, defaults to ~size/64.
         NOTE: Sliders remain interactive and can override these values.
     """
+
+    warnings.warn(
+        "show_xyz_max_slice_interactive is deprecated. "
+        "Please import and use the version from eigenp_utils.tnia_plotting_anywidgets instead. "
+        "Example: from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive",
+        DeprecationWarning,
+        stacklevel=2
+    )
 
     # Support multi-channel input
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)  # (Z, Y, X)
@@ -729,6 +742,14 @@ def show_xyz_max_scatter_interactive(
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
+    warnings.warn(
+        "show_xyz_max_scatter_interactive is deprecated. "
+        "Please import and use the version from eigenp_utils.tnia_plotting_anywidgets instead. "
+        "Example: from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_scatter_interactive",
+        DeprecationWarning,
+        stacklevel=2
+    )
+
     import numpy as np
     import matplotlib.pyplot as plt
     from ipywidgets import interact, IntSlider, Layout
