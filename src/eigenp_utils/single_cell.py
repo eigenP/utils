@@ -1304,7 +1304,7 @@ def plot_archetype_summary(
         adata,
         basis=basis,
         color=profile_name,
-        title=f'Archetype {archetype_id} Score',
+        # title=f'Archetype {archetype_id} Score',
         **kwargs
     )
 
