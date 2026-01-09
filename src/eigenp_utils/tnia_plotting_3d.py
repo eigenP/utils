@@ -731,7 +731,7 @@ def show_xyz_max_scatter_interactive(
     X, Y, Z,
     channels=None,                 # None | int-array (IDs) | float-array (continuous) | list of arrays (IDs or continuous)
     sxy=1, sz=1,
-    render='density',              # 'density' or 'points'
+    render='points',              # 'density' or 'points'
     bins=512,                      # int or (nx, ny) for density mode
     point_size=4, alpha=0.6,       # points mode
     colors=None,                   # per-channel base colors; for single continuous, colors[0] is the target color
