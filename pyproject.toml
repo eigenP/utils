@@ -25,7 +25,8 @@ single-cell = [
     "esda",
     "libpysal",
     "triku",
-    "leidenalg"
+    "leidenalg",
+    "adjustText"
 ]
 widgets = [
     "anywidget",

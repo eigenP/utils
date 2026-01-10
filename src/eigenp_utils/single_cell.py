@@ -10,6 +10,7 @@
 #     "matplotlib",
 #     "pacmap",
 #     "scikit-learn",
+#     "adjustText",
 # ]
 # ///
 
@@ -42,6 +43,11 @@ try:
     import triku as tk
 except ImportError:
     tk = None
+
+try:
+    from adjustText import adjust_text
+except ImportError:
+    adjust_text = None
 
 # ------------------------- Constants -------------------------
 
@@ -2535,3 +2541,161 @@ def export_cell_type_annotations(
 
     # Verify the output
     print(df_export.head())
+
+def plot_volcano_adata(
+    adata: AnnData,
+    rank_genes_key: str,
+    group: str,
+    pval_cutoff: float = 0.05,
+    logfc_cutoff: float = 1.0,
+    label_top_n: int = 20,
+    plot_positive_only: bool = False,
+    figsize: tuple = (6, 5),
+    title: str = None,
+    ax=None,
+    **kwargs
+) -> plt.Axes:
+    """
+    Generates a volcano plot from differential gene expression results
+    stored by scanpy's rank_genes_groups.
+
+    Args:
+        adata (AnnData): The annotated data matrix.
+        rank_genes_key (str): The key in `adata.uns` where the rank_genes_groups results are stored.
+        group (str): The name of the group to plot from the rank_genes_groups results.
+        pval_cutoff (float, optional): The adjusted p-value cutoff for significance. Defaults to 0.05.
+        logfc_cutoff (float, optional): The log2 fold change cutoff for significance. Defaults to 1.0.
+        label_top_n (int, optional): The number of top genes to label based on p-value AND log-fold change.
+                                     The final number of labels can be up to 2 * label_top_n. Defaults to 20.
+        plot_positive_only (bool, optional): If True, highlights and labels only genes with positive
+                                             log-fold change (upregulated). If False, highlights
+                                             both up- and down-regulated significant genes. Defaults to False.
+        figsize (tuple, optional): The size of the figure. Defaults to (6, 5).
+        title (str, optional): The title for the plot. If None, a default title is generated. Defaults to None.
+        ax (matplotlib.axes.Axes, optional): An existing matplotlib axes object to plot on.
+                                             If None, a new figure and axes are created. Defaults to None.
+        **kwargs: Additional keyword arguments passed to `adjust_text`.
+
+    Returns:
+        matplotlib.axes.Axes: The matplotlib axes object containing the plot.
+
+    Notes:
+        This function requires the 'adjustText' library to be installed
+        (`pip install adjustText`) for non-overlapping gene labels.
+    """
+    if adjust_text is None:
+        raise ImportError(
+            "The 'adjustText' library is required for this function. "
+            "Please install it using `pip install adjustText`."
+        )
+
+    # --- 1. Data Extraction ---
+    try:
+        comparison_uns = adata.uns[rank_genes_key]
+        logfoldchanges = comparison_uns['logfoldchanges'][group]
+        pvals_adj = comparison_uns['pvals_adj'][group]
+        names = comparison_uns['names'][group]
+    except KeyError:
+        print(f"Error: Could not find rank_genes_key='{rank_genes_key}' or group='{group}' in adata.uns.")
+        return
+
+    # --- 2. Data Preparation ---
+    # Calculate -log10 of p-values, handling p-values of 0
+    with np.errstate(divide='ignore'):
+        neg_log10_pvals = -np.log10(pvals_adj)
+    # Replace infinite values with a value slightly larger than the max finite value
+    if np.isinf(neg_log10_pvals).any():
+        neg_log10_pvals[np.isinf(neg_log10_pvals)] = np.nanmax(neg_log10_pvals[np.isfinite(neg_log10_pvals)]) * 1.1
+
+    # --- 3. Plotting ---
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+
+    # Scatter plot for all genes (non-significant)
+    ax.scatter(logfoldchanges, neg_log10_pvals, c='gray', alpha=0.5, label='Non-significant')
+
+    # --- 4. Highlight Significant Genes ---
+    if plot_positive_only:
+        significant_idx = (pvals_adj < pval_cutoff) & (logfoldchanges > logfc_cutoff)
+    else:
+        significant_idx = (pvals_adj < pval_cutoff) & (np.abs(logfoldchanges) > logfc_cutoff)
+
+    # Scatter plot for significant genes
+    ax.scatter(
+        logfoldchanges[significant_idx],
+        neg_log10_pvals[significant_idx],
+        c='red',
+        alpha=0.8,
+        label='Significant'
+    )
+
+    # --- 5. Add Threshold Lines ---
+    ax.axhline(-np.log10(pval_cutoff), color='black', linestyle='--', linewidth=0.8)
+    ax.axvline(logfc_cutoff, color='black', linestyle='--', linewidth=0.8)
+    if not plot_positive_only:
+        ax.axvline(-logfc_cutoff, color='black', linestyle='--', linewidth=0.8)
+
+    # --- 6. Annotate Top Genes ---
+    # Get significant genes' data
+    significant_names = names[significant_idx]
+    significant_lfc = logfoldchanges[significant_idx]
+    significant_pvals = neg_log10_pvals[significant_idx]
+
+    # Get top n by p-value
+    top_by_pval_indices = np.argsort(-significant_pvals)[:label_top_n]
+
+    # Get top n by absolute log fold change
+    top_by_lfc_indices = np.argsort(-np.abs(significant_lfc))[:label_top_n]
+
+    # Combine indices and remove duplicates
+    top_indices = np.union1d(top_by_pval_indices, top_by_lfc_indices)
+
+    # Create text labels, adjusting horizontal alignment based on position
+    texts = []
+    for i in top_indices:
+        ha = 'left' if significant_lfc[i] > 0 else 'right'
+        texts.append(ax.text(
+            significant_lfc[i],
+            significant_pvals[i],
+            significant_names[i],
+            fontsize=8,
+            ha=ha
+        ))
+
+    # Use adjust_text to prevent labels from overlapping
+    # Default values for adjust_text
+    adjust_text_kwargs = dict(
+        force_text=(0.5, 10.0), # stonger vertical push
+        force_points=(0.2, 0.2),
+        expand_text=(1.5, 5.5),
+        expand_points=(1.0, 1.0),
+        lim=100_000,
+        arrowprops=dict(
+            arrowstyle='-',
+            color='gray',
+            lw=0.5,
+            alpha=0.8 # Make arrows slightly transparent
+        )
+    )
+    # Update with any user-provided kwargs
+    adjust_text_kwargs.update(kwargs)
+
+    adjust_text(
+            texts,
+            ax=ax,
+            **adjust_text_kwargs
+        )
+
+    # --- 7. Final Touches ---
+    ax.set_xlabel('Log2 Fold Change')
+    ax.set_ylabel('-Log10 Adjusted P-value')
+    if title is None:
+        ax.set_title(f'Volcano Plot: {group} vs. All')
+    else:
+        ax.set_title(title)
+    ax.legend()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    return ax
