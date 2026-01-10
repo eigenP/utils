@@ -41,6 +41,9 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     y_t = traitlets.Int(1).tag(sync=True)
     z_t = traitlets.Int(1).tag(sync=True)
 
+    sxy = traitlets.Float(1.0).tag(sync=True)
+    sz = traitlets.Float(1.0).tag(sync=True)
+
     # Bounds for sliders (computed)
     x_min_pos = traitlets.Int(0).tag(sync=True)
     x_max_pos = traitlets.Int(100).tag(sync=True)
@@ -200,7 +203,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 
 
 class TNIAScatterWidget(TNIAWidgetBase):
-    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=1, sz=1, render='density', bins=512,
+    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=1, sz=1, render='points', bins=512,
                  point_size=4, alpha=0.6, colors=None, gamma=1, vmin=None, vmax=None, figsize=None,
                  x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
 

@@ -59,6 +59,198 @@ CELL_CYCLE_GENES = [
     "CENPE", "CTCF", "NEK2", "G2E3", "GAS2L3", "CBX5", "CENPA"
 ]
 
+# ------------------------- Preprocessing Tools -------------------------
+
+def carry_palette(src_adata, dst_adata, key: str, fallback_color: str = "#BBBBBB"):
+    """
+    Copy colors for `key` from src -> dst, matching by category names.
+    Keeps identical colors for categories present in both; unseen ones get `fallback_color`.
+    """
+    if key not in src_adata.obs or key not in dst_adata.obs:
+        raise KeyError(f"'{key}' must be in .obs of both src and dst")
+
+    # Ensure categoricals & drop unused in the subset
+    src_c = src_adata.obs[key].astype("category")
+    dst_c = dst_adata.obs[key].astype("category").cat.remove_unused_categories()
+    dst_adata.obs[key] = dst_c  # write back (important)
+
+    # Grab source palette
+    pal_key = f"{key}_colors"
+    if pal_key not in src_adata.uns:
+        raise KeyError(f"Source palette '{pal_key}' not found in src_adata.uns")
+
+    src_cats = list(src_c.cat.categories)
+    src_cols = list(src_adata.uns[pal_key])
+    cmap = dict(zip(src_cats, src_cols))
+
+    # Build destination palette in the (possibly new) category order
+    dst_cats = list(dst_c.cat.categories)
+    dst_cols = [cmap.get(cat, fallback_color) for cat in dst_cats]
+    dst_adata.uns[pal_key] = dst_cols
+
+    # Optional sanity check: warn if any cats were missing in source
+    missing = [cat for cat in dst_cats if cat not in cmap]
+    if missing:
+        warnings.warn(f"[carry_palette] No color found in source for: {missing}. Used fallback_color={fallback_color}.")
+
+    return dst_adata
+
+
+def _has_integer_like_counts(X, n_check=200000):
+    if sp.issparse(X):
+        data = X.data
+    else:
+        data = np.ravel(X)
+    if data.size > n_check:
+        rng = np.random.default_rng(0)
+        data = rng.choice(data, size=n_check, replace=False)
+    return np.allclose(data, np.round(data))
+
+
+def _ensure_log1p_layer(
+    A,
+    *,
+    target_layer: str = "log1p",
+    counts_layer: str = "counts",
+    total_count: float = 1e4,
+    force_build: bool = False,
+):
+    """
+    Create A.layers[target_layer] from RAW COUNTS via normalize_total + log1p.
+    Counts source priority (STRICT):
+      1) A.layers[counts_layer]
+      2) A.raw.X
+    No fallback to A.X to avoid double-log issues.
+    """
+    if target_layer in A.layers:
+        return
+
+    # choose counts source
+    if counts_layer in A.layers:
+        C = A.layers[counts_layer]
+        src_name = f"layers['{counts_layer}']"
+    elif A.raw is not None:
+        C = A.raw.X
+        src_name = "raw.X"
+        # cache a copy for future calls
+        A.layers[counts_layer] = A.raw.X.copy()
+    else:
+        raise KeyError(
+            f"Cannot build '{target_layer}': need raw counts in A.layers['{counts_layer}'] or A.raw.X."
+        )
+
+    # sanity check: counts must look integer-like
+    if not force_build and not _has_integer_like_counts(C):
+        raise ValueError(
+            f"{src_name} does not look like raw integer counts. "
+            f"Refusing to create '{target_layer}' to avoid double log-transform. "
+            f"Provide true counts or pass force_build=True if you are certain."
+        )
+
+    # build log1p from counts WITHOUT touching A.X
+    tmp = A.copy()
+    tmp.X = C.copy()
+    sc.pp.normalize_total(tmp, target_sum=total_count)
+    sc.pp.log1p(tmp)
+    A.layers[target_layer] = tmp.X.copy()
+    del tmp
+    warnings.warn(f"[ensure_log1p_layer] Created A.layers['{target_layer}'] from {src_name}.")
+
+
+def preprocess_subset(
+    adata,
+    *,
+    counts_layer: str = "counts",
+    n_top_genes: int = 2500,
+    hvg_flavor: str = "seurat_v3",   # or "triku"
+    batch_key: Optional[str] = None,
+    subset_to_hvgs: bool = True,
+    X_layer_for_pca: str = "log1p",
+    scale_max_value: float = 10.0,
+    n_comps: int = 32,
+    svd_solver: str = "arpack",
+    n_neighbors: int = 15,
+    n_pcs: int = 30,
+    use_rep: Optional[str] = None,
+    cluster_key: str = "leiden",
+    resolution: float = 1.0,
+    random_state: int = 0,
+    copy: bool = False
+):
+    A = adata.copy() if copy else adata
+    sc.pp.filter_genes(A, min_cells=3)
+
+    # ---- Make sure counts/log1p exist BEFORE any var subsetting ----
+    # (prevents shape-mismatch if we need to look at A.raw)
+    if hvg_flavor == "seurat_v3":
+        # seurat_v3 requires raw counts as input to HVG
+        if counts_layer not in A.layers:
+            if A.raw is not None:
+                A.layers[counts_layer] = A.raw.X.copy()
+            else:
+                raise ValueError(
+                    f"flavor='seurat_v3' requires raw counts in A.layers['{counts_layer}'] or A.raw"
+                )
+        if not _has_integer_like_counts(A.layers[counts_layer]):
+            raise ValueError(f"A.layers['{counts_layer}'] does not look like raw integer counts.")
+
+
+    # ensure we have log1p built from true counts
+    _ensure_log1p_layer(
+        A,
+        target_layer="log1p",
+        counts_layer=counts_layer,   # e.g., "counts"
+        total_count=1e4,
+        force_build=False
+    )
+
+    # ---------- HVG selection ----------
+    if hvg_flavor == "triku":
+        # Run Triku on log1p (recommended), then rely on its 'highly_variable' output
+        run_triku(A, layer=X_layer_for_pca, n_features=n_top_genes)
+    else:
+        if batch_key is None and "batch" in A.obs:
+            batch_key = "batch"
+        hvg_kwargs = dict(n_top_genes=n_top_genes, flavor=hvg_flavor, batch_key=batch_key)
+        if hvg_flavor == "seurat_v3":
+            hvg_kwargs["layer"] = counts_layer
+        sc.pp.highly_variable_genes(A, **hvg_kwargs)
+
+    # ---------- subset HVGs (optional but common) ----------
+    if subset_to_hvgs:
+        A._inplace_subset_var(A.var["highly_variable"].values)
+
+    # ---------- set working matrix ----------
+    if X_layer_for_pca not in A.layers:
+        raise KeyError(f"Layer '{X_layer_for_pca}' missing even after construction.")
+    A.X = A.layers[X_layer_for_pca].copy()
+
+    # ---------- scale / PCA on HVGs ----------
+    sc.pp.scale(A, max_value=scale_max_value)
+    sc.tl.pca(
+        A,
+        n_comps=min(n_comps, A.n_vars - 1),
+        use_highly_variable=True,        # mask_var removed; not needed anyway after subsetting
+        svd_solver=svd_solver,
+        random_state=random_state
+    )
+
+    # ---------- neighbors ----------
+    if use_rep is not None:
+        sc.pp.neighbors(A, n_neighbors=n_neighbors, use_rep=use_rep)
+    else:
+        sc.pp.neighbors(A, n_neighbors=n_neighbors, n_pcs=min(n_pcs, A.obsm["X_pca"].shape[1]))
+
+    # ---------- clustering ----------
+    if cluster_key == "leiden":
+        sc.tl.leiden(A, resolution=resolution, key_added="leiden", random_state=random_state)
+    else:
+        if cluster_key not in A.obs:
+            raise KeyError(f"cluster_key '{cluster_key}' not found in .obs.")
+
+    return A
+
+
 # ------------------------- General Utilities -------------------------
 
 def find_cluster_keys(adata, pattern=r'leiden_[\d\.]+'):
@@ -893,29 +1085,6 @@ def morans_i_all_fast(
 
 # ------------------------- Archetype Tools -------------------------
 
-def _pearson_r_vectorized(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    """Calculates row-wise Pearson correlation between two 2D arrays A and B."""
-    if A.shape != B.shape:
-        raise ValueError("Input arrays A and B must have the same shape.")
-    if A.ndim != 2:
-        raise ValueError("Input arrays must be 2D.")
-
-    A_m = A - A.mean(axis=1, keepdims=True)
-    B_m = B - B.mean(axis=1, keepdims=True)
-
-    ssA = (A_m**2).sum(axis=1)
-    ssB = (B_m**2).sum(axis=1)
-
-    # Add epsilon to denominator to avoid division by zero
-    denom = np.sqrt(ssA * ssB) + 1e-9
-
-    dot_prod = (A_m * B_m).sum(axis=1)
-
-    corrs = dot_prod / denom
-    # Clip values to be strictly within [-1, 1]
-    return np.clip(corrs, -1.0, 1.0)
-
-
 def find_expression_archetypes(
     adata: sc.AnnData,
     gene_list: List[str],
@@ -999,26 +1168,76 @@ def find_expression_archetypes(
 
     # 5. Perform hierarchical clustering on genes
     # hierarchy.ward computes the linkage matrix from the (n_genes, n_cells) matrix
-    linkage_matrix = hierarchy.ward(sdge)
+
+    # matth: Standardize genes (rows) to have mean 0 and var 1.
+    # This ensures that clustering is driven by expression PATTERN (correlation),
+    # not magnitude. Ward's method on Z-scored data is equivalent to clustering
+    # by Pearson correlation.
+
+    # Calculate means and stds for rows (genes)
+    gene_means = sdge.mean(axis=1, keepdims=True)
+    gene_stds = sdge.std(axis=1, keepdims=True)
+
+    # Avoid division by zero for constant genes
+    gene_stds[gene_stds == 0] = 1.0
+
+    sdge_z = (sdge - gene_means) / gene_stds
+
+    linkage_matrix = hierarchy.ward(sdge_z)
     clusters = hierarchy.fcluster(linkage_matrix,
                                   num_clusters,
                                   criterion='maxclust')
 
     # 6. Calculate archetypes (average profile for each cluster)
+    # We compute the archetype on the standardized data to represent the consensus "shape"
+    # independent of magnitude. This aligns with the clustering logic.
     archetypes = np.array([
-        np.mean(sdge[np.where(clusters == i)[0], :], axis=0)
+        np.mean(sdge_z[np.where(clusters == i)[0], :], axis=0)
         for i in range(1, num_clusters + 1)
     ])
 
-    # 7. Calculate Pearson correlations for each gene to its archetype (vectorized)
+    # 7. Calculate Pearson correlations for each gene to its archetype
+    # Optimized to avoid allocating a full (n_genes, n_cells) array for archetypes
+    gene_corrs = np.zeros(sdge.shape[0], dtype=np.float32)
 
-    # Create an (n_genes, n_cells) array where each row is the archetype
-    # corresponding to that gene's cluster.
-    # `clusters` is 1-based, so subtract 1 for 0-based indexing.
-    archetypes_per_gene = archetypes[clusters - 1]
+    for i in range(1, num_clusters + 1):
+        # Indices of genes in this cluster
+        # clusters is 1-based
+        indices = np.where(clusters == i)[0]
+        if indices.size == 0:
+            continue
 
-    # Use the fast vectorized Pearson correlation
-    gene_corrs = _pearson_r_vectorized(sdge, archetypes_per_gene)
+        # Extract genes: (n_genes_in_cluster, n_cells)
+        # Fancy indexing creates a copy, but it is a subset
+        sub_sdge = sdge[indices]
+
+        # Extract archetype: (n_cells,)
+        # archetypes is 0-based, clusters is 1-based
+        arch = archetypes[i - 1]
+
+        # Center data
+        # (n_genes_in_cluster, n_cells)
+        sub_mean = sub_sdge.mean(axis=1, keepdims=True)
+        sub_centered = sub_sdge - sub_mean
+
+        # (n_cells,)
+        arch_mean = arch.mean()
+        arch_centered = arch - arch_mean
+
+        # Sum of squares
+        ss_sub = (sub_centered**2).sum(axis=1)
+        ss_arch = (arch_centered**2).sum()
+
+        # Dot product: (n_genes_in_cluster, n_cells) @ (n_cells,) -> (n_genes_in_cluster,)
+        # This is equivalent to row-wise sum of product
+        dot = np.dot(sub_centered, arch_centered)
+
+        # Denominator with epsilon
+        denom = np.sqrt(ss_sub * ss_arch) + 1e-9
+
+        # Correlation
+        corrs = dot / denom
+        gene_corrs[indices] = np.clip(corrs, -1.0, 1.0)
 
     print('done')
 
@@ -1102,7 +1321,7 @@ def plot_archetype_summary(
         adata,
         basis=basis,
         color=profile_name,
-        title=f'Archetype {archetype_id} Score',
+        # title=f'Archetype {archetype_id} Score',
         **kwargs
     )
 
