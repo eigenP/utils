@@ -1168,14 +1168,31 @@ def find_expression_archetypes(
 
     # 5. Perform hierarchical clustering on genes
     # hierarchy.ward computes the linkage matrix from the (n_genes, n_cells) matrix
-    linkage_matrix = hierarchy.ward(sdge)
+
+    # matth: Standardize genes (rows) to have mean 0 and var 1.
+    # This ensures that clustering is driven by expression PATTERN (correlation),
+    # not magnitude. Ward's method on Z-scored data is equivalent to clustering
+    # by Pearson correlation.
+
+    # Calculate means and stds for rows (genes)
+    gene_means = sdge.mean(axis=1, keepdims=True)
+    gene_stds = sdge.std(axis=1, keepdims=True)
+
+    # Avoid division by zero for constant genes
+    gene_stds[gene_stds == 0] = 1.0
+
+    sdge_z = (sdge - gene_means) / gene_stds
+
+    linkage_matrix = hierarchy.ward(sdge_z)
     clusters = hierarchy.fcluster(linkage_matrix,
                                   num_clusters,
                                   criterion='maxclust')
 
     # 6. Calculate archetypes (average profile for each cluster)
+    # We compute the archetype on the standardized data to represent the consensus "shape"
+    # independent of magnitude. This aligns with the clustering logic.
     archetypes = np.array([
-        np.mean(sdge[np.where(clusters == i)[0], :], axis=0)
+        np.mean(sdge_z[np.where(clusters == i)[0], :], axis=0)
         for i in range(1, num_clusters + 1)
     ])
 
