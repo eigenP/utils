@@ -25,6 +25,7 @@ import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
+from scipy.linalg import svd
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
 import matplotlib.colors as mcolors
@@ -1194,13 +1195,47 @@ def find_expression_archetypes(
                                   num_clusters,
                                   criterion='maxclust')
 
-    # 6. Calculate archetypes (average profile for each cluster)
-    # We compute the archetype on the standardized data to represent the consensus "shape"
-    # independent of magnitude. This aligns with the clustering logic.
-    archetypes = np.array([
-        np.mean(sdge_z[np.where(clusters == i)[0], :], axis=0)
-        for i in range(1, num_clusters + 1)
-    ])
+    # 6. Calculate archetypes (PC1 of Z-scored profiles for each cluster)
+    # matth: The "Mean Vector" is a heuristic archetype. The First Principal Component (PC1)
+    # provides the mathematically optimal consensus direction (minimizing squared orthogonal distance).
+    # This is more robust to variable gene loadings (correlation strengths) within a module.
+
+    archetypes_list = []
+
+    for i in range(1, num_clusters + 1):
+        indices = np.where(clusters == i)[0]
+        if indices.size == 0:
+            # Should not happen with valid clustering, but handle gracefully
+            archetypes_list.append(np.zeros(sdge_z.shape[1], dtype=sdge_z.dtype))
+            continue
+
+        cluster_data = sdge_z[indices]  # (n_genes_in_cluster, n_cells)
+
+        if cluster_data.shape[0] == 1:
+            # Only one gene, archetype is the gene itself
+            arch = cluster_data[0]
+        else:
+            try:
+                # SVD of (M, N) matrix X = U S Vt
+                # The first right singular vector Vt[0] corresponds to the first Principal Component
+                # (eigenvector of X.T @ X) in the cell space, representing the dominant expression pattern.
+                _, _, Vt = svd(cluster_data, full_matrices=False, check_finite=False)
+                arch = Vt[0]
+
+                # Sign ambiguity: PC1 direction is arbitrary (+v or -v).
+                # We align it with the mean vector so that it positively correlates
+                # with the majority of the signal (assuming positive correlation cluster).
+                mean_vec = np.mean(cluster_data, axis=0)
+                # Use dot product to check alignment
+                if np.dot(arch, mean_vec) < 0:
+                    arch = -arch
+            except Exception as e:
+                warnings.warn(f"SVD failed for gene cluster {i}: {e}. Falling back to mean archetype.")
+                arch = np.mean(cluster_data, axis=0)
+
+        archetypes_list.append(arch)
+
+    archetypes = np.array(archetypes_list)
 
     # 7. Calculate Pearson correlations for each gene to its archetype
     # Optimized to avoid allocating a full (n_genes, n_cells) array for archetypes
