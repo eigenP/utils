@@ -15,6 +15,7 @@ from scipy.ndimage import generic_filter, zoom
 
 from skimage.filters import median
 from skimage.morphology import disk
+from skimage.util import view_as_windows
 # # Define the custom function
 # def custom_filter(values):
 #     center_value = values[values.size // 2]
@@ -104,20 +105,41 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     counts = np.zeros_like(img[0, :, :], dtype=np.float64)
 
     # 4. Partition into smaller patches and select the best focus level for each patch
-    for i in range(height_map_small.shape[0]):
-        for j in range(height_map_small.shape[1]):
-            y_start = i * (patch_size - overlap)
-            x_start = j * (patch_size - overlap)
-            patch = img[:, y_start:y_start+patch_size, x_start:x_start+patch_size]
+    step = patch_size - overlap
 
-            # For each z-slice, compute focus metric
-            # sdoL_values = np.std(laplace(patch), axis=(1, 2))
-            sdoL_values = np.std(patch, axis=(1, 2))
+    # Use view_as_windows for vectorized patch extraction
+    # We want patches of size (Z, patch_size, patch_size)
+    # The image is (Z, Y, X). We want to slide along Y and X.
+    # So window shape should handle the full Z dimension: (img.shape[0], patch_size, patch_size)
+    # And we step only in Y and X: (img.shape[0], step, step)
 
+    # Note: view_as_windows returns a 6D array: (1, n_rows, n_cols, Z, patch_size, patch_size)
+    # due to the stride in Z being equal to the size in Z.
 
-            # Select the z level with the highest metric value for each metric
-            height_map_small[i, j] = np.argmax(sdoL_values)
-            # height_map_small = height_map_sdoL
+    window_shape = (img.shape[0], patch_size, patch_size)
+    step_shape = (img.shape[0], step, step)
+
+    patches = view_as_windows(img, window_shape, step=step_shape)
+
+    # Remove singleton dimensions (the first dimension which corresponds to Z steps)
+    # Patches shape becomes (n_rows, n_cols, Z, patch_size, patch_size)
+    patches = patches.squeeze(axis=0)
+
+    # Handle edge case where view_as_windows returns slightly different number of windows
+    # than the manual loop logic if padding wasn't perfect.
+    # The original logic iterates range(height_map_small.shape[0/1]).
+    # We slice our result to match height_map_small.
+
+    n_rows, n_cols = height_map_small.shape
+    patches = patches[:n_rows, :n_cols]
+
+    # Compute standard deviation across the spatial dimensions of the patch (last two axes)
+    # Result shape: (n_rows, n_cols, Z)
+    sdoL_values = np.std(patches, axis=(-2, -1))
+
+    # Find the Z-index with maximum standard deviation
+    # Result shape: (n_rows, n_cols)
+    height_map_small[:patches.shape[0], :patches.shape[1]] = np.argmax(sdoL_values, axis=2)
 
 
     # Now we apply this custom median filter function to the height_map
