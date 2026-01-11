@@ -11,7 +11,7 @@
 import numpy as np
 import skimage.io
 
-from scipy.ndimage import generic_filter, zoom
+from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
 
 from skimage.filters import median
 from skimage.morphology import disk
@@ -94,37 +94,66 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     # overlap = patch_size // 4  # 25% overlap
     overlap = patch_size // 3  # 33% overlap
 
-    pad_y = (patch_size - img.shape[0] % patch_size) + overlap
-    pad_x = (patch_size - img.shape[1] % patch_size) + overlap
-    img = np.pad(img, ((0,0), (0, pad_y), (0, pad_x)), mode='reflect')
+    # Fix: padding should be based on Y and X dimensions (shape[1] and shape[2]), not Z (shape[0])
+    pad_y = (patch_size - img.shape[1] % patch_size) + overlap
+    pad_x = (patch_size - img.shape[2] % patch_size) + overlap
 
-    # 3. Prepare the empty height map and the storage for final image and counts
-    height_map_small = np.zeros((img.shape[1] // (patch_size - overlap), img.shape[2] // (patch_size - overlap)), dtype=int)
-    final_img = np.zeros_like(img[0, :, :], dtype=np.float64)
-    counts = np.zeros_like(img[0, :, :], dtype=np.float64)
+    # Ensure float64 for Laplacian precision and consistent processing
+    img_padded = np.pad(img, ((0,0), (0, pad_y), (0, pad_x)), mode='reflect').astype(np.float64)
 
-    # 4. Partition into smaller patches and select the best focus level for each patch
-    for i in range(height_map_small.shape[0]):
-        for j in range(height_map_small.shape[1]):
-            y_start = i * (patch_size - overlap)
-            x_start = j * (patch_size - overlap)
-            patch = img[:, y_start:y_start+patch_size, x_start:x_start+patch_size]
+    # 3. Calculate Focus Metric Vectorized
+    # Metric: Laplacian Energy (Sum of Squared Laplacian)
+    # This measures high-frequency content (sharpness) rather than contrast (std).
+    # We compute it for the entire slice and then pool it over the patch size.
 
-            # For each z-slice, compute focus metric
-            # sdoL_values = np.std(laplace(patch), axis=(1, 2))
-            sdoL_values = np.std(patch, axis=(1, 2))
+    # Grid dimensions
+    n_patches_y = img_padded.shape[1] // (patch_size - overlap)
+    n_patches_x = img_padded.shape[2] // (patch_size - overlap)
 
+    # Initialize score matrix: (Z, rows, cols)
+    score_matrix = np.zeros((img.shape[0], n_patches_y, n_patches_x), dtype=np.float64)
 
-            # Select the z level with the highest metric value for each metric
-            height_map_small[i, j] = np.argmax(sdoL_values)
-            # height_map_small = height_map_sdoL
+    # Grid coordinates (centers of patches) for sampling the uniform filter output
+    # uniform_filter centered at 'c' averages window [c - size//2, c + size//2] (approx)
+    # patch starts at 'start', center is 'start + patch_size // 2'
+    y_starts = np.arange(n_patches_y) * (patch_size - overlap)
+    x_starts = np.arange(n_patches_x) * (patch_size - overlap)
 
+    y_centers = y_starts + patch_size // 2
+    x_centers = x_starts + patch_size // 2
+
+    # Handle edge case where padding might make centers out of bounds (unlikely with reflect pad)
+    # y_centers = np.clip(y_centers, 0, img_padded.shape[1] - 1)
+    # x_centers = np.clip(x_centers, 0, img_padded.shape[2] - 1)
+
+    for z in range(img.shape[0]):
+        slice_img = img_padded[z]
+
+        # 1. Compute Laplacian
+        lap = laplace(slice_img)
+
+        # 2. Compute Energy (Squared)
+        energy = lap ** 2
+
+        # 3. Local Average Energy (proxy for sum over patch)
+        # We use uniform_filter with the patch size
+        mean_energy = uniform_filter(energy, size=patch_size, mode='reflect')
+
+        # 4. Sample at patch centers
+        # ix_ allows sampling a grid from 1D coordinates
+        score_matrix[z] = mean_energy[np.ix_(y_centers, x_centers)]
+
+    # 4. Select best Z
+    height_map_small = np.argmax(score_matrix, axis=0)
 
     # Now we apply this custom median filter function to the height_map
     # height_map_small = generic_filter(height_map_small, custom_filter, size=3)
     height_map_small = apply_median_filter(height_map_small)
 
     # 5. Combine patches to create the final image
+    # Note: We reconstruct using the original 'img' (padded) but cast to float for accumulation
+    final_img = np.zeros_like(img_padded[0, :, :], dtype=np.float64)
+
     _2D_window = _2D_weight(patch_size, overlap)
 
     for i in range(height_map_small.shape[0]):
@@ -132,9 +161,10 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
             best_z = height_map_small[i, j]
-            patch = img[best_z, y_start:y_start+patch_size, x_start:x_start+patch_size]
-            # print(patch.shape)
 
+            # Use img_padded here to match coordinates
+            patch = img_padded[best_z, y_start:y_start+patch_size, x_start:x_start+patch_size]
+            # print(patch.shape)
 
             # Create weighted patch
             try:
