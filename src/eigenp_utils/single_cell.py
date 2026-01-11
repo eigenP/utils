@@ -1203,47 +1203,41 @@ def find_expression_archetypes(
     ])
 
     # 7. Calculate Pearson correlations for each gene to its archetype
-    # Optimized to avoid allocating a full (n_genes, n_cells) array for archetypes
-    gene_corrs = np.zeros(sdge.shape[0], dtype=np.float32)
+    # Optimized to use vectorized operations and avoid repeated allocations/computations.
 
-    for i in range(1, num_clusters + 1):
-        # Indices of genes in this cluster
-        # clusters is 1-based
-        indices = np.where(clusters == i)[0]
-        if indices.size == 0:
-            continue
+    # We reuse sdge_z which is already Z-scored (mean 0, std 1 over cells).
+    # Since sdge_z rows have mean 0, the archetype (mean of sdge_z rows) also has mean 0.
+    # Therefore, we can compute correlation as dot(gene, arch) / (norm(gene) * norm(arch)).
+    # norm(gene) = sqrt(n_cells) since gene is Z-scored.
+    # norm(arch) = sqrt(sum(arch**2)).
 
-        # Extract genes: (n_genes_in_cluster, n_cells)
-        # Fancy indexing creates a copy, but it is a subset
-        sub_sdge = sdge[indices]
+    n_cells = sdge.shape[1]
 
-        # Extract archetype: (n_cells,)
-        # archetypes is 0-based, clusters is 1-based
-        arch = archetypes[i - 1]
+    # 1. Compute dot products between all genes and all archetypes
+    # Shape: (n_genes, n_clusters)
+    # Using float32 for matrix multiplication to match input precision
+    all_dots = np.dot(sdge_z, archetypes.T)
 
-        # Center data
-        # (n_genes_in_cluster, n_cells)
-        sub_mean = sub_sdge.mean(axis=1, keepdims=True)
-        sub_centered = sub_sdge - sub_mean
+    # 2. Compute norms of archetypes
+    # Shape: (n_clusters,)
+    arch_sq_sums = np.sum(archetypes**2, axis=1)
+    # The denominator for correlation is sqrt(sum(g^2) * sum(a^2))
+    # sum(g^2) = n_cells (for Z-scored data)
+    # So denom = sqrt(n_cells * sum(a^2))
+    arch_norms = np.sqrt(n_cells * arch_sq_sums) + 1e-9
 
-        # (n_cells,)
-        arch_mean = arch.mean()
-        arch_centered = arch - arch_mean
+    # 3. Compute all correlations
+    # Shape: (n_genes, n_clusters)
+    all_corrs = all_dots / arch_norms[None, :]
 
-        # Sum of squares
-        ss_sub = (sub_centered**2).sum(axis=1)
-        ss_arch = (arch_centered**2).sum()
+    # 4. Select the specific correlation for each gene based on its cluster assignment
+    # clusters is 1-based index from fcluster
+    cluster_indices = clusters - 1
+    gene_indices = np.arange(sdge.shape[0])
 
-        # Dot product: (n_genes_in_cluster, n_cells) @ (n_cells,) -> (n_genes_in_cluster,)
-        # This is equivalent to row-wise sum of product
-        dot = np.dot(sub_centered, arch_centered)
-
-        # Denominator with epsilon
-        denom = np.sqrt(ss_sub * ss_arch) + 1e-9
-
-        # Correlation
-        corrs = dot / denom
-        gene_corrs[indices] = np.clip(corrs, -1.0, 1.0)
+    # Extract relevant correlation for each gene
+    gene_corrs = all_corrs[gene_indices, cluster_indices]
+    gene_corrs = np.clip(gene_corrs, -1.0, 1.0).astype(np.float32)
 
     print('done')
 
