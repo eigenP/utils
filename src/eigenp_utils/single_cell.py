@@ -593,6 +593,88 @@ def plot_clustering_tree(adata, cluster_keys, title="Clustering Resolution Tree"
     plt.show()
 
 
+def import_obs_to_adata_from_csv(
+    path: str,
+    adata: sc.AnnData,
+    index_col: int | str = 0,
+    sep: Optional[str] = None,
+    engine: str = "python",
+    overwrite_existing: bool = True,
+    to_category: bool = True,
+) -> None:
+    """
+    Import a CSV/TSV file and join it to adata.obs, matching on index/barcode.
+
+    Parameters
+    ----------
+    path
+        Path to the CSV file.
+    adata
+        AnnData object to modify in-place.
+    index_col
+        Column in the CSV to use as the index (barcode). Default is 0.
+    sep
+        Separator used in the file. If None, it is inferred (e.g. comma or tab).
+    engine
+        Parser engine to use. Default "python".
+    overwrite_existing
+        If True, columns in the CSV that already exist in adata.obs will be overwritten.
+        If False, existing columns will be preserved and new columns will have a suffix if they clash.
+    to_category
+        If True, convert object-type columns in the imported data to categorical.
+    """
+    # Read the table (auto-detects comma vs tab)
+    df = pd.read_csv(path, index_col=index_col, sep=sep, engine=engine)
+
+    print(df.head())
+
+    # Tidy up index and columns
+    df.index = df.index.astype(str).str.strip()
+    df.columns = df.columns.str.strip()
+
+    # Drop duplicates in the CSV index to ensure unique mapping
+    if df.index.duplicated().any():
+        n_dupes = df.index.duplicated().sum()
+        warnings.warn(f"Dropping {n_dupes} duplicate barcodes from CSV.")
+        df = df.loc[~df.index.duplicated(keep="first")]
+
+    # Identify overlapping columns
+    overlapping_cols = [col for col in df.columns if col in adata.obs.columns]
+
+    if overwrite_existing:
+        if overlapping_cols:
+            print(f"Overwriting columns in adata.obs: {overlapping_cols}")
+            adata.obs = adata.obs.drop(columns=overlapping_cols)
+
+        # Join (left join to adata to preserve adata shape)
+        adata.obs = adata.obs.join(df, how="left")
+    else:
+        # If not overwriting, append suffix to new data if overlap
+        suffix = "_imported"
+        if overlapping_cols:
+            print(f"Columns {overlapping_cols} exist. Appending '{suffix}' suffix to new data.")
+            adata.obs = adata.obs.join(df, how="left", rsuffix=suffix)
+        else:
+            adata.obs = adata.obs.join(df, how="left")
+
+    # Optional: make columns categorical to save memory
+    if to_category:
+        # Check columns we expect to have added
+        for col in df.columns:
+            target_col = col
+            if not overwrite_existing and col in overlapping_cols:
+                target_col = f"{col}_imported"
+
+            if target_col in adata.obs:
+                # Convert object columns to categorical
+                if pd.api.types.is_object_dtype(adata.obs[target_col]):
+                     adata.obs[target_col] = adata.obs[target_col].astype("category")
+
+    # Quick sanity check
+    n_common = adata.obs_names.isin(df.index).sum()
+    print(f"Annotated {n_common}/{adata.n_obs} cells from CSV.")
+
+
 def plot_marker_genes_dict_on_embedding(
     adata,
     marker_genes: Dict[str, List[str] | str],
