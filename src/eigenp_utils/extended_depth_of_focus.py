@@ -55,11 +55,12 @@ def _2D_weight(patch_size, overlap):
     # Construct 1D profiles for Y and X axes
     # The profile is 1.0 in the center and tapers to 0.0 at the edges
     # We use multiplicative updates to handle cases where overlap regions intersect (overlap > patch_size/2)
-    profile_y = np.ones(patch_size, dtype=np.float64)
+    # Using float32 for weights to match image processing dtype and save memory
+    profile_y = np.ones(patch_size, dtype=np.float32)
     profile_y[:overlap] *= taper
     profile_y[-overlap:] *= taper[::-1]
 
-    profile_x = np.ones(patch_size, dtype=np.float64)
+    profile_x = np.ones(patch_size, dtype=np.float32)
     profile_x[:overlap] *= taper
     profile_x[-overlap:] *= taper[::-1]
 
@@ -98,61 +99,62 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     pad_y = (patch_size - img.shape[1] % patch_size) + overlap
     pad_x = (patch_size - img.shape[2] % patch_size) + overlap
 
-    # Ensure float64 for Laplacian precision and consistent processing
-    img_padded = np.pad(img, ((0,0), (0, pad_y), (0, pad_x)), mode='reflect').astype(np.float64)
+    # matth: Padding keeps original dtype to save memory (avoiding premature cast to float)
+    img_padded = np.pad(img, ((0,0), (0, pad_y), (0, pad_x)), mode='reflect')
 
     # 3. Calculate Focus Metric Vectorized
     # Metric: Laplacian Energy (Sum of Squared Laplacian)
-    # This measures high-frequency content (sharpness) rather than contrast (std).
-    # We compute it for the entire slice and then pool it over the patch size.
+    # Optimization: Use float32 to reduce memory usage by 50% compared to float64.
 
     # Grid dimensions
     n_patches_y = img_padded.shape[1] // (patch_size - overlap)
     n_patches_x = img_padded.shape[2] // (patch_size - overlap)
 
     # Initialize score matrix: (Z, rows, cols)
-    score_matrix = np.zeros((img.shape[0], n_patches_y, n_patches_x), dtype=np.float64)
+    score_matrix = np.zeros((img.shape[0], n_patches_y, n_patches_x), dtype=np.float32)
 
-    # Grid coordinates (centers of patches) for sampling the uniform filter output
-    # uniform_filter centered at 'c' averages window [c - size//2, c + size//2] (approx)
-    # patch starts at 'start', center is 'start + patch_size // 2'
+    # Grid coordinates (centers of patches) for sampling
     y_starts = np.arange(n_patches_y) * (patch_size - overlap)
     x_starts = np.arange(n_patches_x) * (patch_size - overlap)
 
     y_centers = y_starts + patch_size // 2
     x_centers = x_starts + patch_size // 2
 
-    # Handle edge case where padding might make centers out of bounds (unlikely with reflect pad)
-    # y_centers = np.clip(y_centers, 0, img_padded.shape[1] - 1)
-    # x_centers = np.clip(x_centers, 0, img_padded.shape[2] - 1)
-
+    # Iterate over Z-slices one by one to keep memory usage low
     for z in range(img.shape[0]):
-        slice_img = img_padded[z]
+        # 1. Compute Laplacian directly into float32 buffer
+        # 'output=np.float32' automatically handles casting from input dtype (e.g. uint16) to float32
+        # This AVOIDS allocating a separate float copy of the input slice!
+        lap = laplace(img_padded[z], output=np.float32)
 
-        # 1. Compute Laplacian
-        lap = laplace(slice_img)
-
-        # 2. Compute Energy (Squared)
-        energy = lap ** 2
+        # 2. Compute Energy (Squared) in-place
+        np.square(lap, out=lap)
 
         # 3. Local Average Energy (proxy for sum over patch)
-        # We use uniform_filter with the patch size
-        mean_energy = uniform_filter(energy, size=patch_size, mode='reflect')
+        # We reuse 'lap' buffer for output if filter supports it?
+        # uniform_filter(input, output=input) is generally safe for non-recursive filters,
+        # but to be safe and avoid boundary artifacts influencing the center during partial writes,
+        # we let it allocate or use a temp.
+        # Actually uniform_filter(input, output=input) IS safe for 2D.
+        # But let's allocate just to be 100% correct about boundaries, it's just one slice.
+        mean_energy = uniform_filter(lap, size=patch_size, mode='reflect')
 
         # 4. Sample at patch centers
-        # ix_ allows sampling a grid from 1D coordinates
         score_matrix[z] = mean_energy[np.ix_(y_centers, x_centers)]
+
+        # Explicitly delete large temps to help GC (though loop scope handles it)
+        del lap, mean_energy
 
     # 4. Select best Z
     height_map_small = np.argmax(score_matrix, axis=0)
 
-    # Now we apply this custom median filter function to the height_map
-    # height_map_small = generic_filter(height_map_small, custom_filter, size=3)
+    # Apply median filter
     height_map_small = apply_median_filter(height_map_small)
 
     # 5. Combine patches to create the final image
-    # Note: We reconstruct using the original 'img' (padded) but cast to float for accumulation
-    final_img = np.zeros_like(img_padded[0, :, :], dtype=np.float64)
+    # Use float32 for accumulation to save memory
+    final_img = np.zeros_like(img_padded[0, :, :], dtype=np.float32)
+    counts = np.zeros_like(img_padded[0, :, :], dtype=np.float32) # matth: Restored counts
 
     _2D_window = _2D_weight(patch_size, overlap)
 
@@ -162,26 +164,43 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             x_start = j * (patch_size - overlap)
             best_z = height_map_small[i, j]
 
-            # Use img_padded here to match coordinates
-            patch = img_padded[best_z, y_start:y_start+patch_size, x_start:x_start+patch_size]
-            # print(patch.shape)
+            # Extract patch and cast to float32 on the fly
+            patch = img_padded[best_z, y_start:y_start+patch_size, x_start:x_start+patch_size].astype(np.float32)
 
             # Create weighted patch
             try:
-                weighted_patch = patch * _2D_window
+                # weighted_patch = patch * _2D_window
+                # In-place multiplication to save a buffer:
+                # patch *= _2D_window
+                # (but patch is needed? No, we just add it. 'patch' is a temp copy from astype)
+                np.multiply(patch, _2D_window, out=patch)
+                weight_matrix = _2D_window
             except ValueError:
+                # Boundary case
                 min_shape = tuple(min(s1, s2) for s1, s2 in zip(patch.shape, _2D_window.shape))
-                weighted_patch = patch * _2D_window[:min_shape[0], :min_shape[1]]
+                # Slicing creates copies/views.
+                # Just multiply carefully.
+                patch = patch * _2D_window[:min_shape[0], :min_shape[1]]
+                weight_matrix = _2D_window[:min_shape[0], :min_shape[1]]
 
-            # Add the weighted patch to final_img and counts
-            final_img[y_start:y_start+patch_size, x_start:x_start+patch_size] += weighted_patch
+            # Add to accumulators
+            final_img[y_start:y_start+patch_size, x_start:x_start+patch_size] += patch
+            counts[y_start:y_start+patch_size, x_start:x_start+patch_size] += weight_matrix
 
+    # Normalize by the weight counts
+    # Avoid division by zero
+    counts[counts < 1e-9] = 1.0
+    # In-place division
+    np.divide(final_img, counts, out=final_img)
 
-    # 6. Recrop the image to its original size
+    # 6. Recrop
     final_img = final_img[:original_shape[0], :original_shape[1]]
 
+    # Optional: cast back to original input dtype?
+    # Usually focus stacking keeps float result to preserve dynamic range after blending.
+    # We will return float32.
+
     if return_heightmap:
-        # 7. Generate a full resolution height map by interpolating height_map_small
         zoom_y = original_shape[0] / height_map_small.shape[0]
         zoom_x = original_shape[1] / height_map_small.shape[1]
         height_map_full = zoom(height_map_small, (zoom_y, zoom_x), order=0)
