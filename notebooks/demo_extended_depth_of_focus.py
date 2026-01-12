@@ -162,27 +162,124 @@ def _(best_focus_image, membrane_stack, patch_size_slider):
     return edof_img, height_map, max_proj
 
 
+
 @app.cell
 def _(edof_img, height_map, max_proj, plt):
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    _fig, _axes = plt.subplots(1, 3, figsize=(15, 5))
 
-    axes[0].imshow(max_proj, cmap='gray')
-    axes[0].set_title("Standard Max Projection")
-    axes[0].axis('off')
+    _axes[0].imshow(max_proj, cmap='gray')
+    _axes[0].set_title("Standard Max Projection")
+    _axes[0].axis('off')
 
-    axes[1].imshow(edof_img, cmap='gray')
-    axes[1].set_title("EDOF (best_focus_image)")
-    axes[1].axis('off')
+    _axes[1].imshow(edof_img, cmap='gray')
+    _axes[1].set_title("EDOF (best_focus_image)")
+    _axes[1].axis('off')
 
-    im2 = axes[2].imshow(height_map, cmap='viridis')
-    axes[2].set_title("Height Map (Z-index)")
-    axes[2].axis('off')
-    plt.colorbar(im2, ax=axes[2], orientation='vertical')
+    _im2 = _axes[2].imshow(height_map, cmap='viridis')
+    _axes[2].set_title("Height Map (Z-index)")
+    _axes[2].axis('off')
+    plt.colorbar(_im2, ax=_axes[2], orientation='vertical')
 
-    fig.tight_layout()
-    fig
-    return axes, fig, im2
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(membrane, np, patch_size_slider):
+    ### Show difference between laplace energy and std
+
+
+    from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
+
+
+    _PATCH_SIZE = patch_size_slider.value
+
+    slice_img = membrane[30, ...]
+
+
+    # 1. Compute Laplacian
+    lap = laplace(slice_img)
+    lap = lap / lap.max()
+
+    # 2. Compute Energy (Squared)
+    energy = lap ** 2
+
+    # 3. Local Average Energy (proxy for sum over patch)
+    # We use uniform_filter with the patch size
+    mean_energy = uniform_filter(energy, size=_PATCH_SIZE, mode='reflect')
+
+
+    # Get image dimensions
+    H, W = slice_img.shape
+
+    # Initialize a grid to store results (optional, depends on your goal)
+    # Using // ensures we only count full patches
+    std_grid = np.zeros((H // _PATCH_SIZE, W // _PATCH_SIZE))
+
+    for i in range(H // _PATCH_SIZE):
+        for j in range(W // _PATCH_SIZE):
+            # Calculate start and end indices for the patch
+            y_start = i * _PATCH_SIZE
+            y_end = y_start + _PATCH_SIZE
+        
+            x_start = j * _PATCH_SIZE
+            x_end = x_start + _PATCH_SIZE
+        
+            # Extract the patch
+            patch = slice_img[y_start:y_end, x_start:x_end]
+
+            # Compute focus metric (STD of the raw patch or the Laplacian)
+            # Note: If slice_img is 2D, axis=(1, 2) will throw an error. 
+            # For a 2D patch, use np.std(patch).
+            std_values = np.std(patch)
+        
+            # Store result
+            std_grid[i, j] = std_values
+
+
+    return lap, mean_energy, slice_img, std_grid
+
+
+@app.cell
+def _(mean_energy):
+    mean_energy.shape
+    return
+
+
+@app.cell
+def _(lap, mean_energy, plt, slice_img, std_grid):
+    _fig, _axes = plt.subplots(1, 4, figsize=(15, 5))
+
+    _axes[0].imshow(slice_img, cmap='gray')
+    _axes[0].set_title("Original Image")
+    _axes[0].axis('off')
+
+    _axes[1].imshow(lap, cmap='gray')
+    _axes[1].set_title("Lap")
+    _axes[1].axis('off')
+
+    _axes[2].imshow(mean_energy, cmap='gray')
+    _axes[2].set_title("Energy")
+    _axes[2].axis('off')
+
+    _axes[3].imshow(std_grid, cmap='gray')
+    _axes[3].set_title("Energy")
+    _axes[3].axis('off')
+
+
+    # plt.colorbar(im2, ax=_axes[2], orientation='vertical')
+
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":
     app.run()
+
