@@ -11,7 +11,7 @@
 import numpy as np
 import skimage.io
 
-from scipy.ndimage import generic_filter, zoom
+from scipy.ndimage import generic_filter, zoom, laplace
 
 from skimage.filters import median
 from skimage.morphology import disk
@@ -111,8 +111,9 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             patch = img[:, y_start:y_start+patch_size, x_start:x_start+patch_size]
 
             # For each z-slice, compute focus metric
+            # We convert to float to avoid overflow/underflow on uint8, then compute laplace for edge detection
             # sdoL_values = np.std(laplace(patch), axis=(1, 2))
-            sdoL_values = np.std(patch, axis=(1, 2))
+            sdoL_values = np.std(laplace(patch.astype(np.float64)), axis=(1, 2))
 
 
             # Select the z level with the highest metric value for each metric
