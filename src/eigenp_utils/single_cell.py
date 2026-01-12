@@ -1073,14 +1073,31 @@ def morans_i_all_fast(
         Xb = Xb.toarray().astype(np.float32, copy=False) if sp.issparse(Xb) else np.asarray(Xb, dtype=np.float32)
         WXb = WXb.toarray().astype(np.float32, copy=False) if sp.issparse(WXb) else np.asarray(WXb, dtype=np.float32)
 
-        if center:
-            mub = mu[j0:j1][None, :]
-            Xc, WXc = (Xb - mub), (WXb - mub)  # because row-standardized W ⇒ W·1 = 1
-        else:
-            Xc, WXc = Xb, WXb
+        # Optimize memory usage by avoiding explicit centering:
+        # num = sum((Xb - mu) * (WXb - mu))
+        #     = sum(Xb * WXb) - mu * sum(WXb) - mu * sum(Xb) + n * mu^2
+        #     Since mu = sum(Xb) / n, sum(Xb) = n * mu
+        #     = sum(Xb * WXb) - mu * sum(WXb) - n * mu^2 + n * mu^2
+        #     = sum(Xb * WXb) - mu * sum(WXb)
+        #
+        # den = sum((Xb - mu)^2)
+        #     = sum(Xb^2) - 2 * mu * sum(Xb) + n * mu^2
+        #     = sum(Xb^2) - 2 * n * mu^2 + n * mu^2
+        #     = sum(Xb^2) - n * mu^2
 
-        num = (Xc * WXc).sum(axis=0, dtype=np.float64)
-        den = (Xc * Xc).sum(axis=0, dtype=np.float64)
+        # Use einsum to compute sum of products without allocating large intermediate array (Xb * WXb)
+        sum_cross = np.einsum('ij,ij->j', Xb, WXb, dtype=np.float64)
+        sum_sq = np.einsum('ij,ij->j', Xb, Xb, dtype=np.float64)
+
+        if center:
+            mub = mu[j0:j1]
+            sum_WXb = WXb.sum(axis=0, dtype=np.float64)
+            num = sum_cross - mub * sum_WXb
+            den = sum_sq - n * (mub ** 2)
+        else:
+            num = sum_cross
+            den = sum_sq
+
         den = np.where(den > 0, den, np.nan)
         I_vals[j0:j1] = nfac * (num / den).astype(np.float32)
 
