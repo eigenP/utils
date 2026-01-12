@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.ndimage
-from src.eigenp_utils.extended_depth_of_focus import best_focus_image
+from eigenp_utils.extended_depth_of_focus import best_focus_image
 import pytest
 
 def test_focus_sharpness_vs_contrast():
