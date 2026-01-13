@@ -19,6 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+plotting = [
+    "plotly"
+]
 single-cell = [
     "pacmap>=0.7.3",
     "scanpy",

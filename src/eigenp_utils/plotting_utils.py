@@ -426,6 +426,205 @@ def adjust_colormap(cmap_name, start_ = 0.25, end_ = 1.0, start_color = [0.9, 0.
     new_cmap = mcolors.LinearSegmentedColormap.from_list(f"{cmap_name}_adjusted", colors)
     return new_cmap
 
+def plotly_scatter_3d(data=None, x=None, y=None, z=None, color=None, labels=None,
+                      marker_size=5, opacity=0.8, colorscale='Purples',
+                      initial_view=None, **kwargs):
+    """
+    Creates an interactive 3D scatter plot using Plotly.
+
+    Parameters
+    ----------
+    data : pd.DataFrame or dict, optional
+        Data source. If provided, `x`, `y`, `z`, `color`, and `labels` can be column names/keys.
+    x, y, z : str or array-like
+        Coordinates. Can be column names (if `data` is provided) or arrays.
+    color : str or array-like, optional
+        Color values. Can be a column name or an array.
+    labels : str or array-like, optional
+        Labels for hover text. Can be a column name or an array.
+    marker_size : float or array-like, default 5
+        Size of the markers.
+    opacity : float, default 0.8
+        Opacity of the markers.
+    colorscale : str, default 'Purples'
+        Name of the colorscale to use.
+    initial_view : dict, optional
+        Dictionary to set the initial camera view (e.g., `dict(eye=dict(x=1.5, y=1.5, z=1.5))`).
+    **kwargs :
+        Additional keyword arguments passed to `go.Scatter3d`.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+        The generated Plotly figure.
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError as e:
+        raise ImportError("Plotly is required for this function. Install it with `pip install .[plotting]`") from e
+
+    # Helper to resolve input to array
+    def resolve_input(val, data_obj):
+        if val is None:
+            return None
+        if isinstance(val, str) and data_obj is not None:
+            if isinstance(data_obj, pd.DataFrame):
+                return data_obj[val]
+            elif isinstance(data_obj, dict):
+                return data_obj[val]
+        return val
+
+    # Resolve inputs
+    x_data = resolve_input(x, data)
+    y_data = resolve_input(y, data)
+    z_data = resolve_input(z, data)
+    c_data = resolve_input(color, data)
+    l_data = resolve_input(labels, data)
+
+    if x_data is None or y_data is None or z_data is None:
+        raise ValueError("x, y, and z coordinates must be provided.")
+
+    # Prepare marker dict
+    marker = dict(
+        size=marker_size,
+        opacity=opacity,
+        colorscale=colorscale,
+    )
+
+    # Handle color
+    if c_data is not None:
+        if not pd.api.types.is_numeric_dtype(c_data):
+             try:
+                # Ensure it's a Series or convert
+                c_series = pd.Series(c_data)
+                c_codes = c_series.astype('category').cat.codes
+                marker['color'] = c_codes
+             except Exception as e:
+                print(f"Warning: Failed to convert non-numeric color data to codes: {e}")
+                marker['color'] = c_data
+        else:
+            marker['color'] = c_data
+
+        marker['showscale'] = True
+        marker['colorbar'] = dict(title='Value')
+
+    # Construct hover template
+    hovertemplate = (
+        '<b>X:</b> %{x:.2f}<br>'
+        '<b>Y:</b> %{y:.2f}<br>'
+        '<b>Z:</b> %{z:.2f}<br>'
+    )
+    if l_data is not None:
+        hovertemplate = '<b>Label:</b> %{text}<br>' + hovertemplate
+
+    if c_data is not None:
+        hovertemplate += '<b>Color:</b> %{marker.color:.2f}<br>'
+
+    hovertemplate += '<extra></extra>'
+
+    # Create Scatter3d trace
+    trace = go.Scatter3d(
+        x=x_data,
+        y=y_data,
+        z=z_data,
+        mode='markers',
+        marker=marker,
+        text=l_data,
+        hovertemplate=hovertemplate,
+        **kwargs
+    )
+
+    fig = go.Figure(data=[trace])
+
+    # Update layout
+    scene = dict(
+        xaxis_title=x if isinstance(x, str) else 'X',
+        yaxis_title=y if isinstance(y, str) else 'Y',
+        zaxis_title=z if isinstance(z, str) else 'Z',
+        aspectmode='data'
+    )
+
+    if initial_view:
+        scene['camera'] = initial_view
+
+    fig.update_layout(
+        scene=scene,
+        margin=dict(l=0, r=0, b=0, t=40)
+    )
+
+    return fig
+
+
+def plotly_scatter_3d_from_adata_obsm(adata, obsm_key, color_key=None, label_key=None, **kwargs):
+    """
+    Creates an interactive 3D scatter plot from an AnnData object's obsm slot.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data matrix.
+    obsm_key : str
+        Key for `adata.obsm` to use as coordinates (e.g., 'X_umap', 'X_pca').
+        Expects at least 3 dimensions.
+    color_key : str, optional
+        Key for `adata.obs` to use for coloring.
+    label_key : str, optional
+        Key for `adata.obs` to use for labels.
+    **kwargs :
+        Additional keyword arguments passed to `plotly_scatter_3d`.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+        The generated Plotly figure.
+    """
+    if obsm_key not in adata.obsm:
+        raise ValueError(f"'{obsm_key}' not found in adata.obsm.")
+
+    coords = adata.obsm[obsm_key]
+
+    if coords.shape[1] < 3:
+        # Warn or handle gracefully? User asked for 3D.
+        # We'll pad with zeros if 2D, but warn.
+        print(f"Warning: '{obsm_key}' has only {coords.shape[1]} dimensions. Padding with zeros for Z-axis.")
+        z = np.zeros(coords.shape[0])
+        x = coords[:, 0]
+        y = coords[:, 1]
+    else:
+        x = coords[:, 0]
+        y = coords[:, 1]
+        z = coords[:, 2]
+
+    # Extract color and labels
+    color = None
+    if color_key:
+        if color_key in adata.obs:
+            color = adata.obs[color_key]
+        else:
+            print(f"Warning: '{color_key}' not found in adata.obs.")
+
+    labels = None
+    if label_key:
+        if label_key in adata.obs:
+            labels = adata.obs[label_key]
+        else:
+            print(f"Warning: '{label_key}' not found in adata.obs.")
+
+    # Set default axis titles if not provided in kwargs (via passing x,y,z names)
+    # We pass arrays directly, so plotly_scatter_3d won't see names unless we pass them or update layout.
+    # To get nice axis titles, we can manually update the figure afterwards or update the scene dict inside.
+    # But plotly_scatter_3d infers titles from string args. Here we pass arrays.
+
+    fig = plotly_scatter_3d(x=x, y=y, z=z, color=color, labels=labels, **kwargs)
+
+    # Update axis titles to reflect the keys
+    fig.update_layout(scene=dict(
+        xaxis_title=f"{obsm_key}_0",
+        yaxis_title=f"{obsm_key}_1",
+        zaxis_title=f"{obsm_key}_2" if coords.shape[1] >= 3 else "Zero",
+    ))
+
+    return fig
 
 def get_nice_number(value):
     """
