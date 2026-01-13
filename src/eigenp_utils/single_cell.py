@@ -1,19 +1,3 @@
-# /// script
-# dependencies = [
-#     "scanpy",
-#     "esda",
-#     "libpysal",
-#     "triku",
-#     "numpy",
-#     "pandas",
-#     "scipy",
-#     "matplotlib",
-#     "pacmap",
-#     "scikit-learn",
-#     "adjustText",
-# ]
-# ///
-
 from __future__ import annotations
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any
 import warnings
@@ -26,6 +10,7 @@ import scanpy as sc
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
 from scipy.linalg import svd
+from scipy.stats import norm
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
 import matplotlib.colors as mcolors
@@ -2366,7 +2351,7 @@ def annotate_clusters_by_markers(
     cell_type_markers_dict: Optional[Dict[str, Sequence[str]]] = None,
     layer: Optional[str] = None,
     use_raw: bool = True,
-    beta: float = 2.0,
+    beta: float = None,  # Deprecated
     min_markers: int = 1,
     normalize_scores: bool = True,
     write_to_obs: bool = True,
@@ -2374,7 +2359,11 @@ def annotate_clusters_by_markers(
     scores: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
-    Annotate clusters based on cell type scores.
+    Annotate clusters based on cell type scores using a probabilistic confidence metric.
+
+    Uses the Probability of Superiority (Common Language Effect Size) to estimate
+    the confidence that the top assigned cell type is truly separated from the runner-up,
+    accounting for the local variance of scores within the cluster.
 
     If `scores` is provided, it must be a DataFrame with index == adata.obs_names
     and columns == cell types. Otherwise, scores are computed once here.
@@ -2383,6 +2372,9 @@ def annotate_clusters_by_markers(
     - normalize_scores: Whether to apply robust normalization (median/MAD) to the scores. Default is True.
       Formula: (x - median(x)) / (median(|x - median(x)|) + 1e-8)
     """
+    if beta is not None:
+        warnings.warn("The `beta` parameter is deprecated and ignored. `annotate_clusters_by_markers` now uses a parameter-free probabilistic confidence score.", DeprecationWarning, stacklevel=2)
+
     # Get per-cell scores S only if not provided
     if scores is None:
         if cell_type_markers_dict is None:
@@ -2437,25 +2429,61 @@ def annotate_clusters_by_markers(
             top1_ct = order.index[0]
             top1 = order.iloc[0]
             top2 = order.iloc[1] if order.size > 1 else np.nan
-            margin = (top1 - top2) if np.isfinite(top1) and np.isfinite(top2) else np.nan
 
-            # consensus among cell-wise winners within the cluster
+            # matth: Calculate separation metrics using local distribution
             mask = (clabs == g).values
             winners = cell_best[mask]
+
+            # consensus among cell-wise winners within the cluster
             consensus_frac = np.mean(winners == top1_ct) if winners.size else np.nan
 
-            # softmax over median scores within the cluster
-            v = med.values.astype(float)
-            if np.all(~np.isfinite(v)):
-                softmax_p = np.nan
-            else:
-                v = v - np.nanmax(v)
-                sm = np.exp(beta * np.nan_to_num(v, nan=-np.inf))
-                sm[~np.isfinite(med.values)] = 0.0
-                Z = sm.sum()
-                idx_top1 = list(med.index).index(top1_ct) if top1_ct in med.index else None
-                softmax_p = float(sm[idx_top1] / Z) if (Z > 0 and idx_top1 is not None) else np.nan
+            if top1_ct is not None and top2 is not None and np.isfinite(top2) and np.isfinite(top1):
+                # We have at least two valid candidates to compare
 
+                # Extract scores for this cluster
+                # We use the S dataframe (which might be normalized or raw, doesn't matter for t-stat logic as long as linear)
+                cluster_scores = S.loc[mask]
+
+                s1 = cluster_scores[top1_ct].values
+                # Use the name of the second best median
+                top2_ct = order.index[1]
+                s2 = cluster_scores[top2_ct].values
+
+                # Pairwise difference per cell (handles correlation)
+                # s1 and s2 are aligned (same cells)
+                diff = s1 - s2
+
+                # Remove NaNs if any (score_genes shouldn't produce mixed NaNs usually, but safe to check)
+                valid_diff = diff[np.isfinite(diff)]
+
+                if valid_diff.size > 1:
+                    mu_d = np.mean(valid_diff)
+                    std_d = np.std(valid_diff, ddof=1) # Sample std
+
+                    if std_d > 1e-12:
+                        # Z-score of the mean difference being > 0 ?
+                        # No, we want P(random cell score 1 > score 2).
+                        # Assuming diff is Normal(mu, sigma), P(diff > 0) = 1 - CDF(0) = CDF(mu/sigma)
+                        z = mu_d / std_d
+                        softmax_p = norm.cdf(z)
+                    elif mu_d > 0:
+                        softmax_p = 1.0
+                    else:
+                        softmax_p = 0.5 # Indistinguishable or worse
+                else:
+                    softmax_p = 0.5 # Not enough data
+
+                margin = top1 - top2
+            else:
+                # Only one valid type or no valid comparison
+                margin = np.nan
+                if top1_ct is not None and np.isfinite(top1):
+                    softmax_p = 1.0 # Only one candidate
+                else:
+                    softmax_p = np.nan
+
+            # Uncertainty combines ambiguity (softmax_p) and heterogeneity (consensus_frac)
+            # softmax_p here is "Confidence of Superiority"
             uncertainty = 1.0 - (softmax_p * consensus_frac) if (np.isfinite(softmax_p) and np.isfinite(consensus_frac)) else np.nan
 
         rows.append({
@@ -2465,7 +2493,7 @@ def annotate_clusters_by_markers(
             "top2_score": top2,
             "margin": margin,
             "consensus_frac": consensus_frac,
-            "softmax_p": softmax_p,
+            "softmax_p": softmax_p, # Kept name for compatibility, but represents P(Superiority)
             "uncertainty": uncertainty,
             **{f"median_{ct}": med.get(ct, np.nan) for ct in cts},
         })
@@ -2494,7 +2522,7 @@ def sweep_leiden_and_annotate(
     use_raw: bool = True,
     normalize_scores: bool = True,
     min_markers: int = 1,
-    beta: float = 2.0,
+    beta: float = None, # Deprecated
     leiden_key_prefix: str = "leiden",
 ) -> Dict[str, Any]:
     """
@@ -2671,7 +2699,7 @@ def export_cell_type_annotations(
     print(df_export.head())
 
 def plot_volcano_adata(
-    adata: AnnData,
+    adata: sc.AnnData,
     rank_genes_key: str,
     group: str,
     pval_cutoff: float = 0.05,
