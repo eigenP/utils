@@ -279,12 +279,77 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph = None, iterations=1
     mask_translated: ndarray; the adjusted binary mask
     """
     # Translation
-    mask_translated = np.roll(mask, translation, axis=(0, 1, 2))
+    dz, dy, dx = translation
+    Z, Y, X = mask.shape
 
-    # Check if the mask has rolled over the boundaries
-    if np.any(mask_translated[0]) or np.any(mask_translated[-1]) or np.any(mask_translated[:, 0]) or np.any(mask_translated[:, -1]) or np.any(mask_translated[:, :, 0]) or np.any(mask_translated[:, :, -1]):
+    # Initialize with zeros to handle "rolled over value from true to false"
+    mask_translated = np.zeros_like(mask)
+
+    # 1. Define source (mask) and destination (mask_translated) slices
+    # Z-axis
+    if dz > 0:
+        src_z, dst_z = slice(0, max(0, Z - dz)), slice(dz, Z)
+        lost_z = slice(Z - dz, Z)
+    elif dz < 0:
+        src_z, dst_z = slice(-dz, Z), slice(0, max(0, Z + dz))
+        lost_z = slice(0, -dz)
+    else:
+        src_z, dst_z = slice(None), slice(None)
+        lost_z = slice(0, 0)
+
+    # Y-axis
+    if dy > 0:
+        src_y, dst_y = slice(0, max(0, Y - dy)), slice(dy, Y)
+        lost_y = slice(Y - dy, Y)
+    elif dy < 0:
+        src_y, dst_y = slice(-dy, Y), slice(0, max(0, Y + dy))
+        lost_y = slice(0, -dy)
+    else:
+        src_y, dst_y = slice(None), slice(None)
+        lost_y = slice(0, 0)
+
+    # X-axis
+    if dx > 0:
+        src_x, dst_x = slice(0, max(0, X - dx)), slice(dx, X)
+        lost_x = slice(X - dx, X)
+    elif dx < 0:
+        src_x, dst_x = slice(-dx, X), slice(0, max(0, X + dx))
+        lost_x = slice(0, -dx)
+    else:
+        src_x, dst_x = slice(None), slice(None)
+        lost_x = slice(0, 0)
+
+    # 2. Copy valid data
+    # Only copy if the shift is within bounds (otherwise result is all zeros)
+    if (abs(dz) < Z) and (abs(dy) < Y) and (abs(dx) < X):
+        mask_translated[dst_z, dst_y, dst_x] = mask[src_z, src_y, src_x]
+
+    # 3. Check for lost data (Warning)
+    # Warn if any part of the mask that contains data is shifted out of the frame
+    lost_data = False
+
+    # Check Z loss
+    if abs(dz) >= Z:
+        if np.any(mask): lost_data = True
+    elif dz != 0:
+        if np.any(mask[lost_z, :, :]): lost_data = True
+
+    # Check Y loss
+    if not lost_data:
+        if abs(dy) >= Y:
+            if np.any(mask): lost_data = True
+        elif dy != 0:
+            if np.any(mask[:, lost_y, :]): lost_data = True
+
+    # Check X loss
+    if not lost_data:
+        if abs(dx) >= X:
+            if np.any(mask): lost_data = True
+        elif dx != 0:
+            if np.any(mask[:, :, lost_x]): lost_data = True
+
+    if lost_data:
         print("Warning: The mask has rolled over the boundaries. Please adjust the value.")
-
 
     # Morphological operation
     if morph == 'erode':

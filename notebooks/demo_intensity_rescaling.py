@@ -39,7 +39,10 @@ async def _(mo):
         return sys.platform in ("emscripten", "wasi")
 
     OWNER, REPO, REF = "eigenP", "utils", "main"
-    GIT_URL = f"git+https://github.com/{OWNER}/{REPO}.git@{REF}"
+    if in_wasm():
+        GIT_URL = f"eigenp-utils @ https://github.com/{OWNER}/{REPO}/archive/{REF}.zip"
+    else:
+        GIT_URL = f"git+https://github.com/{OWNER}/{REPO}.git@{REF}"
 
     def install_local(url):
         import subprocess, sys, shutil
@@ -189,20 +192,28 @@ def _(mid_slice, plt, stretched):
 @app.cell
 def _(mo):
     mo.md("## Z-Decay Correction (`adjust_brightness_per_slice`)")
-    method_dropdown = mo.ui.dropdown(
+    fit_dropdown = mo.ui.dropdown(
         options={'Linear Ramp': None, 'Exponential Fit': 'exponential', 'Linear Fit': 'linear'},
         value='exponential',
-        label="Correction Method"
+        label="Fit Method"
     )
-    method_dropdown
-    return (method_dropdown,)
+
+    correction_method = mo.ui.radio(
+        options=['gamma', 'gain'],
+        value='gamma',
+        label="Correction Mode"
+    )
+
+    mo.vstack([fit_dropdown, correction_method])
+    return (fit_dropdown, correction_method)
 
 
 @app.cell
-def _(adjust_brightness_per_slice, decayed_stack, method_dropdown):
+def _(adjust_brightness_per_slice, correction_method, decayed_stack, fit_dropdown):
     corrected_stack = adjust_brightness_per_slice(
         decayed_stack,
-        gamma_fit_func=method_dropdown.value,
+        gamma_fit_func=fit_dropdown.value,
+        method=correction_method.value,
         final_gamma=0.5 # Used if None (manual ramp)
     )
     return (corrected_stack,)

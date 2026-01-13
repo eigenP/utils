@@ -87,22 +87,18 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
 
     return result
 
-def _2D_weighted_image(image, overlap):
-    '''
-    # image := image shape
-    # overlap := in pixels
+def _get_weight_profiles(shape, overlap):
+    """
+    Generate 1D weight profiles for Y and X axes.
+    """
+    H, W = shape
 
-    # Example usage
-    # _2D_window = _2D_weight(image, overlap)
-    '''
     if overlap <= 0:
-        return image.astype(np.float32)
+        return np.ones(H, dtype=np.float32), np.ones(W, dtype=np.float32)
 
     # 1D weight function based on cubic spline
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3
-
-    H, W = image.shape
 
     # Generate the 1D taper profile
     # Using float32 for better precision than float16, avoiding accumulation errors
@@ -119,12 +115,48 @@ def _2D_weighted_image(image, overlap):
     profile_x[:overlap] = taper
     profile_x[-overlap:] = taper[::-1]
 
-    # Apply weights using broadcasting
-    # (H, W) * (H, 1) * (1, W)
-    # This avoids allocating a full (H, W) weight matrix, saving memory
-    weighted_image = image * profile_y[:, None] * profile_x[None, :]
+    return profile_y, profile_x
 
-    return weighted_image
+
+def _2D_weighted_image(image, overlap, profiles=None, out=None):
+    '''
+    # image := image shape
+    # overlap := in pixels
+    # profiles := optional pre-calculated (profile_y, profile_x)
+    # out := optional output array for in-place operation
+
+    # Example usage
+    # _2D_window = _2D_weight(image, overlap)
+    '''
+    if overlap <= 0:
+        if out is not None:
+            out[:] = image
+            return out
+        return image.astype(np.float32)
+
+    if profiles is None:
+        profile_y, profile_x = _get_weight_profiles(image.shape, overlap)
+    else:
+        profile_y, profile_x = profiles
+
+    if out is None:
+        # Apply weights using broadcasting
+        # (H, W) * (H, 1) * (1, W)
+        # This avoids allocating a full (H, W) weight matrix, saving memory
+        weighted_image = image * profile_y[:, None] * profile_x[None, :]
+        return weighted_image
+    else:
+        # In-place operation to avoid intermediate allocations
+        if out.shape != image.shape:
+            raise ValueError(f"Output shape {out.shape} does not match image shape {image.shape}")
+
+        # Perform multiplication in steps
+        # out = image * profile_y[:, None]
+        np.multiply(image, profile_y[:, None], out=out)
+        # out *= profile_x[None, :]
+        np.multiply(out, profile_x[None, :], out=out)
+
+        return out
 
 def estimate_drift_2D(frame1, frame2, return_ccm = False):
     """
@@ -241,13 +273,21 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
     min_size_pixels = min(x_shape, y_shape)
     overlap = min_size_pixels // 3
 
+    # Pre-calculate weight profiles once
+    profiles = _get_weight_profiles((x_shape, y_shape), overlap)
+
     # Store projections: (T, W) and (T, H)
     projections_x = []
     projections_y = []
 
+    # Pre-allocate buffer for weighted frame to avoid repeated allocations
+    # Determine dtype based on input (if int, result is float32 due to weights being float32)
+    w_dtype = np.result_type(video_data.dtype, np.float32)
+    w_frame_buffer = np.empty((x_shape, y_shape), dtype=w_dtype)
+
     # Iterate once to compute all projections
     for t in range(t_shape):
-        w_frame = _2D_weighted_image(video_data[t], overlap)
+        w_frame = _2D_weighted_image(video_data[t], overlap, profiles=profiles, out=w_frame_buffer)
         projections_x.append(np.max(w_frame, axis=0))
         projections_y.append(np.max(w_frame, axis=1))
 

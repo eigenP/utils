@@ -1,28 +1,22 @@
-# /// script
-# dependencies = [
-#     "scanpy",
-#     "esda",
-#     "libpysal",
-#     "triku",
-#     "numpy",
-#     "pandas",
-#     "scipy",
-#     "matplotlib",
-#     "pacmap",
-# ]
-# ///
-
 from __future__ import annotations
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any
 import warnings
+from collections import defaultdict
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
+from scipy.linalg import svd
+from scipy.stats import norm
 import matplotlib.pyplot as plt
-from .plotting_utils import adjust_colormap
+from sklearn.metrics import adjusted_rand_score
+import matplotlib.colors as mcolors
+import matplotlib.patheffects as m_fx
+import re
+from .plotting_utils import adjust_colormap, get_nice_number
 
 # Try importing third-party libraries that might be installed via the inline dependencies
 try:
@@ -35,6 +29,11 @@ try:
     import triku as tk
 except ImportError:
     tk = None
+
+try:
+    from adjustText import adjust_text
+except ImportError:
+    adjust_text = None
 
 # ------------------------- Constants -------------------------
 
@@ -52,13 +51,620 @@ CELL_CYCLE_GENES = [
     "CENPE", "CTCF", "NEK2", "G2E3", "GAS2L3", "CBX5", "CENPA"
 ]
 
+# ------------------------- Preprocessing Tools -------------------------
+
+def carry_palette(src_adata, dst_adata, key: str, fallback_color: str = "#BBBBBB"):
+    """
+    Copy colors for `key` from src -> dst, matching by category names.
+    Keeps identical colors for categories present in both; unseen ones get `fallback_color`.
+    """
+    if key not in src_adata.obs or key not in dst_adata.obs:
+        raise KeyError(f"'{key}' must be in .obs of both src and dst")
+
+    # Ensure categoricals & drop unused in the subset
+    src_c = src_adata.obs[key].astype("category")
+    dst_c = dst_adata.obs[key].astype("category").cat.remove_unused_categories()
+    dst_adata.obs[key] = dst_c  # write back (important)
+
+    # Grab source palette
+    pal_key = f"{key}_colors"
+    if pal_key not in src_adata.uns:
+        raise KeyError(f"Source palette '{pal_key}' not found in src_adata.uns")
+
+    src_cats = list(src_c.cat.categories)
+    src_cols = list(src_adata.uns[pal_key])
+    cmap = dict(zip(src_cats, src_cols))
+
+    # Build destination palette in the (possibly new) category order
+    dst_cats = list(dst_c.cat.categories)
+    dst_cols = [cmap.get(cat, fallback_color) for cat in dst_cats]
+    dst_adata.uns[pal_key] = dst_cols
+
+    # Optional sanity check: warn if any cats were missing in source
+    missing = [cat for cat in dst_cats if cat not in cmap]
+    if missing:
+        warnings.warn(f"[carry_palette] No color found in source for: {missing}. Used fallback_color={fallback_color}.")
+
+    return dst_adata
+
+
+def _has_integer_like_counts(X, n_check=200000):
+    if sp.issparse(X):
+        data = X.data
+    else:
+        data = np.ravel(X)
+    if data.size > n_check:
+        rng = np.random.default_rng(0)
+        data = rng.choice(data, size=n_check, replace=False)
+    return np.allclose(data, np.round(data))
+
+
+def _ensure_log1p_layer(
+    A,
+    *,
+    target_layer: str = "log1p",
+    counts_layer: str = "counts",
+    total_count: float = 1e4,
+    force_build: bool = False,
+):
+    """
+    Create A.layers[target_layer] from RAW COUNTS via normalize_total + log1p.
+    Counts source priority (STRICT):
+      1) A.layers[counts_layer]
+      2) A.raw.X
+    No fallback to A.X to avoid double-log issues.
+    """
+    if target_layer in A.layers:
+        return
+
+    # choose counts source
+    if counts_layer in A.layers:
+        C = A.layers[counts_layer]
+        src_name = f"layers['{counts_layer}']"
+    elif A.raw is not None:
+        C = A.raw.X
+        src_name = "raw.X"
+        # cache a copy for future calls
+        A.layers[counts_layer] = A.raw.X.copy()
+    else:
+        raise KeyError(
+            f"Cannot build '{target_layer}': need raw counts in A.layers['{counts_layer}'] or A.raw.X."
+        )
+
+    # sanity check: counts must look integer-like
+    if not force_build and not _has_integer_like_counts(C):
+        raise ValueError(
+            f"{src_name} does not look like raw integer counts. "
+            f"Refusing to create '{target_layer}' to avoid double log-transform. "
+            f"Provide true counts or pass force_build=True if you are certain."
+        )
+
+    # build log1p from counts WITHOUT touching A.X
+    tmp = A.copy()
+    tmp.X = C.copy()
+    sc.pp.normalize_total(tmp, target_sum=total_count)
+    sc.pp.log1p(tmp)
+    A.layers[target_layer] = tmp.X.copy()
+    del tmp
+    warnings.warn(f"[ensure_log1p_layer] Created A.layers['{target_layer}'] from {src_name}.")
+
+
+def preprocess_subset(
+    adata,
+    *,
+    counts_layer: str = "counts",
+    n_top_genes: int = 2500,
+    hvg_flavor: str = "seurat_v3",   # or "triku"
+    batch_key: Optional[str] = None,
+    subset_to_hvgs: bool = True,
+    X_layer_for_pca: str = "log1p",
+    scale_max_value: float = 10.0,
+    n_comps: int = 32,
+    svd_solver: str = "arpack",
+    n_neighbors: int = 15,
+    n_pcs: int = 30,
+    use_rep: Optional[str] = None,
+    cluster_key: str = "leiden",
+    resolution: float = 1.0,
+    random_state: int = 0,
+    copy: bool = False
+):
+    A = adata.copy() if copy else adata
+    sc.pp.filter_genes(A, min_cells=3)
+
+    # ---- Make sure counts/log1p exist BEFORE any var subsetting ----
+    # (prevents shape-mismatch if we need to look at A.raw)
+    if hvg_flavor == "seurat_v3":
+        # seurat_v3 requires raw counts as input to HVG
+        if counts_layer not in A.layers:
+            if A.raw is not None:
+                A.layers[counts_layer] = A.raw.X.copy()
+            else:
+                raise ValueError(
+                    f"flavor='seurat_v3' requires raw counts in A.layers['{counts_layer}'] or A.raw"
+                )
+        if not _has_integer_like_counts(A.layers[counts_layer]):
+            raise ValueError(f"A.layers['{counts_layer}'] does not look like raw integer counts.")
+
+
+    # ensure we have log1p built from true counts
+    _ensure_log1p_layer(
+        A,
+        target_layer="log1p",
+        counts_layer=counts_layer,   # e.g., "counts"
+        total_count=1e4,
+        force_build=False
+    )
+
+    # ---------- HVG selection ----------
+    if hvg_flavor == "triku":
+        # Run Triku on log1p (recommended), then rely on its 'highly_variable' output
+        run_triku(A, layer=X_layer_for_pca, n_features=n_top_genes)
+    else:
+        if batch_key is None and "batch" in A.obs:
+            batch_key = "batch"
+        hvg_kwargs = dict(n_top_genes=n_top_genes, flavor=hvg_flavor, batch_key=batch_key)
+        if hvg_flavor == "seurat_v3":
+            hvg_kwargs["layer"] = counts_layer
+        sc.pp.highly_variable_genes(A, **hvg_kwargs)
+
+    # ---------- subset HVGs (optional but common) ----------
+    if subset_to_hvgs:
+        A._inplace_subset_var(A.var["highly_variable"].values)
+
+    # ---------- set working matrix ----------
+    if X_layer_for_pca not in A.layers:
+        raise KeyError(f"Layer '{X_layer_for_pca}' missing even after construction.")
+    A.X = A.layers[X_layer_for_pca].copy()
+
+    # ---------- scale / PCA on HVGs ----------
+    sc.pp.scale(A, max_value=scale_max_value)
+    sc.tl.pca(
+        A,
+        n_comps=min(n_comps, A.n_vars - 1),
+        use_highly_variable=True,        # mask_var removed; not needed anyway after subsetting
+        svd_solver=svd_solver,
+        random_state=random_state
+    )
+
+    # ---------- neighbors ----------
+    if use_rep is not None:
+        sc.pp.neighbors(A, n_neighbors=n_neighbors, use_rep=use_rep)
+    else:
+        sc.pp.neighbors(A, n_neighbors=n_neighbors, n_pcs=min(n_pcs, A.obsm["X_pca"].shape[1]))
+
+    # ---------- clustering ----------
+    if cluster_key == "leiden":
+        sc.tl.leiden(A, resolution=resolution, key_added="leiden", random_state=random_state)
+    else:
+        if cluster_key not in A.obs:
+            raise KeyError(f"cluster_key '{cluster_key}' not found in .obs.")
+
+    return A
+
+
 # ------------------------- General Utilities -------------------------
+
+def find_cluster_keys(adata, pattern=r'leiden_[\d\.]+'):
+    """
+    Helper helper to find clustering columns in adata.obs that match a regex pattern.
+    It automatically sorts them numerically by resolution if numbers are present.
+
+    Args:
+        adata: AnnData object
+        pattern: Regex pattern to match column names (default: 'leiden_' followed by numbers)
+
+    Returns:
+        List of column names sorted by resolution.
+    """
+    # Find matching columns in .obs
+    keys = [c for c in adata.obs.columns if re.match(pattern, c)]
+
+    # Helper to sort by the number inside the string (e.g., 0.5, 1.0, 2.0)
+    def natural_sort_key(text):
+        # Find the first floating point number in the string
+        match = re.search(r'(\d+\.?\d*)', text)
+        if match:
+            return float(match.group(1))
+        return text # Fallback to alphabetical
+
+    return sorted(keys, key=natural_sort_key)
+
+
+def plot_clustering_tree(adata, cluster_keys, title="Clustering Resolution Tree",
+                         min_edge_weight=0.05, edge_color='darkgray',
+                         num_layout_iterations=20):
+    """
+    Generates a clustering tree plot showing how cluster assignments change across resolutions.
+
+    Args:
+        adata: The AnnData object (or an object with an .obs attribute).
+        cluster_keys (list): List of column names in adata.obs corresponding to clustering
+                             resolutions (ordered low to high).
+        title (str): Title of the plot.
+        min_edge_weight (float): Minimum proportion of cells to show an edge.
+                                 Helps clean up the plot by removing tiny overlaps.
+        edge_color (str): Color for the edges (arrows). Can be a single color string
+                          (e.g., 'gray', 'black') or a matplotlib colormap name
+                          (e.g., 'viridis') for a gradient based on proportion.
+        num_layout_iterations (int): Number of iterations for the barycenter layout
+                                     algorithm to stabilize node positions.
+    """
+
+    # 0. Validate Keys
+    # ----------------
+    missing_keys = [k for k in cluster_keys if k not in adata.obs.columns]
+    if missing_keys:
+        raise KeyError(
+            f"The following keys provided are not in adata.obs: {missing_keys}.\n"
+            "Tip: Make sure you are passing the column names (e.g., 'leiden_1.0'), "
+            "not the color keys from .uns (e.g., 'leiden_1.0_colors')."
+        )
+
+    # 1. Prepare Data and Node Metadata
+    # ---------------------------------
+    df = adata.obs[cluster_keys].copy()
+
+    # Ensure all columns are categorical/strings for consistent labeling
+    for col in cluster_keys:
+        df[col] = df[col].astype(str)
+
+    # Structure to hold node info: { (layer_idx, cluster_label): { 'count': int, 'x': float, 'y': float } }
+    nodes = {}
+
+    # Structure to hold edge info: [ { 'u': (l, c1), 'v': (l+1, c2), 'weight': count, 'in_prop': float } ]
+    edges = []
+
+    # Initialize nodes with counts and y-coordinates
+    for i, key in enumerate(cluster_keys):
+        unique_labels = sorted(df[key].unique(), key=lambda x: (len(x), x))
+        for label in unique_labels:
+            count = df[df[key] == label].shape[0]
+            nodes[(i, label)] = {'count': count, 'y': -i, 'x': 0.0} # Initialize x to 0.0
+
+    # Calculate edges (transitions)
+    for i in range(len(cluster_keys) - 1):
+        curr_key = cluster_keys[i]
+        next_key = cluster_keys[i+1]
+
+        ct = pd.crosstab(df[curr_key], df[next_key])
+
+        for parent_label in ct.index:
+            for child_label in ct.columns:
+                weight = ct.loc[parent_label, child_label]
+                child_size = nodes[(i+1, child_label)]['count']
+                in_prop = weight / child_size if child_size > 0 else 0
+
+                if in_prop >= min_edge_weight:
+                    edges.append({
+                        'u': (i, parent_label),
+                        'v': (i+1, child_label),
+                        'weight': weight,
+                        'in_prop': in_prop
+                    })
+
+    # 2. Calculate Layout (Iterative Barycenter Heuristic for vertical alignment)
+    # -------------------------------------------------------------------------
+    # Initial ordering: Sort first layer by label.
+    layer_order = []
+    for i, key in enumerate(cluster_keys):
+        layer_order.append(sorted([k for (l, k) in nodes.keys() if l == i], key=lambda x: (len(x), x)))
+
+    # Assign initial x-coordinates based on sorted order
+    for layer_idx, labels in enumerate(layer_order):
+        for x_idx, label in enumerate(labels):
+            nodes[(layer_idx, label)]['x'] = float(x_idx)
+
+    # Iterative barycenter method
+    for _ in range(num_layout_iterations):
+        # Top-down pass
+        for i in range(len(cluster_keys) - 1):
+            current_layer_labels = layer_order[i]
+            next_layer_labels = layer_order[i+1]
+
+            # Calculate barycenter for children based on parents' positions
+            new_child_x_positions = {label: [] for label in next_layer_labels}
+            for edge in edges:
+                if edge['u'][0] == i:
+                    parent_node = nodes[edge['u']]
+                    child_label = edge['v'][1]
+                    new_child_x_positions[child_label].append(parent_node['x'] * edge['weight'])
+
+            for label in next_layer_labels:
+                if new_child_x_positions[label]:
+                    # Sum weights of all incoming edges for this child
+                    total_incoming_weight = sum(e['weight'] for e in edges if e['v'] == (i+1, label))
+                    if total_incoming_weight > 0:
+                        nodes[(i+1, label)]['x'] = sum(new_child_x_positions[label]) / total_incoming_weight
+
+        # Bottom-up pass
+        for i in range(len(cluster_keys) - 1, 0, -1): # From second to last layer up to first
+            current_layer_labels = layer_order[i]
+            prev_layer_labels = layer_order[i-1]
+
+            # Calculate barycenter for parents based on children's positions
+            new_parent_x_positions = {label: [] for label in prev_layer_labels}
+            for edge in edges:
+                if edge['v'][0] == i:
+                    child_node = nodes[edge['v']]
+                    parent_label = edge['u'][1]
+                    new_parent_x_positions[parent_label].append(child_node['x'] * edge['weight'])
+
+            for label in prev_layer_labels:
+                if new_parent_x_positions[label]:
+                    # Sum weights of all outgoing edges for this parent
+                    total_outgoing_weight = sum(e['weight'] for e in edges if e['u'] == (i-1, label))
+                    if total_outgoing_weight > 0:
+                        nodes[(i-1, label)]['x'] = sum(new_parent_x_positions[label]) / total_outgoing_weight
+
+        # Re-sort nodes within each layer based on updated x-coordinates
+        for layer_idx in range(len(cluster_keys)):
+            layer_labels_with_x = [(label, nodes[(layer_idx, label)]['x'])
+                                   for label in layer_order[layer_idx]]
+            layer_labels_with_x.sort(key=lambda x: x[1])
+            layer_order[layer_idx] = [label for label, _ in layer_labels_with_x]
+
+            # Re-assign discrete x-coords for plotting after sorting
+            for x_idx, label in enumerate(layer_order[layer_idx]):
+                nodes[(layer_idx, label)]['x'] = float(x_idx) # Ensure integer positions for stability
+
+    # Normalize X coordinates to make plot symmetric/centered
+    # Scale to desired width (e.g., -5 to 5 or 0 to max_clusters_in_a_row - 1)
+    max_nodes_in_row = max(len(l) for l in layer_order)
+
+    # Recalculate node positions based on the final sorted order and spread
+    for layer_idx, labels in enumerate(layer_order):
+        # Re-assign positions for the layer, spreading them evenly
+        if len(labels) > 1:
+            step = max_nodes_in_row / (len(labels) - 1) if len(labels) > 1 else 0
+            for x_idx, label in enumerate(labels):
+                nodes[(layer_idx, label)]['x'] = x_idx * step
+        else: # Single node in layer
+             nodes[(layer_idx, labels[0])]['x'] = max_nodes_in_row / 2.0 # Center single node
+
+        # Center the entire layer
+        layer_min_x = min(nodes[(layer_idx, l)]['x'] for l in labels) if labels else 0
+        layer_max_x = max(nodes[(layer_idx, l)]['x'] for l in labels) if labels else 0
+        layer_width = layer_max_x - layer_min_x
+        centering_offset = (max_nodes_in_row - layer_width) / 2.0 - layer_min_x
+
+        for label in labels:
+            nodes[(layer_idx, label)]['x'] += centering_offset
+
+    # 3. Plotting
+    # -----------
+    fig, ax = plt.subplots(figsize=(12, len(cluster_keys) * 1.5 + 2)) # Adjust figsize for better readability
+
+    # -- Define Colors per Node based on adata.uns --
+    fallback_cmap = plt.cm.get_cmap('Spectral', len(cluster_keys))
+    node_colors = {}
+
+    for i, key in enumerate(cluster_keys):
+        uns_key = f"{key}_colors"
+        specific_colors_map = None
+
+        if hasattr(adata, 'uns') and uns_key in adata.uns:
+            try:
+                if hasattr(adata.obs[key], 'cat'):
+                    categories = adata.obs[key].cat.categories
+                    colors_list = adata.uns[uns_key]
+
+                    if len(categories) == len(colors_list):
+                        specific_colors_map = dict(zip(categories, colors_list))
+            except Exception as e:
+                print(f"Warning: Could not map colors for {key}: {e}")
+
+        layer_labels = layer_order[i]
+        fallback_color = mcolors.to_hex(fallback_cmap(i))
+
+        for label in layer_labels:
+            if specific_colors_map and label in specific_colors_map:
+                node_colors[(i, label)] = specific_colors_map[label]
+            else:
+                node_colors[(i, label)] = fallback_color
+
+    # -- Edge Color Logic --
+    edge_cmap = None
+
+    # Priority 1: If it's a valid color string (e.g., 'gray', '#333333'), create a gradient to it
+    # This check must come BEFORE plt.colormaps check because 'gray' is both a color and a colormap.
+    # Matplotlib's 'gray' colormap is black->white (0->1), which is the opposite of what we want
+    # (we want 1.0 to be the strong color).
+    if mcolors.is_color_like(edge_color):
+        try:
+            target_rgb = mcolors.to_rgb(edge_color)
+            # Gradient: White (0.0) -> Target Color (1.0)
+            cdict = {
+                'red':   [(0.0, 1.0, 1.0), (1.0, target_rgb[0], target_rgb[0])],
+                'green': [(0.0, 1.0, 1.0), (1.0, target_rgb[1], target_rgb[1])],
+                'blue':  [(0.0, 1.0, 1.0), (1.0, target_rgb[2], target_rgb[2])]
+            }
+            edge_cmap = mcolors.LinearSegmentedColormap('custom_edge', segmentdata=cdict)
+        except ValueError:
+            pass
+
+    # Priority 2: If not handled as a color, check if it's a named colormap
+    if edge_cmap is None and isinstance(edge_color, str) and edge_color in plt.colormaps:
+        edge_cmap = plt.colormaps[edge_color]
+
+    # Priority 3: Fallback
+    if edge_cmap is None:
+        edge_cmap = plt.cm.gray_r # Inverted gray (white -> black)
+
+    # -- Draw Edges --
+    for edge in edges:
+        u_node = nodes[edge['u']]
+        v_node = nodes[edge['v']]
+
+        alpha = max(0.2, edge['in_prop']) # Minimum visibility
+        width = 1 + (edge['in_prop'] * 4) # Slightly thicker max width
+
+        # Get color from map
+        edge_line_color = edge_cmap(edge['in_prop'])
+
+        ax.annotate("",
+                    xy=(v_node['x'], v_node['y'] + 0.1),
+                    xytext=(u_node['x'], u_node['y'] - 0.1),
+                    arrowprops=dict(arrowstyle="->",
+                                    color=edge_line_color,
+                                    alpha=alpha,
+                                    lw=width,
+                                    shrinkA=5, shrinkB=5,
+                                    connectionstyle="arc3,rad=0.0"))
+
+    # -- Draw Nodes --
+    all_counts = [n['count'] for n in nodes.values()]
+    max_count = max(all_counts) if all_counts else 1
+    size_scale = 1000
+
+    for (layer_idx, label), data in nodes.items():
+        x, y = data['x'], data['y']
+        s = (data['count'] / max_count) * size_scale
+
+        c = node_colors.get((layer_idx, label), 'gray')
+
+        ax.scatter(x, y, s=s, c=c, zorder=10, edgecolor='black', linewidth=0.5)
+
+        font_size = 8 if len(label) < 3 else 6
+        ax.text(x, y, label, ha='center', va='center',
+                fontsize=font_size, color='white', fontweight='bold', zorder=11,
+                path_effects=[m_fx.Stroke(linewidth=1.5, foreground='black'), m_fx.Normal()])
+
+    # 4. Formatting and Legends
+    # -------------------------
+
+    ax.set_yticks([-i for i in range(len(cluster_keys))])
+    ax.set_yticklabels(cluster_keys)
+    ax.set_ylabel("Clustering Resolution / Layer")
+
+    ax.set_xticks([])
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+
+    ax.set_title(title)
+
+    # -- Custom Legend for Sizes (Adaptive Rounding) --
+    # Generate nice numbers: roughly 20%, 50%, 100%
+    raw_sizes = [max_count * 0.2, max_count * 0.5, max_count]
+    nice_sizes = sorted(list(set([get_nice_number(s) for s in raw_sizes if s > 0])))
+
+    legend_handles = []
+    for s_val in nice_sizes:
+        # Calculate size in points for the scatter marker
+        s_point = (s_val / max_count) * size_scale
+        legend_handles.append(plt.scatter([], [], s=s_point,
+                                          c='gray', alpha=0.5, label=f'{s_val:,} cells'))
+
+    legend1 = ax.legend(handles=legend_handles, title="Cluster Size",
+                        bbox_to_anchor=(1.05, 1), loc='upper left', frameon=False,
+                        scatterpoints=1)
+    ax.add_artist(legend1)
+
+    # -- Custom Legend for In-Proportion --
+    props = [0.2, 0.5, 0.8, 1.0]
+    prop_handles = []
+    for p in props:
+        line_color = edge_cmap(p)
+        line = plt.Line2D([0], [0], color=line_color, alpha=p, lw=1+(p*4), label=f'{p:.1f}')
+        prop_handles.append(line)
+
+    ax.legend(handles=prop_handles, title="In-Proportion",
+              bbox_to_anchor=(1.05, 0.6), loc='upper left', frameon=False)
+
+    ax.autoscale_view()
+    plt.subplots_adjust(right=0.75) # Adjust right margin
+    plt.show()
+
+
+def import_obs_to_adata_from_csv(
+    path: str,
+    adata: sc.AnnData,
+    index_col: int | str = 0,
+    sep: Optional[str] = None,
+    engine: str = "python",
+    overwrite_existing: bool = False,
+    to_category: bool = True,
+) -> None:
+    """
+    Import a CSV/TSV file and join it to adata.obs, matching on index/barcode.
+
+    Parameters
+    ----------
+    path
+        Path to the CSV file.
+    adata
+        AnnData object to modify in-place.
+    index_col
+        Column in the CSV to use as the index (barcode). Default is 0.
+    sep
+        Separator used in the file. If None, it is inferred (e.g. comma or tab).
+    engine
+        Parser engine to use. Default "python".
+    overwrite_existing
+        If True, columns in the CSV that already exist in adata.obs will be overwritten.
+        If False, existing columns will be preserved and new columns will have a suffix if they clash.
+    to_category
+        If True, convert object-type columns in the imported data to categorical.
+    """
+    # Read the table (auto-detects comma vs tab)
+    df = pd.read_csv(path, index_col=index_col, sep=sep, engine=engine)
+
+    print(df.head())
+
+    # Tidy up index and columns
+    df.index = df.index.astype(str).str.strip()
+    df.columns = df.columns.str.strip()
+
+    # Drop duplicates in the CSV index to ensure unique mapping
+    if df.index.duplicated().any():
+        n_dupes = df.index.duplicated().sum()
+        warnings.warn(f"Dropping {n_dupes} duplicate barcodes from CSV.")
+        df = df.loc[~df.index.duplicated(keep="first")]
+
+    # Identify overlapping columns
+    overlapping_cols = [col for col in df.columns if col in adata.obs.columns]
+
+    if overwrite_existing:
+        if overlapping_cols:
+            print(f"Overwriting columns in adata.obs: {overlapping_cols}")
+            adata.obs = adata.obs.drop(columns=overlapping_cols)
+
+        # Join (left join to adata to preserve adata shape)
+        adata.obs = adata.obs.join(df, how="left")
+    else:
+        # If not overwriting, append suffix to new data if overlap
+        suffix = "_imported"
+        if overlapping_cols:
+            print(f"Columns {overlapping_cols} exist. Appending '{suffix}' suffix to new data.")
+            adata.obs = adata.obs.join(df, how="left", rsuffix=suffix)
+        else:
+            adata.obs = adata.obs.join(df, how="left")
+
+    # Optional: make columns categorical to save memory
+    if to_category:
+        # Check columns we expect to have added
+        for col in df.columns:
+            target_col = col
+            if not overwrite_existing and col in overlapping_cols:
+                target_col = f"{col}_imported"
+
+            if target_col in adata.obs:
+                # Convert object columns to categorical
+                if pd.api.types.is_object_dtype(adata.obs[target_col]):
+                     adata.obs[target_col] = adata.obs[target_col].astype("category")
+
+    # Quick sanity check
+    n_common = adata.obs_names.isin(df.index).sum()
+    print(f"Annotated {n_common}/{adata.n_obs} cells from CSV.")
+
 
 def plot_marker_genes_dict_on_embedding(
     adata,
     marker_genes: Dict[str, List[str] | str],
     basis: str = 'X_umap',
-    colormaps: Optional[List[str]] = None,
+    colormaps: Optional[List[str] | str | Any] = None,
     **pl_kwargs
 ) -> List[plt.Axes]:
     """
@@ -73,7 +679,8 @@ def plot_marker_genes_dict_on_embedding(
     basis
         The basis to plot on (e.g., 'X_umap', 'X_pca'). Defaults to 'X_umap'.
     colormaps
-        List of colormap names to cycle through for different tissues.
+        List of colormap names (or objects) to cycle through for different tissues.
+        Can also be a single colormap (string or object) which will be used for all.
     **pl_kwargs
         Additional keyword arguments passed to `sc.pl.embedding`.
         Defaults set: s=50, show=False, frameon=False.
@@ -121,8 +728,9 @@ def plot_marker_genes_dict_on_embedding(
             'Greens', 'Greens', 'YlOrBr', 'Greens',
             'RdPu', 'Oranges', 'PuRd', 'YlOrBr',
         ]
-
-    adjusted_colormaps = {cmap: adjust_colormap(cmap) for cmap in set(colormaps)}
+    elif not isinstance(colormaps, (list, tuple)):
+        # If a single colormap (str or object) is passed, wrap it in a list
+        colormaps = [colormaps]
 
     # 4. Default Kwargs
     pl_kwargs.setdefault('s', 50)
@@ -137,8 +745,30 @@ def plot_marker_genes_dict_on_embedding(
             print(f"Skipping {tissue}: No valid marker genes found.")
             continue
 
-        current_cmap_name = colormaps[idx_i % len(colormaps)]
-        current_cmap = adjusted_colormaps[current_cmap_name]
+        # Calculate module score
+        score_name = f"{tissue}_score"
+        # Check if use_raw is in pl_kwargs to pass to score_genes
+        use_raw = pl_kwargs.get("use_raw", None)
+
+        score_computed = False
+        try:
+            sc.tl.score_genes(
+                adata,
+                gene_list=genes,
+                score_name=score_name,
+                use_raw=use_raw
+            )
+            score_computed = True
+        except Exception as e:
+            print(f"Could not compute score for {tissue}: {e}")
+            score_name = None
+
+        current_cmap = colormaps[idx_i % len(colormaps)]
+
+        # Prepare items to plot
+        items_to_plot = list(genes)
+        if score_computed and score_name:
+            items_to_plot.append(score_name)
 
         # sc.pl.embedding returns a list of axes if show=False and multiple genes are plotted,
         # or a single axis if one gene. Or None if show=True.
@@ -146,10 +776,14 @@ def plot_marker_genes_dict_on_embedding(
         res = sc.pl.embedding(
             adata,
             basis=basis,
-            color=genes,
+            color=items_to_plot,
             cmap=current_cmap,
             **pl_kwargs
         )
+
+        # Remove the score column from obs
+        if score_computed and score_name in adata.obs:
+            del adata.obs[score_name]
 
         # Normalize result to a single axis or list of axes
         # Scanpy's embedding returns: Union[Axes, List[Axes], None]
@@ -506,14 +1140,31 @@ def morans_i_all_fast(
         Xb = Xb.toarray().astype(np.float32, copy=False) if sp.issparse(Xb) else np.asarray(Xb, dtype=np.float32)
         WXb = WXb.toarray().astype(np.float32, copy=False) if sp.issparse(WXb) else np.asarray(WXb, dtype=np.float32)
 
-        if center:
-            mub = mu[j0:j1][None, :]
-            Xc, WXc = (Xb - mub), (WXb - mub)  # because row-standardized W ⇒ W·1 = 1
-        else:
-            Xc, WXc = Xb, WXb
+        # Optimize memory usage by avoiding explicit centering:
+        # num = sum((Xb - mu) * (WXb - mu))
+        #     = sum(Xb * WXb) - mu * sum(WXb) - mu * sum(Xb) + n * mu^2
+        #     Since mu = sum(Xb) / n, sum(Xb) = n * mu
+        #     = sum(Xb * WXb) - mu * sum(WXb) - n * mu^2 + n * mu^2
+        #     = sum(Xb * WXb) - mu * sum(WXb)
+        #
+        # den = sum((Xb - mu)^2)
+        #     = sum(Xb^2) - 2 * mu * sum(Xb) + n * mu^2
+        #     = sum(Xb^2) - 2 * n * mu^2 + n * mu^2
+        #     = sum(Xb^2) - n * mu^2
 
-        num = (Xc * WXc).sum(axis=0, dtype=np.float64)
-        den = (Xc * Xc).sum(axis=0, dtype=np.float64)
+        # Use einsum to compute sum of products without allocating large intermediate array (Xb * WXb)
+        sum_cross = np.einsum('ij,ij->j', Xb, WXb, dtype=np.float64)
+        sum_sq = np.einsum('ij,ij->j', Xb, Xb, dtype=np.float64)
+
+        if center:
+            mub = mu[j0:j1]
+            sum_WXb = WXb.sum(axis=0, dtype=np.float64)
+            num = sum_cross - mub * sum_WXb
+            den = sum_sq - n * (mub ** 2)
+        else:
+            num = sum_cross
+            den = sum_sq
+
         den = np.where(den > 0, den, np.nan)
         I_vals[j0:j1] = nfac * (num / den).astype(np.float32)
 
@@ -524,29 +1175,6 @@ def morans_i_all_fast(
 
 
 # ------------------------- Archetype Tools -------------------------
-
-def _pearson_r_vectorized(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    """Calculates row-wise Pearson correlation between two 2D arrays A and B."""
-    if A.shape != B.shape:
-        raise ValueError("Input arrays A and B must have the same shape.")
-    if A.ndim != 2:
-        raise ValueError("Input arrays must be 2D.")
-
-    A_m = A - A.mean(axis=1, keepdims=True)
-    B_m = B - B.mean(axis=1, keepdims=True)
-
-    ssA = (A_m**2).sum(axis=1)
-    ssB = (B_m**2).sum(axis=1)
-
-    # Add epsilon to denominator to avoid division by zero
-    denom = np.sqrt(ssA * ssB) + 1e-9
-
-    dot_prod = (A_m * B_m).sum(axis=1)
-
-    corrs = dot_prod / denom
-    # Clip values to be strictly within [-1, 1]
-    return np.clip(corrs, -1.0, 1.0)
-
 
 def find_expression_archetypes(
     adata: sc.AnnData,
@@ -631,26 +1259,104 @@ def find_expression_archetypes(
 
     # 5. Perform hierarchical clustering on genes
     # hierarchy.ward computes the linkage matrix from the (n_genes, n_cells) matrix
-    linkage_matrix = hierarchy.ward(sdge)
+
+    # matth: Standardize genes (rows) to have mean 0 and var 1.
+    # This ensures that clustering is driven by expression PATTERN (correlation),
+    # not magnitude. Ward's method on Z-scored data is equivalent to clustering
+    # by Pearson correlation.
+
+    # Calculate means and stds for rows (genes)
+    gene_means = sdge.mean(axis=1, keepdims=True)
+    gene_stds = sdge.std(axis=1, keepdims=True)
+
+    # Avoid division by zero for constant genes
+    gene_stds[gene_stds == 0] = 1.0
+
+    sdge_z = (sdge - gene_means) / gene_stds
+
+    linkage_matrix = hierarchy.ward(sdge_z)
     clusters = hierarchy.fcluster(linkage_matrix,
                                   num_clusters,
                                   criterion='maxclust')
 
-    # 6. Calculate archetypes (average profile for each cluster)
-    archetypes = np.array([
-        np.mean(sdge[np.where(clusters == i)[0], :], axis=0)
-        for i in range(1, num_clusters + 1)
-    ])
+    # 6. Calculate archetypes (PC1 of Z-scored profiles for each cluster)
+    # matth: The "Mean Vector" is a heuristic archetype. The First Principal Component (PC1)
+    # provides the mathematically optimal consensus direction (minimizing squared orthogonal distance).
+    # This is more robust to variable gene loadings (correlation strengths) within a module.
 
-    # 7. Calculate Pearson correlations for each gene to its archetype (vectorized)
+    archetypes_list = []
 
-    # Create an (n_genes, n_cells) array where each row is the archetype
-    # corresponding to that gene's cluster.
-    # `clusters` is 1-based, so subtract 1 for 0-based indexing.
-    archetypes_per_gene = archetypes[clusters - 1]
+    for i in range(1, num_clusters + 1):
+        indices = np.where(clusters == i)[0]
+        if indices.size == 0:
+            # Should not happen with valid clustering, but handle gracefully
+            archetypes_list.append(np.zeros(sdge_z.shape[1], dtype=sdge_z.dtype))
+            continue
 
-    # Use the fast vectorized Pearson correlation
-    gene_corrs = _pearson_r_vectorized(sdge, archetypes_per_gene)
+        cluster_data = sdge_z[indices]  # (n_genes_in_cluster, n_cells)
+
+        if cluster_data.shape[0] == 1:
+            # Only one gene, archetype is the gene itself
+            arch = cluster_data[0]
+        else:
+            try:
+                # SVD of (M, N) matrix X = U S Vt
+                # The first right singular vector Vt[0] corresponds to the first Principal Component
+                # (eigenvector of X.T @ X) in the cell space, representing the dominant expression pattern.
+                _, _, Vt = svd(cluster_data, full_matrices=False, check_finite=False)
+                arch = Vt[0]
+
+                # Sign ambiguity: PC1 direction is arbitrary (+v or -v).
+                # We align it with the mean vector so that it positively correlates
+                # with the majority of the signal (assuming positive correlation cluster).
+                mean_vec = np.mean(cluster_data, axis=0)
+                # Use dot product to check alignment
+                if np.dot(arch, mean_vec) < 0:
+                    arch = -arch
+            except Exception as e:
+                warnings.warn(f"SVD failed for gene cluster {i}: {e}. Falling back to mean archetype.")
+                arch = np.mean(cluster_data, axis=0)
+
+        archetypes_list.append(arch)
+
+    archetypes = np.array(archetypes_list)
+
+    # 7. Calculate Pearson correlations for each gene to its archetype
+    # Optimized to use vectorized operations and avoid repeated allocations/computations.
+
+    # We reuse sdge_z which is already Z-scored (mean 0, std 1 over cells).
+    # Since sdge_z rows have mean 0, the archetype (mean of sdge_z rows) also has mean 0.
+    # Therefore, we can compute correlation as dot(gene, arch) / (norm(gene) * norm(arch)).
+    # norm(gene) = sqrt(n_cells) since gene is Z-scored.
+    # norm(arch) = sqrt(sum(arch**2)).
+
+    n_cells = sdge.shape[1]
+
+    # 1. Compute dot products between all genes and all archetypes
+    # Shape: (n_genes, n_clusters)
+    # Using float32 for matrix multiplication to match input precision
+    all_dots = np.dot(sdge_z, archetypes.T)
+
+    # 2. Compute norms of archetypes
+    # Shape: (n_clusters,)
+    arch_sq_sums = np.sum(archetypes**2, axis=1)
+    # The denominator for correlation is sqrt(sum(g^2) * sum(a^2))
+    # sum(g^2) = n_cells (for Z-scored data)
+    # So denom = sqrt(n_cells * sum(a^2))
+    arch_norms = np.sqrt(n_cells * arch_sq_sums) + 1e-9
+
+    # 3. Compute all correlations
+    # Shape: (n_genes, n_clusters)
+    all_corrs = all_dots / arch_norms[None, :]
+
+    # 4. Select the specific correlation for each gene based on its cluster assignment
+    # clusters is 1-based index from fcluster
+    cluster_indices = clusters - 1
+    gene_indices = np.arange(sdge.shape[0])
+
+    # Extract relevant correlation for each gene
+    gene_corrs = all_corrs[gene_indices, cluster_indices]
+    gene_corrs = np.clip(gene_corrs, -1.0, 1.0).astype(np.float32)
 
     print('done')
 
@@ -734,7 +1440,7 @@ def plot_archetype_summary(
         adata,
         basis=basis,
         color=profile_name,
-        title=f'Archetype {archetype_id} Score',
+        # title=f'Archetype {archetype_id} Score',
         **kwargs
     )
 
@@ -1120,6 +1826,9 @@ def tl_pacmap(
     # Filter out None values from kwargs to let defaults shine
     pmap_kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
+    # Extract 'init' if present, so it's not passed to the constructor
+    user_init = pmap_kwargs.pop("init", None)
+
     # Pass n_neighbors only if not None
     if n_neighbors is not None:
         pmap_kwargs["n_neighbors"] = n_neighbors
@@ -1132,8 +1841,23 @@ def tl_pacmap(
         **pmap_kwargs
     )
 
-    print("Fitting PaCMAP...")
-    X_embedded = embedder.fit_transform(X_in, init="pca") # init='pca' is often robust
+    # Determine initialization method
+    if user_init is not None:
+        init_method = user_init
+    else:
+        # Check feature count to determine initialization method
+        n_features = X_in.shape[1]
+        init_method = "pca"
+
+        if n_features <= 100:
+            warnings.warn(
+                f"Input data has {n_features} features, which is <= 100. "
+                "Switching initialization from 'pca' to 'random' to avoid potential issues."
+            )
+            init_method = "random"
+
+    print(f"Fitting PaCMAP using init='{init_method}'...")
+    X_embedded = embedder.fit_transform(X_in, init=init_method)
 
     # 4. Store Result
     adata.obsm["X_pacmap"] = X_embedded
@@ -1344,3 +2068,790 @@ def multiscale_coarsening(
         return results
     return None
 
+# ------------------------- Cell Type Annotation -------------------------
+
+def _normalize_symbol(s: str) -> str:
+    """Robust normalization for matching gene symbols."""
+    return str(s).strip().upper().replace("_", "-")
+
+
+def _dedupe_preserve_order(seq: Iterable) -> List:
+    """Deduplicate sequence while preserving original order."""
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+
+def _build_norm_map(adata: sc.AnnData, extra_cols: Optional[List[str]] = None) -> Dict[str, str]:
+    """
+    Build a mapping from normalized symbol -> actual var_name in `adata`.
+    Includes var_names and (if present) selected alternate symbol columns.
+    """
+    if extra_cols is None:
+        extra_cols = [
+            "gene_symbol", "gene_symbols", "gene_name", "Gene", "Symbol",
+            "feature_name", "features", "name"
+        ]
+    norm_map = {}
+
+    # 1) var_names / index
+    for var_name in adata.var_names:
+        norm_map[_normalize_symbol(var_name)] = var_name
+
+    # 2) alternate columns (row-aligned)
+    for col in extra_cols:
+        if col in adata.var.columns:
+            col_series = adata.var[col]
+            # tolerate non-string / NaN
+            for idx, val in col_series.items():
+                if val is None:
+                    continue
+                sval = str(val).strip()
+                if sval == "" or sval.lower() == "nan":
+                    continue
+                norm_map[_normalize_symbol(sval)] = str(idx)  # idx is var_name for that row
+
+    return norm_map
+
+
+def filter_markers_to_adata(
+    marker_genes: Dict[str, List[str]],
+    adata: sc.AnnData,
+    extra_cols: Optional[List[str]] = None,
+    verbose: bool = True
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, Dict[str, str]]]:
+    """
+    Filter marker genes to those present in `adata`.
+
+    Parameters
+    ----------
+    marker_genes
+        Dictionary of {cell_type: [gene_list]}.
+    adata
+        Annotated data matrix.
+    extra_cols
+        List of column names in `adata.var` to check for alternative gene symbols.
+    verbose
+        Whether to print a summary of removed/replaced markers.
+
+    Returns
+    -------
+    cleaned
+        Filtered marker dictionary with valid gene names.
+    removed
+        Dictionary of {cell_type: [removed_genes]}.
+    replacements
+        Dictionary of {cell_type: {original_gene: matched_var_name}}.
+    """
+    norm_map = _build_norm_map(adata, extra_cols=extra_cols)
+
+    cleaned = {}
+    removed = defaultdict(list)
+    replacements = defaultdict(dict)  # original -> matched var_name (if case/alias fix)
+
+    for tissue, genes in marker_genes.items():
+        keep = []
+        for g in genes:
+            key = _normalize_symbol(g)
+            hit = norm_map.get(key, None)
+            if hit is not None:
+                keep.append(hit)
+                if hit != g:
+                    replacements[tissue][g] = hit
+            else:
+                removed[tissue].append(g)
+
+        cleaned[tissue] = _dedupe_preserve_order(keep)
+
+    # prune empties from reporting dicts
+    removed = {k: v for k, v in removed.items() if len(v) > 0}
+    replacements = {k: v for k, v in replacements.items() if len(v) > 0}
+
+    if verbose:
+        total_removed = sum(len(v) for v in removed.values())
+        print(f"[marker filter] {total_removed} markers removed across {len(removed)} categories.")
+        if replacements:
+            print("[marker filter] Case/alias replacements (original -> adata var_name):")
+            for k, m in replacements.items():
+                print(f"  - {k}: {m}")
+        if removed:
+            print("[marker filter] Removed (not found in adata):")
+            for k, lost in removed.items():
+                print(f"  - {k} ({len(lost)}): {lost}")
+
+    return cleaned, removed, replacements
+
+
+def filter_markers_by_moran(
+    filtered: Dict[str, List[str]],
+    df_top_dict: pd.DataFrame,
+    *,
+    gene_col: str = "gene",
+    score_col: str = "I",
+    threshold: float = 0.10,
+    top_k: int = 5,
+    min_k: int = 3,
+    fallback_to_min_k: bool = True,
+    case_insensitive: bool = True,
+    verbose: bool = True,
+) -> Tuple[Dict[str, List[str]], Dict[str, Any]]:
+    """
+    From `filtered` (category -> [genes]) keep only genes found in `df_top_dict`
+    with Moran's I >= `threshold`, then return top_k by Moran's I (desc).
+    If fewer than `min_k` pass the threshold and `fallback_to_min_k` is True,
+    backfill with the best-scoring genes (even if below threshold) until min_k.
+
+    Returns
+    -------
+    filtered_by_moran : dict
+        {category: [genes]}
+    report : dict
+        Per-category details: missing_in_df, below_threshold, used_fallback
+    """
+
+    # Build score lookup
+    # If the DF has duplicates, keep the maximum score per gene.
+    df = df_top_dict[[gene_col, score_col]].copy()
+    # normalize gene key
+    def norm(x):
+        return str(x).upper() if case_insensitive else str(x)
+
+    df["_key"] = df[gene_col].map(norm)
+    # best score per gene
+    best = df.sort_values(score_col, ascending=False).drop_duplicates("_key")
+    score_map = dict(zip(best["_key"], best[score_col]))
+    # also map canonical name to return (use the 'gene' from DF if case differs)
+    canon_map = dict(zip(best["_key"], best[gene_col]))
+
+    filtered_by_moran = {}
+    report = {}
+
+    for cat, genes in filtered.items():
+        # normalize and gather scores
+        present = []
+        missing_in_df = []
+        for g in genes:
+            key = norm(g)
+            if key in score_map and pd.notna(score_map[key]):
+                # keep original symbol from filtered if it matches canon ignoring case,
+                # otherwise use DF's canon (helps unify case/alias differences)
+                out_name = g if norm(g) == norm(canon_map[key]) else canon_map[key]
+                present.append((out_name, float(score_map[key])))
+            else:
+                missing_in_df.append(g)
+
+        # sort by Moran's I desc
+        present.sort(key=lambda x: (x[1], x[0]), reverse=True)
+
+        # apply threshold
+        above = [(g, s) for (g, s) in present if s >= threshold]
+        below = [(g, s) for (g, s) in present if s < threshold]
+
+        picked = above[:top_k]
+        used_fallback = False
+        if len(picked) < min_k and fallback_to_min_k:
+            need = min_k - len(picked)
+            # take best from below to reach min_k (avoid duplicates)
+            for g, s in below:
+                if g not in [x[0] for x in picked]:
+                    picked.append((g, s))
+                    need -= 1
+                    if need == 0:
+                        break
+            used_fallback = True if len(above) < min_k else False
+
+        # store only gene names
+        filtered_by_moran[cat] = [g for g, _ in picked]
+
+        report[cat] = {
+            "n_input": len(genes),
+            "n_present_in_df": len(present),
+            "n_above_threshold": len(above),
+            "missing_in_df": missing_in_df,
+            "below_threshold": [g for g, _ in below],
+            "used_fallback": used_fallback,
+        }
+
+    if verbose:
+        total_missing = sum(len(r["missing_in_df"]) for r in report.values())
+        total_below = sum(len(r["below_threshold"]) for r in report.values())
+        print(f"[moran filter] threshold={threshold}, top_k={top_k}, min_k={min_k}")
+        print(f"[moran filter] Missing in df_top_dict: {total_missing} genes across categories.")
+        print(f"[moran filter] Below threshold: {total_below} genes across categories.")
+        fb_cats = [k for k, r in report.items() if r["used_fallback"]]
+        if fb_cats:
+            print(f"[moran filter] Fallback to min_k used for: {fb_cats}")
+
+    return filtered_by_moran, report
+# ------------------------- Annotation Core -------------------------
+
+def score_celltypes(
+    adata: sc.AnnData,
+    cell_type_markers_dict: Dict[str, Sequence[str]],
+    layer: Optional[str] = None,
+    use_raw: bool = True,
+    min_markers: int = 1,
+) -> pd.DataFrame:
+    """
+    Compute per-cell scores for each cell type using sc.tl.score_genes.
+    Notes:
+      - If fewer than `min_markers` genes are present, that cell type's score is NaN.
+    """
+
+    # Determine gene universe for presence/missing checks
+    if use_raw and getattr(adata, "raw", None) is not None and adata.raw is not None:
+        gene_universe = set(map(str, adata.raw.var_names))
+    else:
+        gene_universe = set(map(str, adata.var_names))
+
+    scores = {}
+    missing_report = {}
+    tmp_cols = []
+
+    for ct, markers in cell_type_markers_dict.items():
+        markers = [str(g) for g in markers]
+        present = [g for g in markers if g in gene_universe]
+        missing = [g for g in markers if g not in gene_universe]
+        missing_report[ct] = missing
+
+        if len(present) < min_markers:
+            scores[ct] = np.full(adata.n_obs, np.nan, dtype=float)
+            continue
+
+        tmp_name = f"__ctscore__{ct}__{uuid4().hex}"
+        sc.tl.score_genes(
+            adata,
+            gene_list=present,
+            score_name=tmp_name,
+            use_raw=use_raw,
+            layer=layer,
+        )
+        scores[ct] = adata.obs[tmp_name].to_numpy()
+        tmp_cols.append(tmp_name)
+
+    # Assemble result DF and clean up temp columns
+    df = pd.DataFrame(scores, index=adata.obs_names)
+    if tmp_cols:
+        adata.obs.drop(columns=[c for c in tmp_cols if c in adata.obs.columns], inplace=True, errors="ignore")
+
+    # Merge missing-gene report into .uns
+    adata.uns.setdefault("marker_missing_report", {})
+    adata.uns["marker_missing_report"].update(missing_report)
+
+    return df
+
+
+def annotate_clusters_by_markers(
+    adata: sc.AnnData,
+    cluster_key: str,
+    cell_type_markers_dict: Optional[Dict[str, Sequence[str]]] = None,
+    layer: Optional[str] = None,
+    use_raw: bool = True,
+    beta: float = None,  # Deprecated
+    min_markers: int = 1,
+    normalize_scores: bool = True,
+    write_to_obs: bool = True,
+    obs_prefix: Optional[str] = None,
+    scores: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """
+    Annotate clusters based on cell type scores using a probabilistic confidence metric.
+
+    Uses the Probability of Superiority (Common Language Effect Size) to estimate
+    the confidence that the top assigned cell type is truly separated from the runner-up,
+    accounting for the local variance of scores within the cluster.
+
+    If `scores` is provided, it must be a DataFrame with index == adata.obs_names
+    and columns == cell types. Otherwise, scores are computed once here.
+
+    Parameters:
+    - normalize_scores: Whether to apply robust normalization (median/MAD) to the scores. Default is True.
+      Formula: (x - median(x)) / (median(|x - median(x)|) + 1e-8)
+    """
+    if beta is not None:
+        warnings.warn("The `beta` parameter is deprecated and ignored. `annotate_clusters_by_markers` now uses a parameter-free probabilistic confidence score.", DeprecationWarning, stacklevel=2)
+
+    # Get per-cell scores S only if not provided
+    if scores is None:
+        if cell_type_markers_dict is None:
+            raise ValueError("Provide `cell_type_markers_dict` when `scores` is None.")
+        S = score_celltypes(
+            adata,
+            cell_type_markers_dict,
+            layer=layer,
+            use_raw=use_raw,
+            min_markers=min_markers,
+        )
+    else:
+        S = scores
+        # Align/validate
+        if not S.index.equals(adata.obs_names):
+            S = S.reindex(adata.obs_names)
+
+    if normalize_scores:
+        if scores is not None:
+             warnings.warn("Scores provided and normalize_scores=True. This may result in double normalization.")
+        # NORMALIZE SCORES (Robust Median/MAD)
+        S = S.apply(lambda x: (x - np.nanmedian(x)) / (np.nanmedian(np.abs(x - np.nanmedian(x))) + 1e-8))
+
+    cts = list(S.columns)
+    clabs = adata.obs[cluster_key].astype(str)
+
+    # Compute per-cluster medians for all cell types in one shot
+    med_by_cluster = S.groupby(clabs).median()  # rows=clusters, cols=cell types
+
+    # Per-cell best type once (used for consensus_frac)
+    arr = S.to_numpy()
+    all_nan = np.all(np.isnan(arr), axis=1)
+    # nanargmax fails on all-NaN rows, so safe compute:
+    argmax = np.zeros(arr.shape[0], dtype=int)
+    argmax[~all_nan] = np.nanargmax(arr[~all_nan], axis=1)
+    argmax[all_nan] = -1
+    cell_best = np.array([cts[j] if j >= 0 else None for j in argmax], dtype=object)
+
+    rows = []
+    per_cluster_label, per_cluster_softmaxp, per_cluster_unc = {}, {}, {}
+
+    for g, med in med_by_cluster.iterrows():
+        order = med.sort_values(ascending=False)
+
+        if order.size == 0 or np.all(~np.isfinite(order.values)):
+            top1_ct, top1, top2 = None, np.nan, np.nan
+            margin = np.nan
+            consensus_frac = np.nan
+            softmax_p = np.nan
+            uncertainty = np.nan
+        else:
+            top1_ct = order.index[0]
+            top1 = order.iloc[0]
+            top2 = order.iloc[1] if order.size > 1 else np.nan
+
+            # matth: Calculate separation metrics using local distribution
+            mask = (clabs == g).values
+            winners = cell_best[mask]
+
+            # consensus among cell-wise winners within the cluster
+            consensus_frac = np.mean(winners == top1_ct) if winners.size else np.nan
+
+            if top1_ct is not None and top2 is not None and np.isfinite(top2) and np.isfinite(top1):
+                # We have at least two valid candidates to compare
+
+                # Extract scores for this cluster
+                # We use the S dataframe (which might be normalized or raw, doesn't matter for t-stat logic as long as linear)
+                cluster_scores = S.loc[mask]
+
+                s1 = cluster_scores[top1_ct].values
+                # Use the name of the second best median
+                top2_ct = order.index[1]
+                s2 = cluster_scores[top2_ct].values
+
+                # Pairwise difference per cell (handles correlation)
+                # s1 and s2 are aligned (same cells)
+                diff = s1 - s2
+
+                # Remove NaNs if any (score_genes shouldn't produce mixed NaNs usually, but safe to check)
+                valid_diff = diff[np.isfinite(diff)]
+
+                if valid_diff.size > 1:
+                    mu_d = np.mean(valid_diff)
+                    std_d = np.std(valid_diff, ddof=1) # Sample std
+
+                    if std_d > 1e-12:
+                        # Z-score of the mean difference being > 0 ?
+                        # No, we want P(random cell score 1 > score 2).
+                        # Assuming diff is Normal(mu, sigma), P(diff > 0) = 1 - CDF(0) = CDF(mu/sigma)
+                        z = mu_d / std_d
+                        softmax_p = norm.cdf(z)
+                    elif mu_d > 0:
+                        softmax_p = 1.0
+                    else:
+                        softmax_p = 0.5 # Indistinguishable or worse
+                else:
+                    softmax_p = 0.5 # Not enough data
+
+                margin = top1 - top2
+            else:
+                # Only one valid type or no valid comparison
+                margin = np.nan
+                if top1_ct is not None and np.isfinite(top1):
+                    softmax_p = 1.0 # Only one candidate
+                else:
+                    softmax_p = np.nan
+
+            # Uncertainty combines ambiguity (softmax_p) and heterogeneity (consensus_frac)
+            # softmax_p here is "Confidence of Superiority"
+            uncertainty = 1.0 - (softmax_p * consensus_frac) if (np.isfinite(softmax_p) and np.isfinite(consensus_frac)) else np.nan
+
+        rows.append({
+            "cluster": g,
+            "assigned_cell_type": top1_ct,
+            "top1_score": top1,
+            "top2_score": top2,
+            "margin": margin,
+            "consensus_frac": consensus_frac,
+            "softmax_p": softmax_p, # Kept name for compatibility, but represents P(Superiority)
+            "uncertainty": uncertainty,
+            **{f"median_{ct}": med.get(ct, np.nan) for ct in cts},
+        })
+        per_cluster_label[g] = top1_ct
+        per_cluster_softmaxp[g] = softmax_p
+        per_cluster_unc[g] = uncertainty
+
+    cluster_df = pd.DataFrame(rows).set_index("cluster").sort_index()
+
+    if write_to_obs:
+        prefix = obs_prefix or cluster_key
+        adata.obs[f"{prefix}_cell_type"] = clabs.map(per_cluster_label).astype("category")
+        adata.obs[f"{prefix}_ctype_softmaxp"] = clabs.map(per_cluster_softmaxp).astype(float)
+        adata.obs[f"{prefix}_ctype_uncertainty"] = clabs.map(per_cluster_unc).astype(float)
+
+    return cluster_df
+
+
+def sweep_leiden_and_annotate(
+    adata: sc.AnnData,
+    cell_type_markers_dict: Dict[str, Sequence[str]],
+    resolutions: Sequence[float] = (0.2, 0.5, 1.0, 2.0, 5.0),
+    neighbors_already_computed: bool = True,
+    random_state: int = 0,
+    layer: Optional[str] = None,
+    use_raw: bool = True,
+    normalize_scores: bool = True,
+    min_markers: int = 1,
+    beta: float = None, # Deprecated
+    leiden_key_prefix: str = "leiden",
+) -> Dict[str, Any]:
+    """
+    For a fixed graph (recommended), run Leiden at multiple `resolutions`,
+    annotate clusters at each resolution, and compute agreement between
+    per-cell assigned cell types across adjacent resolutions.
+
+    Scores are computed ONCE and reused across all resolutions.
+    """
+    if not neighbors_already_computed and "connectivities" not in adata.obsp:
+        raise ValueError("Please compute neighbors once (sc.pp.neighbors) before sweeping or ensure they exist.")
+
+    # --- compute once ---
+    S = score_celltypes(
+        adata,
+        cell_type_markers_dict,
+        layer=layer,
+        use_raw=use_raw,
+        min_markers=min_markers,
+    )
+
+    if normalize_scores:
+        S = S.apply(lambda x: (x - np.nanmedian(x)) / (np.nanmedian(np.abs(x - np.nanmedian(x))) + 1e-8))
+
+    res_list = [float(r) for r in resolutions]
+    cluster_annotations = {}
+    celltype_labels = {}
+
+    for r in res_list:
+        key = f"{leiden_key_prefix}_{r:.1f}"
+        # We check if leiden key exists or compute it if missing?
+        # The user snippet raised ValueError. I will modify to compute if missing for convenience, or match intent.
+        # "sweep_leiden" implies it might run it.
+        # The user's snippet raised: "Please compute leiden before sweeping." if key missing.
+        # But earlier "multiscale_coarsening" computes it.
+        # Let's compute it if missing, as it is helpful.
+        if key not in adata.obs:
+            print(f"Computing Leiden resolution {r:.1f}...")
+            sc.tl.leiden(adata, resolution=r, key_added=key, random_state=random_state)
+
+        cdf = annotate_clusters_by_markers(
+            adata,
+            cluster_key=key,
+            cell_type_markers_dict=None,  # not needed since we pass scores
+            layer=layer,
+            use_raw=use_raw,
+            normalize_scores=False, # Already normalized if requested
+            min_markers=min_markers,
+            beta=beta,
+            write_to_obs=True,
+            obs_prefix=key,
+            scores=S,  # <- reuse
+        )
+        cluster_annotations[r] = cdf
+        celltype_labels[r] = adata.obs[f"{key}_cell_type"].astype(str).copy()
+
+    # ARI across resolutions for per-cell TYPE labels (not cluster IDs)
+    R = np.zeros((len(res_list), len(res_list)))
+    for i, ri in enumerate(res_list):
+        for j, rj in enumerate(res_list):
+            R[i, j] = adjusted_rand_score(celltype_labels[ri], celltype_labels[rj])
+
+    all_pair_ARI = pd.DataFrame(R, index=res_list, columns=res_list)
+
+    # Adjacent pairs
+    rows = []
+    for i in range(len(res_list) - 1):
+        ri, rj = res_list[i], res_list[i + 1]
+        ari = adjusted_rand_score(celltype_labels[ri], celltype_labels[rj])
+        rows.append({"res_i": ri, "res_j": rj, "ARI": ari})
+    adjacent_ARI = pd.DataFrame(rows)
+
+    return {
+        "cluster_annotations": cluster_annotations,
+        "celltype_labels": celltype_labels,
+        "adjacent_ARI": adjacent_ARI,
+        "all_pair_ARI": all_pair_ARI,
+    }
+# ------------------------- Visualization & Export -------------------------
+
+def plot_celltype_ari(all_pair_ARI: pd.DataFrame) -> Tuple[plt.Figure, plt.Axes]:
+    """
+    Plot ARI heatmap using standard matplotlib.
+    """
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(all_pair_ARI, cmap="viridis", vmin=0, vmax=1)
+
+    # We want to show the ticks as the resolutions
+    res_labels = [str(r) for r in all_pair_ARI.index]
+
+    ax.set_xticks(np.arange(len(res_labels)))
+    ax.set_yticks(np.arange(len(res_labels)))
+    ax.set_xticklabels(res_labels)
+    ax.set_yticklabels(res_labels)
+
+    ax.set_xlabel("resolution")
+    ax.set_ylabel("resolution")
+    ax.set_title("ARI of per-cell TYPE labels across resolutions")
+
+    # Add colorbar
+    fig.colorbar(im, ax=ax)
+
+    plt.tight_layout()
+    return fig, ax
+
+
+def barplot_cluster_uncertainty(cluster_df: pd.DataFrame, top_k: int = 25) -> Tuple[plt.Figure, plt.Axes]:
+    """
+    Bar plot of cluster uncertainty.
+    """
+    df = cluster_df.sort_values("uncertainty").head(top_k)
+    fig, ax = plt.subplots(figsize=(7, 3 + 0.25 * len(df)))
+    ax.barh(df.index.astype(str), df["uncertainty"], color="#4444aa")
+    ax.invert_yaxis()
+    ax.set_xlabel("Uncertainty (lower is better)")
+    ax.set_ylabel("Cluster")
+    ax.set_title("Cluster annotation uncertainty")
+    plt.tight_layout()
+    return fig, ax
+
+
+def export_cell_type_annotations(
+    adata: sc.AnnData,
+    annotation_key: str,
+    output_path: Optional[str] = None,
+    color_key: Optional[str] = None
+) -> None:
+    """
+    Export cell type annotations to CSV.
+    """
+    from pathlib import Path
+
+    # 1. Define your column names
+    if color_key is None:
+        color_key = annotation_key + '_colors'
+
+    # 2. Create a temporary dataframe with the cell type
+    # We explicitly copy the index to a column to ensure the Barcode is preserved
+    if annotation_key not in adata.obs:
+         raise ValueError(f"Annotation key '{annotation_key}' not found in adata.obs")
+
+    df_export = adata.obs[[annotation_key]].copy()
+
+    # 3. Map the colors from adata.uns to the individual cells
+    # (Scanpy stores colors in .uns in the same order as the categories)
+    if color_key in adata.uns:
+        # Create a dictionary: { 'T-cell': '#1f77b4', 'B-cell': '#ff7f0e', ... }
+        categories = adata.obs[annotation_key].cat.categories
+        colors = adata.uns[color_key]
+        if len(categories) == len(colors):
+            category_map = dict(zip(categories, colors))
+            # Map this to a new column in the dataframe
+            df_export[color_key] = df_export[annotation_key].map(category_map)
+        else:
+            print(f"Warning: Number of colors in '{color_key}' does not match categories in '{annotation_key}'. Colors not exported.")
+    else:
+        print(f"Warning: '{color_key}' not found in adata.uns. Colors not exported.")
+
+    # 4. Rename the index to 'Cell_ID' for clarity
+    df_export.index.name = 'Cell_ID'
+
+    # 5. Export to CSV
+    if output_path is None:
+        out_file = Path('cell_type_export.csv')
+    else:
+        out_file = Path(output_path)
+        if not out_file.suffix.lower() == '.csv':
+            out_file = out_file.with_suffix('.csv')
+
+    print(f'Saving at {out_file.resolve()}')
+    df_export.to_csv(out_file)
+
+    # Verify the output
+    print(df_export.head())
+
+def plot_volcano_adata(
+    adata: sc.AnnData,
+    rank_genes_key: str,
+    group: str,
+    pval_cutoff: float = 0.05,
+    logfc_cutoff: float = 1.0,
+    label_top_n: int = 20,
+    plot_positive_only: bool = False,
+    figsize: tuple = (6, 5),
+    title: str = None,
+    ax=None,
+    **kwargs
+) -> plt.Axes:
+    """
+    Generates a volcano plot from differential gene expression results
+    stored by scanpy's rank_genes_groups.
+
+    Args:
+        adata (AnnData): The annotated data matrix.
+        rank_genes_key (str): The key in `adata.uns` where the rank_genes_groups results are stored.
+        group (str): The name of the group to plot from the rank_genes_groups results.
+        pval_cutoff (float, optional): The adjusted p-value cutoff for significance. Defaults to 0.05.
+        logfc_cutoff (float, optional): The log2 fold change cutoff for significance. Defaults to 1.0.
+        label_top_n (int, optional): The number of top genes to label based on p-value AND log-fold change.
+                                     The final number of labels can be up to 2 * label_top_n. Defaults to 20.
+        plot_positive_only (bool, optional): If True, highlights and labels only genes with positive
+                                             log-fold change (upregulated). If False, highlights
+                                             both up- and down-regulated significant genes. Defaults to False.
+        figsize (tuple, optional): The size of the figure. Defaults to (6, 5).
+        title (str, optional): The title for the plot. If None, a default title is generated. Defaults to None.
+        ax (matplotlib.axes.Axes, optional): An existing matplotlib axes object to plot on.
+                                             If None, a new figure and axes are created. Defaults to None.
+        **kwargs: Additional keyword arguments passed to `adjust_text`.
+
+    Returns:
+        matplotlib.axes.Axes: The matplotlib axes object containing the plot.
+
+    Notes:
+        This function requires the 'adjustText' library to be installed
+        (`pip install adjustText`) for non-overlapping gene labels.
+    """
+    if adjust_text is None:
+        raise ImportError(
+            "The 'adjustText' library is required for this function. "
+            "Please install it using `pip install adjustText`."
+        )
+
+    # --- 1. Data Extraction ---
+    try:
+        comparison_uns = adata.uns[rank_genes_key]
+        logfoldchanges = comparison_uns['logfoldchanges'][group]
+        pvals_adj = comparison_uns['pvals_adj'][group]
+        names = comparison_uns['names'][group]
+    except KeyError:
+        print(f"Error: Could not find rank_genes_key='{rank_genes_key}' or group='{group}' in adata.uns.")
+        return
+
+    # --- 2. Data Preparation ---
+    # Calculate -log10 of p-values, handling p-values of 0
+    with np.errstate(divide='ignore'):
+        neg_log10_pvals = -np.log10(pvals_adj)
+    # Replace infinite values with a value slightly larger than the max finite value
+    if np.isinf(neg_log10_pvals).any():
+        neg_log10_pvals[np.isinf(neg_log10_pvals)] = np.nanmax(neg_log10_pvals[np.isfinite(neg_log10_pvals)]) * 1.1
+
+    # --- 3. Plotting ---
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+
+    # Scatter plot for all genes (non-significant)
+    ax.scatter(logfoldchanges, neg_log10_pvals, c='gray', alpha=0.5, label='Non-significant')
+
+    # --- 4. Highlight Significant Genes ---
+    if plot_positive_only:
+        significant_idx = (pvals_adj < pval_cutoff) & (logfoldchanges > logfc_cutoff)
+    else:
+        significant_idx = (pvals_adj < pval_cutoff) & (np.abs(logfoldchanges) > logfc_cutoff)
+
+    # Scatter plot for significant genes
+    ax.scatter(
+        logfoldchanges[significant_idx],
+        neg_log10_pvals[significant_idx],
+        c='red',
+        alpha=0.8,
+        label='Significant'
+    )
+
+    # --- 5. Add Threshold Lines ---
+    ax.axhline(-np.log10(pval_cutoff), color='black', linestyle='--', linewidth=0.8)
+    ax.axvline(logfc_cutoff, color='black', linestyle='--', linewidth=0.8)
+    if not plot_positive_only:
+        ax.axvline(-logfc_cutoff, color='black', linestyle='--', linewidth=0.8)
+
+    # --- 6. Annotate Top Genes ---
+    # Get significant genes' data
+    significant_names = names[significant_idx]
+    significant_lfc = logfoldchanges[significant_idx]
+    significant_pvals = neg_log10_pvals[significant_idx]
+
+    # Get top n by p-value
+    top_by_pval_indices = np.argsort(-significant_pvals)[:label_top_n]
+
+    # Get top n by absolute log fold change
+    top_by_lfc_indices = np.argsort(-np.abs(significant_lfc))[:label_top_n]
+
+    # Combine indices and remove duplicates
+    top_indices = np.union1d(top_by_pval_indices, top_by_lfc_indices)
+
+    # Create text labels, adjusting horizontal alignment based on position
+    texts = []
+    for i in top_indices:
+        ha = 'left' if significant_lfc[i] > 0 else 'right'
+        texts.append(ax.text(
+            significant_lfc[i],
+            significant_pvals[i],
+            significant_names[i],
+            fontsize=8,
+            ha=ha
+        ))
+
+    # Use adjust_text to prevent labels from overlapping
+    # Default values for adjust_text
+    adjust_text_kwargs = dict(
+        force_text=(0.5, 10.0), # stonger vertical push
+        force_points=(0.2, 0.2),
+        expand_text=(1.5, 5.5),
+        expand_points=(1.0, 1.0),
+        lim=100_000,
+        arrowprops=dict(
+            arrowstyle='-',
+            color='gray',
+            lw=0.5,
+            alpha=0.8 # Make arrows slightly transparent
+        )
+    )
+    # Update with any user-provided kwargs
+    adjust_text_kwargs.update(kwargs)
+
+    adjust_text(
+            texts,
+            ax=ax,
+            **adjust_text_kwargs
+        )
+
+    # --- 7. Final Touches ---
+    ax.set_xlabel('Log2 Fold Change')
+    ax.set_ylabel('-Log10 Adjusted P-value')
+    if title is None:
+        ax.set_title(f'Volcano Plot: {group} vs. All')
+    else:
+        ax.set_title(title)
+    ax.legend()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    return ax
