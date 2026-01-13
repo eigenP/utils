@@ -599,7 +599,7 @@ def import_obs_to_adata_from_csv(
     index_col: int | str = 0,
     sep: Optional[str] = None,
     engine: str = "python",
-    overwrite_existing: bool = True,
+    overwrite_existing: bool = False,
     to_category: bool = True,
 ) -> None:
     """
