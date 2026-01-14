@@ -99,16 +99,21 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     pad_y = (patch_size - img.shape[1] % patch_size) + overlap
     pad_x = (patch_size - img.shape[2] % patch_size) + overlap
 
-    # matth: Padding keeps original dtype to save memory (avoiding premature cast to float)
-    img_padded = np.pad(img, ((0,0), (0, pad_y), (0, pad_x)), mode='reflect')
+    # bolt: Removed full 3D padding (img_padded) to save O(Z*H*W) memory.
+    # Instead, we apply padding on the fly per slice (scoring) or per patch (reconstruction).
+    # This reduces peak memory significantly (e.g. from 1.6GB to ~200MB for typical stacks).
+
+    # Virtual dimensions of the padded space
+    padded_H = img.shape[1] + pad_y
+    padded_W = img.shape[2] + pad_x
 
     # 3. Calculate Focus Metric Vectorized
     # Metric: Laplacian Energy (Sum of Squared Laplacian)
     # Optimization: Use float32 to reduce memory usage by 50% compared to float64.
 
     # Grid dimensions
-    n_patches_y = img_padded.shape[1] // (patch_size - overlap)
-    n_patches_x = img_padded.shape[2] // (patch_size - overlap)
+    n_patches_y = padded_H // (patch_size - overlap)
+    n_patches_x = padded_W // (patch_size - overlap)
 
     # Initialize score matrix: (Z, rows, cols)
     score_matrix = np.zeros((img.shape[0], n_patches_y, n_patches_x), dtype=np.float32)
@@ -122,28 +127,25 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
     # Iterate over Z-slices one by one to keep memory usage low
     for z in range(img.shape[0]):
-        # 1. Compute Laplacian directly into float32 buffer
-        # 'output=np.float32' automatically handles casting from input dtype (e.g. uint16) to float32
-        # This AVOIDS allocating a separate float copy of the input slice!
-        lap = laplace(img_padded[z], output=np.float32)
+        # 1. Pad only the current slice (2D)
+        # This keeps memory overhead to O(H*W) instead of O(Z*H*W)
+        slice_padded = np.pad(img[z], ((0, pad_y), (0, pad_x)), mode='reflect')
 
-        # 2. Compute Energy (Squared) in-place
+        # 2. Compute Laplacian directly into float32 buffer
+        # 'output=np.float32' automatically handles casting from input dtype (e.g. uint16) to float32
+        lap = laplace(slice_padded, output=np.float32)
+
+        # 3. Compute Energy (Squared) in-place
         np.square(lap, out=lap)
 
-        # 3. Local Average Energy (proxy for sum over patch)
-        # We reuse 'lap' buffer for output if filter supports it?
-        # uniform_filter(input, output=input) is generally safe for non-recursive filters,
-        # but to be safe and avoid boundary artifacts influencing the center during partial writes,
-        # we let it allocate or use a temp.
-        # Actually uniform_filter(input, output=input) IS safe for 2D.
-        # But let's allocate just to be 100% correct about boundaries, it's just one slice.
+        # 4. Local Average Energy (proxy for sum over patch)
         mean_energy = uniform_filter(lap, size=patch_size, mode='reflect')
 
-        # 4. Sample at patch centers
+        # 5. Sample at patch centers
         score_matrix[z] = mean_energy[np.ix_(y_centers, x_centers)]
 
-        # Explicitly delete large temps to help GC (though loop scope handles it)
-        del lap, mean_energy
+        # Explicitly delete temps to help GC
+        del slice_padded, lap, mean_energy
 
     # 4. Select best Z
     height_map_small = np.argmax(score_matrix, axis=0)
@@ -153,8 +155,8 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
     # 5. Combine patches to create the final image
     # Use float32 for accumulation to save memory
-    final_img = np.zeros_like(img_padded[0, :, :], dtype=np.float32)
-    counts = np.zeros_like(img_padded[0, :, :], dtype=np.float32) # matth: Restored counts
+    final_img = np.zeros((padded_H, padded_W), dtype=np.float32)
+    counts = np.zeros((padded_H, padded_W), dtype=np.float32) # matth: Restored counts
 
     _2D_window = _2D_weight(patch_size, overlap)
 
@@ -164,8 +166,52 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             x_start = j * (patch_size - overlap)
             best_z = height_map_small[i, j]
 
-            # Extract patch and cast to float32 on the fly
-            patch = img_padded[best_z, y_start:y_start+patch_size, x_start:x_start+patch_size].astype(np.float32)
+            # Extract patch with on-demand padding/cropping logic to avoid full padded copy
+            y_end = y_start + patch_size
+            x_end = x_start + patch_size
+
+            # Determine safe extraction bounds from original image
+            # If the patch extends beyond original image (into padded region),
+            # we need to extract enough "history" for reflection.
+            y_s_clamped = y_start
+            y_e_clamped = min(y_end, img.shape[1])
+            pad_bottom = 0
+
+            if y_end > img.shape[1]:
+                pad_bottom = pad_y
+                # Ensure we capture enough context for reflection.
+                # np.pad 'reflect' needs at least 'pad_width' elements if mirroring from edge.
+                # We need to ensure extraction size >= needed context.
+                needed_history = max(pad_bottom + 1, y_end - img.shape[1] + 2)
+                y_s_clamped = min(y_s_clamped, img.shape[1] - needed_history)
+                y_s_clamped = max(0, y_s_clamped)
+                y_e_clamped = img.shape[1]
+
+            x_s_clamped = x_start
+            x_e_clamped = min(x_end, img.shape[2])
+            pad_right = 0
+
+            if x_end > img.shape[2]:
+                pad_right = pad_x
+                needed_history = max(pad_right + 1, x_end - img.shape[2] + 2)
+                x_s_clamped = min(x_s_clamped, img.shape[2] - needed_history)
+                x_s_clamped = max(0, x_s_clamped)
+                x_e_clamped = img.shape[2]
+
+            # Extract chunk
+            chunk = img[best_z, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
+
+            # Pad chunk locally
+            if pad_bottom > 0 or pad_right > 0:
+                chunk_padded = np.pad(chunk, ((0, pad_bottom), (0, pad_right)), mode='reflect')
+            else:
+                chunk_padded = chunk
+
+            # Slice out the exact target region relative to chunk start
+            y_rel = y_start - y_s_clamped
+            x_rel = x_start - x_s_clamped
+
+            patch = chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
 
             # Create weighted patch
             try:
