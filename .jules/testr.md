@@ -24,3 +24,9 @@
 - **Invariant:** Indistinguishable distributions yield $P \approx 0.5$.
 - **Calibration:** Controlled Gaussian overlap ($N(1,1)$ vs $N(0,1)$) yields $P \approx 0.76$, matching the analytical solution $\Phi(\frac{\Delta \mu}{\sqrt{\sigma_1^2 + \sigma_2^2}})$.
 **Action:** This confirms that the "uncertainty" metric is a statistically valid probability derived from the distribution of scores, not an arbitrary heuristic. Future probabilistic classifiers should always be tested against analytical distributions to verify calibration.
+
+## 2025-02-23 - Focus Stacking Verification
+**Learning:** Verified `best_focus_image` using a "Checkerboard Depth Field".
+- **Invariant:** The focus map accurately recovers a discrete step function (checkerboard) of indices from a noisy 3D stack, proving the Laplacian energy metric correctly identifies high-frequency texture.
+- **Signal Preservation:** The algorithm preserves the original texture variance (Output Std $\approx$ Input Std) and strongly rejects blurred versions (MSE Ratio > 40), confirming that the blending process does not wash out signals.
+**Action:** Future tests for image fusion or reconstruction algorithms should utilize synthetic "depth fields" with known ground-truth index maps. This decouples the verification of the decision logic (selection) from the reconstruction quality (blending).
