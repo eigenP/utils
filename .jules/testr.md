@@ -17,3 +17,10 @@
 - **Statistics:** Random noise converges to E[I] = -1/(n-1) as expected under the null hypothesis.
 - **Optimization:** The memory-optimized algebraic expansion is numerically equivalent to the naive definition.
 **Action:** These invariants confirm both the statistical correctness and the implementation stability of the fast Moran's I calculator. Future spatial statistic tests should leverage known spectral graph theory properties.
+
+## 2025-02-23 - Annotation Confidence Statistics
+**Learning:** Verified that `annotate_clusters_by_markers` correctly implements the "Probability of Superiority" metric ($P(X > Y)$) for cell type assignment.
+- **Invariant:** Perfect separation yields $P=1.0$.
+- **Invariant:** Indistinguishable distributions yield $P \approx 0.5$.
+- **Calibration:** Controlled Gaussian overlap ($N(1,1)$ vs $N(0,1)$) yields $P \approx 0.76$, matching the analytical solution $\Phi(\frac{\Delta \mu}{\sqrt{\sigma_1^2 + \sigma_2^2}})$.
+**Action:** This confirms that the "uncertainty" metric is a statistically valid probability derived from the distribution of scores, not an arbitrary heuristic. Future probabilistic classifiers should always be tested against analytical distributions to verify calibration.
