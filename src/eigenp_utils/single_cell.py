@@ -1071,6 +1071,35 @@ def _build_dedup_aggregator(
     return uniq, G
 
 
+def _compute_moran_moments(W: sp.csr_matrix) -> Tuple[float, float, float]:
+    """
+    Compute S0, S1, S2 for variance of Moran's I.
+    S0 = sum(wij)
+    S1 = 0.5 * sum((wij + wji)^2)
+    S2 = sum((sum_j wij + sum_j wji)^2)
+    """
+    # W is row-standardized, but not necessarily symmetric.
+    # W should be float32/64.
+
+    # S0
+    S0 = float(W.sum())
+
+    # S1: 0.5 * sum((W + W.T)^2)
+    # Note: (W + W.T) is efficient for sparse
+    Wt = W.transpose()
+    T = (W + Wt)
+    S1 = float(T.power(2).sum()) / 2.0
+
+    # S2: sum((RowSum + ColSum)^2)
+    # Row sums
+    R = np.asarray(W.sum(axis=1)).flatten()
+    # Col sums
+    C = np.asarray(W.sum(axis=0)).flatten()
+    S2 = float(np.sum((R + C)**2))
+
+    return S0, S1, S2
+
+
 def morans_i_all_fast(
     adata,
     *,
@@ -1083,9 +1112,9 @@ def morans_i_all_fast(
     center: bool = True,
 ) -> pd.DataFrame:
     """
-    Fast Moran's I for all genes (no permutation p-values).
-    Uses the identity I = (n/S0) * (x^T W x) / (x^T x), with row-standardized W.
-    Returns DataFrame ['gene','I'] sorted by I desc.
+    Fast Moran's I for all genes with analytical p-values (randomization null).
+    Uses the identity I = (n/S0) * (x^T W x) / (x^T x).
+    Returns DataFrame ['gene','I', 'pval_z', 'z_score'] sorted by I desc.
     """
     if W_rowstd is None:
         W_rowstd = build_rowstd_connectivities(adata, key=weights_key)
@@ -1118,8 +1147,35 @@ def morans_i_all_fast(
         X = np.asarray(X, dtype=dtype)
 
     n = X.shape[0]
-    S0 = getattr(W, "sum_cache", None) or float(W.sum())
-    nfac = (n / S0) if S0 > 0 else 0.0
+
+    if n <= 3:
+        # Variance formula requires n > 3. Return simple I without stats if n is too small.
+        # Although I itself is defined, p-values are not.
+        warnings.warn("Number of observations n <= 3, cannot compute Moran's I statistics (z-score/p-value).")
+        # Just compute I without variance
+        # (Fallthrough to simpler loop or handle gracefully? Since n is tiny, efficiency doesn't matter)
+        # We can just run the loop and set stats to NaN.
+        S0, S1, S2 = float(W.sum()), 0.0, 0.0
+        var_denom = np.nan
+        term_A = 0.0
+        term_B_coeff = 0.0
+        nfac = (n / S0) if S0 > 0 else 0.0
+    else:
+        # Precompute moments of W
+        S0, S1, S2 = _compute_moran_moments(W)
+
+        nfac = (n / S0) if S0 > 0 else 0.0
+
+        # Denominator for Var(I)
+        var_denom = (n - 1) * (n - 2) * (n - 3) * (S0 ** 2)
+
+        # Term A (independent of kurtosis)
+        # A = n * ( (n^2 - 3n + 3) * S1 - n * S2 + 3 * S0^2 )
+        term_A = n * ((n**2 - 3*n + 3) * S1 - n * S2 + 3 * S0**2)
+
+        # Term B coefficient (multiplies kurtosis b2)
+        # B = (n^2 - n) * S1 - 2*n * S2 + 6 * S0^2
+        term_B_coeff = (n**2 - n) * S1 - 2*n * S2 + 6 * S0**2
 
     # precompute means if centering
     if center:
@@ -1132,6 +1188,14 @@ def morans_i_all_fast(
 
     G = X.shape[1]
     I_vals = np.empty(G, dtype=np.float32)
+    Z_vals = np.full(G, np.nan, dtype=np.float32)
+    P_vals = np.full(G, np.nan, dtype=np.float32)
+
+    # Constant for Expected I: E[I] = -1 / (N-1)
+    if n > 1:
+        E_I = -1.0 / (n - 1)
+    else:
+        E_I = np.nan
 
     for j0 in range(0, G, block_genes):
         j1 = min(G, j0 + block_genes)
@@ -1140,35 +1204,67 @@ def morans_i_all_fast(
         Xb = Xb.toarray().astype(np.float32, copy=False) if sp.issparse(Xb) else np.asarray(Xb, dtype=np.float32)
         WXb = WXb.toarray().astype(np.float32, copy=False) if sp.issparse(WXb) else np.asarray(WXb, dtype=np.float32)
 
-        # Optimize memory usage by avoiding explicit centering:
-        # num = sum((Xb - mu) * (WXb - mu))
-        #     = sum(Xb * WXb) - mu * sum(WXb) - mu * sum(Xb) + n * mu^2
-        #     Since mu = sum(Xb) / n, sum(Xb) = n * mu
-        #     = sum(Xb * WXb) - mu * sum(WXb) - n * mu^2 + n * mu^2
-        #     = sum(Xb * WXb) - mu * sum(WXb)
-        #
-        # den = sum((Xb - mu)^2)
-        #     = sum(Xb^2) - 2 * mu * sum(Xb) + n * mu^2
-        #     = sum(Xb^2) - 2 * n * mu^2 + n * mu^2
-        #     = sum(Xb^2) - n * mu^2
-
-        # Use einsum to compute sum of products without allocating large intermediate array (Xb * WXb)
+        # Optimize memory usage by avoiding explicit centering for cross-product
         sum_cross = np.einsum('ij,ij->j', Xb, WXb, dtype=np.float64)
         sum_sq = np.einsum('ij,ij->j', Xb, Xb, dtype=np.float64)
 
+        # For kurtosis, we need sum of 4th powers of deviations
+        # (Xb - mu)^4.
+        mub = mu[j0:j1]
+
         if center:
-            mub = mu[j0:j1]
             sum_WXb = WXb.sum(axis=0, dtype=np.float64)
             num = sum_cross - mub * sum_WXb
             den = sum_sq - n * (mub ** 2)
+
+            # Kurtosis calculation: sum((x-u)^4)
+            # Using dense Xb since it's already dense
+            # Note: Xb is float32, casting to float64 for higher power sums
+            Xb_dev = Xb - mub[None, :] # (n, block)
+            sum_fourth = np.sum(Xb_dev**4, axis=0, dtype=np.float64)
+
         else:
             num = sum_cross
             den = sum_sq
+            # If not centered, we assume mean 0 for formula (deviations from 0)
+            sum_fourth = np.sum(Xb**4, axis=0, dtype=np.float64)
 
         den = np.where(den > 0, den, np.nan)
         I_vals[j0:j1] = nfac * (num / den).astype(np.float32)
 
-    out = pd.DataFrame({"gene": out_names, "I": I_vals})
+        # Variance Calculation
+        if n > 3:
+            # b2 = n * sum(z^4) / (sum(z^2))^2
+            # den is sum(z^2)
+            # handle den=0 case safely
+            den_safe = np.where(den > 0, den, np.inf) # avoid div by zero
+            b2 = (n * sum_fourth) / (den_safe ** 2)
+
+            # Var(I)
+            var_I = (term_A - b2 * term_B_coeff) / var_denom - E_I**2
+
+            # Clip negative variance (numerical noise)
+            var_I = np.maximum(var_I, 1e-18)
+
+            sd_I = np.sqrt(var_I)
+
+            # Avoid division by zero if variance is tiny (constant I)
+            z = np.zeros_like(I_vals[j0:j1])
+            mask_sd = sd_I > 1e-12
+            z[mask_sd] = (I_vals[j0:j1][mask_sd] - E_I) / sd_I[mask_sd]
+
+            # P-value (two-sided)
+            p = 2 * norm.sf(np.abs(z))
+
+            Z_vals[j0:j1] = z.astype(np.float32)
+            P_vals[j0:j1] = p.astype(np.float32)
+
+    out = pd.DataFrame({
+        "gene": out_names,
+        "I": I_vals,
+        "pval_z": P_vals,
+        "z_score": Z_vals
+    })
     out.sort_values("I", ascending=False, inplace=True, kind="mergesort")
     out.reset_index(drop=True, inplace=True)
     return out
