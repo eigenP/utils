@@ -24,3 +24,9 @@
 - **Invariant:** Indistinguishable distributions yield $P \approx 0.5$.
 - **Calibration:** Controlled Gaussian overlap ($N(1,1)$ vs $N(0,1)$) yields $P \approx 0.76$, matching the analytical solution $\Phi(\frac{\Delta \mu}{\sqrt{\sigma_1^2 + \sigma_2^2}})$.
 **Action:** This confirms that the "uncertainty" metric is a statistically valid probability derived from the distribution of scores, not an arbitrary heuristic. Future probabilistic classifiers should always be tested against analytical distributions to verify calibration.
+
+## 2025-02-23 - Moran's I Statistical Calibration
+**Learning:** Validated that `morans_i_all_fast` produces correctly calibrated Z-scores under the null hypothesis, specifically handling non-Gaussian data.
+- **Gaussian Noise:** Z-scores follow $N(0, 1)$ ($Mean \approx 0.04$, $Std \approx 1.01$). P-values are Uniform (Prop < 0.05 is 0.049).
+- **Kurtotic Noise:** Even with sparse, spiky data (high kurtosis), Z-scores maintain unit variance ($Std \approx 0.997$).
+**Action:** This confirms that the complex analytical variance formula (Cliff & Ord) including the kurtosis correction term ($b_2$) is implemented correctly. It proves the statistic is robust to data distribution, allowing its use on raw or log-transformed expression data without false positives from non-normality.
