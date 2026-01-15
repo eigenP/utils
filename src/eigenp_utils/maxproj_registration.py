@@ -191,10 +191,10 @@ def estimate_drift_2D(frame1, frame2, return_ccm = False):
 
 
     shift_x, error, diffphase = phase_cross_correlation(frame1_max_proj_x,
-                                                      frame2_max_proj_x)
+                                                      frame2_max_proj_x, upsample_factor=100)
 
     shift_y, error, diffphase = phase_cross_correlation(frame1_max_proj_y,
-                                                      frame2_max_proj_y)
+                                                      frame2_max_proj_y, upsample_factor=100)
 
     shift = np.array((shift_x[0], shift_y[0]))
 
@@ -307,13 +307,13 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
         for time_point in tqdm(range_values, desc='Applying Drift Correction'):
             # Estimate the drift between the current frame and the previous frame
 
-            # Use precomputed projections
-            shift_x_back, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point])
-            shift_y_back, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point])
+            # Use precomputed projections with subpixel precision
+            shift_x_back, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point], upsample_factor=100)
+            shift_y_back, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point], upsample_factor=100)
             dx_backward, dy_backward = shift_x_back[0], shift_y_back[0]
 
-            shift_x_fwd, _, _ = phase_cross_correlation(projections_x[time_point], projections_x[time_point - 1])
-            shift_y_fwd, _, _ = phase_cross_correlation(projections_y[time_point], projections_y[time_point - 1])
+            shift_x_fwd, _, _ = phase_cross_correlation(projections_x[time_point], projections_x[time_point - 1], upsample_factor=100)
+            shift_y_fwd, _, _ = phase_cross_correlation(projections_y[time_point], projections_y[time_point - 1], upsample_factor=100)
             dx_forward, dy_forward = shift_x_fwd[0], shift_y_fwd[0]
 
             dx = (dx_forward - dx_backward) / 2
@@ -322,19 +322,19 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
 
             ##### if too large, then keep as zero ####
             if abs(dx) > x_shape//5:
-                dx = 0
+                dx = 0.0
             if abs(dy) > y_shape//5:
                 # print('Whaa')
-                dy = 0
+                dy = 0.0
 
-            # Update the cumulative drift
-            cum_dx, cum_dy = int(cum_dx + dx), int(cum_dy + dy)
+            # Update the cumulative drift (using float to prevent integrator windup)
+            cum_dx, cum_dy = cum_dx + dx, cum_dy + dy
 
-            # Apply drift correction to the current frame
+            # Apply drift correction to the current frame (rounding for integer shift)
             OFFSET = 1 if reverse_time else 0 
             zero_shift_multi_dimensional(
                 video_data[time_point - OFFSET],
-                shifts=(cum_dy, cum_dx),
+                shifts=(int(round(cum_dy)), int(round(cum_dx))),
                 fill_value=min_value,
                 out=corrected_data[time_point]
             )
@@ -361,28 +361,28 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
         for time_point in tqdm(range_values, desc='Applying Drift Correction'):
             # Estimate the drift between the current frame and the previous frame
 
-            # Use precomputed projections
-            shift_x, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point])
-            shift_y, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point])
+            # Use precomputed projections with subpixel precision
+            shift_x, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point], upsample_factor=100)
+            shift_y, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point], upsample_factor=100)
             dx, dy = shift_x[0], shift_y[0]
 
             dx, dy = dx * DRIFT_SIGN, dy * DRIFT_SIGN
 
             ##### if too large, then keep as zero ####
             if abs(dx) > x_shape//5:
-                dx = 0
+                dx = 0.0
             if abs(dy) > y_shape//5:
                 # print('Whaa')
-                dy = 0
+                dy = 0.0
 
-            # Update the cumulative drift
-            cum_dx, cum_dy = int(cum_dx + dx), int(cum_dy + dy)
+            # Update the cumulative drift (using float to prevent integrator windup)
+            cum_dx, cum_dy = cum_dx + dx, cum_dy + dy
 
-            # Apply drift correction to the current frame
+            # Apply drift correction to the current frame (rounding for integer shift)
             OFFSET = 1 if reverse_time else 0 
             zero_shift_multi_dimensional(
                 video_data[time_point - OFFSET],
-                shifts=(cum_dy, cum_dx),
+                shifts=(int(round(cum_dy)), int(round(cum_dx))),
                 fill_value=min_value,
                 out=corrected_data[time_point]
             )
