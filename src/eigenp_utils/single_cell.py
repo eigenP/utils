@@ -984,7 +984,15 @@ def build_rowstd_connectivities(
     nz = rs > 0
     inv = np.zeros_like(rs, dtype=np.float32)
     inv[nz] = 1.0 / rs[nz]
-    W = sp.diags(inv) @ W
+
+    # In-place row normalization to avoid allocating a new sparse matrix
+    # W is CSR: W.data elements are ordered by row.
+    # We repeat the inverse-sum for row i for all its non-zero elements.
+    row_nnz = np.diff(W.indptr)
+    if row_nnz.size > 0:
+        scale_vector = np.repeat(inv, row_nnz)
+        W.data *= scale_vector
+
     W.sum_cache = float(W.sum())  # cache S0
     return W
 
