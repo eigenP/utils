@@ -10,6 +10,11 @@ We compute $P(S_{top1} > S_{top2})$ for a random cell in the cluster by modeling
 The confidence is then $\Phi(\mu_D / \sigma_D)$, where $\Phi$ is the standard normal CDF.
 This is a parameter-free, statistically grounded metric that naturally adapts to the intra-cluster variance.
 
+## 2025-05-23 - Scale Mismatch in Discrete Regularization
+
+**Learning:** The focus stacking algorithm used a fixed-size median filter (`disk(3)`, diameter 7) on the reconstructed depth map index grid. However, the grid resolution depends on `patch_size` (derived from image size). For default patch sizes, the grid can be very coarse (e.g., 10x10). A 7x7 filter on such a grid is a global operator, not a local regularizer, effectively flattening the depth map and erasing all features smaller than ~50% of the image width.
+
+**Action:** Regularization kernels must be scaled relative to the signal resolution (grid size), or chosen conservatively (`3x3`) to remove outliers without enforcing global smoothness. When discretizing a continuous field (depth) onto a coarse grid, feature preservation requires minimal kernel sizes.
 ## 2025-05-22 - Fixing Integrator Windup in Drift Correction
 
 **Learning:** The `apply_drift_correction_2D` function was accumulating drift using integer quantization at each time step (`cum_dx = int(cum_dx + dx)`).
