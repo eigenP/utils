@@ -167,45 +167,76 @@ def preprocess_subset(
     cluster_key: str = "leiden",
     resolution: float = 1.0,
     random_state: int = 0,
-    copy: bool = False
+    copy: bool = False,
+    scale_data: bool = True
 ):
     A = adata.copy() if copy else adata
     sc.pp.filter_genes(A, min_cells=3)
 
     # ---- Make sure counts/log1p exist BEFORE any var subsetting ----
     # (prevents shape-mismatch if we need to look at A.raw)
+
+    # 1. Check/Get Counts
+    has_counts = False
+    if counts_layer in A.layers:
+        has_counts = True
+    elif A.raw is not None:
+        # Auto-populate if possible
+        A.layers[counts_layer] = A.raw.X.copy()
+        has_counts = True
+
     if hvg_flavor == "seurat_v3":
-        # seurat_v3 requires raw counts as input to HVG
-        if counts_layer not in A.layers:
-            if A.raw is not None:
-                A.layers[counts_layer] = A.raw.X.copy()
-            else:
-                raise ValueError(
-                    f"flavor='seurat_v3' requires raw counts in A.layers['{counts_layer}'] or A.raw"
-                )
+        # seurat_v3 STRICTLY requires raw counts
+        if not has_counts:
+             raise ValueError(
+                f"flavor='seurat_v3' requires raw counts in A.layers['{counts_layer}'] or A.raw"
+            )
         if not _has_integer_like_counts(A.layers[counts_layer]):
             raise ValueError(f"A.layers['{counts_layer}'] does not look like raw integer counts.")
+    else:
+        # For other flavors, we tolerate missing counts but warn
+        if not has_counts:
+             warnings.warn(
+                f"Counts layer '{counts_layer}' not found. Some functionality (e.g. log1p generation) may be skipped."
+            )
 
-
-    # ensure we have log1p built from true counts
-    _ensure_log1p_layer(
-        A,
-        target_layer="log1p",
-        counts_layer=counts_layer,   # e.g., "counts"
-        total_count=1e4,
-        force_build=False
-    )
+    # 2. Ensure log1p (if needed)
+    # If the user explicitly asks for 'log1p' as the PCA layer, we MUST build it (or fail if counts missing).
+    # If they ask for something else (e.g. 'scvi'), we try to build 'log1p' for convenience but don't crash if missing.
+    try:
+        if X_layer_for_pca == "log1p" or has_counts:
+             _ensure_log1p_layer(
+                A,
+                target_layer="log1p",
+                counts_layer=counts_layer,
+                total_count=1e4,
+                force_build=False
+            )
+    except Exception as e:
+        if X_layer_for_pca == "log1p":
+            raise e  # Critical failure
+        else:
+            warnings.warn(f"Could not build 'log1p' layer: {e}. Proceeding with '{X_layer_for_pca}'...")
 
     # ---------- HVG selection ----------
     if hvg_flavor == "triku":
-        # Run Triku on log1p (recommended), then rely on its 'highly_variable' output
+        # Run Triku on specified layer (recommended log1p or scvi), then rely on its 'highly_variable' output
         run_triku(A, layer=X_layer_for_pca, n_features=n_top_genes)
+        # Ensure 'highly_variable' column exists for subsetting
+        if "triku_highly_variable" in A.var:
+            A.var["highly_variable"] = A.var["triku_highly_variable"]
     else:
         if batch_key is None and "batch" in A.obs:
             batch_key = "batch"
         hvg_kwargs = dict(n_top_genes=n_top_genes, flavor=hvg_flavor, batch_key=batch_key)
+
         if hvg_flavor == "seurat_v3":
             hvg_kwargs["layer"] = counts_layer
+        elif X_layer_for_pca is not None and X_layer_for_pca in A.layers:
+            # Use the target PCA layer for HVG selection (e.g. scvi_normalized)
+            # Standard seurat flavor works on log-normalized data.
+            hvg_kwargs["layer"] = X_layer_for_pca
+
         sc.pp.highly_variable_genes(A, **hvg_kwargs)
 
     # ---------- subset HVGs (optional but common) ----------
@@ -213,12 +244,18 @@ def preprocess_subset(
         A._inplace_subset_var(A.var["highly_variable"].values)
 
     # ---------- set working matrix ----------
-    if X_layer_for_pca not in A.layers:
-        raise KeyError(f"Layer '{X_layer_for_pca}' missing even after construction.")
-    A.X = A.layers[X_layer_for_pca].copy()
+    if X_layer_for_pca is None:
+        warnings.warn("X_layer_for_pca is None. Using existing .X for PCA/Neighbors.")
+    else:
+        if X_layer_for_pca not in A.layers:
+            raise KeyError(f"Layer '{X_layer_for_pca}' missing even after construction.")
+        warnings.warn(f"Overwriting .X with layer '{X_layer_for_pca}'.")
+        A.X = A.layers[X_layer_for_pca].copy()
 
     # ---------- scale / PCA on HVGs ----------
-    sc.pp.scale(A, max_value=scale_max_value)
+    if scale_data:
+        sc.pp.scale(A, max_value=scale_max_value)
+
     sc.tl.pca(
         A,
         n_comps=min(n_comps, A.n_vars - 1),
@@ -1788,6 +1825,42 @@ def run_triku(
             # Note: slicing adata[:, mask] should preserve layers.
             raise KeyError(f"Requested layer '{layer}' not found. Build it before Triku.")
         adata_triku.X = adata_triku.layers[layer].copy()
+
+    # Check for integer/count-like data (Triku requirement)
+    # If data is float (e.g. scvi_normalized), convert to pseudo-counts
+    if sp.issparse(adata_triku.X):
+        data_sample = adata_triku.X.data
+    else:
+        data_sample = np.ravel(adata_triku.X)
+
+    # Check first 1000 elements for speed
+    check_size = min(len(data_sample), 1000)
+    if check_size > 0:
+        sample = data_sample[:check_size]
+        is_integers = np.allclose(sample, np.round(sample))
+
+        if not is_integers:
+            warnings.warn(
+                f"Layer '{layer}' does not look like integer counts. Triku requires counts. "
+                "Rounding (and un-logging if needed) to generate pseudo-counts."
+            )
+
+            # Heuristic: Check if log-transformed (max < 50 is a safe bet for log-data)
+            max_val = data_sample.max()
+            if max_val < 50:
+                warnings.warn("Data seems log-transformed. Applying expm1 before rounding.")
+                if sp.issparse(adata_triku.X):
+                    np.expm1(adata_triku.X.data, out=adata_triku.X.data)
+                else:
+                    np.expm1(adata_triku.X, out=adata_triku.X)
+
+            # Round and ensure non-negative
+            if sp.issparse(adata_triku.X):
+                np.round(adata_triku.X.data, out=adata_triku.X.data)
+                adata_triku.X.data[adata_triku.X.data < 0] = 0
+            else:
+                np.round(adata_triku.X, out=adata_triku.X)
+                adata_triku.X[adata_triku.X < 0] = 0
 
     # KNN graph for Triku on the current X (log1p); use PCA for stability/speed
     # This avoids the earlier "X_pca doesn't exist" issue.
