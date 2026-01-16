@@ -95,7 +95,7 @@ def test_triku_with_floats(adata_float_layer):
     except ImportError:
         pytest.skip("triku not installed")
 
-    # Match the actual warning emitted
+    # Match the actual warning emitted (missing counts), but NOT the "rounding" warning
     with pytest.warns(UserWarning, match="Counts layer .* not found"):
          adata = preprocess_subset(
             adata_float_layer,
@@ -106,3 +106,4 @@ def test_triku_with_floats(adata_float_layer):
         )
 
     assert "triku_distance" in adata.var
+    assert "highly_variable" in adata.var # Check for the mapping fix too

@@ -1826,41 +1826,11 @@ def run_triku(
             raise KeyError(f"Requested layer '{layer}' not found. Build it before Triku.")
         adata_triku.X = adata_triku.layers[layer].copy()
 
-    # Check for integer/count-like data (Triku requirement)
-    # If data is float (e.g. scvi_normalized), convert to pseudo-counts
-    if sp.issparse(adata_triku.X):
-        data_sample = adata_triku.X.data
-    else:
-        data_sample = np.ravel(adata_triku.X)
-
-    # Check first 1000 elements for speed
-    check_size = min(len(data_sample), 1000)
-    if check_size > 0:
-        sample = data_sample[:check_size]
-        is_integers = np.allclose(sample, np.round(sample))
-
-        if not is_integers:
-            warnings.warn(
-                f"Layer '{layer}' does not look like integer counts. Triku requires counts. "
-                "Rounding (and un-logging if needed) to generate pseudo-counts."
-            )
-
-            # Heuristic: Check if log-transformed (max < 50 is a safe bet for log-data)
-            max_val = data_sample.max()
-            if max_val < 50:
-                warnings.warn("Data seems log-transformed. Applying expm1 before rounding.")
-                if sp.issparse(adata_triku.X):
-                    np.expm1(adata_triku.X.data, out=adata_triku.X.data)
-                else:
-                    np.expm1(adata_triku.X, out=adata_triku.X)
-
-            # Round and ensure non-negative
-            if sp.issparse(adata_triku.X):
-                np.round(adata_triku.X.data, out=adata_triku.X.data)
-                adata_triku.X.data[adata_triku.X.data < 0] = 0
-            else:
-                np.round(adata_triku.X, out=adata_triku.X)
-                adata_triku.X[adata_triku.X < 0] = 0
+    # Note: Triku works with both raw counts and log-transformed data.
+    # We pass the data as-is from the specified layer.
+    # If the user passed a log-transformed layer (e.g. 'log1p'), we use it directly.
+    # If the user passed 'scvi_normalized' (floats), we use it directly.
+    # We do NOT apply log1p here to avoid double-logging.
 
     # KNN graph for Triku on the current X (log1p); use PCA for stability/speed
     # This avoids the earlier "X_pca doesn't exist" issue.
