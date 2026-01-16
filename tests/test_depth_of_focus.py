@@ -3,6 +3,7 @@ import numpy as np
 import scipy.ndimage as ndi
 import pytest
 from eigenp_utils.extended_depth_of_focus import best_focus_image
+from scipy.ndimage import gaussian_filter
 
 def test_best_focus_checkerboard_reconstruction():
     """
@@ -115,10 +116,7 @@ def test_best_focus_checkerboard_reconstruction():
     # Allow small drop due to potential blending/interpolation, but should be close
     assert std_output > 0.95 * std_input, \
         f"Output lost significant contrast. InStd={std_input}, OutStd={std_output}"
-import numpy as np
-import pytest
-from scipy.ndimage import gaussian_filter
-from eigenp_utils.extended_depth_of_focus import best_focus_image
+
 
 def generate_feature_stack(shape=(10, 200, 200), feature_size=60):
     """
