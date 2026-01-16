@@ -122,27 +122,62 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     y_centers = y_starts + patch_size // 2
     x_centers = x_starts + patch_size // 2
 
+    # Pre-allocate buffers to reuse memory across Z-slices
+    # Reduces allocation churn and runtime overhead significantly
+    # padded_buffer stores the padded input slice
+    # lap_buffer stores the laplacian (float32)
+    # energy_buffer stores the uniform filter result (float32)
+
+    # Check if manual padding is safe (pad < dim - 1)
+    # If pad is too large, manual slice logic fails, so fallback to np.pad
+    H, W = img.shape[1], img.shape[2]
+    use_fast_pad = (pad_y < H - 1) and (pad_x < W - 1)
+
+    padded_buffer = np.zeros((padded_H, padded_W), dtype=img.dtype)
+    lap_buffer = np.zeros((padded_H, padded_W), dtype=np.float32)
+    energy_buffer = np.zeros((padded_H, padded_W), dtype=np.float32)
+
     # Iterate over Z-slices one by one to keep memory usage low
     for z in range(img.shape[0]):
         # 1. Pad only the current slice (2D)
         # This keeps memory overhead to O(H*W) instead of O(Z*H*W)
-        slice_padded = np.pad(img[z], ((0, pad_y), (0, pad_x)), mode='reflect')
 
-        # 2. Compute Laplacian directly into float32 buffer
-        # 'output=np.float32' automatically handles casting from input dtype (e.g. uint16) to float32
-        lap = laplace(slice_padded, output=np.float32)
+        if use_fast_pad:
+            # Copy core
+            padded_buffer[:H, :W] = img[z]
+
+            # Reflect Right (approx, ensuring dims match)
+            # Reflect H rows, pad_x cols
+            # input: img[:H, W-pad_x-1:W-1][:, ::-1] -> shape (H, pad_x)
+            padded_buffer[:H, W:] = img[z][:, -pad_x-1:-1][:, ::-1]
+
+            # Reflect Bottom (approx)
+            # Reflect pad_y rows, all cols (including already padded right side)
+            # input: padded_buffer[H-pad_y-1:H-1, :][::-1, :] -> shape (pad_y, W+pad_x)
+            padded_buffer[H:, :] = padded_buffer[H-pad_y-1:H-1, :][::-1, :]
+
+            slice_padded = padded_buffer # Reference, no copy
+        else:
+            # Fallback for large pads
+            slice_padded = np.pad(img[z], ((0, pad_y), (0, pad_x)), mode='reflect')
+
+        # 2. Compute Laplacian directly into reusable float32 buffer
+        # 'output=lap_buffer' reuses memory
+        laplace(slice_padded, output=lap_buffer)
 
         # 3. Compute Energy (Squared) in-place
-        np.square(lap, out=lap)
+        np.square(lap_buffer, out=lap_buffer)
 
         # 4. Local Average Energy (proxy for sum over patch)
-        mean_energy = uniform_filter(lap, size=patch_size, mode='reflect')
+        # Reuses energy_buffer
+        uniform_filter(lap_buffer, size=patch_size, output=energy_buffer, mode='reflect')
 
         # 5. Sample at patch centers
-        score_matrix[z] = mean_energy[np.ix_(y_centers, x_centers)]
+        score_matrix[z] = energy_buffer[np.ix_(y_centers, x_centers)]
 
-        # Explicitly delete temps to help GC
-        del slice_padded, lap, mean_energy
+        # Explicit delete not needed as buffers are reused, but slice_padded might be a new array in fallback
+        if not use_fast_pad:
+             del slice_padded
 
     # 4. Select best Z
     height_map_small = np.argmax(score_matrix, axis=0)

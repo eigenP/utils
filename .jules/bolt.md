@@ -1,3 +1,4 @@
-## 2024-05-23 - Sparse Matrix Row Standardization
-**Learning:** `sp.diags(inv) @ W` (sparse @ sparse) creates a new CSR matrix, allocating full indices and data arrays.
-**Action:** For row scaling of CSR matrices, use in-place multiplication of `W.data` with `np.repeat(inv, np.diff(W.indptr))` to save memory and time (~2x faster), provided `W` is a safe copy.
+## 2024-05-23 - Memory-Efficient Focus Stacking
+**Learning:** In image processing pipelines (specifically `best_focus_image`), allocating large arrays (`np.pad`, `laplace` output) inside a loop over Z-slices creates massive memory churn.
+**Action:** Use pre-allocated buffers and manual slicing logic (simulating `np.pad` 'reflect' mode) to reuse memory. This reduces peak memory usage (from O(Z*H*W) or high churn to O(H*W) constant) and improves runtime by avoiding `malloc` overhead.
+**Caveat:** Manual implementation of `mode='reflect'` must carefully handle slice indices and edge cases; a fallback to `np.pad` is essential for robustness when padding exceeds dimensions.
