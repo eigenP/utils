@@ -2873,6 +2873,16 @@ def plot_volcano_adata(
             "Please install it using `pip install adjustText`."
         )
 
+    # Handle group being a list (e.g. ['0']) which can happen if passed from other scanpy tools
+    if isinstance(group, (list, tuple)):
+        if len(group) == 1:
+            group = group[0]
+        else:
+            raise ValueError(
+                f"plot_volcano_adata only supports plotting a single group. "
+                f"Got {len(group)} groups: {group}"
+            )
+
     # --- 1. Data Extraction ---
     try:
         comparison_uns = adata.uns[rank_genes_key]
