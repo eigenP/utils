@@ -12,6 +12,7 @@
 ### Imports
 import numpy as np
 import pandas as pd
+from typing import Literal
 from skimage.registration import phase_cross_correlation
 from skimage.registration._phase_cross_correlation import _upsampled_dft
 from scipy.ndimage import shift
@@ -234,7 +235,13 @@ def estimate_drift_2D(frame1, frame2, return_ccm = False):
     else:
         return shift
 
-def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table=False, csv_filename='drift_table.csv'):
+def apply_drift_correction_2D(
+    video_data,
+    reverse_time = False,
+    save_drift_table=False,
+    csv_filename='drift_table.csv',
+    method: Literal['integer', 'subpixel'] = 'integer'
+):
     """
     Apply drift correction to video data.
 
@@ -244,8 +251,11 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
     to a CSV file.
 
     :param video_data: A 3D numpy array representing the video data. The dimensions should be (time, x, y).
+    :param reverse_time: Process frames in reverse order (or 'both').
     :param save_drift_table: A boolean indicating whether to save the drift values to a CSV file. Default is False.
     :param csv_filename: The name of the CSV file to save the drift table to. Default is 'drift_table.csv'.
+    :param method: 'integer' (default) for fast integer shifting, or 'subpixel' for precise bicubic interpolation.
+                   Note that 'subpixel' uses float shifts and performs range clipping to prevent integer wraparound artifacts.
     :return: A tuple containing two elements:
         - corrected_data: A 3D numpy array of the same shape as video_data, representing the drift-corrected video.
         - drift_table: A pandas DataFrame containing the drift values, cumulative drift, and time points.
@@ -256,8 +266,6 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
     # Initialize an array to store the corrected video data
     corrected_data = np.zeros_like(video_data)
 
-
-
     # Initialize variables to store cumulative drift
     cum_dx, cum_dy = 0.0, 0.0
 
@@ -266,6 +274,19 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
 
 
     min_value = video_data.min()
+
+    # Pre-calculate data range limits for clipping (to prevent interpolation ringing)
+    if np.issubdtype(video_data.dtype, np.integer):
+        dtype_min = np.iinfo(video_data.dtype).min
+        dtype_max = np.iinfo(video_data.dtype).max
+    else:
+        # For float data, we might not want to clip arbitrarily, or use the min/max of the data?
+        # Usually float images are 0-1 or normalized.
+        # Let's use the min/max of the data range if float, or just let it float.
+        # However, to be consistent with 'zero_shift_multi_dimensional' which fills with fill_value,
+        # we might want to respect bounds.
+        # For now, we only clip integer types to prevent overflow.
+        dtype_min, dtype_max = None, None
 
     # Pre-calculate weighted projections for all frames to avoid re-computation inside the loop
     # This speeds up the process by O(T) since each frame is accessed multiple times
@@ -333,16 +354,42 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
             # Apply drift correction to the current frame
             # NOTE: We cast to integer for the shift operation, but keep cumulative drift as float
             # to prevent integrator windup/loss of precision for slow drifts.
-            shift_dx = int(round(cum_dx))
-            shift_dy = int(round(cum_dy))
 
             OFFSET = 1 if reverse_time else 0 
-            zero_shift_multi_dimensional(
-                video_data[time_point - OFFSET],
-                shifts=(shift_dy, shift_dx),
-                fill_value=min_value,
-                out=corrected_data[time_point]
-            )
+
+            if method == 'subpixel':
+                # Subpixel correction using bicubic interpolation
+                s_dy, s_dx = cum_dy, cum_dx
+
+                # Perform shift on float data to avoid wrapping of negative/overshot values
+                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+
+                shifted_slice = shift(
+                    input_frame,
+                    shift=(s_dy, s_dx),
+                    order=3,
+                    mode='constant',
+                    cval=min_value
+                )
+
+                # Robust clipping to prevent integer wraparound if bicubic overshoots
+                if dtype_min is not None and dtype_max is not None:
+                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
+
+                # Assign (implicit cast back to original dtype)
+                corrected_data[time_point] = shifted_slice
+
+            else:
+                # Integer correction
+                shift_dx = int(round(cum_dx))
+                shift_dy = int(round(cum_dy))
+
+                zero_shift_multi_dimensional(
+                    video_data[time_point - OFFSET],
+                    shifts=(shift_dy, shift_dx),
+                    fill_value=min_value,
+                    out=corrected_data[time_point]
+                )
 
             # Record the drift values and cumulative drift for the current time point
             drift_records.append({'Time Point': time_point, 'dx': dx, 'dy': dy, 'cum_dx': cum_dx, 'cum_dy': cum_dy})
@@ -386,16 +433,39 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
             # Apply drift correction to the current frame
             # NOTE: We cast to integer for the shift operation, but keep cumulative drift as float
             # to prevent integrator windup/loss of precision for slow drifts.
-            shift_dx = int(round(cum_dx))
-            shift_dy = int(round(cum_dy))
 
             OFFSET = 1 if reverse_time else 0 
-            zero_shift_multi_dimensional(
-                video_data[time_point - OFFSET],
-                shifts=(shift_dy, shift_dx),
-                fill_value=min_value,
-                out=corrected_data[time_point]
-            )
+
+            if method == 'subpixel':
+                # Subpixel correction using bicubic interpolation
+                s_dy, s_dx = cum_dy, cum_dx
+
+                # Perform shift on float data to avoid wrapping of negative/overshot values
+                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+
+                shifted_slice = shift(
+                    input_frame,
+                    shift=(s_dy, s_dx),
+                    order=3,
+                    mode='constant',
+                    cval=min_value
+                )
+
+                if dtype_min is not None and dtype_max is not None:
+                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
+
+                corrected_data[time_point] = shifted_slice
+
+            else:
+                shift_dx = int(round(cum_dx))
+                shift_dy = int(round(cum_dy))
+
+                zero_shift_multi_dimensional(
+                    video_data[time_point - OFFSET],
+                    shifts=(shift_dy, shift_dx),
+                    fill_value=min_value,
+                    out=corrected_data[time_point]
+                )
 
             # Record the drift values and cumulative drift for the current time point
             drift_records.append({'Time Point': time_point, 'dx': dx, 'dy': dy, 'cum_dx': cum_dx, 'cum_dy': cum_dy})

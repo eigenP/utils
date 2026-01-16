@@ -1,29 +1,21 @@
-## 2025-05-22 - Replacing Ad-Hoc Softmax with Probabilistic Superiority
+# Matth's Journal
 
-**Learning:** The function `annotate_clusters_by_markers` previously used a softmax function with an arbitrary temperature parameter (`beta=2.0`) applied to robustly normalized scores (median/MAD) to estimate "confidence".
-This approach had two flaws:
-1.  **Arbitrary Scaling:** The `beta` parameter implies a specific belief about the signal-to-noise ratio of the *global* normalization that may not hold for individual clusters.
-2.  **Global vs. Local Variance:** Normalization used global MAD, but confidence is a function of *local* separability within the cluster. A tight cluster should have higher confidence for the same mean separation than a loose one. Using global variance ignores this.
+## 2025-02-19 - Drift Correction: The Cost of Integer Rounding
 
-**Action:** Replaced the softmax heuristic with the **Probability of Superiority** (also known as Common Language Effect Size).
-We compute $P(S_{top1} > S_{top2})$ for a random cell in the cluster by modeling the pairwise difference of scores $D = S_{top1} - S_{top2}$ as normally distributed: $D \sim \mathcal{N}(\mu_D, \sigma_D^2)$.
-The confidence is then $\Phi(\mu_D / \sigma_D)$, where $\Phi$ is the standard normal CDF.
-This is a parameter-free, statistically grounded metric that naturally adapts to the intra-cluster variance.
+**Learning:** Detection precision means nothing without application precision.
 
-## 2025-05-23 - Scale Mismatch in Discrete Regularization
+The `estimate_drift_2D` function uses `phase_cross_correlation` with `upsample_factor=100`, providing drift estimates with 0.01-pixel precision. However, the original `apply_drift_correction_2D` rounded these values to the nearest integer before shifting.
 
-**Learning:** The focus stacking algorithm used a fixed-size median filter (`disk(3)`, diameter 7) on the reconstructed depth map index grid. However, the grid resolution depends on `patch_size` (derived from image size). For default patch sizes, the grid can be very coarse (e.g., 10x10). A 7x7 filter on such a grid is a global operator, not a local regularizer, effectively flattening the depth map and erasing all features smaller than ~50% of the image width.
+This creates a mismatch: we *know* the drift is 0.5 pixels, but we correct it by 0 or 1.
+- If we shift by 0: Residual error is 0.5 pixels.
+- If we shift by 1: Residual error is 0.5 pixels (overshoot).
 
-**Action:** Regularization kernels must be scaled relative to the signal resolution (grid size), or chosen conservatively (`3x3`) to remove outliers without enforcing global smoothness. When discretizing a continuous field (depth) onto a coarse grid, feature preservation requires minimal kernel sizes.
-## 2025-05-22 - Fixing Integrator Windup in Drift Correction
+For a continuous signal (like an image), the "value" at x=0.5 exists and can be reconstructed via interpolation. Ignoring this is mathematically unsound if the goal is alignment.
 
-**Learning:** The `apply_drift_correction_2D` function was accumulating drift using integer quantization at each time step (`cum_dx = int(cum_dx + dx)`).
-This is a classic control theory failure mode known as **Integrator Windup** (or quantization deadband).
-If the physical drift is slow (e.g., 0.4 pixels/frame) and the estimator returns sub-pixel shifts (or is forced to integer 0 due to low precision), the `int()` cast truncates the signal to 0 at every step.
-The cumulative drift remains 0 indefinitely, failing to correct significant total drift (e.g., 40 pixels over 100 frames).
+**Action:** Upgraded `apply_drift_correction_2D` to support subpixel correction using bicubic interpolation (`order=3`).
 
-**Action:**
-1.  **Continuous State:** Accumulate drift in floating point (`cum_dx += dx`) to preserve fractional contributions.
-2.  **Actuation Quantization:** Perform rounding/quantization *only* at the actuation step (shifting the image), i.e., `shift_amount = round(cum_dx)`.
-3.  **Subpixel Estimation:** Increase estimator precision (`upsample_factor=100`) to ensure `dx` captures fractional drift, preventing the "measurement deadband" problem.
-This ensures that small, consistent biases integrate up to a correction step, mathematically guaranteeing zero steady-state velocity error.
+**Crucial Detail:** Bicubic interpolation is non-monotone; it can produce values outside the original range (overshoot/ringing) near sharp edges (Gibbs phenomenon).
+- If the image is `uint8` (0-255), a value of -5 becomes 251 (wrap-around) if simply cast.
+- **Robustness Fix:** Explicitly cast to `float32` before interpolation, then clip the result to the valid range of the data type before casting back. This preserves the topology of the data and prevents "salt-and-pepper" noise at edges.
+
+This moves the algorithm from a discrete grid approximation to a continuous signal reconstruction, aligning with the precision of the detection step.
