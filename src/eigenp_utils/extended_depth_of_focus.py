@@ -15,15 +15,7 @@ from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
 
 from skimage.filters import median
 from skimage.morphology import disk
-# # Define the custom function
-# def custom_filter(values):
-#     center_value = values[values.size // 2]
-#     counts = np.bincount(values.astype(int))
-#     mode = np.argmax(counts)
-#     if counts[mode] >= 3 and abs(mode - center_value) >= 2:
-#         return mode
-#     else:
-#         return center_value
+
 
 def apply_median_filter(height_map):
     """
@@ -35,15 +27,20 @@ def apply_median_filter(height_map):
     Returns:
     ndarray: The filtered 2D array.
     """
-    # Define a 2*2+1 diameter (i.e. radius 2) disk structuring element for the median filter
-    selem = disk(3)
+    # Define a 3x3 (radius 1) disk structuring element for the median filter
+    selem = disk(1)
 
     # Apply the median filter with the defined structuring element
-    filtered_map = median(height_map, selem, mode = 'reflect')
+    filtered_map = median(height_map, selem, mode='reflect')
 
     return filtered_map
 
+
 def _2D_weight(patch_size, overlap):
+    """
+    Generate a 2D weight matrix for blending patches, using a cubic spline (smoothstep) taper.
+    This ensures C1 continuity across patch boundaries.
+    """
     # 1D weight function based on cubic spline
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3

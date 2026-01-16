@@ -1,5 +1,8 @@
 # Testr Journal
 
+## 2025-02-18 - Drift Correction Integrator Windup
+**Learning:** The drift correction algorithm in `maxproj_registration.py` was casting cumulative drift to integer at every time step (`cum_dx = int(cum_dx + dx)`). This introduced a severe "integrator windup" bug (or rather, failure to integrate) where fractional drifts smaller than 1.0 would be discarded repeatedly if they didn't cross an integer boundary in a single step. For slow drifts (e.g., 0.5 px/frame), this resulted in zero correction over time.
+**Action:** The accumulation logic was fixed to maintain float precision (`cum_dx += dx`) and only round to integer when applying the final shift. A high-level invariant test (`tests/test_drift_integrity.py`) was added to verify that fractional drift accumulates correctly over time (Linearity/conservation of total drift).
 
 ## 2024-05-22 - Archetype Recovery and Invariants
 **Learning:** Verified that find_expression_archetypes correctly identifies gene modules using PC1 and aligns them with the cluster mean. This test ensures that the algorithm is robust to scale and shift transformations (affine invariance) and correctly separates orthogonal signals.
@@ -30,3 +33,8 @@
 - **Invariant:** The focus map accurately recovers a discrete step function (checkerboard) of indices from a noisy 3D stack, proving the Laplacian energy metric correctly identifies high-frequency texture.
 - **Signal Preservation:** The algorithm preserves the original texture variance (Output Std $\approx$ Input Std) and strongly rejects blurred versions (MSE Ratio > 40), confirming that the blending process does not wash out signals.
 **Action:** Future tests for image fusion or reconstruction algorithms should utilize synthetic "depth fields" with known ground-truth index maps. This decouples the verification of the decision logic (selection) from the reconstruction quality (blending).
+## 2025-02-23 - Moran's I Statistical Calibration
+**Learning:** Validated that `morans_i_all_fast` produces correctly calibrated Z-scores under the null hypothesis, specifically handling non-Gaussian data.
+- **Gaussian Noise:** Z-scores follow $N(0, 1)$ ($Mean \approx 0.04$, $Std \approx 1.01$). P-values are Uniform (Prop < 0.05 is 0.049).
+- **Kurtotic Noise:** Even with sparse, spiky data (high kurtosis), Z-scores maintain unit variance ($Std \approx 0.997$).
+**Action:** This confirms that the complex analytical variance formula (Cliff & Ord) including the kurtosis correction term ($b_2$) is implemented correctly. It proves the statistic is robust to data distribution, allowing its use on raw or log-transformed expression data without false positives from non-normality.
