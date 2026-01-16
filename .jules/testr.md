@@ -1,5 +1,8 @@
 # Testr Journal
 
+## 2025-02-18 - Drift Correction Integrator Windup
+**Learning:** The drift correction algorithm in `maxproj_registration.py` was casting cumulative drift to integer at every time step (`cum_dx = int(cum_dx + dx)`). This introduced a severe "integrator windup" bug (or rather, failure to integrate) where fractional drifts smaller than 1.0 would be discarded repeatedly if they didn't cross an integer boundary in a single step. For slow drifts (e.g., 0.5 px/frame), this resulted in zero correction over time.
+**Action:** The accumulation logic was fixed to maintain float precision (`cum_dx += dx`) and only round to integer when applying the final shift. A high-level invariant test (`tests/test_drift_integrity.py`) was added to verify that fractional drift accumulates correctly over time (Linearity/conservation of total drift).
 
 ## 2024-05-22 - Archetype Recovery and Invariants
 **Learning:** Verified that find_expression_archetypes correctly identifies gene modules using PC1 and aligns them with the cluster mean. This test ensures that the algorithm is robust to scale and shift transformations (affine invariance) and correctly separates orthogonal signals.

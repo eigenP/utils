@@ -259,7 +259,7 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
 
 
     # Initialize variables to store cumulative drift
-    cum_dx, cum_dy = 0, 0
+    cum_dx, cum_dy = 0.0, 0.0
 
     # Initialize a list to store drift records for each time point
     drift_records = []
@@ -327,14 +327,19 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
                 # print('Whaa')
                 dy = 0.0
 
-            # Update the cumulative drift (using float to prevent integrator windup)
+            # Update the cumulative drift
             cum_dx, cum_dy = cum_dx + dx, cum_dy + dy
 
-            # Apply drift correction to the current frame (rounding for integer shift)
+            # Apply drift correction to the current frame
+            # NOTE: We cast to integer for the shift operation, but keep cumulative drift as float
+            # to prevent integrator windup/loss of precision for slow drifts.
+            shift_dx = int(round(cum_dx))
+            shift_dy = int(round(cum_dy))
+
             OFFSET = 1 if reverse_time else 0 
             zero_shift_multi_dimensional(
                 video_data[time_point - OFFSET],
-                shifts=(int(round(cum_dy)), int(round(cum_dx))),
+                shifts=(shift_dy, shift_dx),
                 fill_value=min_value,
                 out=corrected_data[time_point]
             )
@@ -375,14 +380,19 @@ def apply_drift_correction_2D(video_data, reverse_time = False, save_drift_table
                 # print('Whaa')
                 dy = 0.0
 
-            # Update the cumulative drift (using float to prevent integrator windup)
+            # Update the cumulative drift
             cum_dx, cum_dy = cum_dx + dx, cum_dy + dy
 
-            # Apply drift correction to the current frame (rounding for integer shift)
+            # Apply drift correction to the current frame
+            # NOTE: We cast to integer for the shift operation, but keep cumulative drift as float
+            # to prevent integrator windup/loss of precision for slow drifts.
+            shift_dx = int(round(cum_dx))
+            shift_dy = int(round(cum_dy))
+
             OFFSET = 1 if reverse_time else 0 
             zero_shift_multi_dimensional(
                 video_data[time_point - OFFSET],
-                shifts=(int(round(cum_dy)), int(round(cum_dx))),
+                shifts=(shift_dy, shift_dx),
                 fill_value=min_value,
                 out=corrected_data[time_point]
             )
