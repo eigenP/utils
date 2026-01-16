@@ -1225,17 +1225,41 @@ def morans_i_all_fast(
             num = sum_cross - mub * sum_WXb
             den = sum_sq - n * (mub ** 2)
 
+            # Bolt: Optimize memory. WXb is no longer needed.
+            del WXb
+
             # Kurtosis calculation: sum((x-u)^4)
-            # Using dense Xb since it's already dense
-            # Note: Xb is float32, casting to float64 for higher power sums
-            Xb_dev = Xb - mub[None, :] # (n, block)
-            sum_fourth = np.sum(Xb_dev**4, axis=0, dtype=np.float64)
+            # We can perform this in-place on Xb if it's safe (i.e., not a view of X).
+            # If Xb shares memory with X (e.g. X is dense), we must copy first.
+            if np.shares_memory(Xb, X):
+                # Copy to avoid corrupting X
+                # Xb_dev will be (N, block) float32
+                Xb_dev = Xb - mub[None, :]
+                np.power(Xb_dev, 4, out=Xb_dev)
+                sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
+                del Xb_dev
+            else:
+                # Xb is a copy (e.g. from sparse conversion or explicit copy), safe to reuse in-place
+                np.subtract(Xb, mub[None, :], out=Xb)
+                np.power(Xb, 4, out=Xb)
+                sum_fourth = np.sum(Xb, axis=0, dtype=np.float64)
 
         else:
             num = sum_cross
             den = sum_sq
+            # Bolt: WXb not needed
+            del WXb
+
             # If not centered, we assume mean 0 for formula (deviations from 0)
-            sum_fourth = np.sum(Xb**4, axis=0, dtype=np.float64)
+            if np.shares_memory(Xb, X):
+                 # Must copy (or create temp)
+                 Xb_dev = Xb ** 4
+                 sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
+                 del Xb_dev
+            else:
+                 # In-place power
+                 np.power(Xb, 4, out=Xb)
+                 sum_fourth = np.sum(Xb, axis=0, dtype=np.float64)
 
         den = np.where(den > 0, den, np.nan)
         I_vals[j0:j1] = nfac * (num / den).astype(np.float32)
