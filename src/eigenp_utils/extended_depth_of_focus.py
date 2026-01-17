@@ -180,10 +180,42 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
              del slice_padded
 
     # 4. Select best Z
-    height_map_small = np.argmax(score_matrix, axis=0)
+    height_map_small_int = np.argmax(score_matrix, axis=0)
 
-    # Apply median filter
-    height_map_small = apply_median_filter(height_map_small)
+    # --- Matth: Sub-pixel Refinement ---
+    # We calculate a refined float height map using parabolic interpolation.
+    # This provides a smoother, more accurate topography for return_heightmap,
+    # while we stick to the robust integer argmax for the actual patch reconstruction
+    # to avoid interpolation artifacts in the image data.
+
+    # 1. Safe indices for 3-point stencil (clamp to [1, Z-2])
+    Z_dim = score_matrix.shape[0]
+    idx_safe = np.clip(height_map_small_int, 1, Z_dim - 2)
+
+    # 2. Extract values at peak and neighbors
+    gy, gx = np.indices(height_map_small_int.shape)
+    v_c = score_matrix[idx_safe, gy, gx]
+    v_l = score_matrix[idx_safe - 1, gy, gx]
+    v_r = score_matrix[idx_safe + 1, gy, gx]
+
+    # 3. Calculate parabolic peak shift (delta)
+    # Denominator is proportional to curvature (v_l + v_r - 2*v_c).
+    denom = v_l + v_r - 2 * v_c
+    denom[np.abs(denom) < 1e-9] = -1e-9  # Avoid division by zero
+    delta = 0.5 * (v_l - v_r) / denom
+
+    # 4. Handle boundaries: if argmax was 0 or Z-1, force delta to 0
+    mask_boundary = (height_map_small_int == 0) | (height_map_small_int == Z_dim - 1)
+    delta[mask_boundary] = 0.0
+
+    # 5. Create refined map
+    height_map_small_float = height_map_small_int.astype(np.float32) + delta
+    height_map_small_float = np.clip(height_map_small_float, 0, Z_dim - 1)
+
+    # Apply median filter to both maps for spatial consistency
+    # (Removes salt-and-pepper noise from the index map)
+    height_map_small = apply_median_filter(height_map_small_int).astype(int)
+    height_map_small_float = apply_median_filter(height_map_small_float)
 
     # 5. Combine patches to create the final image
     # Use float32 for accumulation to save memory
@@ -196,6 +228,8 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         for j in range(height_map_small.shape[1]):
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
+
+            # Use the integer index for reconstruction (conservative approach)
             best_z = height_map_small[i, j]
 
             # Extract patch with on-demand padding/cropping logic to avoid full padded copy
@@ -279,9 +313,10 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     # We will return float32.
 
     if return_heightmap:
-        zoom_y = original_shape[0] / height_map_small.shape[0]
-        zoom_x = original_shape[1] / height_map_small.shape[1]
-        height_map_full = zoom(height_map_small, (zoom_y, zoom_x), order=0)
+        zoom_y = original_shape[0] / height_map_small_float.shape[0]
+        zoom_x = original_shape[1] / height_map_small_float.shape[1]
+        # Use bilinear interpolation (order=1) on the float map for smooth topography
+        height_map_full = zoom(height_map_small_float, (zoom_y, zoom_x), order=1)
 
         return final_img, height_map_full
 

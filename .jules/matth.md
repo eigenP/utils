@@ -27,3 +27,7 @@ The cumulative drift remains 0 indefinitely, failing to correct significant tota
 2.  **Actuation Quantization:** Perform rounding/quantization *only* at the actuation step (shifting the image), i.e., `shift_amount = round(cum_dx)`.
 3.  **Subpixel Estimation:** Increase estimator precision (`upsample_factor=100`) to ensure `dx` captures fractional drift, preventing the "measurement deadband" problem.
 This ensures that small, consistent biases integrate up to a correction step, mathematically guaranteeing zero steady-state velocity error.
+
+## 2025-05-23 - Sub-pixel Depth Estimation in Focus Stacking
+**Learning:** The `argmax` operator for depth estimation in focus stacking assumes the focal plane lies exactly on an integer slice, which is mathematically incorrect for continuous surfaces. Using parabolic refinement on the focus score (Laplacian energy) recovers sub-pixel depth information ($\delta = 0.5 \frac{v_l - v_r}{v_l + v_r - 2v_c}$) and significantly reduces quantization artifacts in the height map.
+**Action:** When estimating continuous parameters (like depth, shift, or peak location) from discrete sampling, always prefer interpolation-based estimators (parabolic, Gaussian, centroid) over winner-takes-all integers to preserve precision and differentiability.
