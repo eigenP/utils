@@ -7,6 +7,7 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import anndata
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
 from scipy.linalg import svd
@@ -140,11 +141,12 @@ def _ensure_log1p_layer(
         )
 
     # build log1p from counts WITHOUT touching A.X
-    tmp = A.copy()
-    tmp.X = C.copy()
+    # Bolt optimization: avoid copying full adata structure (which may be large)
+    # just to normalize a matrix. Use a minimal AnnData object instead.
+    tmp = anndata.AnnData(X=C.copy())
     sc.pp.normalize_total(tmp, target_sum=total_count)
     sc.pp.log1p(tmp)
-    A.layers[target_layer] = tmp.X.copy()
+    A.layers[target_layer] = tmp.X
     del tmp
     warnings.warn(f"[ensure_log1p_layer] Created A.layers['{target_layer}'] from {src_name}.")
 
