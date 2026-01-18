@@ -1235,13 +1235,17 @@ def morans_i_all_fast(
                 # Copy to avoid corrupting X
                 # Xb_dev will be (N, block) float32
                 Xb_dev = Xb - mub[None, :]
-                np.power(Xb_dev, 4, out=Xb_dev)
+                # Optimize x^4 as (x^2)^2 using repeated multiplication
+                np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
+                np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
                 sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
                 del Xb_dev
             else:
                 # Xb is a copy (e.g. from sparse conversion or explicit copy), safe to reuse in-place
                 np.subtract(Xb, mub[None, :], out=Xb)
-                np.power(Xb, 4, out=Xb)
+                # Optimize x^4 as (x^2)^2 using repeated multiplication
+                np.multiply(Xb, Xb, out=Xb)
+                np.multiply(Xb, Xb, out=Xb)
                 sum_fourth = np.sum(Xb, axis=0, dtype=np.float64)
 
         else:
@@ -1253,12 +1257,16 @@ def morans_i_all_fast(
             # If not centered, we assume mean 0 for formula (deviations from 0)
             if np.shares_memory(Xb, X):
                  # Must copy (or create temp)
-                 Xb_dev = Xb ** 4
+                 # Optimize x^4 as (x^2)^2 using repeated multiplication
+                 Xb_dev = np.multiply(Xb, Xb)
+                 np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
                  sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
                  del Xb_dev
             else:
                  # In-place power
-                 np.power(Xb, 4, out=Xb)
+                 # Optimize x^4 as (x^2)^2 using repeated multiplication
+                 np.multiply(Xb, Xb, out=Xb)
+                 np.multiply(Xb, Xb, out=Xb)
                  sum_fourth = np.sum(Xb, axis=0, dtype=np.float64)
 
         den = np.where(den > 0, den, np.nan)
