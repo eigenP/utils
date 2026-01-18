@@ -11,7 +11,7 @@
 import numpy as np
 import skimage.io
 
-from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
+from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter, map_coordinates
 
 from skimage.filters import median
 from skimage.morphology import disk
@@ -179,11 +179,60 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         if not use_fast_pad:
              del slice_padded
 
-    # 4. Select best Z
-    height_map_small = np.argmax(score_matrix, axis=0)
+    # 4. Select best Z (Integer Peak)
+    best_z_idx = np.argmax(score_matrix, axis=0)
 
-    # Apply median filter
-    height_map_small = apply_median_filter(height_map_small)
+    # 4.1 Sub-pixel Refinement (Parabolic Interpolation)
+    # Matth: The integer argmax introduces quantization artifacts ("staircase").
+    # We refine the peak position by fitting a parabola to the peak and its two neighbors.
+    # Formula: delta = 0.5 * (S_l - S_r) / (S_l - 2*S_c + S_r)
+
+    Z_dim, Y_dim, X_dim = score_matrix.shape
+    yy, xx = np.indices((Y_dim, X_dim))
+
+    # Identify pixels where we can interpolate (peak is not at boundaries)
+    valid_mask = (best_z_idx > 0) & (best_z_idx < Z_dim - 1)
+
+    # Initialize float map with integer peaks
+    height_map_float = best_z_idx.astype(np.float32)
+
+    if np.any(valid_mask):
+        # Indices for neighbors
+        z_c = best_z_idx
+        z_l = np.maximum(z_c - 1, 0)
+        z_r = np.minimum(z_c + 1, Z_dim - 1)
+
+        # Gather scores
+        # We use the grid indices (yy, xx) for spatial dimensions
+        S_c = score_matrix[z_c, yy, xx]
+        S_l = score_matrix[z_l, yy, xx]
+        S_r = score_matrix[z_r, yy, xx]
+
+        # Compute denominator (curvature)
+        denom = S_l - 2 * S_c + S_r
+
+        # We only interpolate where curvature is negative (concave down peak)
+        # and denominator is not zero (avoid division by zero).
+        interp_mask = valid_mask & (denom < -1e-9)
+
+        if np.any(interp_mask):
+            delta = 0.5 * (S_l[interp_mask] - S_r[interp_mask]) / denom[interp_mask]
+
+            # Apply correction
+            # Note: We subtract delta because the formula derivation direction.
+            # Let's re-verify sign.
+            # If S_l > S_r, peak should be towards left (negative delta).
+            # Formula: 0.5 * (S_l - S_r) / neg_denom.
+            # (pos) / (neg) -> negative result. Correct.
+            # So we ADD delta.
+            height_map_float[interp_mask] += delta
+
+    # Apply median filter to the refined float map to remove outliers
+    height_map_small = apply_median_filter(height_map_float)
+
+    # Create integer indices for reconstruction (rounding the refined map)
+    reconstruction_indices = np.round(height_map_small).astype(np.int32)
+    reconstruction_indices = np.clip(reconstruction_indices, 0, Z_dim - 1)
 
     # 5. Combine patches to create the final image
     # Use float32 for accumulation to save memory
@@ -192,11 +241,13 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
     _2D_window = _2D_weight(patch_size, overlap)
 
-    for i in range(height_map_small.shape[0]):
-        for j in range(height_map_small.shape[1]):
+    for i in range(reconstruction_indices.shape[0]):
+        for j in range(reconstruction_indices.shape[1]):
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
-            best_z = height_map_small[i, j]
+
+            # Use integer index for image sampling
+            best_z = reconstruction_indices[i, j]
 
             # Extract patch with on-demand padding/cropping logic to avoid full padded copy
             y_end = y_start + patch_size
@@ -279,9 +330,37 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     # We will return float32.
 
     if return_heightmap:
-        zoom_y = original_shape[0] / height_map_small.shape[0]
-        zoom_x = original_shape[1] / height_map_small.shape[1]
-        height_map_full = zoom(height_map_small, (zoom_y, zoom_x), order=0)
+        # Matth: Correctly project the low-res height map to the high-res image grid.
+        # The height map indices correspond to patch centers: center = i * stride + offset
+        # We invert this to find sample coordinates: i = (pixel - offset) / stride
+
+        stride_y = patch_size - overlap
+        stride_x = patch_size - overlap
+        offset_y = patch_size // 2
+        offset_x = patch_size // 2
+
+        # Create grid of target pixel coordinates
+        # Note: We want output shape to be original_shape
+        H_out, W_out = original_shape[0], original_shape[1]
+
+        # We can use broadcast arithmetic instead of meshgrid to save memory if map_coordinates supported it,
+        # but map_coordinates expects a (ndim, size) array.
+
+        # Generate coordinate arrays
+        gy, gx = np.indices((H_out, W_out), dtype=np.float32)
+
+        # Transform to index space of height_map_small
+        # i = (y - offset) / stride
+        coords_y = (gy - offset_y) / stride_y
+        coords_x = (gx - offset_x) / stride_x
+
+        # Stack for map_coordinates
+        coords = np.stack([coords_y, coords_x])
+
+        # Interpolate
+        # order=1 (bilinear) for smoothness
+        # mode='nearest' to extend edge values (clamped)
+        height_map_full = map_coordinates(height_map_small, coords, order=1, mode='nearest')
 
         return final_img, height_map_full
 

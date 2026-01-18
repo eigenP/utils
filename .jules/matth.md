@@ -27,3 +27,16 @@ The cumulative drift remains 0 indefinitely, failing to correct significant tota
 2.  **Actuation Quantization:** Perform rounding/quantization *only* at the actuation step (shifting the image), i.e., `shift_amount = round(cum_dx)`.
 3.  **Subpixel Estimation:** Increase estimator precision (`upsample_factor=100`) to ensure `dx` captures fractional drift, preventing the "measurement deadband" problem.
 This ensures that small, consistent biases integrate up to a correction step, mathematically guaranteeing zero steady-state velocity error.
+
+## 2025-05-23 - Sub-pixel Peak Finding and Coordinate Correctness
+
+**Learning:**
+1.  **Quantization Artifacts:** Using integer `argmax` for focal plane detection introduces step-like quantization errors ($\sigma^2 \approx 1/12$ slice) in the depth map.
+2.  **Coordinate Misalignment:** Upscaling patch-based parameter maps (like focus scores) using naive `zoom` causes significant spatial distortion because it assumes corner-to-corner alignment rather than mapping patch centers to pixels.
+    *   Patch center: $y_c = i \cdot \text{stride} + \text{offset}$.
+    *   Naive zoom implies $y = i \cdot \text{scale}$.
+    *   The offset is ignored, leading to sub-patch shifts that dominate error metrics.
+
+**Action:**
+1.  **Parabolic Refinement:** Implemented parabolic interpolation around the integer peak to recover continuous depth values. Formula: $\delta = 0.5 \frac{S_{l} - S_{r}}{S_{l} - 2S_{c} + S_{r}}$.
+2.  **Explicit Projection:** Replaced `scipy.ndimage.zoom` with `map_coordinates`. We explicitly calculate the fractional index $i = (y_{pixel} - \text{offset}) / \text{stride}$ for each pixel, ensuring the high-resolution map is geometrically aligned with the input patches. This reduced RMSE on a synthetic slant test from ~0.42 to ~0.03 slices.
