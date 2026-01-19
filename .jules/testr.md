@@ -44,3 +44,8 @@
 - **Accuracy:** Reconstructed surface matches analytical ground truth with MAE ~0.55 pixels (sub-pixel accuracy despite downsampling).
 - **Invariance:** Z-axis translation of the input volume results in an equivalent translation of the output surface (Mean shift error < 0.03 px, Std < 0.2 px).
 **Action:** Confirms that the `downscale` -> `smooth` -> `threshold` -> `zoom` pipeline is robust and preserves geometry. Future 3D segmentation tests should rely on translation invariance as a primary correctness check.
+## 2025-02-23 - Surface Extraction Accuracy & Invariance
+**Learning:** Verified `extract_surface` ("surface peeler") accuracy using a "Sine Wave Reconstruction" test.
+- **Accuracy:** The algorithm (with bicubic upscaling) recovers the analytical surface with low MAE (< 2 pixels), confirming that the geometry is preserved despite downsampling.
+- **Invariance:** Translation invariance holds (Mean Shift $\approx$ Actual Shift), *provided* that `gaussian_sigma` is not excessively large relative to the volume size. Large smoothing combined with global Otsu thresholding can induce bias when the foreground/background ratio changes significantly.
+**Action:** For small volumes or precise surface extraction, `gaussian_sigma` should be kept low (e.g., 1.0) to minimize threshold-induced shift errors. Tests for geometric algorithms must verify invariance to rigid transformations (translation, rotation).
