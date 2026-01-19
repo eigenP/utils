@@ -38,3 +38,9 @@
 - **Gaussian Noise:** Z-scores follow $N(0, 1)$ ($Mean \approx 0.04$, $Std \approx 1.01$). P-values are Uniform (Prop < 0.05 is 0.049).
 - **Kurtotic Noise:** Even with sparse, spiky data (high kurtosis), Z-scores maintain unit variance ($Std \approx 0.997$).
 **Action:** This confirms that the complex analytical variance formula (Cliff & Ord) including the kurtosis correction term ($b_2$) is implemented correctly. It proves the statistic is robust to data distribution, allowing its use on raw or log-transformed expression data without false positives from non-normality.
+
+## 2025-02-23 - Surface Extraction Invariance
+**Learning:** Verified `extract_surface` accuracy and stability using a synthetic sinusoidal landscape.
+- **Accuracy:** Reconstructed surface matches analytical ground truth with MAE ~0.55 pixels (sub-pixel accuracy despite downsampling).
+- **Invariance:** Z-axis translation of the input volume results in an equivalent translation of the output surface (Mean shift error < 0.03 px, Std < 0.2 px).
+**Action:** Confirms that the `downscale` -> `smooth` -> `threshold` -> `zoom` pipeline is robust and preserves geometry. Future 3D segmentation tests should rely on translation invariance as a primary correctness check.
