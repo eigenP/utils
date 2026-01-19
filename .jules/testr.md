@@ -38,3 +38,9 @@
 - **Gaussian Noise:** Z-scores follow $N(0, 1)$ ($Mean \approx 0.04$, $Std \approx 1.01$). P-values are Uniform (Prop < 0.05 is 0.049).
 - **Kurtotic Noise:** Even with sparse, spiky data (high kurtosis), Z-scores maintain unit variance ($Std \approx 0.997$).
 **Action:** This confirms that the complex analytical variance formula (Cliff & Ord) including the kurtosis correction term ($b_2$) is implemented correctly. It proves the statistic is robust to data distribution, allowing its use on raw or log-transformed expression data without false positives from non-normality.
+
+## 2025-02-23 - Surface Extraction Accuracy & Invariance
+**Learning:** Verified `extract_surface` ("surface peeler") accuracy using a "Sine Wave Reconstruction" test.
+- **Accuracy:** The algorithm (with bicubic upscaling) recovers the analytical surface with low MAE (< 2 pixels), confirming that the geometry is preserved despite downsampling.
+- **Invariance:** Translation invariance holds (Mean Shift $\approx$ Actual Shift), *provided* that `gaussian_sigma` is not excessively large relative to the volume size. Large smoothing combined with global Otsu thresholding can induce bias when the foreground/background ratio changes significantly.
+**Action:** For small volumes or precise surface extraction, `gaussian_sigma` should be kept low (e.g., 1.0) to minimize threshold-induced shift errors. Tests for geometric algorithms must verify invariance to rigid transformations (translation, rotation).
