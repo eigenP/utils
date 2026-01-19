@@ -96,6 +96,23 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     pad_y = (patch_size - img.shape[1] % patch_size) + overlap
     pad_x = (patch_size - img.shape[2] % patch_size) + overlap
 
+    # Bolt fix: Ensure padding is sufficient to cover the full extent of the last patch.
+    # Because n_patches is calculated via floor division, the last patch might extend slightly beyond
+    # the initially calculated padded dimension. We extend the padding to cover this overhang.
+    step = patch_size - overlap
+
+    padded_H_initial = img.shape[1] + pad_y
+    n_patches_y = padded_H_initial // step
+    needed_H = (n_patches_y - 1) * step + patch_size
+    if needed_H > padded_H_initial:
+        pad_y += (needed_H - padded_H_initial)
+
+    padded_W_initial = img.shape[2] + pad_x
+    n_patches_x = padded_W_initial // step
+    needed_W = (n_patches_x - 1) * step + patch_size
+    if needed_W > padded_W_initial:
+        pad_x += (needed_W - padded_W_initial)
+
     # bolt: Removed full 3D padding (img_padded) to save O(Z*H*W) memory.
     # Instead, we apply padding on the fly per slice (scoring) or per patch (reconstruction).
     # This reduces peak memory significantly (e.g. from 1.6GB to ~200MB for typical stacks).
@@ -108,7 +125,7 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     # Metric: Laplacian Energy (Sum of Squared Laplacian)
     # Optimization: Use float32 to reduce memory usage by 50% compared to float64.
 
-    # Grid dimensions
+    # Grid dimensions (should be stable after padding adjustment)
     n_patches_y = padded_H // (patch_size - overlap)
     n_patches_x = padded_W // (patch_size - overlap)
 
@@ -169,11 +186,85 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         np.square(lap_buffer, out=lap_buffer)
 
         # 4. Local Average Energy (proxy for sum over patch)
-        # Reuses energy_buffer
-        uniform_filter(lap_buffer, size=patch_size, output=energy_buffer, mode='reflect')
+        # Bolt Optimization: Replaced uniform_filter with integral image sampling.
+        # This reduces aggregation time from O(N_pixels) to O(N_pixels [for cumsum] + N_patches).
+        # uniform_filter is roughly 2x slower than cumsum.
 
-        # 5. Sample at patch centers
-        score_matrix[z] = energy_buffer[np.ix_(y_centers, x_centers)]
+        # Compute Integral Image (Summed Area Table)
+        # We can reuse energy_buffer as temporary storage or compute in-place on lap_buffer.
+        # Using lap_buffer in-place (it's float32).
+        np.cumsum(lap_buffer, axis=0, out=lap_buffer)
+        np.cumsum(lap_buffer, axis=1, out=lap_buffer)
+
+        # 5. Sample at patch windows
+        # Window limits for each center:
+        # Uniform filter with size S centers at C.
+        # Window is [C - S//2, C + S//2 + S%2].
+        # Integral Image sum for window [y1, y2) x [x1, x2) is:
+        # I[y2-1, x2-1] - I[y1-1, x2-1] - I[y2-1, x1-1] + I[y1-1, x1-1]
+
+        # Calculate window boundaries (inclusive indices for integral image)
+        half_size = patch_size // 2
+
+        # y_centers are scalar coordinates.
+        y_starts_win = y_centers - half_size
+        y_ends_win   = y_centers + half_size + (patch_size % 2) - 1
+
+        x_starts_win = x_centers - half_size
+        x_ends_win   = x_centers + half_size + (patch_size % 2) - 1
+
+        # Handle boundaries. Our integral image is `lap_buffer`.
+        # Indices < 0 are implicit 0.
+        # We sample at:
+        # A = I[y_ends, x_ends]
+        # B = I[y_starts-1, x_ends]
+        # C = I[y_ends, x_starts-1]
+        # D = I[y_starts-1, x_starts-1]
+        # Result = A - B - C + D
+
+        # Note: y_starts_win usually >= 0 if padding is sufficient.
+        # y_starts = y_centers - patch_size//2.
+        # In current logic, y_starts (grid) starts at 0. So y_centers[0] = patch_size//2.
+        # So y_starts_win[0] = 0.
+        # So y_starts_win - 1 = -1.
+        # We need to handle index -1 as 0.
+
+        # Helper for vectorized sampling with boundary handling for -1
+        # Since we use np.ix_, we need 1D vectors for broadcasting.
+
+        def sample_integral(y_idx, x_idx, src):
+            # If indices are all >= 0, we just slice.
+            # If some are -1, we mask.
+            # src is (H, W). y_idx is (Ny,), x_idx is (Nx,)
+            # Return (Ny, Nx)
+
+            # Simple case: all valid
+            if y_idx[0] >= 0 and x_idx[0] >= 0:
+                 return src[np.ix_(y_idx, x_idx)]
+
+            # Handle negative indices
+            # Create full grid? Or broadcast manually.
+            val = src[np.ix_(np.maximum(y_idx, 0), np.maximum(x_idx, 0))]
+
+            # Mask out where indices were -1
+            # If y_idx[i] < 0, row i should be 0.
+            if y_idx[0] < 0:
+                 # Mask rows
+                 mask_y = (y_idx >= 0)[:, None]
+                 val *= mask_y # Broadcasting (Ny, 1)
+
+            if x_idx[0] < 0:
+                 mask_x = (x_idx >= 0)[None, :]
+                 val *= mask_x # Broadcasting (1, Nx)
+
+            return val
+
+        A = sample_integral(y_ends_win, x_ends_win, lap_buffer)
+        B = sample_integral(y_starts_win - 1, x_ends_win, lap_buffer)
+        C = sample_integral(y_ends_win, x_starts_win - 1, lap_buffer)
+        D = sample_integral(y_starts_win - 1, x_starts_win - 1, lap_buffer)
+
+        score_matrix[z] = A - B - C + D
 
         # Explicit delete not needed as buffers are reused, but slice_padded might be a new array in fallback
         if not use_fast_pad:
