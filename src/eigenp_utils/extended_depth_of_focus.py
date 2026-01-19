@@ -11,7 +11,7 @@
 import numpy as np
 import skimage.io
 
-from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
+from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter, map_coordinates
 
 from skimage.filters import median
 from skimage.morphology import disk
@@ -180,10 +180,63 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
              del slice_padded
 
     # 4. Select best Z
-    height_map_small = np.argmax(score_matrix, axis=0)
+    height_map_indices = np.argmax(score_matrix, axis=0)
 
-    # Apply median filter
+    # matth: Refine Z estimates using Parabolic Interpolation
+    # This converts the integer steps into a smooth surface.
+    # Formula: delta = 0.5 * (s_left - s_right) / (s_left - 2*s_center + s_right)
+    # Assumes local quadratic peak.
+
+    height_map_small = height_map_indices.astype(np.float32)
+    Z_dim, H_s, W_s = score_matrix.shape
+
+    # Create mask for valid inner pixels (can't refine if max is at edges 0 or Z-1)
+    valid_mask = (height_map_indices > 0) & (height_map_indices < Z_dim - 1)
+
+    if np.any(valid_mask):
+        # Extract scores for peak and neighbors
+        # Use advanced indexing
+        z_c = height_map_indices[valid_mask]
+        y_c, x_c = np.where(valid_mask)
+
+        s_center = score_matrix[z_c, y_c, x_c]
+        s_minus = score_matrix[z_c - 1, y_c, x_c]
+        s_plus = score_matrix[z_c + 1, y_c, x_c]
+
+        # matth: Use log-domain for parabolic fitting (Gaussian energy profile)
+        # Avoid log(0) with epsilon
+        epsilon = 1e-12
+        l_center = np.log(s_center + epsilon)
+        l_minus = np.log(s_minus + epsilon)
+        l_plus = np.log(s_plus + epsilon)
+
+        # Calculate parabolic correction on logs
+        # Denominator corresponds to the 2nd derivative (curvature)
+        denom = l_minus - 2 * l_center + l_plus
+
+        # Only refine if curvature is negative (peak) and non-zero
+        peak_mask = denom < -1e-6
+
+        if np.any(peak_mask):
+            delta = 0.5 * (l_minus[peak_mask] - l_plus[peak_mask]) / denom[peak_mask]
+
+            # Clip delta to [-0.5, 0.5] to prevent overshooting into neighbor pixels
+            delta = np.clip(delta, -0.5, 0.5)
+
+            # Apply correction
+            flat_indices = np.flatnonzero(valid_mask)
+            target_indices = flat_indices[peak_mask]
+
+            rows, cols = np.unravel_index(target_indices, (H_s, W_s))
+            height_map_small[rows, cols] += delta
+
+    # Apply median filter to clean up outliers (works on floats too)
     height_map_small = apply_median_filter(height_map_small)
+
+    # Round back to integer indices for image reconstruction
+    # (Reconstruction uses the actual slices, so we need integers)
+    height_map_indices = np.round(height_map_small).astype(int)
+    np.clip(height_map_indices, 0, Z_dim - 1, out=height_map_indices)
 
     # 5. Combine patches to create the final image
     # Use float32 for accumulation to save memory
@@ -192,11 +245,11 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
     _2D_window = _2D_weight(patch_size, overlap)
 
-    for i in range(height_map_small.shape[0]):
-        for j in range(height_map_small.shape[1]):
+    for i in range(height_map_indices.shape[0]):
+        for j in range(height_map_indices.shape[1]):
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
-            best_z = height_map_small[i, j]
+            best_z = height_map_indices[i, j]
 
             # Extract patch with on-demand padding/cropping logic to avoid full padded copy
             y_end = y_start + patch_size
@@ -279,9 +332,25 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     # We will return float32.
 
     if return_heightmap:
-        zoom_y = original_shape[0] / height_map_small.shape[0]
-        zoom_x = original_shape[1] / height_map_small.shape[1]
-        height_map_full = zoom(height_map_small, (zoom_y, zoom_x), order=0)
+        # matth: Use map_coordinates for geometrically correct interpolation
+        # zoom() assumes the array covers the full extent [0, H], but our samples are at patch centers.
+
+        H_full, W_full = original_shape
+        step = patch_size - overlap
+        start_offset = patch_size // 2
+
+        # Create grid of coordinates in the "index space" of height_map_small
+        # y_pixel = start_offset + y_index * step
+        # => y_index = (y_pixel - start_offset) / step
+
+        # Using float32 grid to save memory if image is large
+        grid_y, grid_x = np.mgrid[0:H_full, 0:W_full].astype(np.float32)
+
+        coords_y = (grid_y - start_offset) / step
+        coords_x = (grid_x - start_offset) / step
+
+        # Use bilinear interpolation (order=1) and replicate edge values (mode='nearest')
+        height_map_full = map_coordinates(height_map_small, np.stack((coords_y, coords_x)), order=1, mode='nearest')
 
         return final_img, height_map_full
 
