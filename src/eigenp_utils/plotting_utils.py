@@ -396,6 +396,22 @@ def raincloud_plot(data,
     labels = [p[0] for p in plot_data]
     ticks = np.arange(len(plot_data))
 
+    # Handle custom category labels passed via x_label (if vertical) or y_label (if horizontal)
+    if vert:
+        if x_label is not None and isinstance(x_label, (list, tuple, np.ndarray)):
+            if len(x_label) == len(plot_data):
+                labels = x_label
+                x_label = None
+            else:
+                print(f"Warning: x_label list length ({len(x_label)}) does not match number of groups ({len(plot_data)}). Using as axis label.")
+    else:
+        if y_label is not None and isinstance(y_label, (list, tuple, np.ndarray)):
+            if len(y_label) == len(plot_data):
+                labels = y_label
+                y_label = None
+            else:
+                print(f"Warning: y_label list length ({len(y_label)}) does not match number of groups ({len(plot_data)}). Using as axis label.")
+
     if vert:
         ax.set_xticks(ticks)
         ax.set_xticklabels(labels)
