@@ -42,3 +42,20 @@
 ## 2025-02-24 - Drift Correction Windowing Bias
 **Learning:** The windowing function (`_2D_weighted_image`) used in drift estimation can significantly bias results on small images if the object is large relative to the field of view. A Gaussian moving by 1.0 px was estimated as moving only 0.2 px on a 32x32 image because the window attenuated the object's tails, effectively shifting its centroid back towards the center.
 **Action:** Tests for drift correction must use images large enough (e.g., 64x64 or 128x128) so that the object resides within the flat region of the window, or explicitly handle windowing effects.
+## 2025-02-23 - Surface Extraction Invariance
+**Learning:** Verified `extract_surface` accuracy and stability using a synthetic sinusoidal landscape.
+- **Accuracy:** Reconstructed surface matches analytical ground truth with MAE ~0.55 pixels (sub-pixel accuracy despite downsampling).
+- **Invariance:** Z-axis translation of the input volume results in an equivalent translation of the output surface (Mean shift error < 0.03 px, Std < 0.2 px).
+**Action:** Confirms that the `downscale` -> `smooth` -> `threshold` -> `zoom` pipeline is robust and preserves geometry. Future 3D segmentation tests should rely on translation invariance as a primary correctness check.
+## 2025-02-23 - Surface Extraction Accuracy & Invariance
+**Learning:** Verified `extract_surface` ("surface peeler") accuracy using a "Sine Wave Reconstruction" test.
+- **Accuracy:** The algorithm (with bicubic upscaling) recovers the analytical surface with low MAE (< 2 pixels), confirming that the geometry is preserved despite downsampling.
+- **Invariance:** Translation invariance holds (Mean Shift $\approx$ Actual Shift), *provided* that `gaussian_sigma` is not excessively large relative to the volume size. Large smoothing combined with global Otsu thresholding can induce bias when the foreground/background ratio changes significantly.
+**Action:** For small volumes or precise surface extraction, `gaussian_sigma` should be kept low (e.g., 1.0) to minimize threshold-induced shift errors. Tests for geometric algorithms must verify invariance to rigid transformations (translation, rotation).
+
+## 2025-02-23 - Brightness Correction Invariants
+**Learning:** Verified `adjust_brightness_per_slice` as a Global Trend Corrector, not a local normalizer.
+- **Global Stability:** It perfectly flattens systematic exponential decay (CV < 1.5%) when the signal follows the model.
+- **Local Preservation:** It preserves local anomalies (outliers) relative to the corrected trend, rather than normalizing them away. This confirms the intent is to correct for physics (e.g., attenuation), not biology (e.g., sparse cells).
+- **Statistical Idempotence:** The correction is stable/idempotent, but finite sampling noise in the 99th percentile prevents perfect identity (Delta < 0.1%).
+**Action:** When testing statistical estimators on finite samples (like P99), exact equality assertions must be replaced with tolerance checks that account for sampling variance/overfitting.
