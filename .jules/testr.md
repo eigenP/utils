@@ -49,3 +49,10 @@
 - **Accuracy:** The algorithm (with bicubic upscaling) recovers the analytical surface with low MAE (< 2 pixels), confirming that the geometry is preserved despite downsampling.
 - **Invariance:** Translation invariance holds (Mean Shift $\approx$ Actual Shift), *provided* that `gaussian_sigma` is not excessively large relative to the volume size. Large smoothing combined with global Otsu thresholding can induce bias when the foreground/background ratio changes significantly.
 **Action:** For small volumes or precise surface extraction, `gaussian_sigma` should be kept low (e.g., 1.0) to minimize threshold-induced shift errors. Tests for geometric algorithms must verify invariance to rigid transformations (translation, rotation).
+
+## 2025-02-23 - Brightness Correction Invariants
+**Learning:** Verified `adjust_brightness_per_slice` as a Global Trend Corrector, not a local normalizer.
+- **Global Stability:** It perfectly flattens systematic exponential decay (CV < 1.5%) when the signal follows the model.
+- **Local Preservation:** It preserves local anomalies (outliers) relative to the corrected trend, rather than normalizing them away. This confirms the intent is to correct for physics (e.g., attenuation), not biology (e.g., sparse cells).
+- **Statistical Idempotence:** The correction is stable/idempotent, but finite sampling noise in the 99th percentile prevents perfect identity (Delta < 0.1%).
+**Action:** When testing statistical estimators on finite samples (like P99), exact equality assertions must be replaced with tolerance checks that account for sampling variance/overfitting.
