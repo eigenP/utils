@@ -39,6 +39,9 @@
 - **Kurtotic Noise:** Even with sparse, spiky data (high kurtosis), Z-scores maintain unit variance ($Std \approx 0.997$).
 **Action:** This confirms that the complex analytical variance formula (Cliff & Ord) including the kurtosis correction term ($b_2$) is implemented correctly. It proves the statistic is robust to data distribution, allowing its use on raw or log-transformed expression data without false positives from non-normality.
 
+## 2025-02-24 - Drift Correction Windowing Bias
+**Learning:** The windowing function (`_2D_weighted_image`) used in drift estimation can significantly bias results on small images if the object is large relative to the field of view. A Gaussian moving by 1.0 px was estimated as moving only 0.2 px on a 32x32 image because the window attenuated the object's tails, effectively shifting its centroid back towards the center.
+**Action:** Tests for drift correction must use images large enough (e.g., 64x64 or 128x128) so that the object resides within the flat region of the window, or explicitly handle windowing effects.
 ## 2025-02-23 - Surface Extraction Invariance
 **Learning:** Verified `extract_surface` accuracy and stability using a synthetic sinusoidal landscape.
 - **Accuracy:** Reconstructed surface matches analytical ground truth with MAE ~0.55 pixels (sub-pixel accuracy despite downsampling).
