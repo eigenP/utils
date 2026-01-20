@@ -223,7 +223,17 @@ def preprocess_subset(
     # ---------- HVG selection ----------
     if hvg_flavor == "triku":
         # Run Triku on specified layer (recommended log1p or scvi), then rely on its 'highly_variable' output
-        run_triku(A, layer=X_layer_for_pca, n_features=n_top_genes)
+        # Triku requires robust values (integers or log-transformed counts).
+        # Low-magnitude floats (like scvi_normalized) can cause crashes due to zero-sum weights.
+        triku_layer = X_layer_for_pca
+
+        # Prefer log1p if available and appropriate
+        if "log1p" in A.layers:
+            triku_layer = "log1p"
+        elif counts_layer in A.layers:
+            triku_layer = counts_layer
+
+        run_triku(A, layer=triku_layer, n_features=n_top_genes)
         # Ensure 'highly_variable' column exists for subsetting
         if "triku_highly_variable" in A.var:
             A.var["highly_variable"] = A.var["triku_highly_variable"]
