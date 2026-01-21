@@ -124,3 +124,43 @@ def test_single_candidate_edge_case():
 
     assert res_df.loc["0", "softmax_p"] == 1.0, "Single candidate should have P=1.0"
     assert res_df.loc["0", "assigned_cell_type"] == "TypeA"
+
+def test_skewed_distribution_robustness():
+    """
+    Testr 🔎: Verify robustness of the confidence metric against skewed distributions/outliers.
+
+    We create a scenario where Type A is better than Type B in 99% of cells (Score Diff = +1),
+    but in 1% of cells, Type B is massively better (Score Diff = -100).
+
+    - Parametric (Gaussian) Estimator: Fails (Mean diff ~ 0, so P ~ 0.5).
+    - Empirical Estimator: Succeeds (P ~ 0.99).
+    """
+    n_cells = 100
+    obs = pd.DataFrame({"leiden": ["0"]*n_cells}, index=[f"c{i}" for i in range(n_cells)])
+
+    # Construct scores
+    sA = np.ones(n_cells)
+    sB = np.zeros(n_cells)
+    # Add outlier: Cell 99 has huge B score
+    sB[-1] = 100.0
+
+    scores = pd.DataFrame({"TypeA": sA, "TypeB": sB}, index=obs.index)
+    adata = AnnData(X=np.zeros((n_cells, 2)), obs=obs)
+
+    res_df = annotate_clusters_by_markers(
+        adata,
+        cluster_key="leiden",
+        scores=scores,
+        normalize_scores=False
+    )
+
+    p_val = res_df.loc["0", "softmax_p"]
+    print(f"\nSkewed Robustness Test: P={p_val:.4f}")
+
+    # We expect P to be close to 0.99 (99/100 cells prefer A)
+    # The outlier should not drag P down to 0.5.
+    assert p_val > 0.95, \
+        f"Empirical P should be robust to outliers (>0.95), but got {p_val:.4f}. " \
+        "This implies the metric is sensitive to magnitude outliers (parametric weakness)."
+
+    assert res_df.loc["0", "assigned_cell_type"] == "TypeA", "Should assign TypeA despite outlier."

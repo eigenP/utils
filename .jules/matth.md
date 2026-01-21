@@ -19,3 +19,9 @@ For a continuous signal (like an image), the "value" at x=0.5 exists and can be 
 - **Robustness Fix:** Explicitly cast to `float32` before interpolation, then clip the result to the valid range of the data type before casting back. This preserves the topology of the data and prevents "salt-and-pepper" noise at edges.
 
 This moves the algorithm from a discrete grid approximation to a continuous signal reconstruction, aligning with the precision of the detection step.
+
+## 2025-05-18 - Empirical Probability of Superiority in Single-Cell Annotation
+
+**Learning:** Parametric estimators (like Z-scores) fail catastrophically for single-cell confidence metrics because marker gene scores are often zero-inflated, skewed, or contain massive outliers. A single outlier can drag a mean-based Z-score to 0 (indicating "no confidence") even if 99% of cells show a clear signal. Additionally, robust normalization (Median/MAD) can amplify noise in sparse vectors (where MAD is near zero) to infinity.
+
+**Action:** Prefer the empirical "Probability of Superiority" (Common Language Effect Size), calculated as `mean(Score_A > Score_B)`, over parametric Gaussian approximations. Avoid default normalization of scores that lack variance; trust the raw sign/rank signal over magnitude when data is sparse.

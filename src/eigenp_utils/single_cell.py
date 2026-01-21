@@ -2534,7 +2534,7 @@ def annotate_clusters_by_markers(
     use_raw: bool = True,
     beta: float = None,  # Deprecated
     min_markers: int = 1,
-    normalize_scores: bool = True,
+    normalize_scores: bool = False,
     write_to_obs: bool = True,
     obs_prefix: Optional[str] = None,
     scores: Optional[pd.DataFrame] = None,
@@ -2542,16 +2542,19 @@ def annotate_clusters_by_markers(
     """
     Annotate clusters based on cell type scores using a probabilistic confidence metric.
 
-    Uses the Probability of Superiority (Common Language Effect Size) to estimate
-    the confidence that the top assigned cell type is truly separated from the runner-up,
-    accounting for the local variance of scores within the cluster.
+    Uses the Empirical Probability of Superiority (Common Language Effect Size) to estimate
+    the confidence that the top assigned cell type is truly separated from the runner-up.
+    This estimator P(Score_Top1 > Score_Top2) is non-parametric and robust to skewed
+    distributions (e.g. zero-inflated) common in single-cell data.
 
     If `scores` is provided, it must be a DataFrame with index == adata.obs_names
     and columns == cell types. Otherwise, scores are computed once here.
 
     Parameters:
-    - normalize_scores: Whether to apply robust normalization (median/MAD) to the scores. Default is True.
-      Formula: (x - median(x)) / (median(|x - median(x)|) + 1e-8)
+    - normalize_scores: Whether to apply robust normalization (median/MAD) to the scores.
+      Default is False (recommended), as raw scores preserve relative magnitude better
+      and MAD normalization can amplify noise in sparse/zero-inflated vectors.
+      Formula if True: (x - median(x)) / (median(|x - median(x)|) + 1e-8)
     """
     if beta is not None:
         warnings.warn("The `beta` parameter is deprecated and ignored. `annotate_clusters_by_markers` now uses a parameter-free probabilistic confidence score.", DeprecationWarning, stacklevel=2)
@@ -2637,20 +2640,16 @@ def annotate_clusters_by_markers(
                 # Remove NaNs if any (score_genes shouldn't produce mixed NaNs usually, but safe to check)
                 valid_diff = diff[np.isfinite(diff)]
 
-                if valid_diff.size > 1:
-                    mu_d = np.mean(valid_diff)
-                    std_d = np.std(valid_diff, ddof=1) # Sample std
+                if valid_diff.size > 0:
+                    # Empirical Probability of Superiority (Common Language Effect Size)
+                    # We compute P(Score_Top1 > Score_Top2) directly.
+                    # This is robust to non-normal distributions (e.g. outliers, skew) where
+                    # parametric assumptions (mean/std) fail.
 
-                    if std_d > 1e-12:
-                        # Z-score of the mean difference being > 0 ?
-                        # No, we want P(random cell score 1 > score 2).
-                        # Assuming diff is Normal(mu, sigma), P(diff > 0) = 1 - CDF(0) = CDF(mu/sigma)
-                        z = mu_d / std_d
-                        softmax_p = norm.cdf(z)
-                    elif mu_d > 0:
-                        softmax_p = 1.0
-                    else:
-                        softmax_p = 0.5 # Indistinguishable or worse
+                    # Ties (diff == 0) count as 0.5
+                    n_pos = np.sum(valid_diff > 0)
+                    n_ties = np.sum(valid_diff == 0)
+                    softmax_p = (n_pos + 0.5 * n_ties) / valid_diff.size
                 else:
                     softmax_p = 0.5 # Not enough data
 
