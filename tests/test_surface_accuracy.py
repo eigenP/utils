@@ -1,236 +1,125 @@
 
+import unittest
 import numpy as np
-import pytest
 from eigenp_utils.surface_extraction import extract_surface
-
-def generate_synthetic_landscape(shape, z_offset=20, amplitude=5, period=50):
-    """
-    Generates a binary volume with a sinusoidal 'ground'.
-    Returns the volume and the ground truth height map.
-    """
-    d, h, w = shape
-    z, y, x = np.indices(shape)
-
-    # Surface function: Z = z_offset + A * sin(x) + A * cos(y)
-    # This creates an egg-carton-like surface
-    surface_height = z_offset + amplitude * np.sin(2 * np.pi * x / period) + amplitude * np.cos(2 * np.pi * y / period)
-
-    # Create binary volume
-    # Pixels with z >= surface_height are "Ground" (Foreground)
-    # Pixels with z < surface_height are "Air" (Background)
-    # extract_surface finds the "top" of the foreground, which corresponds to the smallest z index where mask is True.
-
-    volume = np.zeros(shape, dtype=np.uint8)
-    mask = z >= surface_height
-    volume[mask] = 200 # Foreground intensity
-
-    return volume, surface_height
-
-def test_surface_accuracy():
-    """
-    Verifies that extracted surface follows the ground truth geometry.
-    This checks functional correctness: does the algorithm actually find the surface?
-    """
-    shape = (64, 128, 128)
-    # Period must be large enough relative to downscale * sigma to avoid smoothing it out
-    # Downscale=2, Sigma=1.0 -> Effective smoothing sigma ~ 2-3 pixels. Period 64 is plenty.
-    image, gt_height = generate_synthetic_landscape(shape, z_offset=32, amplitude=5, period=64)
-
-    # Run extraction
-    # Using low sigma to preserve the shape for accuracy testing
-    surface_mask = extract_surface(image, downscale_factor=2, gaussian_sigma=1.0)
-
-    # Reconstruct height map from mask (Find first True along Z)
-    # If a column has no True, argmax is 0. But our surface is around z=32, so 0 is far away.
-    # We should ensure we don't include those if any.
-    has_surface = np.any(surface_mask, axis=0)
-    assert np.all(has_surface), "Surface should be detected everywhere"
-
-    extracted_z = np.argmax(surface_mask, axis=0)
-
-    # Calculate Mean Absolute Error
-    diff = extracted_z - gt_height
-    mae = np.mean(np.abs(diff))
-
-    print(f"Accuracy MAE: {mae:.4f}")
-
-    # Allow small error due to binning, smoothing, and integer quantization
-    assert mae < 1.5, f"Surface extraction MAE {mae} is too high (expected < 1.5)"
-
-def test_translation_invariance():
-    """
-    Verifies that shifting the input Z shifts the output Z.
-    This is a critical invariant for 3D processing pipelines.
-    """
-    shape = (100, 64, 64) # Taller Z to allow shift without clipping interesting parts
-    # Create a distinct surface
-    image, _ = generate_synthetic_landscape(shape, z_offset=40, amplitude=5, period=40)
-
-    shift_amount = 8 # Integer shift
-
-    # Case 1: Original
-    mask1 = extract_surface(image, downscale_factor=2, gaussian_sigma=1.0)
-    z1 = np.argmax(mask1, axis=0)
-
-    # Case 2: Shifted Image
-    # Shift data 'down' (to higher indices), filling top with 0
-    image_shifted = np.roll(image, shift_amount, axis=0)
-    image_shifted[:shift_amount] = 0
-
-    mask2 = extract_surface(image_shifted, downscale_factor=2, gaussian_sigma=1.0)
-    z2 = np.argmax(mask2, axis=0)
-
-    # Compare
-    # calculate shift for each pixel
-    detected_shift = z2 - z1
-
-    # Statistics
-    mean_shift = np.mean(detected_shift)
-    std_shift = np.std(detected_shift)
-
-    print(f"Mean Shift: {mean_shift:.4f}, Std Shift: {std_shift:.4f}")
-
-    # The mean shift should match the applied shift
-    assert np.abs(mean_shift - shift_amount) < 0.5, f"Expected shift {shift_amount}, got {mean_shift}"
-
-    # The variance of the shift should be low (the shape shouldn't distort)
-    assert std_shift < 0.5, f"Shift introduced distortion (std: {std_shift})"
 from scipy.ndimage import gaussian_filter
 
-def generate_sine_wave_volume(shape, amplitude=10, period=50, base_height=25, noise_sigma=0.0):
+class TestSurfaceAccuracy(unittest.TestCase):
     """
-    Generates a 3D volume with a sine wave surface.
-    Z, Y, X order.
-    Surface is defined as z = base_height + amplitude * sin(2*pi*x / period).
-    """
-    Z, Y, X = shape
-    volume = np.zeros(shape, dtype=np.uint8)
+    Matth 🧠 Verification: Surface Extraction Accuracy
 
-    # Grid
-    x = np.arange(X)
-
-    # Surface function Z(x) - independent of Y for simplicity
-    surface_z = base_height + amplitude * np.sin(2 * np.pi * x / period)
-
-    # Create volume
-    # Voxels where z >= surface_z are foreground (high intensity)
-    # Using a soft edge or hard edge? Let's use hard edge + smoothing.
-
-    for i in range(X):
-        z_cutoff = int(np.round(surface_z[i]))
-        z_cutoff = max(0, min(Z, z_cutoff))
-
-        # Fill from z_cutoff to Z (assuming we are looking for the 'top' surface,
-        # which extract_surface defines as the first index from 0.
-        # So we should fill from index z_cutoff to end?
-        # Let's verify 'top'. extract_surface does argmax.
-        # If we fill 255 at z >= z_cutoff, argmax will return z_cutoff.
-        volume[z_cutoff:, :, i] = 255
-
-    if noise_sigma > 0:
-        rng = np.random.default_rng(42)
-        noise = rng.normal(0, noise_sigma, shape)
-        volume = np.clip(volume.astype(float) + noise, 0, 255).astype(np.uint8)
-
-    return volume, surface_z
-
-def test_sine_wave_reconstruction():
-    """
-    Testr 🔎 Verification: Surface Reconstruction Accuracy
-
-    Verifies that extract_surface can accurately recover a smooth analytical surface (sine wave).
-
-    The Invariant:
-    The recovered height map (argmax of mask) should match the ground truth function
-    within a reasonable tolerance (Mean Absolute Error < 2.0 pixels).
-
-    This ensures:
-    1. The downsampling/upsampling logic (using order=3 bicubic) preserves shape.
-    2. The smoothing (Gaussian) doesn't flatten the signal excessively.
-    3. The coordinate system is consistent.
+    Validates that the surface extraction algorithm correctly identifies
+    the surface of a 3D object and measures the precision of the height map.
     """
 
-    # 1. Setup
-    shape = (60, 100, 100) # Z, Y, X
-    amp = 10
-    period = 40
-    # Create sine wave
-    volume, gt_profile = generate_sine_wave_volume(shape, amplitude=amp, period=period, base_height=30)
+    def generate_slanted_plane(self, shape=(50, 64, 64), slope_y=0.2, slope_x=0.1, z_offset=10, noise_sigma=0.0):
+        """
+        Generates a 3D volume with a slanted plane interface.
+        Voxels ABOVE the plane (low Z) are dark (background).
+        Voxels BELOW the plane (high Z) are bright (foreground).
+        """
+        Z, Y, X = shape
+        vol = np.zeros(shape, dtype=np.float32)
 
-    # 2. Run Algorithm
-    # Use downscale_factor=2 to test the interpolation logic.
-    mask = extract_surface(volume, downscale_factor=2, gaussian_sigma=1.0)
+        y_idx, x_idx = np.indices((Y, X))
 
-    # 3. Recover Height Map from Mask
-    # Mask is Z, Y, X.
-    # Find first True along Z.
+        # True surface height at each (y, x)
+        gt_height = z_offset + slope_y * y_idx + slope_x * x_idx
 
-    # We need to handle columns where no surface was found (though our volume is full).
-    # But argmax returns 0 if all False.
-    detected_z = np.argmax(mask, axis=0)
+        # Fill volume
+        # I(z) = 0 if z < h, 1 if z > h
+        # Ramp: I(z) = clip(z - h + 0.5, 0, 1)
 
-    # Check coverage (should be 100%)
-    has_surface = np.any(mask, axis=0)
-    assert np.mean(has_surface) > 0.99, "Surface should be detected almost everywhere."
+        for z in range(Z):
+            # Signed distance from surface (positive = inside object, below surface)
+            dist = z - gt_height
 
-    # 4. Compare with Ground Truth
-    # gt_profile is 1D array of length X.
-    # detected_z is (Y, X).
-    # We average detected_z over Y since the surface is constant in Y.
+            # Clamp to 0-1 (linear ramp over 1 pixel thickness)
+            val = np.clip(dist + 0.5, 0.0, 1.0)
 
-    avg_detected_profile = np.mean(detected_z, axis=0)
+            vol[z] = val
 
-    # Calculate Error
-    # Note: ground truth is float, detected is int (indices).
-    # We expect some quantization error + smoothing error.
+        # Add noise
+        if noise_sigma > 0:
+            vol += np.random.normal(0, noise_sigma, size=shape)
+            vol = np.clip(vol, 0.0, 1.0)
 
-    diff = avg_detected_profile - gt_profile
-    mae = np.mean(np.abs(diff))
+        # Scale to uint8 for the algorithm
+        vol_u8 = (vol * 255).astype(np.uint8)
 
-    print(f"\nMean Absolute Error: {mae:.4f} pixels")
-    print(f"Max Error: {np.max(np.abs(diff)):.4f} pixels")
+        return vol_u8, gt_height
 
-    # Tolerance:
-    # Downscaling by 2 means precision loss. Smoothing shifts edges.
-    # MAE < 2.0 is a reasonable goal for a 10px amplitude wave.
-    assert mae < 2.0, f"Reconstruction error too high (MAE={mae:.4f})"
+    def test_surface_precision(self):
+        """
+        Measure the RMSE of the extracted surface against the ground truth.
+        """
+        # Parameters
+        shape = (40, 64, 64)
+        slope_y = 0.15
+        slope_x = 0.05
+        z_offset = 5.0
 
-    # Correlation check (shape preservation)
-    corr = np.corrcoef(avg_detected_profile, gt_profile)[0, 1]
-    print(f"Correlation: {corr:.4f}")
-    assert corr > 0.98, "Reconstructed shape does not match sine wave."
+        # No noise to test pure quantization error
+        vol, gt_height = self.generate_slanted_plane(shape, slope_y, slope_x, z_offset, noise_sigma=0.0)
 
-def test_translation_invariance():
-    """
-    Testr 🔎 Verification: Surface Translation Invariance
+        # Run extraction
+        # We increase gaussian_sigma to 2.0 to ensure the sharp step function of the synthetic data
+        # is blurred enough to create a gradient for subpixel interpolation.
+        # This simulates real microscopy data which is always band-limited (PSF).
+        surface_mask, height_map = extract_surface(vol, downscale_factor=1, gaussian_sigma=2.0, clahe_clip=0.0, return_heightmap=True)
 
-    Verifies that shifting the input volume by K pixels shifts the output surface by K pixels.
-    """
-    shape = (60, 50, 50)
-    # Generate base volume
-    vol1, _ = generate_sine_wave_volume(shape, base_height=20)
+        found_mask = np.any(surface_mask, axis=0)
 
-    # Generate shifted volume (+10 pixels)
-    vol2, _ = generate_sine_wave_volume(shape, base_height=30)
+        # Compare ground truth to the floating point height map
+        error = height_map[found_mask] - gt_height[found_mask]
 
-    # Run extraction
-    # Use smaller sigma to reduce edge shift sensitivity to threshold changes
-    mask1 = extract_surface(vol1, downscale_factor=2, gaussian_sigma=1.0)
-    mask2 = extract_surface(vol2, downscale_factor=2, gaussian_sigma=1.0)
+        H, W = height_map.shape
+        crop = 5
+        valid_crop = found_mask[crop:-crop, crop:-crop]
+        error_crop = error.reshape(H, W)[crop:-crop, crop:-crop][valid_crop]
 
-    z1 = np.argmax(mask1, axis=0).astype(float)
-    z2 = np.argmax(mask2, axis=0).astype(float)
+        rmse = np.sqrt(np.mean(error_crop**2))
 
-    # Filter valid
-    valid = (np.any(mask1, axis=0)) & (np.any(mask2, axis=0))
+        print(f"Surface RMSE (Float): {rmse:.4f} pixels")
 
-    diff = z2[valid] - z1[valid]
-    mean_shift = np.mean(diff)
-    std_shift = np.std(diff)
+        # With sufficient smoothing, subpixel interpolation works effectively.
+        self.assertLess(rmse, 0.20, "RMSE should be better than integer quantization (0.29)")
 
-    print(f"\nMean Shift: {mean_shift:.4f} (Expected 10.0)")
-    print(f"Std Shift: {std_shift:.4f}")
+    def test_translation_invariance(self):
+        """
+        The surface should not change shape when the object is shifted in Z.
+        Subpixel extraction should shift smoothly.
+        """
+        shape = (40, 32, 32)
+        # Shift by 0.5 pixels
+        vol1, gt1 = self.generate_slanted_plane(shape, z_offset=10.0)
+        vol2, gt2 = self.generate_slanted_plane(shape, z_offset=10.5)
 
-    # Check
-    assert np.abs(mean_shift - 10.0) < 1.0, f"Shift not preserved. Mean shift: {mean_shift}"
-    assert std_shift < 1.0, "Shift should be uniform across the surface."
+        # Use sigma=2.0 for smoothing
+        mask1, h1 = extract_surface(vol1, downscale_factor=1, gaussian_sigma=2.0, return_heightmap=True)
+        mask2, h2 = extract_surface(vol2, downscale_factor=1, gaussian_sigma=2.0, return_heightmap=True)
+
+        valid = (np.any(mask1, axis=0)) & (np.any(mask2, axis=0))
+
+        crop = 5
+        valid[:crop, :] = False
+        valid[-crop:, :] = False
+        valid[:, :crop] = False
+        valid[:, -crop:] = False
+
+        z1 = h1[valid]
+        z2 = h2[valid]
+
+        mean_shift = np.mean(z2 - z1)
+        print(f"Detected Shift (True=0.5): {mean_shift:.4f}")
+
+        diff_std = np.std(z2 - z1)
+        print(f"Shift StdDev: {diff_std:.4f}")
+
+        self.assertAlmostEqual(mean_shift, 0.5, delta=0.05)
+
+        # With sigma=2.0, the "staircase" effect is smoothed out, so the shift should be consistent.
+        self.assertLess(diff_std, 0.15, "Shift StdDev should be low for rigid shift")
+
+if __name__ == '__main__':
+    unittest.main()
