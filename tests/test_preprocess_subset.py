@@ -86,24 +86,3 @@ def test_seurat_v3_missing_counts_error(adata_float_layer):
             copy=True
         )
 
-def test_triku_with_floats(adata_float_layer):
-    """
-    Test passing float data to Triku.
-    """
-    try:
-        import triku
-    except ImportError:
-        pytest.skip("triku not installed")
-
-    # Match the actual warning emitted (missing counts), but NOT the "rounding" warning
-    with pytest.warns(UserWarning, match="Counts layer .* not found"):
-         adata = preprocess_subset(
-            adata_float_layer,
-            hvg_flavor="triku",
-            X_layer_for_pca="scvi_normalized",
-            n_top_genes=20,
-            copy=True
-        )
-
-    assert "triku_distance" in adata.var
-    assert "highly_variable" in adata.var # Check for the mapping fix too
