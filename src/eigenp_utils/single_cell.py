@@ -1253,7 +1253,7 @@ def morans_i_all_fast(
 
         # Optimize memory usage by avoiding explicit centering for cross-product
         sum_cross = np.einsum('ij,ij->j', Xb, WXb, dtype=np.float64)
-        sum_sq = np.einsum('ij,ij->j', Xb, Xb, dtype=np.float64)
+        # Bolt: Avoid einsum(Xb, Xb) for sum_sq. We will compute it during kurtosis loop.
 
         # For kurtosis, we need sum of 4th powers of deviations
         # (Xb - mu)^4.
@@ -1262,7 +1262,7 @@ def morans_i_all_fast(
         if center:
             sum_WXb = WXb.sum(axis=0, dtype=np.float64)
             num = sum_cross - mub * sum_WXb
-            den = sum_sq - n * (mub ** 2)
+            # den = sum_sq - n * (mub ** 2) -> We calculate den later via Xb_dev sum
 
             # Bolt: Optimize memory. WXb is no longer needed.
             del WXb
@@ -1274,38 +1274,63 @@ def morans_i_all_fast(
                 # Copy to avoid corrupting X
                 # Xb_dev will be (N, block) float32
                 Xb_dev = Xb - mub[None, :]
-                # Optimize x^4 as (x^2)^2 using repeated multiplication
+
+                # First square: (x-u)^2
                 np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
+
+                # Bolt: Calculate den here!
+                # den = sum((x-u)^2)
+                den = np.sum(Xb_dev, axis=0, dtype=np.float64)
+
+                # Second square: (x-u)^4
                 np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
+
                 sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
                 del Xb_dev
             else:
                 # Xb is a copy (e.g. from sparse conversion or explicit copy), safe to reuse in-place
                 np.subtract(Xb, mub[None, :], out=Xb)
-                # Optimize x^4 as (x^2)^2 using repeated multiplication
+
+                # First square: (x-u)^2
                 np.multiply(Xb, Xb, out=Xb)
+
+                # Bolt: Calculate den here!
+                den = np.sum(Xb, axis=0, dtype=np.float64)
+
+                # Second square: (x-u)^4
                 np.multiply(Xb, Xb, out=Xb)
+
                 sum_fourth = np.sum(Xb, axis=0, dtype=np.float64)
 
         else:
             num = sum_cross
-            den = sum_sq
             # Bolt: WXb not needed
             del WXb
 
             # If not centered, we assume mean 0 for formula (deviations from 0)
             if np.shares_memory(Xb, X):
                  # Must copy (or create temp)
-                 # Optimize x^4 as (x^2)^2 using repeated multiplication
-                 Xb_dev = np.multiply(Xb, Xb)
+                 Xb_dev = np.multiply(Xb, Xb) # First square: x^2
+
+                 # Bolt: Calculate den here!
+                 # den = sum(x^2)
+                 den = np.sum(Xb_dev, axis=0, dtype=np.float64)
+
+                 # Second square: x^4
                  np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
+
                  sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
                  del Xb_dev
             else:
                  # In-place power
-                 # Optimize x^4 as (x^2)^2 using repeated multiplication
+                 np.multiply(Xb, Xb, out=Xb) # First square: x^2
+
+                 # Bolt: Calculate den here!
+                 den = np.sum(Xb, axis=0, dtype=np.float64)
+
+                 # Second square: x^4
                  np.multiply(Xb, Xb, out=Xb)
-                 np.multiply(Xb, Xb, out=Xb)
+
                  sum_fourth = np.sum(Xb, axis=0, dtype=np.float64)
 
         den = np.where(den > 0, den, np.nan)
