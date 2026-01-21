@@ -59,3 +59,7 @@
 - **Local Preservation:** It preserves local anomalies (outliers) relative to the corrected trend, rather than normalizing them away. This confirms the intent is to correct for physics (e.g., attenuation), not biology (e.g., sparse cells).
 - **Statistical Idempotence:** The correction is stable/idempotent, but finite sampling noise in the 99th percentile prevents perfect identity (Delta < 0.1%).
 **Action:** When testing statistical estimators on finite samples (like P99), exact equality assertions must be replaced with tolerance checks that account for sampling variance/overfitting.
+
+## 2025-02-24 - Multiscale Coarsening Lineage Inconsistency
+**Learning:** Verified that `multiscale_coarsening` correctly handles "Simpson's Paradox" scenarios where the direct lineage (Fine->Coarse) disagrees with the indirect lineage (Fine->Mid->Coarse) due to aggregation "majority vote" flips.
+**Action:** Tests for hierarchical aggregation must explicitly mock or construct edge cases where the majority shifts across levels to ensure robustness against voting anomalies.
