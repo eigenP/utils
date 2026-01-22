@@ -63,3 +63,11 @@
 ## 2025-02-24 - Multiscale Coarsening Lineage Inconsistency
 **Learning:** Verified that `multiscale_coarsening` correctly handles "Simpson's Paradox" scenarios where the direct lineage (Fine->Coarse) disagrees with the indirect lineage (Fine->Mid->Coarse) due to aggregation "majority vote" flips.
 **Action:** Tests for hierarchical aggregation must explicitly mock or construct edge cases where the majority shifts across levels to ensure robustness against voting anomalies.
+
+## 2025-02-24 - CLAHE Limits & Identity
+**Learning:** Verified the mathematical properties of `_my_clahe_` (Adaptive Histogram Equalization):
+1.  **Monotonicity:** Contrast (entropy) increases monotonically with `clip_limit`.
+2.  **Identity Convergence:** As `clip_limit` $\to$ 0 (e.g. $10^{-5}$), the operation converges to a linear identity transform (correlation > 0.99), preserving relative signal shape rather than enforcing a uniform histogram.
+3.  **Sentinel Discontinuity:** `clip_limit=0` is a sentinel for "Unlimited AHE" (Max Contrast), causing a sharp discontinuity from `clip_limit=0.001` (Low Contrast). This behavior is correct but counter-intuitive.
+4.  **Saturation:** For smooth/sparse images, effective contrast limits saturate quickly (e.g. at 0.05) once the clip limit exceeds the maximum bin count of the local histogram.
+**Action:** Tests for contrast enhancement must account for signal content (saturation) and the specific sentinel value (0) to avoid false failures. Using `clip_limit=0` should be preferred for "Maximum Effect" rather than `clip_limit=1.0` to avoid ambiguity.
