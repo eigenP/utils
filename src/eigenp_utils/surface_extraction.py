@@ -23,8 +23,9 @@ def extract_surface(
     image: np.ndarray,
     downscale_factor: Union[int, Tuple[int, int, int]] = 4,
     gaussian_sigma: float = 4.0,
-    clahe_clip: float = 0.00
-) -> np.ndarray:
+    clahe_clip: float = 0.00,
+    return_heightmap: bool = False
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
 
     # --- 1. HANDLE ANISOTROPIC FACTORS ---
     if isinstance(downscale_factor, int):
@@ -90,14 +91,54 @@ def extract_surface(
 
     Z_red, Y_red, X_red = img_mask.shape
 
-    # --- 7. SURFACE UPSCALING VIA HEIGHT MAP ---
-    zred_dtype = np.int16 if Z_red <= 32767 else np.int32
-    surface_z_red = np.full((Y_red, X_red), -1, dtype=zred_dtype)
-    surface_z_red[has_surface] = top_surface_indices[has_surface]
+    # --- 7. SUBPIXEL REFINEMENT ---
+    # Convert integer indices to float indices using linear interpolation of intensity
+    # around the threshold crossing.
+    # z_int is the index where mask becomes True (img_proc[z] > thresh).
+    # Since we scan 0->Z, and use argmax, z_int is the first voxel > thresh.
+    # The crossing happened between z_int-1 and z_int.
+
+    # Extract intensities at z_int and z_int-1
+    # We need to handle z_int=0 carefully (no z_int-1).
+    # Use advanced indexing.
+
+    # Filter for columns that actually have a surface
+    z_int = top_surface_indices[has_surface]
+    y_idx, x_idx = np.where(has_surface)
+
+    # Values at z_int
+    val_at = img_proc[z_int, y_idx, x_idx].astype(np.float32)
+
+    # Values at z_int - 1
+    # Clip indices to be at least 0. If z_int=0, we just use index 0 twice (delta=0).
+    z_prev = np.maximum(z_int - 1, 0)
+    val_prev = img_proc[z_prev, y_idx, x_idx].astype(np.float32)
+
+    # Linear interpolation:
+    # We want z where I(z) = thresh.
+    # I(z) ~ val_prev + (val_at - val_prev) * delta
+    # thresh = val_prev + (val_at - val_prev) * delta
+    # delta = (thresh - val_prev) / (val_at - val_prev)
+    # Refined z = (z_int - 1) + delta = z_int - (1 - delta)
+    # Or: z = z_prev + delta.
+
+    denom = val_at - val_prev
+    # Avoid division by zero
+    denom[denom == 0] = 1.0
+
+    delta = (thresh - val_prev) / denom
+
+    # If z_int was 0, z_prev is 0, val_at == val_prev, delta=0. Refined z=0. Correct.
+    z_refined = z_prev.astype(np.float32) + delta
+
+    # --- 8. SURFACE UPSCALING VIA HEIGHT MAP ---
+    # Use float32 for the height map to preserve subpixel precision during zoom
+    surface_z_red = np.full((Y_red, X_red), -1.0, dtype=np.float32)
+    surface_z_red[has_surface] = z_refined
 
     # Upscale in Y/X only
     surface_z_full = ndimage.zoom(
-        surface_z_red.astype(np.float32),
+        surface_z_red,
         zoom=(sy, sx),
         order=3
     )
@@ -115,10 +156,13 @@ def extract_surface(
 
     surface_z_full[~valid_mask] = -1
 
-    # Convert to integer indices
+    # Keep float map for return if requested
+    surface_z_float = surface_z_full.copy()
+
+    # Convert to integer indices for mask generation
     Z = image.shape[0]
     z_dtype = np.int16 if Z <= 32767 else np.int32
-    surface_z_full = np.round(surface_z_full).astype(z_dtype)
+    surface_z_int = np.round(surface_z_full).astype(z_dtype)
 
     # --- 8. RASTERIZE TO BOOLEAN MASK ---
     Z, Y, X = image.shape
@@ -126,15 +170,17 @@ def extract_surface(
 
     # Optimization: Use nonzero indices instead of creating full 2D meshgrids (np.indices)
     # This avoids allocating two (Y, X) arrays, saving O(Y*X) memory (e.g., ~64MB for 2k x 2k)
-    valid = (surface_z_full >= 0) & (surface_z_full < Z)
+    valid = (surface_z_int >= 0) & (surface_z_int < Z)
     y_idxs, x_idxs = np.nonzero(valid)
 
     surface_upscaled[
-        surface_z_full[valid],
+        surface_z_int[valid],
         y_idxs,
         x_idxs
     ] = True
 
+    if return_heightmap:
+        return surface_upscaled, surface_z_float
     return surface_upscaled
 
 

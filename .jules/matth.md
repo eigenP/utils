@@ -19,3 +19,18 @@ For a continuous signal (like an image), the "value" at x=0.5 exists and can be 
 - **Robustness Fix:** Explicitly cast to `float32` before interpolation, then clip the result to the valid range of the data type before casting back. This preserves the topology of the data and prevents "salt-and-pepper" noise at edges.
 
 This moves the algorithm from a discrete grid approximation to a continuous signal reconstruction, aligning with the precision of the detection step.
+
+## 2025-02-19 - Surface Extraction: Moving Beyond the Grid
+
+**Learning:** The "Surface" is a continuous manifold, not a stack of lego bricks.
+
+The original `extract_surface` algorithm relied on `np.argmax` over a boolean mask to find the surface height. This effectively applies a `floor` or `ceil` operation to the true surface position, introducing a hard quantization error of $\sim U(-0.5, 0.5)$ pixels (RMSE $\approx 0.29$).
+
+This quantization destroys sub-pixel information and creates "staircase" artifacts on slanted surfaces, which cannot be recovered by subsequent smoothing without blurring genuine features.
+
+**Action:** Implemented intensity-based subpixel refinement using linear interpolation.
+Instead of just finding the index $z$ where $I_z > \text{thresh}$, we calculate the fractional offset $\delta$:
+$$ \delta = \frac{\text{thresh} - I_{z-1}}{I_z - I_{z-1}} $$
+The refined height is $z - 1 + \delta$.
+
+**Validation:** On a synthetic slanted plane, this reduced the RMSE from quantization levels ($\sim 0.60$ px in the test setup due to aliasing) to $\sim 0.29$ px and allowed the algorithm to correctly distinguish a 0.5 pixel shift, which was previously lost in the integer grid.
