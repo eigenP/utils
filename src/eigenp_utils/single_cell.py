@@ -1093,6 +1093,7 @@ def morans_i(
 def _ensure_csr_f32(A: sp.csr_matrix) -> sp.csr_matrix:
     A = A.tocsr(copy=False)
     A.sort_indices()
+    A.sum_duplicates()  # Ensure canonical format for valid arithmetic on .data
     return A.astype(np.float32, copy=False)
 
 
@@ -1129,19 +1130,29 @@ def _compute_moran_moments(W: sp.csr_matrix) -> Tuple[float, float, float]:
     # W should be float32/64.
 
     # S0
-    S0 = float(W.sum())
+    # Use float64 accumulator for precision
+    S0 = float(np.sum(W.data.astype(np.float64)))
 
     # S1: 0.5 * sum((W + W.T)^2)
-    # Note: (W + W.T) is efficient for sparse
+    # Optimized: sum(w_{ij}^2) + sum(w_{ij} * w_{ji})
+    # This avoids creating the large matrix T = W + W.T and T.power(2).
+    # Requires W to be canonical (sum_duplicates called in _ensure_csr_f32).
     Wt = W.transpose()
-    T = (W + Wt)
-    S1 = float(T.power(2).sum()) / 2.0
+
+    # Term 1: sum(w_{ij}^2)
+    term1 = np.sum(W.data.astype(np.float64)**2)
+
+    # Term 2: sum(w_{ij} * w_{ji}) = sum(W * W.T element-wise)
+    # W.multiply(Wt) computes element-wise product of intersection
+    term2 = W.multiply(Wt).sum(dtype=np.float64)  # explicit dtype for sum
+
+    S1 = float(term1 + term2)
 
     # S2: sum((RowSum + ColSum)^2)
     # Row sums
-    R = np.asarray(W.sum(axis=1)).flatten()
+    R = np.asarray(W.sum(axis=1, dtype=np.float64)).flatten()
     # Col sums
-    C = np.asarray(W.sum(axis=0)).flatten()
+    C = np.asarray(W.sum(axis=0, dtype=np.float64)).flatten()
     S2 = float(np.sum((R + C)**2))
 
     return S0, S1, S2
