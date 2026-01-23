@@ -36,10 +36,10 @@ def apply_median_filter(height_map):
     return filtered_map
 
 
-def _2D_weight(patch_size, overlap):
+def _get_weight_variants(patch_size, overlap):
     """
-    Generate a 2D weight matrix for blending patches, using a cubic spline (smoothstep) taper.
-    This ensures C1 continuity across patch boundaries.
+    Generate 2D weight matrices for blending patches, using a cubic spline (smoothstep) taper.
+    Returns a dictionary of weight matrices for different patch positions (start, mid, end, all).
     """
     # 1D weight function based on cubic spline
     def weight_1d(x):
@@ -50,23 +50,38 @@ def _2D_weight(patch_size, overlap):
     taper = weight_1d(x)
 
     # Construct 1D profiles for Y and X axes
-    # The profile is 1.0 in the center and tapers to 0.0 at the edges
-    # We use multiplicative updates to handle cases where overlap regions intersect (overlap > patch_size/2)
     # Using float32 for weights to match image processing dtype and save memory
-    profile_y = np.ones(patch_size, dtype=np.float32)
-    profile_y[:overlap] *= taper
-    profile_y[-overlap:] *= taper[::-1]
 
-    profile_x = np.ones(patch_size, dtype=np.float32)
-    profile_x[:overlap] *= taper
-    profile_x[-overlap:] *= taper[::-1]
+    # Mid: Taper on both sides
+    p_mid = np.ones(patch_size, dtype=np.float32)
+    p_mid[:overlap] *= taper
+    p_mid[-overlap:] *= taper[::-1]
 
-    # Apply weights using broadcasting
-    # (H, W) * (H, 1) * (1, W)
-    # This avoids allocating a full (H, W) weight matrix initialised with ones and then modified in a loop
-    weight_2d = profile_y[:, None] * profile_x[None, :]
+    # Start: No taper at start (left/top boundary)
+    p_start = np.ones(patch_size, dtype=np.float32)
+    p_start[-overlap:] *= taper[::-1]
 
-    return weight_2d
+    # End: No taper at end (right/bottom boundary)
+    p_end = np.ones(patch_size, dtype=np.float32)
+    p_end[:overlap] *= taper
+
+    # All: No taper (single patch covers whole dimension)
+    p_all = np.ones(patch_size, dtype=np.float32)
+
+    profiles = {
+        'start': p_start,
+        'mid': p_mid,
+        'end': p_end,
+        'all': p_all
+    }
+
+    variants = {}
+    for y_type in ['start', 'mid', 'end', 'all']:
+        for x_type in ['start', 'mid', 'end', 'all']:
+            # Apply weights using broadcasting
+            variants[(y_type, x_type)] = profiles[y_type][:, None] * profiles[x_type][None, :]
+
+    return variants
 
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
@@ -190,10 +205,35 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     final_img = np.zeros((padded_H, padded_W), dtype=np.float32)
     counts = np.zeros((padded_H, padded_W), dtype=np.float32) # matth: Restored counts
 
-    _2D_window = _2D_weight(patch_size, overlap)
+    weight_variants = _get_weight_variants(patch_size, overlap)
 
-    for i in range(height_map_small.shape[0]):
-        for j in range(height_map_small.shape[1]):
+    rows = height_map_small.shape[0]
+    cols = height_map_small.shape[1]
+
+    for i in range(rows):
+        # Determine Y profile type based on row position
+        if rows == 1:
+            y_type = 'all'
+        elif i == 0:
+            y_type = 'start'
+        elif i == rows - 1:
+            y_type = 'end'
+        else:
+            y_type = 'mid'
+
+        for j in range(cols):
+            # Determine X profile type based on col position
+            if cols == 1:
+                x_type = 'all'
+            elif j == 0:
+                x_type = 'start'
+            elif j == cols - 1:
+                x_type = 'end'
+            else:
+                x_type = 'mid'
+
+            _2D_window = weight_variants[(y_type, x_type)]
+
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
             best_z = height_map_small[i, j]
