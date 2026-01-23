@@ -34,3 +34,19 @@ $$ \delta = \frac{\text{thresh} - I_{z-1}}{I_z - I_{z-1}} $$
 The refined height is $z - 1 + \delta$.
 
 **Validation:** On a synthetic slanted plane, this reduced the RMSE from quantization levels ($\sim 0.60$ px in the test setup due to aliasing) to $\sim 0.29$ px and allowed the algorithm to correctly distinguish a 0.5 pixel shift, which was previously lost in the integer grid.
+
+## 2025-02-19 - Extended Depth of Field: The Geometry of Patches
+
+**Learning:** Patch-based focus measures are sampled on a sparse grid; treating them as a pixel-aligned image requires rigorous geometric projection.
+
+The previous implementation of `best_focus_image` calculated focus scores on a grid of patch centers but used `scipy.ndimage.zoom(order=0)` to upsample this to the full image. This introduced two critical errors:
+1.  **Quantization**: Peak Z was an integer.
+2.  **Geometric Misalignment**: `zoom` stretches the array bounds 0..N to 0..M, ignoring the fact that patch centers are inset by `patch_size//2`. This shift caused the height map to be spatially misaligned with the image features.
+
+**Action:**
+1.  **Sub-pixel Peak Finding**: Implemented log-parabolic interpolation to refine the Z-peak, treating the focus metric as a sampled Gaussian.
+2.  **Correct Coordinate Mapping**: Replaced `zoom` with `map_coordinates`, explicitly mapping output pixel coordinates to the continuous index space of the patch grid ($y_{out} \to y_{in} = (y_{out} - \text{offset}) / \text{stride}$).
+3.  **Linear Interpolation**: Upgraded height map reconstruction to bilinear (`order=1`) to prevent staircase artifacts.
+
+**Validation:**
+RMSE on a synthetic slanted plane dropped from **1.94** to **0.06** pixels. This confirms that the staircase artifacts were primarily due to geometric aliasing and quantization, both of which are now resolved. The "height map" is now a continuous surface estimate rather than a blocky segmentation.
