@@ -11,7 +11,7 @@
 import numpy as np
 import skimage.io
 
-from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
+from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter, map_coordinates
 
 from skimage.filters import median
 from skimage.morphology import disk
@@ -67,6 +67,74 @@ def _2D_weight(patch_size, overlap):
     weight_2d = profile_y[:, None] * profile_x[None, :]
 
     return weight_2d
+
+def _refine_subpixel_parabolic(scores, max_indices):
+    """
+    Refine integer peak indices using Gaussian (log-parabolic) interpolation.
+
+    Formula:
+    delta = (ln(y1) - ln(y3)) / (2 * (ln(y1) - 2*ln(y2) + ln(y3)))
+    peak = z + delta
+
+    Where y2 is the peak score, y1 is score at z-1, y3 is score at z+1.
+    """
+    Z, H, W = scores.shape
+
+    # Initialize with integer indices (casted to float)
+    refined_map = max_indices.astype(np.float32)
+
+    # Identify valid pixels for refinement (not at boundaries)
+    # mask: 0 < z < Z-1
+    mask = (max_indices > 0) & (max_indices < Z - 1)
+
+    # Coordinates of valid pixels
+    rows, cols = np.where(mask)
+    z_vals = max_indices[rows, cols]
+
+    # Extract scores: center (y2), left (y1), right (y3)
+    # Using advanced indexing
+    y2 = scores[z_vals, rows, cols]
+    y1 = scores[z_vals - 1, rows, cols]
+    y3 = scores[z_vals + 1, rows, cols]
+
+    # Avoid log of zero or negative (though energy is non-negative)
+    epsilon = 1e-10
+    y1 = np.maximum(y1, epsilon)
+    y2 = np.maximum(y2, epsilon)
+    y3 = np.maximum(y3, epsilon)
+
+    # Log domain
+    ly1 = np.log(y1)
+    ly2 = np.log(y2)
+    ly3 = np.log(y3)
+
+    # Denominator: (ly1 - 2*ly2 + ly3)
+    # This is effectively the curvature (2nd derivative). Should be negative for a peak.
+    denom = ly1 - 2 * ly2 + ly3
+
+    # Filter out cases where curvature is positive or zero (not a peak, or flat)
+    valid_curvature = denom < -1e-6
+
+    # Compute delta only for valid curvature
+    # delta = (ly1 - ly3) / (2 * denom)
+    # Note: formula sign depends on definition.
+    # Parabola: a*x^2 + b*x + c.
+    # y(-1)=ly1, y(0)=ly2, y(1)=ly3.
+    # b = (ly3 - ly1) / 2
+    # a = (ly1 - 2*ly2 + ly3) / 2
+    # peak x* = -b / (2a) = - (ly3 - ly1) / (2 * (ly1 - 2*ly2 + ly3))
+    # = (ly1 - ly3) / (2 * denom)
+
+    delta = np.zeros_like(ly2)
+    delta[valid_curvature] = (ly1[valid_curvature] - ly3[valid_curvature]) / (2 * denom[valid_curvature])
+
+    # Clip delta to [-0.5, 0.5] to ensure we stay within the bin
+    delta = np.clip(delta, -0.5, 0.5)
+
+    # Update map
+    refined_map[rows, cols] += delta
+
+    return refined_map
 
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
@@ -180,9 +248,12 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
              del slice_padded
 
     # 4. Select best Z
-    height_map_small = np.argmax(score_matrix, axis=0)
+    max_indices = np.argmax(score_matrix, axis=0)
 
-    # Apply median filter
+    # 4b. Sub-pixel refinement
+    height_map_small = _refine_subpixel_parabolic(score_matrix, max_indices)
+
+    # Apply median filter (works on floats)
     height_map_small = apply_median_filter(height_map_small)
 
     # 5. Combine patches to create the final image
@@ -192,10 +263,18 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
     _2D_window = _2D_weight(patch_size, overlap)
 
+    def extract_patch(z_idx, y_s, x_s, y_e, x_e, y_rel, x_rel, pb, pr):
+        """Helper to extract a patch from a specific Z slice."""
+        chunk = img[z_idx, y_s:y_e, x_s:x_e]
+        if pb > 0 or pr > 0:
+            chunk = np.pad(chunk, ((0, pb), (0, pr)), mode='reflect')
+        return chunk[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
+
     for i in range(height_map_small.shape[0]):
         for j in range(height_map_small.shape[1]):
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
+
             best_z = height_map_small[i, j]
 
             # Extract patch with on-demand padding/cropping logic to avoid full padded copy
@@ -211,9 +290,6 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
             if y_end > img.shape[1]:
                 pad_bottom = pad_y
-                # Ensure we capture enough context for reflection.
-                # np.pad 'reflect' needs at least 'pad_width' elements if mirroring from edge.
-                # We need to ensure extraction size >= needed context.
                 needed_history = max(pad_bottom + 1, y_end - img.shape[1] + 2)
                 y_s_clamped = min(y_s_clamped, img.shape[1] - needed_history)
                 y_s_clamped = max(0, y_s_clamped)
@@ -230,34 +306,34 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
                 x_s_clamped = max(0, x_s_clamped)
                 x_e_clamped = img.shape[2]
 
-            # Extract chunk
-            chunk = img[best_z, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
-
-            # Pad chunk locally
-            if pad_bottom > 0 or pad_right > 0:
-                chunk_padded = np.pad(chunk, ((0, pad_bottom), (0, pad_right)), mode='reflect')
-            else:
-                chunk_padded = chunk
-
-            # Slice out the exact target region relative to chunk start
+            # Slice relative coords
             y_rel = y_start - y_s_clamped
             x_rel = x_start - x_s_clamped
 
-            patch = chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
+            # Linear interpolation for sub-pixel Z
+            floor_z = int(np.floor(best_z))
+            ceil_z = min(floor_z + 1, img.shape[0] - 1)
+            alpha = best_z - floor_z
+
+            # Clamp bounds
+            floor_z = max(0, min(floor_z, img.shape[0] - 1))
+
+            patch_low = extract_patch(floor_z, y_s_clamped, x_s_clamped, y_e_clamped, x_e_clamped, y_rel, x_rel, pad_bottom, pad_right)
+
+            if alpha > 1e-4 and floor_z != ceil_z:
+                patch_high = extract_patch(ceil_z, y_s_clamped, x_s_clamped, y_e_clamped, x_e_clamped, y_rel, x_rel, pad_bottom, pad_right)
+                patch = (1.0 - alpha) * patch_low + alpha * patch_high
+            else:
+                patch = patch_low
 
             # Create weighted patch
             try:
                 # weighted_patch = patch * _2D_window
-                # In-place multiplication to save a buffer:
-                # patch *= _2D_window
-                # (but patch is needed? No, we just add it. 'patch' is a temp copy from astype)
                 np.multiply(patch, _2D_window, out=patch)
                 weight_matrix = _2D_window
             except ValueError:
                 # Boundary case
                 min_shape = tuple(min(s1, s2) for s1, s2 in zip(patch.shape, _2D_window.shape))
-                # Slicing creates copies/views.
-                # Just multiply carefully.
                 patch = patch * _2D_window[:min_shape[0], :min_shape[1]]
                 weight_matrix = _2D_window[:min_shape[0], :min_shape[1]]
 
@@ -279,9 +355,24 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     # We will return float32.
 
     if return_heightmap:
-        zoom_y = original_shape[0] / height_map_small.shape[0]
-        zoom_x = original_shape[1] / height_map_small.shape[1]
-        height_map_full = zoom(height_map_small, (zoom_y, zoom_x), order=0)
+        # Proper geometric projection of patch scores to pixel grid
+        stride = patch_size - overlap
+        offset = patch_size // 2
+
+        out_h, out_w = original_shape
+
+        # Map output pixel coordinates to input indices in height_map_small
+        # physical_y = index * stride + offset
+        # index = (physical_y - offset) / stride
+
+        y_coords = (np.arange(out_h) - offset) / stride
+        x_coords = (np.arange(out_w) - offset) / stride
+
+        yy, xx = np.meshgrid(y_coords, x_coords, indexing='ij')
+        coords = np.stack([yy, xx])
+
+        # Use order=1 (bilinear) for smooth height map, mode='nearest' to extrapolate edges
+        height_map_full = map_coordinates(height_map_small, coords, order=1, mode='nearest')
 
         return final_img, height_map_full
 
