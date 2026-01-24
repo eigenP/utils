@@ -71,3 +71,7 @@
 3.  **Sentinel Discontinuity:** `clip_limit=0` is a sentinel for "Unlimited AHE" (Max Contrast), causing a sharp discontinuity from `clip_limit=0.001` (Low Contrast). This behavior is correct but counter-intuitive.
 4.  **Saturation:** For smooth/sparse images, effective contrast limits saturate quickly (e.g. at 0.05) once the clip limit exceeds the maximum bin count of the local histogram.
 **Action:** Tests for contrast enhancement must account for signal content (saturation) and the specific sentinel value (0) to avoid false failures. Using `clip_limit=0` should be preferred for "Maximum Effect" rather than `clip_limit=1.0` to avoid ambiguity.
+
+## 2025-02-24 - Focus Stacking Partition of Unity
+**Learning:** `best_focus_image` failed **Affine Intensity Equivariance** at image boundaries. The boundary pixels were being darkened because the blending weights (Partition of Unity) were tapered to zero at the edges, even when there was no neighboring patch to blend with.
+**Action:** Implemented context-aware weight generation (`_get_weight_variants`) to ensure weights sum to 1.0 everywhere. Verified that `focus(a*I + b) == a*focus(I) + b` now holds to floating-point precision, ensuring photometric correctness.
