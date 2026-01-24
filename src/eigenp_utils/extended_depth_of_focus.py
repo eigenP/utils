@@ -36,37 +36,37 @@ def apply_median_filter(height_map):
     return filtered_map
 
 
-def _2D_weight(patch_size, overlap):
+def _get_1d_weight_variants(patch_size, overlap):
     """
-    Generate a 2D weight matrix for blending patches, using a cubic spline (smoothstep) taper.
-    This ensures C1 continuity across patch boundaries.
+    Generate 1D weight profiles for Start, Mid, and End patches.
+    Start: Taper only right.
+    Mid: Taper both.
+    End: Taper only left.
+    All: No taper (for single patch).
     """
-    # 1D weight function based on cubic spline
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3
 
-    # Generate the 1D taper profile
     x = np.linspace(0, 1, overlap)
     taper = weight_1d(x)
 
-    # Construct 1D profiles for Y and X axes
-    # The profile is 1.0 in the center and tapers to 0.0 at the edges
-    # We use multiplicative updates to handle cases where overlap regions intersect (overlap > patch_size/2)
-    # Using float32 for weights to match image processing dtype and save memory
-    profile_y = np.ones(patch_size, dtype=np.float32)
-    profile_y[:overlap] *= taper
-    profile_y[-overlap:] *= taper[::-1]
+    # Mid: Taper both ends
+    w_mid = np.ones(patch_size, dtype=np.float32)
+    w_mid[:overlap] *= taper
+    w_mid[-overlap:] *= taper[::-1]
 
-    profile_x = np.ones(patch_size, dtype=np.float32)
-    profile_x[:overlap] *= taper
-    profile_x[-overlap:] *= taper[::-1]
+    # Start: Taper only end (right)
+    w_start = np.ones(patch_size, dtype=np.float32)
+    w_start[-overlap:] *= taper[::-1]
 
-    # Apply weights using broadcasting
-    # (H, W) * (H, 1) * (1, W)
-    # This avoids allocating a full (H, W) weight matrix initialised with ones and then modified in a loop
-    weight_2d = profile_y[:, None] * profile_x[None, :]
+    # End: Taper only start (left)
+    w_end = np.ones(patch_size, dtype=np.float32)
+    w_end[:overlap] *= taper
 
-    return weight_2d
+    # All: No taper
+    w_all = np.ones(patch_size, dtype=np.float32)
+
+    return w_start, w_mid, w_end, w_all
 
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
@@ -179,10 +179,76 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         if not use_fast_pad:
              del slice_padded
 
-    # 4. Select best Z
-    height_map_small = np.argmax(score_matrix, axis=0)
+    # 4. Select best Z (Sub-pixel Refinement)
+    # Start with integer max
+    z_int = np.argmax(score_matrix, axis=0)
+    height_map_small = z_int.astype(np.float32)
 
-    # Apply median filter
+    # Refine peaks using Parabolic Interpolation on Log-Scores (Gaussian assumption)
+    # Only possible for indices 1 to Z-2 (need neighbors on both sides)
+
+    # Create valid mask
+    valid_mask = (z_int > 0) & (z_int < (score_matrix.shape[0] - 1))
+
+    if np.any(valid_mask):
+        # Gather neighbors using advanced indexing
+        rows, cols = np.indices(z_int.shape)
+
+        # Clip indices for safety (though valid_mask prevents OOB access for the mask)
+        z_safe = np.clip(z_int, 1, score_matrix.shape[0] - 2)
+
+        # Log scores (add eps for numerical stability)
+        eps = 1e-9
+
+        # Extract 3 points
+        s_m1 = score_matrix[z_safe - 1, rows, cols]
+        s_0  = score_matrix[z_safe,     rows, cols]
+        s_p1 = score_matrix[z_safe + 1, rows, cols]
+
+        # Parabolic fit requires log scores
+        # We process all valid interior points. Since z_int is argmax, it is a local max (or flat).
+
+        # Filter for significant signal to avoid fitting noise?
+        # (Optional, but here we just fit the peak)
+
+        mask = valid_mask # We trust argmax found a peak
+
+        if np.any(mask):
+            y_m1 = np.log(s_m1[mask] + eps)
+            y_0  = np.log(s_0[mask]  + eps)
+            y_p1 = np.log(s_p1[mask] + eps)
+
+            # Parabolic vertex offset: (y-1 - y+1) / (2 * (y-1 - 2y0 + y+1))
+            # Denominator D = y-1 - 2y0 + y+1. Since y0 is max, D <= 0.
+            denom = y_m1 - 2*y_0 + y_p1
+
+            # Handle flat peaks (denom ~ 0).
+            # If denom is 0, it means y-1 - y0 = y0 - y+1.
+            # Since y0 >= y-1 and y0 >= y+1, this implies y-1 = y0 = y+1 (flat).
+            # Delta should be 0.
+
+            # If denom is very small, delta can blow up.
+            # We treat denom=0 as no curvature -> no update (or undefined).
+            # But earlier we showed for s0=s1, denom is non-zero (negative).
+            # If y0 = y1 and y-1 < y0. D = y-1 - y0 < 0.
+
+            # Avoid div by zero
+            safe_denom = denom.copy()
+            safe_denom[np.abs(safe_denom) < 1e-9] = -1e-9
+
+            delta = (y_m1 - y_p1) / (2 * safe_denom)
+
+            # Clamp delta to [-0.5, 0.5] to ensure we stay within the bin
+            delta = np.clip(delta, -0.5, 0.5)
+
+            # If original denom was effectively zero (flat 3 points), delta might be unstable?
+            # If y-1 = y0 = y+1, num=0, den=0. 0/0.
+            # If flat, delta should be 0.
+            delta[np.abs(denom) < 1e-9] = 0.0
+
+            height_map_small[mask] += delta
+
+    # Apply median filter (works on floats too)
     height_map_small = apply_median_filter(height_map_small)
 
     # 5. Combine patches to create the final image
@@ -190,13 +256,49 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     final_img = np.zeros((padded_H, padded_W), dtype=np.float32)
     counts = np.zeros((padded_H, padded_W), dtype=np.float32) # matth: Restored counts
 
-    _2D_window = _2D_weight(patch_size, overlap)
+    w_y_start, w_y_mid, w_y_end, w_y_all = _get_1d_weight_variants(patch_size, overlap)
+    w_x_start, w_x_mid, w_x_end, w_x_all = _get_1d_weight_variants(patch_size, overlap)
 
-    for i in range(height_map_small.shape[0]):
-        for j in range(height_map_small.shape[1]):
+    n_py = height_map_small.shape[0]
+    n_px = height_map_small.shape[1]
+
+    for i in range(n_py):
+        # Select Y weight profile
+        if n_py == 1:
+            wy = w_y_all
+        elif i == 0:
+            wy = w_y_start
+        elif i == n_py - 1:
+            wy = w_y_end
+        else:
+            wy = w_y_mid
+
+        for j in range(n_px):
+            # Select X weight profile
+            if n_px == 1:
+                wx = w_x_all
+            elif j == 0:
+                wx = w_x_start
+            elif j == n_px - 1:
+                wx = w_x_end
+            else:
+                wx = w_x_mid
+
+            # Construct 2D window on the fly (cheap O(patch_size))
+            weight_matrix = wy[:, None] * wx[None, :]
+
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
             best_z = height_map_small[i, j]
+
+            # Sub-pixel interpolation setup
+            floor_z = int(np.floor(best_z))
+            ceil_z = floor_z + 1
+            alpha = best_z - floor_z # Weight for ceil slice
+
+            # Clamp indices
+            floor_z = np.clip(floor_z, 0, img.shape[0] - 1)
+            ceil_z = np.clip(ceil_z, 0, img.shape[0] - 1)
 
             # Extract patch with on-demand padding/cropping logic to avoid full padded copy
             y_end = y_start + patch_size
@@ -230,36 +332,35 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
                 x_s_clamped = max(0, x_s_clamped)
                 x_e_clamped = img.shape[2]
 
-            # Extract chunk
-            chunk = img[best_z, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
-
-            # Pad chunk locally
-            if pad_bottom > 0 or pad_right > 0:
-                chunk_padded = np.pad(chunk, ((0, pad_bottom), (0, pad_right)), mode='reflect')
-            else:
-                chunk_padded = chunk
-
             # Slice out the exact target region relative to chunk start
             y_rel = y_start - y_s_clamped
             x_rel = x_start - x_s_clamped
+            slice_y = slice(y_s_clamped, y_e_clamped)
+            slice_x = slice(x_s_clamped, x_e_clamped)
 
-            patch = chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
+            # Extract and Pad Function
+            def get_padded_patch(z_idx):
+                c = img[z_idx, slice_y, slice_x]
+                if pad_bottom > 0 or pad_right > 0:
+                    c = np.pad(c, ((0, pad_bottom), (0, pad_right)), mode='reflect')
+                return c[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
+
+            # Linear Interpolation between slices
+            patch0 = get_padded_patch(floor_z)
+            if floor_z != ceil_z and alpha > 1e-4:
+                patch1 = get_padded_patch(ceil_z)
+                patch = patch0 + alpha * (patch1 - patch0)
+            else:
+                patch = patch0
 
             # Create weighted patch
             try:
-                # weighted_patch = patch * _2D_window
-                # In-place multiplication to save a buffer:
-                # patch *= _2D_window
-                # (but patch is needed? No, we just add it. 'patch' is a temp copy from astype)
-                np.multiply(patch, _2D_window, out=patch)
-                weight_matrix = _2D_window
+                np.multiply(patch, weight_matrix, out=patch)
             except ValueError:
-                # Boundary case
-                min_shape = tuple(min(s1, s2) for s1, s2 in zip(patch.shape, _2D_window.shape))
-                # Slicing creates copies/views.
-                # Just multiply carefully.
-                patch = patch * _2D_window[:min_shape[0], :min_shape[1]]
-                weight_matrix = _2D_window[:min_shape[0], :min_shape[1]]
+                # Boundary case (should be rare with correct padding)
+                min_shape = tuple(min(s1, s2) for s1, s2 in zip(patch.shape, weight_matrix.shape))
+                patch = patch * weight_matrix[:min_shape[0], :min_shape[1]]
+                weight_matrix = weight_matrix[:min_shape[0], :min_shape[1]]
 
             # Add to accumulators
             final_img[y_start:y_start+patch_size, x_start:x_start+patch_size] += patch
