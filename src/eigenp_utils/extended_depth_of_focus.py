@@ -36,37 +36,41 @@ def apply_median_filter(height_map):
     return filtered_map
 
 
-def _2D_weight(patch_size, overlap):
+def _get_weight_variants(patch_size, overlap):
     """
-    Generate a 2D weight matrix for blending patches, using a cubic spline (smoothstep) taper.
-    This ensures C1 continuity across patch boundaries.
+    Generate 2D weight matrices for blending patches, handling boundary conditions
+    to preserve Partition of Unity at image edges.
     """
-    # 1D weight function based on cubic spline
+    # 1D weight function based on cubic spline (smoothstep)
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3
 
-    # Generate the 1D taper profile
+    # Generate the 1D taper profile (0 to 1)
     x = np.linspace(0, 1, overlap)
     taper = weight_1d(x)
 
-    # Construct 1D profiles for Y and X axes
-    # The profile is 1.0 in the center and tapers to 0.0 at the edges
-    # We use multiplicative updates to handle cases where overlap regions intersect (overlap > patch_size/2)
-    # Using float32 for weights to match image processing dtype and save memory
-    profile_y = np.ones(patch_size, dtype=np.float32)
-    profile_y[:overlap] *= taper
-    profile_y[-overlap:] *= taper[::-1]
+    # Helper to build 1D profiles
+    def build_profile(is_start, is_end):
+        p = np.ones(patch_size, dtype=np.float32)
+        # If NOT start (i.e. we have a neighbor to the left/top), taper the beginning
+        if not is_start:
+            p[:overlap] *= taper
+        # If NOT end (i.e. we have a neighbor to the right/bottom), taper the end
+        if not is_end:
+            p[-overlap:] *= taper[::-1]
+        return p
 
-    profile_x = np.ones(patch_size, dtype=np.float32)
-    profile_x[:overlap] *= taper
-    profile_x[-overlap:] *= taper[::-1]
+    # Build 1D variants
+    # Keys: (is_start, is_end)
+    # Precompute all 4 combinations
+    profiles = {
+        (True, False):  build_profile(True, False),  # Top/Left patch
+        (False, False): build_profile(False, False), # Middle patch
+        (False, True):  build_profile(False, True),  # Bottom/Right patch
+        (True, True):   build_profile(True, True)    # Single patch covers dim
+    }
 
-    # Apply weights using broadcasting
-    # (H, W) * (H, 1) * (1, W)
-    # This avoids allocating a full (H, W) weight matrix initialised with ones and then modified in a loop
-    weight_2d = profile_y[:, None] * profile_x[None, :]
-
-    return weight_2d
+    return profiles
 
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
@@ -190,10 +194,25 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     final_img = np.zeros((padded_H, padded_W), dtype=np.float32)
     counts = np.zeros((padded_H, padded_W), dtype=np.float32) # matth: Restored counts
 
-    _2D_window = _2D_weight(patch_size, overlap)
+    # Precompute 1D profiles for weighting
+    profs = _get_weight_variants(patch_size, overlap)
+    n_rows, n_cols = height_map_small.shape
 
-    for i in range(height_map_small.shape[0]):
-        for j in range(height_map_small.shape[1]):
+    for i in range(n_rows):
+        # Determine Y profile
+        is_first_row = (i == 0)
+        is_last_row = (i == n_rows - 1)
+        wy = profs[(is_first_row, is_last_row)]
+
+        for j in range(n_cols):
+            # Determine X profile
+            is_first_col = (j == 0)
+            is_last_col = (j == n_cols - 1)
+            wx = profs[(is_first_col, is_last_col)]
+
+            # Construct 2D weight for this specific patch
+            _2D_window = wy[:, None] * wx[None, :]
+
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
             best_z = height_map_small[i, j]
@@ -246,20 +265,17 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             patch = chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
 
             # Create weighted patch
-            try:
-                # weighted_patch = patch * _2D_window
-                # In-place multiplication to save a buffer:
-                # patch *= _2D_window
-                # (but patch is needed? No, we just add it. 'patch' is a temp copy from astype)
-                np.multiply(patch, _2D_window, out=patch)
-                weight_matrix = _2D_window
-            except ValueError:
-                # Boundary case
-                min_shape = tuple(min(s1, s2) for s1, s2 in zip(patch.shape, _2D_window.shape))
-                # Slicing creates copies/views.
-                # Just multiply carefully.
-                patch = patch * _2D_window[:min_shape[0], :min_shape[1]]
-                weight_matrix = _2D_window[:min_shape[0], :min_shape[1]]
+            # _2D_window is now correct for this patch's boundary status
+
+            # Safety check for shape mismatch (shouldn't happen with correct logic but good for robustness)
+            if patch.shape != _2D_window.shape:
+                 min_shape = tuple(min(s1, s2) for s1, s2 in zip(patch.shape, _2D_window.shape))
+                 current_window = _2D_window[:min_shape[0], :min_shape[1]]
+            else:
+                 current_window = _2D_window
+
+            np.multiply(patch, current_window, out=patch)
+            weight_matrix = current_window
 
             # Add to accumulators
             final_img[y_start:y_start+patch_size, x_start:x_start+patch_size] += patch
