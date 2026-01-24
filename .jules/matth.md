@@ -34,3 +34,18 @@ $$ \delta = \frac{\text{thresh} - I_{z-1}}{I_z - I_{z-1}} $$
 The refined height is $z - 1 + \delta$.
 
 **Validation:** On a synthetic slanted plane, this reduced the RMSE from quantization levels ($\sim 0.60$ px in the test setup due to aliasing) to $\sim 0.29$ px and allowed the algorithm to correctly distinguish a 0.5 pixel shift, which was previously lost in the integer grid.
+
+## 2025-02-19 - Depth of Focus: Interpolating the Unseen Peak
+
+**Learning:** Discrete maximization throws away curvature information.
+
+The `best_focus_image` algorithm calculates a focus score $S(z)$ for each slice and picks $\text{argmax}_z S(z)$. This limits depth resolution to the integer Z-spacing, creating quantization artifacts (staircase depth maps) and suboptimal image reconstruction (always picking a slice, never blending).
+
+However, the focus metric (Laplacian energy) typically follows a Gaussian-like profile near the focus plane. The "true" peak lies between samples.
+By assuming a Gaussian profile $S(z) \approx A \exp(-(z-z_0)^2/2\sigma^2)$, the log-score $\ln S(z)$ is parabolic. We can fit a parabola to the top 3 points $(z-1, z, z+1)$ to find the sub-pixel vertex $z^*$.
+
+**Action:**
+1.  **Estimation:** Implemented parabolic interpolation on log-scores to estimate fractional depth $z^*$.
+2.  **Reconstruction:** Updated the image fusion to linearly interpolate pixel values between slices $\lfloor z^* \rfloor$ and $\lceil z^* \rceil$, weighted by the fractional distance.
+
+**Validation:** On a synthetic stack with focus at $z=4.5$, RMSE improved from $0.50$ (quantization error) to $0.00$ (perfect recovery). Image intensity reconstruction also matched theoretical expectations after fixing a boundary weighting bug.
