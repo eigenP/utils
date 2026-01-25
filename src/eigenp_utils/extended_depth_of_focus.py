@@ -68,6 +68,57 @@ def _2D_weight(patch_size, overlap):
 
     return weight_2d
 
+def _get_fractional_peak(score_matrix):
+    """
+    Estimates the peak Z-position with sub-pixel precision using parabolic interpolation.
+    """
+    Z, H, W = score_matrix.shape
+
+    # 1. Integer argmax
+    z_int = np.argmax(score_matrix, axis=0)
+
+    # If Z < 3, we cannot fit a parabola. Return integer peaks.
+    if Z < 3:
+        return z_int.astype(np.float32)
+
+    # 2. Extract neighbors (clamped to boundary)
+    z_prev = np.clip(z_int - 1, 0, Z - 1)
+    z_next = np.clip(z_int + 1, 0, Z - 1)
+
+    # Advanced indexing to gather scores
+    grid_y, grid_x = np.indices((H, W))
+
+    s0 = score_matrix[z_prev, grid_y, grid_x] # y_{-1}
+    s1 = score_matrix[z_int, grid_y, grid_x]  # y_{0}
+    s2 = score_matrix[z_next, grid_y, grid_x] # y_{1}
+
+    # 3. Parabolic correction
+    # Formula: delta = (s0 - s2) / (2 * (s0 - 2s1 + s2))
+    # This assumes x = [-1, 0, 1] relative to z_int.
+
+    numerator = s0 - s2
+    denominator = 2.0 * (s0 - 2.0 * s1 + s2)
+
+    # Avoid division by zero
+    # Denominator is roughly proportional to the curvature (2nd derivative).
+    # If curvature is near zero (flat peak), localization is poor.
+
+    delta = np.zeros_like(s1)
+    valid_mask = np.abs(denominator) > 1e-6
+
+    delta[valid_mask] = numerator[valid_mask] / denominator[valid_mask]
+
+    # Clip delta to [-0.5, 0.5] to ensure we don't jump too far from the argmax
+    # (Parabolic fit can be unstable if data isn't actually parabolic)
+    delta = np.clip(delta, -0.5, 0.5)
+
+    # Handle boundaries: if argmax is at 0 or Z-1, we can't reliably interpolate outward.
+    # We assume the peak is at the boundary.
+    boundary_mask = (z_int == 0) | (z_int == Z - 1)
+    delta[boundary_mask] = 0.0
+
+    return z_int.astype(np.float32) + delta
+
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
     Expecting an image with dimension order ZYX
@@ -179,10 +230,10 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         if not use_fast_pad:
              del slice_padded
 
-    # 4. Select best Z
-    height_map_small = np.argmax(score_matrix, axis=0)
+    # 4. Select best Z (Subpixel Refinement)
+    height_map_small = _get_fractional_peak(score_matrix)
 
-    # Apply median filter
+    # Apply median filter (works on floats too, removing outliers)
     height_map_small = apply_median_filter(height_map_small)
 
     # 5. Combine patches to create the final image
@@ -196,7 +247,17 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         for j in range(height_map_small.shape[1]):
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
+
+            # Subpixel Logic
             best_z = height_map_small[i, j]
+            z_floor = int(np.floor(best_z))
+            # Ensure indices are valid
+            z_floor = np.clip(z_floor, 0, img.shape[0] - 1)
+            z_ceil = np.clip(z_floor + 1, 0, img.shape[0] - 1)
+
+            # Blending factor
+            alpha = best_z - z_floor
+            # If z_floor was clipped (e.g. z was -0.1), alpha is irrelevant if slices are same.
 
             # Extract patch with on-demand padding/cropping logic to avoid full padded copy
             y_end = y_start + patch_size
@@ -230,20 +291,27 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
                 x_s_clamped = max(0, x_s_clamped)
                 x_e_clamped = img.shape[2]
 
-            # Extract chunk
-            chunk = img[best_z, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
+            # Helper to extract a single patch from a given Z slice
+            def get_padded_patch(z_idx):
+                chunk = img[z_idx, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
+                if pad_bottom > 0 or pad_right > 0:
+                    chunk_padded = np.pad(chunk, ((0, pad_bottom), (0, pad_right)), mode='reflect')
+                else:
+                    chunk_padded = chunk
 
-            # Pad chunk locally
-            if pad_bottom > 0 or pad_right > 0:
-                chunk_padded = np.pad(chunk, ((0, pad_bottom), (0, pad_right)), mode='reflect')
+                # Slice out the exact target region relative to chunk start
+                y_rel = y_start - y_s_clamped
+                x_rel = x_start - x_s_clamped
+
+                return chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
+
+            patch0 = get_padded_patch(z_floor)
+            if z_ceil != z_floor and alpha > 0.001:
+                patch1 = get_padded_patch(z_ceil)
+                # Linear blend: (1 - alpha) * patch0 + alpha * patch1
+                patch = (1.0 - alpha) * patch0 + alpha * patch1
             else:
-                chunk_padded = chunk
-
-            # Slice out the exact target region relative to chunk start
-            y_rel = y_start - y_s_clamped
-            x_rel = x_start - x_s_clamped
-
-            patch = chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
+                patch = patch0
 
             # Create weighted patch
             try:
@@ -264,6 +332,7 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             # Add to accumulators
             final_img[y_start:y_start+patch_size, x_start:x_start+patch_size] += patch
             counts[y_start:y_start+patch_size, x_start:x_start+patch_size] += weight_matrix
+
 
     # Normalize by the weight counts
     # Avoid division by zero
