@@ -1093,6 +1093,7 @@ def morans_i(
 def _ensure_csr_f32(A: sp.csr_matrix) -> sp.csr_matrix:
     A = A.tocsr(copy=False)
     A.sort_indices()
+    A.sum_duplicates()
     return A.astype(np.float32, copy=False)
 
 
@@ -1132,10 +1133,11 @@ def _compute_moran_moments(W: sp.csr_matrix) -> Tuple[float, float, float]:
     S0 = float(W.sum())
 
     # S1: 0.5 * sum((W + W.T)^2)
-    # Note: (W + W.T) is efficient for sparse
+    # Expanded: 0.5 * sum(W^2 + W.T^2 + 2*W*W.T) = sum(W^2) + sum(W*W.T)
+    # This avoids allocating the large (W + W.T) matrix.
     Wt = W.transpose()
-    T = (W + Wt)
-    S1 = float(T.power(2).sum()) / 2.0
+    # Assuming W is canonical (sum_duplicates called), sum(W^2) is sum(W.data**2)
+    S1 = float(np.sum(W.data**2) + W.multiply(Wt).sum())
 
     # S2: sum((RowSum + ColSum)^2)
     # Row sums
