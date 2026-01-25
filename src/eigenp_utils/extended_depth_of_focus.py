@@ -36,12 +36,12 @@ def apply_median_filter(height_map):
     return filtered_map
 
 
-def _2D_weight(patch_size, overlap):
+def _get_1d_weight_variants(patch_size, overlap):
     """
-    Generate a 2D weight matrix for blending patches, using a cubic spline (smoothstep) taper.
-    This ensures C1 continuity across patch boundaries.
+    Generate 1D weight profiles for blending patches, with selective tapering.
+    Returns a dictionary mapping (taper_start, taper_end) -> profile array.
     """
-    # 1D weight function based on cubic spline
+    # 1D weight function based on cubic spline (smoothstep)
     def weight_1d(x):
         return 3 * x**2 - 2 * x**3
 
@@ -49,24 +49,17 @@ def _2D_weight(patch_size, overlap):
     x = np.linspace(0, 1, overlap)
     taper = weight_1d(x)
 
-    # Construct 1D profiles for Y and X axes
-    # The profile is 1.0 in the center and tapers to 0.0 at the edges
-    # We use multiplicative updates to handle cases where overlap regions intersect (overlap > patch_size/2)
-    # Using float32 for weights to match image processing dtype and save memory
-    profile_y = np.ones(patch_size, dtype=np.float32)
-    profile_y[:overlap] *= taper
-    profile_y[-overlap:] *= taper[::-1]
+    variants = {}
+    for start in [False, True]:
+        for end in [False, True]:
+            profile = np.ones(patch_size, dtype=np.float32)
+            if start:
+                profile[:overlap] *= taper
+            if end:
+                profile[-overlap:] *= taper[::-1]
+            variants[(start, end)] = profile
 
-    profile_x = np.ones(patch_size, dtype=np.float32)
-    profile_x[:overlap] *= taper
-    profile_x[-overlap:] *= taper[::-1]
-
-    # Apply weights using broadcasting
-    # (H, W) * (H, 1) * (1, W)
-    # This avoids allocating a full (H, W) weight matrix initialised with ones and then modified in a loop
-    weight_2d = profile_y[:, None] * profile_x[None, :]
-
-    return weight_2d
+    return variants
 
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
@@ -190,13 +183,29 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     final_img = np.zeros((padded_H, padded_W), dtype=np.float32)
     counts = np.zeros((padded_H, padded_W), dtype=np.float32) # matth: Restored counts
 
-    _2D_window = _2D_weight(patch_size, overlap)
+    # Pre-calculate 1D weight profiles
+    weight_profiles = _get_1d_weight_variants(patch_size, overlap)
 
     for i in range(height_map_small.shape[0]):
         for j in range(height_map_small.shape[1]):
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
             best_z = height_map_small[i, j]
+
+            # Determine tapering needs based on grid position
+            # We taper start if we are NOT the first patch (i > 0)
+            # We taper end if we are NOT the last patch (i < max)
+            # This ensures image boundaries (Top/Left/Bot/Right) have weight 1.0 (no fade to black)
+            taper_y_start = (i > 0)
+            taper_y_end = (i < height_map_small.shape[0] - 1)
+
+            taper_x_start = (j > 0)
+            taper_x_end = (j < height_map_small.shape[1] - 1)
+
+            # Construct 2D window on the fly (cheap broadcasting)
+            prof_y = weight_profiles[(taper_y_start, taper_y_end)]
+            prof_x = weight_profiles[(taper_x_start, taper_x_end)]
+            _2D_window = prof_y[:, None] * prof_x[None, :]
 
             # Extract patch with on-demand padding/cropping logic to avoid full padded copy
             y_end = y_start + patch_size
