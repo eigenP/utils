@@ -71,3 +71,7 @@
 3.  **Sentinel Discontinuity:** `clip_limit=0` is a sentinel for "Unlimited AHE" (Max Contrast), causing a sharp discontinuity from `clip_limit=0.001` (Low Contrast). This behavior is correct but counter-intuitive.
 4.  **Saturation:** For smooth/sparse images, effective contrast limits saturate quickly (e.g. at 0.05) once the clip limit exceeds the maximum bin count of the local histogram.
 **Action:** Tests for contrast enhancement must account for signal content (saturation) and the specific sentinel value (0) to avoid false failures. Using `clip_limit=0` should be preferred for "Maximum Effect" rather than `clip_limit=1.0` to avoid ambiguity.
+
+## 2025-02-24 - Focus Stacking Boundary Artifacts
+**Learning:** Verified that `best_focus_image` was incorrectly tapering blending weights at image boundaries, causing severe signal loss (black borders) for constant inputs. The "Partition of Unity" test (Constant Input -> Constant Output) instantly revealed this failure, which was missed by standard reconstruction tests that ignored boundaries.
+**Action:** Patch-based reconstruction algorithms must be tested for "Constant Reproduction" to ensure that the sum of weights is exactly 1.0 everywhere, including at image edges.
