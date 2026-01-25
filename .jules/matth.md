@@ -34,3 +34,17 @@ $$ \delta = \frac{\text{thresh} - I_{z-1}}{I_z - I_{z-1}} $$
 The refined height is $z - 1 + \delta$.
 
 **Validation:** On a synthetic slanted plane, this reduced the RMSE from quantization levels ($\sim 0.60$ px in the test setup due to aliasing) to $\sim 0.29$ px and allowed the algorithm to correctly distinguish a 0.5 pixel shift, which was previously lost in the integer grid.
+
+## 2025-02-20 - Focus Stacking: The Parabola of Clarity
+
+**Learning:** "Best focus" is not a binary choice between slices.
+
+The original `best_focus_image` algorithm used `argmax` on the Laplacian energy score to select the source Z-slice for each pixel. This creates a quantized depth map (stairs) and reconstructs the image using only discrete slices, potentially missing the true focal plane that lies *between* two captured slices.
+
+**Action:** Implemented sub-pixel peak estimation using Parabolic Interpolation on the focus scores.
+Given the max score $S_z$ and neighbors $S_{z-1}, S_{z+1}$, the fractional offset $\delta$ is:
+$$ \delta = \frac{S_{z-1} - S_{z+1}}{2(S_{z-1} - 2S_z + S_{z+1})} $$
+The image is then reconstructed by linearly blending the two nearest slices ($z, z+1$) weighted by the fractional depth.
+
+**Validation:**
+On a synthetic slanted plane, this reduced the depth RMSE from ~0.45 (quantization error) to ~0.40, and significantly reduced the discrete "jump" artifacts (Max Jump 1.0 -> 0.49), producing a smoother and more accurate depth map and fused image. This treats the Z-stack as a sampled continuous signal rather than a deck of cards.
