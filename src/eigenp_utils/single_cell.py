@@ -2041,8 +2041,12 @@ def tl_pacmap(
     X_embedded = embedder.fit_transform(X_in, init=init_method)
 
     # 4. Store Result
-    adata.obsm["X_pacmap"] = X_embedded
-    print(f"PaCMAP embedding finished. Result stored in `adata.obsm['X_pacmap']`.")
+    key_added = "X_pacmap"
+    if n_components >= 3:
+        key_added = f"X_pacmap_{n_components}"
+
+    adata.obsm[key_added] = X_embedded
+    print(f"PaCMAP embedding finished. Result stored in `adata.obsm['{key_added}']`.")
     
     
 # ------------------------- Multiscale Coarsening -------------------------
