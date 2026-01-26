@@ -1150,7 +1150,7 @@ def _compute_moran_moments(W: sp.csr_matrix) -> Tuple[float, float, float]:
 def morans_i_all_fast(
     adata,
     *,
-    W_rowstd: Optional[sp.csr_matrix] = None,     # row-standardized CSR
+    W_rowstd: Optional[sp.csr_matrix] = None,     # spatial weights matrix (CSR)
     weights_key: str = "connectivities",
     source: Literal["X", "raw"] | str = "X",
     deduplicate: Literal["none", "mean", "sum", "first", "last"] = "mean",
@@ -1161,6 +1161,8 @@ def morans_i_all_fast(
     """
     Fast Moran's I for all genes with analytical p-values (randomization null).
     Uses the identity I = (n/S0) * (x^T W x) / (x^T x).
+    Supports general (irregular) spatial weights; row-standardization is NOT required.
+
     Returns DataFrame ['gene','I', 'pval_z', 'z_score'] sorted by I desc.
     """
     if W_rowstd is None:
@@ -1230,8 +1232,14 @@ def morans_i_all_fast(
             mu = (np.asarray(X.sum(axis=0)).ravel() / float(n)).astype(np.float32)
         else:
             mu = (X.sum(axis=0, dtype=np.float64) / float(n)).astype(np.float32)
+
+        # Precompute row sums for general weights correction (N, )
+        # If W is row-standardized, R_sum is all 1s (usually).
+        # We need this to correct the numerator formula for general weights.
+        R_sum = np.asarray(W.sum(axis=1)).flatten().astype(np.float64)
     else:
         mu = np.zeros(X.shape[1], dtype=np.float32)
+        R_sum = None
 
     G = X.shape[1]
     I_vals = np.empty(G, dtype=np.float32)
@@ -1260,12 +1268,25 @@ def morans_i_all_fast(
         mub = mu[j0:j1]
 
         if center:
+            # sum_WXb corresponds to (x^T C) in the generalized formula
             sum_WXb = WXb.sum(axis=0, dtype=np.float64)
-            num = sum_cross - mub * sum_WXb
-            den = sum_sq - n * (mub ** 2)
 
             # Bolt: Optimize memory. WXb is no longer needed.
             del WXb
+
+            # Correction term for general weights: sum_XR = x^T R
+            # This is required if W is not row-standardized.
+            # Efficiently compute x^T R = (Xb.T @ R)
+            # Xb is already dense float32 here.
+            sum_XR = np.dot(Xb.T, R_sum)
+
+            # Generalized Numerator Formula:
+            # Num = x^T W x - mu * (x^T R + x^T C) + mu^2 * S0
+            # sum_cross = x^T W x
+            # sum_WXb = x^T C
+            # sum_XR  = x^T R
+            num = sum_cross - mub * (sum_XR + sum_WXb) + (mub ** 2) * S0
+            den = sum_sq - n * (mub ** 2)
 
             # Kurtosis calculation: sum((x-u)^4)
             # We can perform this in-place on Xb if it's safe (i.e., not a view of X).
