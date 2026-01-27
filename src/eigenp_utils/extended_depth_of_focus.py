@@ -11,7 +11,7 @@
 import numpy as np
 import skimage.io
 
-from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
+from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter, map_coordinates
 
 from skimage.filters import median
 from skimage.morphology import disk
@@ -70,6 +70,60 @@ def _get_1d_weight_variants(patch_size, overlap):
     w_flat = w_base.copy()
 
     return w_full, w_start, w_end, w_flat
+
+def _get_fractional_peak(scores_stack):
+    """
+    Given a stack of scores (Z, H, W), find the sub-pixel peak for each pixel (H, W)
+    using parabolic interpolation.
+    Returns height_map (H, W) in float coordinates.
+    """
+    Z, H, W = scores_stack.shape
+    best_z = np.argmax(scores_stack, axis=0) # (H, W)
+
+    # Indices grid
+    rows, cols = np.indices((H, W))
+
+    # Mask for interior peaks (0 < z < Z-1) to allow neighbor access
+    mask = (best_z > 0) & (best_z < Z - 1)
+
+    # Initialize delta with zeros
+    delta = np.zeros((H, W), dtype=np.float32)
+
+    # Extract y-1, y0, y+1 only where valid
+    # Using advanced indexing
+    z_int = best_z[mask]
+    r_int = rows[mask]
+    c_int = cols[mask]
+
+    # y0 is the peak
+    y0 = scores_stack[z_int, r_int, c_int]
+    y_minus = scores_stack[z_int - 1, r_int, c_int]
+    y_plus = scores_stack[z_int + 1, r_int, c_int]
+
+    # Quadratic interpolation
+    # Shift = (y_minus - y_plus) / (2 * (y_minus - 2*y0 + y_plus))
+    # Note: Curvature (y_minus - 2*y0 + y_plus) should be negative for a max.
+    denom = 2 * (y_minus - 2 * y0 + y_plus)
+
+    # Handle small denominator (flat peak or singularity)
+    valid_denom = np.abs(denom) > 1e-6
+
+    # Compute delta only where denom is safe
+    d = np.zeros_like(y0) # Default 0
+
+    # We only compute where curvature is valid
+    # Note: If curvature is positive (minima), the formula finds a minimum.
+    # But since y0 >= y_plus and y0 >= y_minus, y_minus - 2y0 + y_plus <= 0 is guaranteed.
+    # Just need to check for zero.
+
+    d[valid_denom] = (y_minus[valid_denom] - y_plus[valid_denom]) / denom[valid_denom]
+
+    # Clamp delta to [-0.5, 0.5] to prevent wild extrapolation
+    d = np.clip(d, -0.5, 0.5)
+
+    delta[mask] = d
+
+    return best_z.astype(np.float32) + delta
 
 
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
@@ -183,10 +237,11 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         if not use_fast_pad:
              del slice_padded
 
-    # 4. Select best Z
-    height_map_small = np.argmax(score_matrix, axis=0)
+    # 4. Select best Z (Sub-pixel refinement)
+    # Replaced simple argmax with parabolic interpolation
+    height_map_small = _get_fractional_peak(score_matrix)
 
-    # Apply median filter
+    # Apply median filter (works on floats too)
     height_map_small = apply_median_filter(height_map_small)
 
     # 5. Combine patches to create the final image
@@ -228,15 +283,21 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
             y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
+
+            # --- Sub-pixel Chunk Extraction ---
             best_z = height_map_small[i, j]
 
-            # Extract patch with on-demand padding/cropping logic to avoid full padded copy
-            y_end = y_start + patch_size
-            x_end = x_start + patch_size
+            # Ensure index safety
+            best_z = np.clip(best_z, 0, img.shape[0] - 1.00001)
+            z_int = int(best_z)
+            alpha = best_z - z_int
 
             # Determine safe extraction bounds from original image
             # If the patch extends beyond original image (into padded region),
             # we need to extract enough "history" for reflection.
+            y_end = y_start + patch_size
+            x_end = x_start + patch_size
+
             y_s_clamped = y_start
             y_e_clamped = min(y_end, img.shape[1])
             pad_bottom = 0
@@ -262,8 +323,16 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
                 x_s_clamped = max(0, x_s_clamped)
                 x_e_clamped = img.shape[2]
 
-            # Extract chunk
-            chunk = img[best_z, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
+            # Extract chunk from floor slice
+            chunk0 = img[z_int, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
+
+            # If sub-pixel and next slice exists, interpolate
+            if alpha > 0.001 and z_int < img.shape[0] - 1:
+                chunk1 = img[z_int + 1, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
+                # Linear interpolation
+                chunk = (1.0 - alpha) * chunk0 + alpha * chunk1
+            else:
+                chunk = chunk0
 
             # Pad chunk locally
             if pad_bottom > 0 or pad_right > 0:
@@ -311,9 +380,30 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     # We will return float32.
 
     if return_heightmap:
-        zoom_y = original_shape[0] / height_map_small.shape[0]
-        zoom_x = original_shape[1] / height_map_small.shape[1]
-        height_map_full = zoom(height_map_small, (zoom_y, zoom_x), order=0)
+        # Correctly resample the height map to align with the original image coordinates.
+        # height_map_small contains values at patch centers.
+        # We map output pixels (y, x) to the index space of height_map_small.
+
+        H, W = original_shape
+        stride = patch_size - overlap
+        # Center of the first patch (index 0)
+        c0_y = patch_size // 2
+        c0_x = patch_size // 2
+
+        # Grid of output coordinates
+        # k = (y - c0) / stride
+        grid_y, grid_x = np.indices((H, W))
+        coord_y = (grid_y - c0_y) / stride
+        coord_x = (grid_x - c0_x) / stride
+
+        # Map coordinates
+        # mode='nearest' extends the edge values to the boundary (reasonable for padding)
+        height_map_full = map_coordinates(
+            height_map_small,
+            [coord_y, coord_x],
+            order=1,
+            mode='nearest'
+        )
 
         return final_img, height_map_full
 

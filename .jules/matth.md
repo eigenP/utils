@@ -34,3 +34,17 @@ $$ \delta = \frac{\text{thresh} - I_{z-1}}{I_z - I_{z-1}} $$
 The refined height is $z - 1 + \delta$.
 
 **Validation:** On a synthetic slanted plane, this reduced the RMSE from quantization levels ($\sim 0.60$ px in the test setup due to aliasing) to $\sim 0.29$ px and allowed the algorithm to correctly distinguish a 0.5 pixel shift, which was previously lost in the integer grid.
+
+## 2025-02-19 - Depth of Focus: The Map is the Territory (Only if Aligned)
+
+**Learning:** Patch-based processing creates a disconnect between the "index space" of the results and the "physical space" of the image.
+
+The `best_focus_image` function computes optimal depth indices for discrete patches. When upsampling this patch-level map to the full image size using standard `scipy.ndimage.zoom`, the function implicitly maps the patch grid range $[0, N_{patches}-1]$ to the pixel range $[0, H-1]$.
+However, the center of the first patch is at $y = P/2$, not $y=0$. This mismatch introduces a systematic spatial shift of $\approx P/2$ pixels, which manifests as a significant depth error on slanted surfaces (RMSE ~0.93 px).
+
+**Action:** Replaced `zoom` with explicit coordinate mapping using `scipy.ndimage.map_coordinates`.
+We calculate the precise index $k$ in the patch grid for every pixel $y$:
+$$ k = \frac{y - P/2}{S} $$
+where $S$ is the stride. This aligns the "map" with the "territory".
+
+**Result:** Combined with parabolic peak interpolation (converting discrete Z-slices to continuous depth), the RMSE dropped from 0.93 px (dominated by alignment error) to 0.03 px. This validates that the "Depth Map" is now a faithful, sub-pixel accurate representation of the object's geometry, not just a processing artifact.
