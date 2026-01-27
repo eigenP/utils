@@ -45,6 +45,28 @@ def test_extract_surface():
 
     # Let's trust it returns a mask for now.
 
+def test_extract_surface_padding_mismatch():
+    """
+    Test extract_surface with dimensions that are not divisible by block size,
+    causing internal padding that previously led to IndexError.
+    """
+    # Y = 10, X = 10. Block size = (2, 4, 4)
+    # 10 % 4 = 2 != 0. Requires padding.
+    Z, Y, X = 20, 10, 10
+    image = np.zeros((Z, Y, X), dtype=np.uint8)
+    image[10:, :, :] = 200 # Foreground
+
+    # Pad Z manually as in the user report (optional, but good for consistency)
+    padded_image = pad_z_slices(image, num_slices=4)
+
+    _BLOCK_SIZE = (2, 4, 4)
+
+    # This should not raise IndexError
+    surface = extract_surface(padded_image, downscale_factor=_BLOCK_SIZE)
+
+    assert surface.shape == padded_image.shape
+    assert surface.dtype == bool
+
 def test_pad_z_slices():
     arr = np.zeros((10, 10, 10))
     # Pad 1 slice before
