@@ -146,6 +146,11 @@ def extract_surface(
     # Scale Z back to full resolution
     surface_z_full *= sz
 
+    # Ensure dimensions match original image (handle padding/scaling mismatch)
+    # The padding added during binning can cause surface_z_full to be larger than image.
+    Z, Y, X = image.shape
+    surface_z_full = surface_z_full[:Y, :X]
+
     # FIX: mask-aware smoothing
     valid_mask = surface_z_full >= 0
     surface_z_full[~valid_mask] = 0
