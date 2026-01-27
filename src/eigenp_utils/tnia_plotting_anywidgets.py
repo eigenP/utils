@@ -19,7 +19,7 @@ import io
 import base64
 from .tnia_plotting_3d import show_xyz_max_slabs, show_xyz, create_multichannel_rgb, blend_colors, black_to
 import importlib.resources as ir
-
+from matplotlib import gridspec
 
 
 class TNIAWidgetBase(anywidget.AnyWidget):
@@ -624,4 +624,267 @@ def show_xyz_max_scatter_interactive(
         point_size=point_size, alpha=alpha, colors=colors,
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
+    )
+
+class IsoScatterWidget(anywidget.AnyWidget):
+    _esm = ir.files("eigenp_utils").joinpath("iso_scatter.js")
+
+    image_data = traitlets.Unicode(sync=True)
+    elev = traitlets.Float(30).tag(sync=True)
+    azim = traitlets.Float(-60).tag(sync=True)
+    save_filename = traitlets.Unicode("iso_scatter.svg").tag(sync=True)
+    save_trigger = traitlets.Int(0).tag(sync=True)
+
+    def __init__(self, X, Y, Z, color=None, sxy=1, sz=1, figsize=(12, 8),
+                 point_size=5, alpha=0.6, cmap='viridis', max_points=10000,
+                 title=None):
+        super().__init__()
+
+        self.X = np.asarray(X)
+        self.Y = np.asarray(Y)
+        self.Z = np.asarray(Z)
+
+        # Determine color mode and convert to numpy array immediately
+        self.is_continuous = False
+        self.is_categorical = False
+
+        # Ensure color is numpy array
+        if color is not None:
+             self.color = np.asarray(color)
+        else:
+             self.color = None
+
+        # Subsample if needed
+        if len(self.X) > max_points:
+            idx = np.random.choice(len(self.X), max_points, replace=False)
+            self.X = self.X[idx]
+            self.Y = self.Y[idx]
+            self.Z = self.Z[idx]
+            if self.color is not None:
+                 self.color = self.color[idx]
+
+        self.sxy = sxy
+        self.sz = sz
+        self.figsize = figsize
+        self.point_size = point_size
+        self.alpha = alpha
+        self.cmap = cmap
+        self.title = title
+
+        # Bounds
+        self.xmin, self.xmax = self.X.min(), self.X.max()
+        self.ymin, self.ymax = self.Y.min(), self.Y.max()
+        self.zmin, self.zmax = self.Z.min(), self.Z.max()
+
+        # Analyze color types (after subsampling)
+        if self.color is not None:
+            if np.issubdtype(self.color.dtype, np.number):
+                 self.is_continuous = True
+            else:
+                 self.is_categorical = True
+                 # Map categories to colors
+                 self.unique_cats = np.unique(self.color)
+                 n_cats = len(self.unique_cats)
+
+                 # Use a distinct colormap for categorical
+                 # We'll generate a color mapping dictionary
+                 # Use matplotlib 'tab10' or 'tab20' or 'viridis' if too many
+                 base_cmap = plt.get_cmap('tab20' if n_cats > 10 else 'tab10')
+                 self.cat_color_map = {cat: base_cmap(i % base_cmap.N) for i, cat in enumerate(self.unique_cats)}
+                 self.c_mapped = [self.cat_color_map[c] for c in self.color]
+
+        self.observe(self._render_wrapper, names=['elev', 'azim'])
+        self.observe(self._save_svg, names='save_trigger')
+
+        # Initial render
+        self._render_wrapper(None)
+
+    def _render_wrapper(self, change):
+        fig = self._render()
+        if fig:
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+            plt.close(fig)
+
+    def _save_svg(self, change):
+        fig = self._render()
+        if fig:
+            try:
+                fig.savefig(self.save_filename, format='svg', dpi=300, bbox_inches='tight')
+                print(f"Saved to {self.save_filename}")
+            except Exception as e:
+                print(f"Error saving file: {e}")
+            finally:
+                plt.close(fig)
+
+    def _render(self):
+        # Create figure with GridSpec
+        # Layout:
+        #  [ YZ ] [ 3D ] [ XY ]
+        #  [    ] [ XZ ] [    ]
+        # Wait, isometric layout usually:
+        # Center: 3D
+        # Left/Bottom/Right faces projected.
+        # User request: "center view will be the 3d, and then the plane projection -- kinda like isometric 2.5D layout"
+
+        fig = plt.figure(figsize=self.figsize, facecolor='white')
+        gs = gridspec.GridSpec(3, 3, width_ratios=[1, 2, 1], height_ratios=[1, 2, 1], figure=fig)
+
+        # 3D Axes (Center)
+        ax3d = fig.add_subplot(gs[1, 1], projection='3d')
+
+        # Projections
+        # XY (Top View) -> usually Z vs X or Y vs X? Standard is Y vs X.
+        # Let's map:
+        # Z-axis is vertical in 3D plot usually.
+        # If we unwrap the box:
+        #   Top (XY) above 3D? Or Bottom?
+        #   Front (XZ) below?
+        #   Side (YZ) left/right?
+
+        # Let's try:
+        #   (0, 1): XY (Top)
+        #   (1, 0): YZ (Left)
+        #   (1, 1): 3D
+        #   (2, 1): XZ (Front/Bottom) - wait, XZ is usually "Front"
+
+        # Let's stick to standard Scanpy/Spatial layouts or mechanical drawing layouts
+        # Top View (XY): Top Center (0,1)
+        # Front View (XZ): Bottom Center (2,1)
+        # Side View (YZ): Right Center (1,2) or Left Center (1,0)
+
+        # Coordinates scaled
+        Xs, Ys, Zs = self.X * self.sxy, self.Y * self.sxy, self.Z * self.sz
+
+        # Common scatter args
+        scatter_kwargs = {
+            's': self.point_size,
+            'alpha': self.alpha,
+        }
+
+        if self.is_continuous:
+            scatter_kwargs['c'] = self.color
+            scatter_kwargs['cmap'] = self.cmap
+        elif self.is_categorical:
+            scatter_kwargs['c'] = self.c_mapped
+        else:
+            scatter_kwargs['c'] = 'gray'
+
+        # 3D Plot
+        p3d = ax3d.scatter(Xs, Ys, Zs, **scatter_kwargs)
+        ax3d.view_init(elev=self.elev, azim=self.azim)
+        ax3d.set_xlabel('X')
+        ax3d.set_ylabel('Y')
+        ax3d.set_zlabel('Z')
+        # Make panes transparent or white? Default is fine.
+
+        # XY Projection (Top) -> (0, 1)
+        # Plot X vs Y
+        ax_xy = fig.add_subplot(gs[0, 1])
+        p_xy = ax_xy.scatter(Xs, Ys, **scatter_kwargs)
+        ax_xy.set_aspect('equal')
+        ax_xy.set_xlabel('X')
+        ax_xy.set_ylabel('Y')
+        ax_xy.set_title("XY (Top)")
+        ax_xy.grid(True, linestyle=':', alpha=0.6)
+
+        # XZ Projection (Front) -> (2, 1)
+        # Plot X vs Z
+        ax_xz = fig.add_subplot(gs[2, 1])
+        p_xz = ax_xz.scatter(Xs, Zs, **scatter_kwargs)
+        ax_xz.set_aspect('auto') # Z scaling might differ
+        ax_xz.set_xlabel('X')
+        ax_xz.set_ylabel('Z')
+        ax_xz.set_title("XZ (Front)")
+        ax_xz.grid(True, linestyle=':', alpha=0.6)
+
+        # YZ Projection (Side) -> (1, 0) (Left side)
+        # Plot Z vs Y (or Y vs Z).
+        # Usually Side view aligns Y with XY plot's Y?
+        # If XY is above 3D, Y axis is vertical.
+        # If YZ is to the left, Y axis should ideally match?
+        # Let's just do Z vs Y for "Side" view.
+        ax_yz = fig.add_subplot(gs[1, 0])
+        p_yz = ax_yz.scatter(Ys, Zs, **scatter_kwargs)
+        ax_yz.set_aspect('auto')
+        ax_yz.set_xlabel('Y')
+        ax_yz.set_ylabel('Z')
+        ax_yz.set_title("YZ (Side)")
+        ax_yz.grid(True, linestyle=':', alpha=0.6)
+
+        # Remove unused axes
+        # (0,0), (0,2), (2,0), (2,2)
+        # We can use (1,2) for Legend/Colorbar!
+
+        ax_leg = fig.add_subplot(gs[1, 2])
+        ax_leg.axis('off')
+
+        if self.is_continuous:
+            # Add colorbar
+            # We can use the 3D plot mappable
+            cbar = plt.colorbar(p3d, ax=ax_leg, fraction=0.8, pad=0.05, aspect=20)
+            cbar.set_label('Value')
+        elif self.is_categorical:
+            # Add legend
+            handles = [
+                matplotlib.lines.Line2D([0], [0], marker='o', color='w',
+                                        markerfacecolor=self.cat_color_map[cat],
+                                        markersize=10, label=str(cat))
+                for cat in self.unique_cats
+            ]
+            ax_leg.legend(handles=handles, loc='center', title="Categories", frameon=False)
+
+        if self.title:
+            fig.suptitle(self.title, fontsize=16)
+
+        fig.tight_layout()
+        return fig
+
+def show_iso_scatter(
+    X, Y, Z,
+    color=None,
+    sxy=1, sz=1,
+    figsize=(10, 8),
+    point_size=5,
+    alpha=0.6,
+    cmap='viridis',
+    max_points=10000,
+    title=None
+):
+    """
+    Displays an interactive isometric scatter plot widget.
+
+    Parameters
+    ----------
+    X, Y, Z : array-like
+        Coordinates of points.
+    color : array-like, optional
+        Color values (continuous or categorical).
+    sxy, sz : float
+        Scaling factors for XY and Z dimensions.
+    figsize : tuple
+        Size of the rendered figure.
+    point_size : int
+        Size of scatter points.
+    alpha : float
+        Transparency of points.
+    cmap : str
+        Colormap for continuous data.
+    max_points : int
+        Maximum number of points to render (random subsampling applied if exceeded).
+    title : str, optional
+        Plot title.
+    """
+    return IsoScatterWidget(
+        X, Y, Z,
+        color=color,
+        sxy=sxy,
+        sz=sz,
+        figsize=figsize,
+        point_size=point_size,
+        alpha=alpha,
+        cmap=cmap,
+        max_points=max_points,
+        title=title
     )

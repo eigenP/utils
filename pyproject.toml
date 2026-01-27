@@ -49,6 +49,7 @@ where = ["src"]
 eigenp_utils = [
   "tnia_plotting_anywidgets.js",
   "tnia_plotting_anywidgets.css",
+  "iso_scatter.js",
   "scientific.mplstyle",
   "Inter-Regular.ttf"
 ]
