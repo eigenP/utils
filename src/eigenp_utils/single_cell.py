@@ -1615,7 +1615,8 @@ def plot_archetype_summary(
         adata,
         basis=basis,
         color=profile_name,
-        # title=f'Archetype {archetype_id} Score',
+        title=f'Archetype {archetype_id} Score',
+        cmap='PiYG',
         **kwargs
     )
 
@@ -1625,7 +1626,7 @@ def plot_archetype_summary(
             adata,
             basis=basis,
             color=top_k_genes,
-            title=f'Top {len(top_k_genes)} Genes for Archetype {archetype_id}',
+            # title=f'Top {len(top_k_genes)} Genes for Archetype {archetype_id}',
             **kwargs
         )
 
