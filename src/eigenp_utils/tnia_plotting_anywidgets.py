@@ -635,14 +635,15 @@ class IsoScatterWidget(anywidget.AnyWidget):
     save_filename = traitlets.Unicode("iso_scatter.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
 
-    def __init__(self, X, Y, Z, color=None, sxy=1, sz=1, figsize=(12, 8),
+    def __init__(self, X, Y, Z, color=None, sxy=1, sz=1, figsize=(12, 10),
                  point_size=5, alpha=0.6, cmap='viridis', max_points=10000,
                  title=None):
         super().__init__()
 
-        self.X = np.asarray(X)
-        self.Y = np.asarray(Y)
-        self.Z = np.asarray(Z)
+        # Store ORIGINAL Data
+        self.X_orig = np.asarray(X)
+        self.Y_orig = np.asarray(Y)
+        self.Z_orig = np.asarray(Z)
 
         # Determine color mode and convert to numpy array immediately
         self.is_continuous = False
@@ -654,12 +655,29 @@ class IsoScatterWidget(anywidget.AnyWidget):
         else:
              self.color = None
 
+        # Handle empty data
+        if len(self.X_orig) == 0:
+             self.cx, self.cy, self.cz = 0, 0, 0
+             self.max_radius = 1.0
+             self.sxy = sxy
+             self.sz = sz
+             self.figsize = figsize
+             self.point_size = point_size
+             self.alpha = alpha
+             self.cmap = cmap
+             self.title = title
+             # Initialize rendering observers even if empty
+             self.observe(self._render_wrapper, names=['elev', 'azim'])
+             self.observe(self._save_svg, names='save_trigger')
+             self._render_wrapper(None)
+             return
+
         # Subsample if needed
-        if len(self.X) > max_points:
-            idx = np.random.choice(len(self.X), max_points, replace=False)
-            self.X = self.X[idx]
-            self.Y = self.Y[idx]
-            self.Z = self.Z[idx]
+        if len(self.X_orig) > max_points:
+            idx = np.random.choice(len(self.X_orig), max_points, replace=False)
+            self.X_orig = self.X_orig[idx]
+            self.Y_orig = self.Y_orig[idx]
+            self.Z_orig = self.Z_orig[idx]
             if self.color is not None:
                  self.color = self.color[idx]
 
@@ -671,10 +689,17 @@ class IsoScatterWidget(anywidget.AnyWidget):
         self.cmap = cmap
         self.title = title
 
-        # Bounds
-        self.xmin, self.xmax = self.X.min(), self.X.max()
-        self.ymin, self.ymax = self.Y.min(), self.Y.max()
-        self.zmin, self.zmax = self.Z.min(), self.Z.max()
+        # Calculate Centroid and Fixed Bounds for Rotation
+        self.cx = (self.X_orig.min() + self.X_orig.max()) / 2
+        self.cy = (self.Y_orig.min() + self.Y_orig.max()) / 2
+        self.cz = (self.Z_orig.min() + self.Z_orig.max()) / 2
+
+        # Calculate max radius from centroid
+        dx = (self.X_orig - self.cx) * sxy
+        dy = (self.Y_orig - self.cy) * sxy
+        dz = (self.Z_orig - self.cz) * sz
+        dists = np.sqrt(dx**2 + dy**2 + dz**2)
+        self.max_radius = dists.max() * 1.05 # 5% buffer
 
         # Analyze color types (after subsampling)
         if self.color is not None:
@@ -718,44 +743,62 @@ class IsoScatterWidget(anywidget.AnyWidget):
             finally:
                 plt.close(fig)
 
+    def _get_rotation_matrix(self, elev_deg, azim_deg):
+        # Convert to radians
+        elev = np.radians(elev_deg)
+        azim = np.radians(azim_deg)
+
+        # Rotation around Z (Azimuth)
+        Rz = np.array([
+            [np.cos(azim), -np.sin(azim), 0],
+            [np.sin(azim),  np.cos(azim), 0],
+            [0,             0,            1]
+        ])
+
+        # Rotation around X (Elevation) - or Y?
+        # Usually Elevation is tilting up/down.
+        # If Z is up, X is right, Y is forward (or similar).
+        # Rotation around X tilts Y and Z.
+        Rx = np.array([
+            [1, 0,             0],
+            [0, np.cos(elev), -np.sin(elev)],
+            [0, np.sin(elev),  np.cos(elev)]
+        ])
+
+        # Combined Rotation
+        return Rx @ Rz
+
     def _render(self):
-        # Create figure with GridSpec
-        # Layout:
-        #  [ YZ ] [ 3D ] [ XY ]
-        #  [    ] [ XZ ] [    ]
-        # Wait, isometric layout usually:
-        # Center: 3D
-        # Left/Bottom/Right faces projected.
-        # User request: "center view will be the 3d, and then the plane projection -- kinda like isometric 2.5D layout"
-
         fig = plt.figure(figsize=self.figsize, facecolor='white')
-        gs = gridspec.GridSpec(3, 3, width_ratios=[1, 2, 1], height_ratios=[1, 2, 1], figure=fig)
 
-        # 3D Axes (Center)
-        ax3d = fig.add_subplot(gs[1, 1], projection='3d')
+        # Layout: 3 Rows, 2 Columns
+        # Row 0 (Span 2): 3D Scatter
+        # Row 1 (0): Side View (Y-Z)
+        # Row 1 (1): Front View (X-Z)
+        # Row 2 (0): Top View (X-Y)
+        # Row 2 (1): Legend
+        gs = gridspec.GridSpec(3, 2, width_ratios=[1, 1], height_ratios=[1.5, 1, 1], figure=fig)
 
-        # Projections
-        # XY (Top View) -> usually Z vs X or Y vs X? Standard is Y vs X.
-        # Let's map:
-        # Z-axis is vertical in 3D plot usually.
-        # If we unwrap the box:
-        #   Top (XY) above 3D? Or Bottom?
-        #   Front (XZ) below?
-        #   Side (YZ) left/right?
+        # Handle Empty Data
+        if self.X_orig.size == 0:
+            fig.text(0.5, 0.5, "No Data", ha='center', va='center')
+            return fig
 
-        # Let's try:
-        #   (0, 1): XY (Top)
-        #   (1, 0): YZ (Left)
-        #   (1, 1): 3D
-        #   (2, 1): XZ (Front/Bottom) - wait, XZ is usually "Front"
+        # 1. Apply Rotation to Data
+        # We need to center the data first to rotate around centroid
+        X_c = (self.X_orig - self.cx) * self.sxy
+        Y_c = (self.Y_orig - self.cy) * self.sxy
+        Z_c = (self.Z_orig - self.cz) * self.sz
 
-        # Let's stick to standard Scanpy/Spatial layouts or mechanical drawing layouts
-        # Top View (XY): Top Center (0,1)
-        # Front View (XZ): Bottom Center (2,1)
-        # Side View (YZ): Right Center (1,2) or Left Center (1,0)
+        # Stack
+        points = np.stack([X_c, Y_c, Z_c], axis=1) # N x 3
 
-        # Coordinates scaled
-        Xs, Ys, Zs = self.X * self.sxy, self.Y * self.sxy, self.Z * self.sz
+        # Get Rotation Matrix
+        R = self._get_rotation_matrix(self.elev, self.azim)
+
+        points_rot = points @ R.T # (3x3 @ 3xN).T -> N x 3
+
+        Xs, Ys, Zs = points_rot[:, 0], points_rot[:, 1], points_rot[:, 2]
 
         # Common scatter args
         scatter_kwargs = {
@@ -771,62 +814,71 @@ class IsoScatterWidget(anywidget.AnyWidget):
         else:
             scatter_kwargs['c'] = 'gray'
 
-        # 3D Plot
+        # Global Limits
+        lim = self.max_radius
+        # Limits: [-lim, lim]
+
+        # --- 3D Plot (Row 0, Span 2) ---
+        ax3d = fig.add_subplot(gs[0, :], projection='3d')
         p3d = ax3d.scatter(Xs, Ys, Zs, **scatter_kwargs)
-        ax3d.view_init(elev=self.elev, azim=self.azim)
+
+        # Fix Camera
+        ax3d.view_init(elev=20, azim=-45)
+
+        ax3d.set_xlim([-lim, lim])
+        ax3d.set_ylim([-lim, lim])
+        ax3d.set_zlim([-lim, lim])
+        ax3d.set_box_aspect((1, 1, 1))
         ax3d.set_xlabel('X')
         ax3d.set_ylabel('Y')
         ax3d.set_zlabel('Z')
-        # Make panes transparent or white? Default is fine.
 
-        # XY Projection (Top) -> (0, 1)
-        # Plot X vs Y
-        ax_xy = fig.add_subplot(gs[0, 1])
-        p_xy = ax_xy.scatter(Xs, Ys, **scatter_kwargs)
-        ax_xy.set_aspect('equal')
-        ax_xy.set_xlabel('X')
-        ax_xy.set_ylabel('Y')
-        ax_xy.set_title("XY (Top)")
-        ax_xy.grid(True, linestyle=':', alpha=0.6)
-
-        # XZ Projection (Front) -> (2, 1)
-        # Plot X vs Z
-        ax_xz = fig.add_subplot(gs[2, 1])
-        p_xz = ax_xz.scatter(Xs, Zs, **scatter_kwargs)
-        ax_xz.set_aspect('auto') # Z scaling might differ
-        ax_xz.set_xlabel('X')
-        ax_xz.set_ylabel('Z')
-        ax_xz.set_title("XZ (Front)")
-        ax_xz.grid(True, linestyle=':', alpha=0.6)
-
-        # YZ Projection (Side) -> (1, 0) (Left side)
-        # Plot Z vs Y (or Y vs Z).
-        # Usually Side view aligns Y with XY plot's Y?
-        # If XY is above 3D, Y axis is vertical.
-        # If YZ is to the left, Y axis should ideally match?
-        # Let's just do Z vs Y for "Side" view.
+        # --- Side Projection (Row 1, Left) ---
+        # Z vs Y (Y on horizontal, Z on vertical)
         ax_yz = fig.add_subplot(gs[1, 0])
-        p_yz = ax_yz.scatter(Ys, Zs, **scatter_kwargs)
-        ax_yz.set_aspect('auto')
+        ax_yz.scatter(Ys, Zs, **scatter_kwargs)
+        ax_yz.set_aspect('equal')
+        ax_yz.set_xlim([-lim, lim])
+        ax_yz.set_ylim([-lim, lim])
         ax_yz.set_xlabel('Y')
         ax_yz.set_ylabel('Z')
-        ax_yz.set_title("YZ (Side)")
+        ax_yz.set_title("Side View (Y-Z)")
         ax_yz.grid(True, linestyle=':', alpha=0.6)
 
-        # Remove unused axes
-        # (0,0), (0,2), (2,0), (2,2)
-        # We can use (1,2) for Legend/Colorbar!
+        # --- Front Projection (Row 1, Right) ---
+        # Z vs X (X on horizontal, Z on vertical)
+        ax_xz = fig.add_subplot(gs[1, 1])
+        ax_xz.scatter(Xs, Zs, **scatter_kwargs)
+        ax_xz.set_aspect('equal')
+        ax_xz.set_xlim([-lim, lim])
+        ax_xz.set_ylim([-lim, lim])
+        ax_xz.set_xlabel('X')
+        ax_xz.set_ylabel('Z')
+        ax_xz.set_title("Front View (X-Z)")
+        ax_xz.grid(True, linestyle=':', alpha=0.6)
 
-        ax_leg = fig.add_subplot(gs[1, 2])
+        # --- Top Projection (Row 2, Left) ---
+        # Y vs X (X horizontal, Y vertical)
+        ax_yx = fig.add_subplot(gs[2, 0])
+        ax_yx.scatter(Xs, Ys, **scatter_kwargs)
+        ax_yx.set_aspect('equal')
+        ax_yx.set_xlim([-lim, lim])
+        ax_yx.set_ylim([-lim, lim])
+        ax_yx.set_xlabel('X')
+        ax_yx.set_ylabel('Y')
+        ax_yx.set_title("Top View (X-Y)")
+        ax_yx.grid(True, linestyle=':', alpha=0.6)
+
+        # --- Legend (Row 2, Right) ---
+        ax_leg = fig.add_subplot(gs[2, 1])
         ax_leg.axis('off')
 
         if self.is_continuous:
-            # Add colorbar
-            # We can use the 3D plot mappable
-            cbar = plt.colorbar(p3d, ax=ax_leg, fraction=0.8, pad=0.05, aspect=20)
-            cbar.set_label('Value')
+            # Safely add colorbar only if collection exists
+            if hasattr(p3d, 'cmap'):
+                 cbar = plt.colorbar(p3d, ax=ax_leg, fraction=0.8, pad=0.05, aspect=20)
+                 cbar.set_label('Value')
         elif self.is_categorical:
-            # Add legend
             handles = [
                 matplotlib.lines.Line2D([0], [0], marker='o', color='w',
                                         markerfacecolor=self.cat_color_map[cat],
