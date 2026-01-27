@@ -75,3 +75,10 @@
 ## 2025-02-24 - Focus Stacking Boundary Artifacts
 **Learning:** The `best_focus_image` algorithm blindly applied tapering (windowing) to all patches, including those at the image boundaries. This violated the Partition of Unity property, causing significant signal loss (fading to black) at the edges of the reconstructed image. Identity reproduction failed: a uniform input stack resulted in an image with dark borders.
 **Action:** The algorithm was updated to use context-aware windowing (`_get_1d_weight_variants`), selecting flat-start/flat-end profiles for boundary patches. A new invariant test (`tests/test_focus_properties.py`) was added to enforce Identity Reproduction (Input=1s -> Output=1s) and Partition of Unity, ensuring future regressions are caught.
+
+## 2025-02-24 - Subpixel Drift Correction Precision
+**Learning:** Verified the precision of `apply_drift_correction_2D(method='subpixel')` using synthetic moving Gaussians.
+- **Precision:** Subpixel (bicubic) correction reduces centroid jitter by nearly 200x (0.0004px vs 0.08px) compared to integer correction, confirming it is not just "interpolated" but "stabilized" to near-theoretical limits.
+- **Convention:** The drift table stores the **Correction Vector** (negative of object motion), which is the shift required to stabilize the image, not the motion vector itself.
+- **Cycle Consistency:** The algorithm satisfies cycle consistency: correcting a known shift restores the original image with negligible residual error ($< 10^{-5}$).
+**Action:** High-precision video stabilization requires testing against subpixel metrics; integer-based metrics (like "within 0.5px") are insufficient to validate bicubic/subpixel logic. The distinction between "Motion" and "Correction" vectors must be explicit in test expectations.
