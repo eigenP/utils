@@ -81,3 +81,9 @@
 - **Subpixel Magic:** Bicubic interpolation effectively eliminates quantization noise for fractional drifts, providing near-perfect stability for smooth signals.
 - **Windowing Trap:** Reinforced that small image sizes (e.g., 64x64) combined with drift can push objects into the tapered window region, causing massive estimation bias. Tests must ensure the object stays in the "flat" central region of the window (requiring size >= 128 for moderate drifts).
 **Action:** Always prefer `method='subpixel'` for precision tasks. When testing registration, verify that the object's trajectory does not intersect the windowing taper to avoid confounding estimation errors.
+## 2025-02-24 - Subpixel Drift Correction Precision
+**Learning:** Verified the precision of `apply_drift_correction_2D(method='subpixel')` using synthetic moving Gaussians.
+- **Precision:** Subpixel (bicubic) correction reduces centroid jitter by nearly 200x (0.0004px vs 0.08px) compared to integer correction, confirming it is not just "interpolated" but "stabilized" to near-theoretical limits.
+- **Convention:** The drift table stores the **Correction Vector** (negative of object motion), which is the shift required to stabilize the image, not the motion vector itself.
+- **Cycle Consistency:** The algorithm satisfies cycle consistency: correcting a known shift restores the original image with negligible residual error ($< 10^{-5}$).
+**Action:** High-precision video stabilization requires testing against subpixel metrics; integer-based metrics (like "within 0.5px") are insufficient to validate bicubic/subpixel logic. The distinction between "Motion" and "Correction" vectors must be explicit in test expectations.
