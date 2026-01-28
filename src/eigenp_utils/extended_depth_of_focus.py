@@ -72,6 +72,54 @@ def _get_1d_weight_variants(patch_size, overlap):
     return w_full, w_start, w_end, w_flat
 
 
+def _get_fractional_peak(score_matrix):
+    """
+    Refines the discrete argmax peak using parabolic interpolation.
+
+    score_matrix: (Z, H, W)
+
+    Returns:
+    peak_z: (H, W) float32
+    """
+    Z, H, W = score_matrix.shape
+    idx = np.argmax(score_matrix, axis=0) # (H, W)
+
+    # We need values at idx-1, idx, idx+1
+    # Clamp to ensure we don't access out of bounds
+    z_c = idx
+    z_l = np.maximum(z_c - 1, 0)
+    z_r = np.minimum(z_c + 1, Z - 1)
+
+    # Extract values
+    # Advanced indexing
+    grid_y, grid_x = np.indices((H, W))
+
+    v_c = score_matrix[z_c, grid_y, grid_x]
+    v_l = score_matrix[z_l, grid_y, grid_x]
+    v_r = score_matrix[z_r, grid_y, grid_x]
+
+    # Parabolic fit
+    # Delta = (v_l - v_r) / (2 * (v_l - 2*v_c + v_r))
+    denom = v_l - 2*v_c + v_r
+
+    # Handle denominator close to zero (flat or linear)
+    # v_c is max, so denom is <= 0.
+    delta = np.zeros_like(v_c, dtype=np.float32)
+    mask = np.abs(denom) > 1e-9
+
+    # We expect negative denominator for a maximum
+    delta[mask] = (v_l[mask] - v_r[mask]) / (2 * denom[mask])
+
+    # Clamp delta to [-0.5, 0.5] to prevent instability
+    # Also clamp to 0 if we are at the boundaries of the stack
+    boundary_mask = (idx == 0) | (idx == Z - 1)
+    delta[boundary_mask] = 0
+
+    delta = np.clip(delta, -0.5, 0.5)
+
+    return idx.astype(np.float32) + delta
+
+
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
     Expecting an image with dimension order ZYX
@@ -183,10 +231,11 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         if not use_fast_pad:
              del slice_padded
 
-    # 4. Select best Z
-    height_map_small = np.argmax(score_matrix, axis=0)
+    # 4. Select best Z with Subpixel Precision
+    # matth: Use parabolic interpolation to find fractional peak
+    height_map_small = _get_fractional_peak(score_matrix)
 
-    # Apply median filter
+    # Apply median filter (works on floats, preserves edges while removing outliers)
     height_map_small = apply_median_filter(height_map_small)
 
     # 5. Combine patches to create the final image
@@ -200,6 +249,49 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
     n_patches_y = height_map_small.shape[0]
     n_patches_x = height_map_small.shape[1]
+
+    Z_dim = img.shape[0]
+
+    # Helper to extract a padded patch from a specific Z slice
+    def _get_padded_patch(z_idx, y_s, x_s, y_e, x_e, y_start, x_start):
+        # Determine safe extraction bounds from original image
+        y_s_clamped = y_s
+        y_e_clamped = min(y_e, img.shape[1])
+        pad_bottom = 0
+
+        if y_e > img.shape[1]:
+            pad_bottom = pad_y
+            needed_history = max(pad_bottom + 1, y_e - img.shape[1] + 2)
+            y_s_clamped = min(y_s_clamped, img.shape[1] - needed_history)
+            y_s_clamped = max(0, y_s_clamped)
+            y_e_clamped = img.shape[1]
+
+        x_s_clamped = x_s
+        x_e_clamped = min(x_e, img.shape[2])
+        pad_right = 0
+
+        if x_e > img.shape[2]:
+            pad_right = pad_x
+            needed_history = max(pad_right + 1, x_e - img.shape[2] + 2)
+            x_s_clamped = min(x_s_clamped, img.shape[2] - needed_history)
+            x_s_clamped = max(0, x_s_clamped)
+            x_e_clamped = img.shape[2]
+
+        # Extract chunk
+        chunk = img[z_idx, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
+
+        # Pad chunk locally
+        if pad_bottom > 0 or pad_right > 0:
+            chunk_padded = np.pad(chunk, ((0, pad_bottom), (0, pad_right)), mode='reflect')
+        else:
+            chunk_padded = chunk
+
+        # Slice out the exact target region relative to chunk start
+        y_rel = y_start - y_s_clamped
+        x_rel = x_start - x_s_clamped
+
+        return chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
+
 
     for i in range(n_patches_y):
         # Select Y-weight
@@ -230,66 +322,37 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             x_start = j * (patch_size - overlap)
             best_z = height_map_small[i, j]
 
-            # Extract patch with on-demand padding/cropping logic to avoid full padded copy
+            # Patch bounds
             y_end = y_start + patch_size
             x_end = x_start + patch_size
 
-            # Determine safe extraction bounds from original image
-            # If the patch extends beyond original image (into padded region),
-            # we need to extract enough "history" for reflection.
-            y_s_clamped = y_start
-            y_e_clamped = min(y_end, img.shape[1])
-            pad_bottom = 0
+            # matth: Subpixel reconstruction
+            # Interpolate between floor(z) and ceil(z)
+            z_floor = int(np.floor(best_z))
+            z_ceil = int(np.ceil(best_z))
+            alpha = best_z - z_floor
 
-            if y_end > img.shape[1]:
-                pad_bottom = pad_y
-                # Ensure we capture enough context for reflection.
-                # np.pad 'reflect' needs at least 'pad_width' elements if mirroring from edge.
-                # We need to ensure extraction size >= needed context.
-                needed_history = max(pad_bottom + 1, y_end - img.shape[1] + 2)
-                y_s_clamped = min(y_s_clamped, img.shape[1] - needed_history)
-                y_s_clamped = max(0, y_s_clamped)
-                y_e_clamped = img.shape[1]
+            # Clamp indices
+            z_floor = max(0, min(z_floor, Z_dim - 1))
+            z_ceil = max(0, min(z_ceil, Z_dim - 1))
 
-            x_s_clamped = x_start
-            x_e_clamped = min(x_end, img.shape[2])
-            pad_right = 0
+            patch_floor = _get_padded_patch(z_floor, y_start, x_start, y_end, x_end, y_start, x_start)
 
-            if x_end > img.shape[2]:
-                pad_right = pad_x
-                needed_history = max(pad_right + 1, x_end - img.shape[2] + 2)
-                x_s_clamped = min(x_s_clamped, img.shape[2] - needed_history)
-                x_s_clamped = max(0, x_s_clamped)
-                x_e_clamped = img.shape[2]
-
-            # Extract chunk
-            chunk = img[best_z, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
-
-            # Pad chunk locally
-            if pad_bottom > 0 or pad_right > 0:
-                chunk_padded = np.pad(chunk, ((0, pad_bottom), (0, pad_right)), mode='reflect')
+            if z_floor == z_ceil:
+                patch = patch_floor
             else:
-                chunk_padded = chunk
-
-            # Slice out the exact target region relative to chunk start
-            y_rel = y_start - y_s_clamped
-            x_rel = x_start - x_s_clamped
-
-            patch = chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
+                patch_ceil = _get_padded_patch(z_ceil, y_start, x_start, y_end, x_end, y_start, x_start)
+                patch = (1.0 - alpha) * patch_floor + alpha * patch_ceil
 
             # Create weighted patch
             try:
                 # weighted_patch = patch * _2D_window
-                # In-place multiplication to save a buffer:
-                # patch *= _2D_window
-                # (but patch is needed? No, we just add it. 'patch' is a temp copy from astype)
+                # In-place multiplication
                 np.multiply(patch, _2D_window, out=patch)
                 weight_matrix = _2D_window
             except ValueError:
                 # Boundary case
                 min_shape = tuple(min(s1, s2) for s1, s2 in zip(patch.shape, _2D_window.shape))
-                # Slicing creates copies/views.
-                # Just multiply carefully.
                 patch = patch * _2D_window[:min_shape[0], :min_shape[1]]
                 weight_matrix = _2D_window[:min_shape[0], :min_shape[1]]
 
@@ -306,14 +369,52 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     # 6. Recrop
     final_img = final_img[:original_shape[0], :original_shape[1]]
 
-    # Optional: cast back to original input dtype?
-    # Usually focus stacking keeps float result to preserve dynamic range after blending.
-    # We will return float32.
-
     if return_heightmap:
-        zoom_y = original_shape[0] / height_map_small.shape[0]
-        zoom_x = original_shape[1] / height_map_small.shape[1]
-        height_map_full = zoom(height_map_small, (zoom_y, zoom_x), order=0)
+        # matth: Use RegularGridInterpolator for spatially accurate upscaling
+        # scipy.ndimage.zoom assumes a different coordinate system that introduces
+        # a systematic shift. We map the exact patch centers to the pixel grid.
+        from scipy.interpolate import RegularGridInterpolator
+
+        n_patches_y = height_map_small.shape[0]
+        n_patches_x = height_map_small.shape[1]
+
+        # Coordinates of the centers where height_map_small is defined
+        # Note: In scoring, y_centers = y_starts + patch_size // 2
+        # y_starts = i * (patch_size - overlap)
+        y_starts = np.arange(n_patches_y) * (patch_size - overlap)
+        x_starts = np.arange(n_patches_x) * (patch_size - overlap)
+
+        y_c = y_starts + patch_size // 2
+        x_c = x_starts + patch_size // 2
+
+        # Create interpolator
+        # bounds_error=False, fill_value=None -> Linear extrapolation
+        interp = RegularGridInterpolator((y_c, x_c), height_map_small, bounds_error=False, fill_value=None)
+
+        # Target grid coordinates
+        gy = np.arange(original_shape[0])
+        gx = np.arange(original_shape[1])
+
+        # Meshgrid for interpolation (indexing='ij')
+        # We can optimize by broadcasting if grid is huge, but RegularGridInterpolator
+        # usually expects (N, 2) points or tuple of grids.
+        # interp((gy[:, None], gx[None, :])) works if grid is tuple?
+        # No, RegularGridInterpolator.__call__ expects points (N, D) or (y, x) if method='linear'.
+        # Actually it supports meshgrid style inputs in newer scipy.
+        # Let's use the explicit meshgrid to be safe and clear.
+        GY, GX = np.meshgrid(gy, gx, indexing='ij')
+
+        # Flatten for interpolation then reshape, or pass directly if supported.
+        # Passing tuple (GY, GX) is supported in SciPy 1.9+.
+        # We'll assume a reasonably modern SciPy.
+        try:
+            height_map_full = interp((GY, GX))
+        except (TypeError, ValueError):
+            # Fallback for older SciPy
+            pts = np.array([GY.ravel(), GX.ravel()]).T
+            height_map_full = interp(pts).reshape(original_shape)
+
+        height_map_full = height_map_full.astype(np.float32)
 
         return final_img, height_map_full
 
