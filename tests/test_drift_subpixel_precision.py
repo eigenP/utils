@@ -136,6 +136,8 @@ class TestDriftSubpixelPrecision(unittest.TestCase):
         mse = np.mean((corrected - video)**2)
         print(f"Stationary Reconstruction MSE: {mse:.6f}")
         self.assertLess(mse, 1e-6, "Subpixel correction degraded stationary image")
+
+    """
     Testr 🔎 Verification: Subpixel Drift Correction Precision
 
     This test verifies that the 'subpixel' mode of drift correction provides
