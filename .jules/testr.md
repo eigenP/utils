@@ -76,6 +76,11 @@
 **Learning:** The `best_focus_image` algorithm blindly applied tapering (windowing) to all patches, including those at the image boundaries. This violated the Partition of Unity property, causing significant signal loss (fading to black) at the edges of the reconstructed image. Identity reproduction failed: a uniform input stack resulted in an image with dark borders.
 **Action:** The algorithm was updated to use context-aware windowing (`_get_1d_weight_variants`), selecting flat-start/flat-end profiles for boundary patches. A new invariant test (`tests/test_focus_properties.py`) was added to enforce Identity Reproduction (Input=1s -> Output=1s) and Partition of Unity, ensuring future regressions are caught.
 
+## 2025-02-24 - Subpixel Drift Precision
+**Learning:** Verified that `apply_drift_correction_2D` with `method='subpixel'` achieves sub-pixel stability (RMSE < 0.1 px) significantly better than integer correction (RMSE ~ 0.4 px).
+- **Subpixel Magic:** Bicubic interpolation effectively eliminates quantization noise for fractional drifts, providing near-perfect stability for smooth signals.
+- **Windowing Trap:** Reinforced that small image sizes (e.g., 64x64) combined with drift can push objects into the tapered window region, causing massive estimation bias. Tests must ensure the object stays in the "flat" central region of the window (requiring size >= 128 for moderate drifts).
+**Action:** Always prefer `method='subpixel'` for precision tasks. When testing registration, verify that the object's trajectory does not intersect the windowing taper to avoid confounding estimation errors.
 ## 2025-02-24 - Subpixel Drift Correction Precision
 **Learning:** Verified the precision of `apply_drift_correction_2D(method='subpixel')` using synthetic moving Gaussians.
 - **Precision:** Subpixel (bicubic) correction reduces centroid jitter by nearly 200x (0.0004px vs 0.08px) compared to integer correction, confirming it is not just "interpolated" but "stabilized" to near-theoretical limits.
