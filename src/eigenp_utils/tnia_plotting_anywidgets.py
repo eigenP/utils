@@ -771,13 +771,13 @@ class IsoScatterWidget(anywidget.AnyWidget):
     def _render(self):
         fig = plt.figure(figsize=self.figsize, facecolor='white')
 
-        # Layout: 3 Rows, 2 Columns
-        # Row 0 (Span 2): 3D Scatter
-        # Row 1 (0): Side View (Y-Z)
-        # Row 1 (1): Front View (X-Z)
-        # Row 2 (0): Top View (X-Y)
-        # Row 2 (1): Legend
-        gs = gridspec.GridSpec(3, 2, width_ratios=[1, 1], height_ratios=[1.5, 1, 1], figure=fig)
+        # Layout: 2 Rows, 3 Columns
+        # Row 0 (Col 0-1): 3D Scatter (Span 2)
+        # Row 0 (Col 2): Legend
+        # Row 1 (Col 0): Side View (Y-Z)
+        # Row 1 (Col 1): Front View (X-Z)
+        # Row 1 (Col 2): Top View (X-Y)
+        gs = gridspec.GridSpec(2, 3, width_ratios=[1, 1, 1], height_ratios=[1.5, 1], figure=fig)
 
         # Handle Empty Data
         if self.X_orig.size == 0:
@@ -818,8 +818,8 @@ class IsoScatterWidget(anywidget.AnyWidget):
         lim = self.max_radius
         # Limits: [-lim, lim]
 
-        # --- 3D Plot (Row 0, Span 2) ---
-        ax3d = fig.add_subplot(gs[0, :], projection='3d')
+        # --- 3D Plot (Row 0, Span 2 Cols) ---
+        ax3d = fig.add_subplot(gs[0, :2], projection='3d')
         p3d = ax3d.scatter(Xs, Ys, Zs, **scatter_kwargs)
 
         # Fix Camera
@@ -833,7 +833,33 @@ class IsoScatterWidget(anywidget.AnyWidget):
         ax3d.set_ylabel('Y')
         ax3d.set_zlabel('Z')
 
-        # --- Side Projection (Row 1, Left) ---
+        # --- Legend (Row 0, Col 2) ---
+        ax_leg = fig.add_subplot(gs[0, 2])
+        ax_leg.axis('off')
+
+        if self.is_continuous:
+            # Safely add colorbar only if collection exists
+            if hasattr(p3d, 'cmap'):
+                 cbar = plt.colorbar(p3d, ax=ax_leg, fraction=0.5, pad=0.1, aspect=20)
+                 cbar.set_label('Value')
+        elif self.is_categorical:
+            handles = [
+                matplotlib.lines.Line2D([0], [0], marker='o', color='w',
+                                        markerfacecolor=self.cat_color_map[cat],
+                                        markersize=10, label=str(cat))
+                for cat in self.unique_cats
+            ]
+            # Dynamic columns for legend
+            # If many items, increase columns
+            n_items = len(handles)
+            ncols = 1
+            if n_items > 10: ncols = 2
+            if n_items > 20: ncols = 3
+
+            ax_leg.legend(handles=handles, loc='center', title="Categories",
+                          frameon=False, ncol=ncols, fontsize='small')
+
+        # --- Side Projection (Row 1, Col 0) ---
         # Z vs Y (Y on horizontal, Z on vertical)
         ax_yz = fig.add_subplot(gs[1, 0])
         ax_yz.scatter(Ys, Zs, **scatter_kwargs)
@@ -845,7 +871,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         ax_yz.set_title("Side View (Y-Z)")
         ax_yz.grid(True, linestyle=':', alpha=0.6)
 
-        # --- Front Projection (Row 1, Right) ---
+        # --- Front Projection (Row 1, Col 1) ---
         # Z vs X (X on horizontal, Z on vertical)
         ax_xz = fig.add_subplot(gs[1, 1])
         ax_xz.scatter(Xs, Zs, **scatter_kwargs)
@@ -857,9 +883,9 @@ class IsoScatterWidget(anywidget.AnyWidget):
         ax_xz.set_title("Front View (X-Z)")
         ax_xz.grid(True, linestyle=':', alpha=0.6)
 
-        # --- Top Projection (Row 2, Left) ---
+        # --- Top Projection (Row 1, Col 2) ---
         # Y vs X (X horizontal, Y vertical)
-        ax_yx = fig.add_subplot(gs[2, 0])
+        ax_yx = fig.add_subplot(gs[1, 2])
         ax_yx.scatter(Xs, Ys, **scatter_kwargs)
         ax_yx.set_aspect('equal')
         ax_yx.set_xlim([-lim, lim])
@@ -868,24 +894,6 @@ class IsoScatterWidget(anywidget.AnyWidget):
         ax_yx.set_ylabel('Y')
         ax_yx.set_title("Top View (X-Y)")
         ax_yx.grid(True, linestyle=':', alpha=0.6)
-
-        # --- Legend (Row 2, Right) ---
-        ax_leg = fig.add_subplot(gs[2, 1])
-        ax_leg.axis('off')
-
-        if self.is_continuous:
-            # Safely add colorbar only if collection exists
-            if hasattr(p3d, 'cmap'):
-                 cbar = plt.colorbar(p3d, ax=ax_leg, fraction=0.8, pad=0.05, aspect=20)
-                 cbar.set_label('Value')
-        elif self.is_categorical:
-            handles = [
-                matplotlib.lines.Line2D([0], [0], marker='o', color='w',
-                                        markerfacecolor=self.cat_color_map[cat],
-                                        markersize=10, label=str(cat))
-                for cat in self.unique_cats
-            ]
-            ax_leg.legend(handles=handles, loc='center', title="Categories", frameon=False)
 
         if self.title:
             fig.suptitle(self.title, fontsize=16)
