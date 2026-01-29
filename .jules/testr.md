@@ -87,3 +87,7 @@
 - **Convention:** The drift table stores the **Correction Vector** (negative of object motion), which is the shift required to stabilize the image, not the motion vector itself.
 - **Cycle Consistency:** The algorithm satisfies cycle consistency: correcting a known shift restores the original image with negligible residual error ($< 10^{-5}$).
 **Action:** High-precision video stabilization requires testing against subpixel metrics; integer-based metrics (like "within 0.5px") are insufficient to validate bicubic/subpixel logic. The distinction between "Motion" and "Correction" vectors must be explicit in test expectations.
+
+## 2025-02-24 - Bidirectional Drift Sign Inversion
+**Learning:** The `reverse_time='both'` mode in `apply_drift_correction_2D` was incorrectly calculating the average drift as `(dx_forward - dx_backward) / 2`. Since `dx_backward` and `dx_forward` have opposite signs for the same motion (e.g., -0.5 and +0.5 for +0.5 motion), this formula resulted in a correction vector with the **same sign** as the motion (e.g., +0.5), exacerbating drift instead of correcting it (Positive Feedback Loop).
+**Action:** The formula was corrected to `(dx_backward - dx_forward) / 2`, ensuring the correction vector opposes the motion. A new test `tests/test_bidirectional_drift_sign.py` was created to verify the sign of correction for a known drift direction, catching any future regression into positive feedback.

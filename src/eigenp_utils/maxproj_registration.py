@@ -320,10 +320,11 @@ def apply_drift_correction_2D(
     # Wrap the range function with tqdm for a progress bar
 
     if reverse_time == 'both':
-        # Reverse order
-        range_values = range(t_shape - 1, 0, -1)
+        # Forward order for 'both' (Bidirectional Estimation, Reference=Frame 0)
+        range_values = range(1, t_shape)
 
-
+        # Ensure first frame is copied
+        corrected_data[0] = video_data[0]
 
         for time_point in tqdm(range_values, desc='Applying Drift Correction'):
             # Estimate the drift between the current frame and the previous frame
@@ -337,8 +338,12 @@ def apply_drift_correction_2D(
             shift_y_fwd, _, _ = phase_cross_correlation(projections_y[time_point], projections_y[time_point - 1], upsample_factor=100)
             dx_forward, dy_forward = shift_x_fwd[0], shift_y_fwd[0]
 
-            dx = (dx_forward - dx_backward) / 2
-            dy = (dy_forward - dy_backward) / 2
+            # dx_backward is shift T-1 -> T (e.g. -0.5 for +0.5 motion)
+            # dx_forward is shift T -> T-1 (e.g. +0.5 for +0.5 motion)
+            # We want the average of (dx_backward) and (-dx_forward)
+            # (dx_backward - dx_forward) / 2
+            dx = (dx_backward - dx_forward) / 2
+            dy = (dy_backward - dy_forward) / 2
 
 
             ##### if too large, then keep as zero ####
@@ -355,7 +360,8 @@ def apply_drift_correction_2D(
             # NOTE: We cast to integer for the shift operation, but keep cumulative drift as float
             # to prevent integrator windup/loss of precision for slow drifts.
 
-            OFFSET = 1 if reverse_time else 0 
+            # OFFSET = 0 for Forward iteration
+            OFFSET = 0
 
             if method == 'subpixel':
                 # Subpixel correction using bicubic interpolation
