@@ -44,3 +44,17 @@ When upscaling a "sparse" map (like a patch-based heightmap) to a dense grid, st
 **Action:** Replaced `zoom` with `scipy.interpolate.RegularGridInterpolator`, explicitly mapping the *exact* centers of the patches to the target pixel grid. This reduced heightmap RMSE from $\sim 0.44$ px to $\sim 0.05$ px.
 
 **Mathematical Insight:** Parabolic interpolation of discrete focus scores ({z-1}, S_z, S_{z+1}$) recovers the continuous peak with high precision, provided the underlying focus metric (Laplacian energy) is locally quadratic near the optimum. This allows reconstructing (z^*)$ via linear interpolation between slices {\lfloor z^* \rfloor}$ and {\lceil z^* \rceil}$, effectively treating the Z-stack as a continuous function (x,y,z)$.
+
+## 2025-02-19 - Drift Correction: The Perils of Coupled Windowing
+
+**Learning:** Windowing for FFT must respect the projection geometry.
+
+The original implementation of `estimate_drift_2D` applied a 2D weighting window (tapering 33% of the image!) to the raw image *before* computing max projections.
+This coupled the X and Y axes: a feature located at the top edge (Y=0) was attenuated to zero, making it invisible to the X-projection (which should only care about X-position).
+This effectively reduced the Field of View for registration, causing failure when valid features were only present near the boundaries.
+
+**Action:** Decoupled the windowing process.
+1. Compute raw Max Projections (capturing full signal intensity regardless of orthogonal position).
+2. Apply a 1D Tukey window ($\alpha=0.1$) to the *projections* to satisfy the periodic boundary requirement for the 1D FFT in `phase_cross_correlation`.
+
+**Result:** The algorithm now robustly detects drift even when the only trackable object is at the extreme edge of the FOV (verified by `test_drift_edge_robustness.py`), while still preventing FFT edge ringing.
