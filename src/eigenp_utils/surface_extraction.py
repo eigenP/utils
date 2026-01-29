@@ -137,14 +137,26 @@ def extract_surface(
     surface_z_red[has_surface] = z_refined
 
     # Upscale in Y/X only
-    surface_z_full = ndimage.zoom(
+    from eigenp_utils.upscaling_utils import interpolate_heightmap, get_block_centers
+
+    # Calculate coordinates of block centers in the padded coordinate system
+    y_coords = get_block_centers(Y_red, sy)
+    x_coords = get_block_centers(X_red, sx)
+
+    # Upscale to the padded image dimensions to match coordinate system
+    padded_H = image_padded.shape[1]
+    padded_W = image_padded.shape[2]
+
+    surface_z_full = interpolate_heightmap(
         surface_z_red,
-        zoom=(sy, sx),
-        order=3
+        (padded_H, padded_W),
+        y_coords,
+        x_coords
     )
 
     # Scale Z back to full resolution
-    surface_z_full *= sz
+    # Shift to center of the blocks
+    surface_z_full = surface_z_full * sz + (sz - 1) / 2.0
 
     # Ensure dimensions match original image (handle padding/scaling mismatch)
     # The padding added during binning can cause surface_z_full to be larger than image.
