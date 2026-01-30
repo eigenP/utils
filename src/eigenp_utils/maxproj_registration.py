@@ -171,16 +171,27 @@ def estimate_drift_2D(frame1, frame2, return_ccm = False):
     # shift, error, diffphase = phase_cross_correlation(frame1, frame2)
 
     min_size_pixels = min(frame1.shape)
+    overlap = min_size_pixels // 3
 
-    frame1 = _2D_weighted_image(frame1, min_size_pixels // 3)
-    frame2 = _2D_weighted_image(frame2, min_size_pixels // 3)
+    # matth: Compute raw max projections first to preserve orthogonal invariance.
+    # Windowing 2D first couples X and Y, causing amplitude modulation artifacts
+    # when objects move into the tapered region (orthogonal drift).
+    frame1_max_proj_x = np.max(frame1, axis=0)
+    frame2_max_proj_x = np.max(frame2, axis=0)
 
+    frame1_max_proj_y = np.max(frame1, axis=1)
+    frame2_max_proj_y = np.max(frame2, axis=1)
 
-    frame1_max_proj_x = np.max(frame1, axis = 0)
-    frame2_max_proj_x = np.max(frame2, axis = 0)
+    # Apply 1D windowing to the projections
+    # This prepares the signal for FFT-based correlation (suppressing edge discontinuities)
+    # without introducing cross-axis modulation.
+    profile_y, profile_x = _get_weight_profiles(frame1.shape, overlap)
 
-    frame1_max_proj_y = np.max(frame1, axis = 1)
-    frame2_max_proj_y = np.max(frame2, axis = 1)
+    frame1_max_proj_x = frame1_max_proj_x * profile_x
+    frame2_max_proj_x = frame2_max_proj_x * profile_x
+
+    frame1_max_proj_y = frame1_max_proj_y * profile_y
+    frame2_max_proj_y = frame2_max_proj_y * profile_y
 
     # Apply gaussian smoothing for robustness
     # frame1_max_proj_x = gaussian_filter1d(frame1_max_proj_x, sigma = 3, radius = 5)
@@ -295,22 +306,23 @@ def apply_drift_correction_2D(
     overlap = min_size_pixels // 3
 
     # Pre-calculate weight profiles once
-    profiles = _get_weight_profiles((x_shape, y_shape), overlap)
+    profile_y, profile_x = _get_weight_profiles((x_shape, y_shape), overlap)
 
     # Store projections: (T, W) and (T, H)
     projections_x = []
     projections_y = []
 
-    # Pre-allocate buffer for weighted frame to avoid repeated allocations
-    # Determine dtype based on input (if int, result is float32 due to weights being float32)
-    w_dtype = np.result_type(video_data.dtype, np.float32)
-    w_frame_buffer = np.empty((x_shape, y_shape), dtype=w_dtype)
-
     # Iterate once to compute all projections
+    # matth: Refactored to project first, then window. Saves memory (no 2D float buffer)
+    # and improves robustness to orthogonal drift.
     for t in range(t_shape):
-        w_frame = _2D_weighted_image(video_data[t], overlap, profiles=profiles, out=w_frame_buffer)
-        projections_x.append(np.max(w_frame, axis=0))
-        projections_y.append(np.max(w_frame, axis=1))
+        # Raw projections
+        raw_proj_x = np.max(video_data[t], axis=0)
+        raw_proj_y = np.max(video_data[t], axis=1)
+
+        # Apply 1D weights
+        projections_x.append(raw_proj_x * profile_x)
+        projections_y.append(raw_proj_y * profile_y)
 
     # Convert to arrays for easy indexing
     projections_x = np.array(projections_x)
