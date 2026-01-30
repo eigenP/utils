@@ -91,3 +91,7 @@
 ## 2025-02-24 - Bidirectional Drift Sign Inversion
 **Learning:** The `reverse_time='both'` mode in `apply_drift_correction_2D` was incorrectly calculating the average drift as `(dx_forward - dx_backward) / 2`. Since `dx_backward` and `dx_forward` have opposite signs for the same motion (e.g., -0.5 and +0.5 for +0.5 motion), this formula resulted in a correction vector with the **same sign** as the motion (e.g., +0.5), exacerbating drift instead of correcting it (Positive Feedback Loop).
 **Action:** The formula was corrected to `(dx_backward - dx_forward) / 2`, ensuring the correction vector opposes the motion. A new test `tests/test_bidirectional_drift_sign.py` was created to verify the sign of correction for a known drift direction, catching any future regression into positive feedback.
+
+## 2025-02-20 - Color Blending & Hue Preservation
+**Learning:** Testing clipping logic requires distinguishing between "Input Normalization" (per-channel) and "Output Blending" (summation). My initial test failed because I didn't account for inputs being clipped *before* blending. High-quality tests must respect the precondition contracts (e.g. `vmax`) while stressing the post-condition invariants (hue preservation).
+**Action:** When testing blending or aggregation functions, explicitly construct inputs that are valid individually but create edge cases (like saturation) only upon aggregation.
