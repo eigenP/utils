@@ -61,19 +61,25 @@ def dimensionality_parser(target_dims : str, iterate_dims : dict = None):
             aligned_output_dims = [target_dims[i] for i in range(len(dummy_output_shape))]
             # reduced_dims = [dim for dim in aligned_input_dims if dim not in aligned_output_dims]
             reduced_dims = []
-            output_dim_pointer = -1  # start at the last dimension of dummy_output_shape
 
-            for input_dim in reversed(aligned_input_dims):
-                input_size = dummy_input_shape[aligned_input_dims.index(input_dim)]
-                
-                if output_dim_pointer >= -len(dummy_output_shape) and dummy_output_shape[output_dim_pointer] == input_size:
-                    # this dimension exists in the output; decrement the output pointer and continue
-                    output_dim_pointer -= 1
-                else:
-                    # this dimension is missing in the output and therefore is a reduced dimension
-                    reduced_dims.append(input_dim)
+            # If the rank (number of dimensions) is preserved, we assume no dimensions were reduced,
+            # even if sizes changed (e.g. resizing/downsampling).
+            if len(dummy_input_shape) == len(dummy_output_shape):
+                reduced_dims = []
+            else:
+                output_dim_pointer = -1  # start at the last dimension of dummy_output_shape
 
-            reduced_dims = list(reversed(reduced_dims))  # reverse it back to the original order
+                for input_dim in reversed(aligned_input_dims):
+                    input_size = dummy_input_shape[aligned_input_dims.index(input_dim)]
+
+                    if output_dim_pointer >= -len(dummy_output_shape) and dummy_output_shape[output_dim_pointer] == input_size:
+                        # this dimension exists in the output; decrement the output pointer and continue
+                        output_dim_pointer -= 1
+                    else:
+                        # this dimension is missing in the output and therefore is a reduced dimension
+                        reduced_dims.append(input_dim)
+
+                reduced_dims = list(reversed(reduced_dims))  # reverse it back to the original order
 
 
 
@@ -94,7 +100,19 @@ def dimensionality_parser(target_dims : str, iterate_dims : dict = None):
                 iterate_dims_arg = {dim: '0:{}'.format(image.shape[image_dims.index(dim)]) for dim in iterate_over_dims}
 
             # Construct the output shape based on the main_dims:
-            output_shape = [image.shape[image_dims.index(dim)] for dim in main_dims]
+            output_shape = []
+            preserved_target_dims = [d for d in target_dims if d not in reduced_dims]
+
+            for dim in main_dims:
+                if dim in preserved_target_dims:
+                    # If the dimension was part of the target operation and preserved,
+                    # use the size from the dummy output (handling resizing)
+                    idx = preserved_target_dims.index(dim)
+                    output_shape.append(dummy_output_shape[idx])
+                else:
+                    # If it wasn't processed (iterated dimension), keep original size
+                    output_shape.append(image.shape[image_dims.index(dim)])
+
             print('output_shape : ', output_shape)
 
 

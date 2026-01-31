@@ -91,3 +91,7 @@
 ## 2025-02-24 - Bidirectional Drift Sign Inversion
 **Learning:** The `reverse_time='both'` mode in `apply_drift_correction_2D` was incorrectly calculating the average drift as `(dx_forward - dx_backward) / 2`. Since `dx_backward` and `dx_forward` have opposite signs for the same motion (e.g., -0.5 and +0.5 for +0.5 motion), this formula resulted in a correction vector with the **same sign** as the motion (e.g., +0.5), exacerbating drift instead of correcting it (Positive Feedback Loop).
 **Action:** The formula was corrected to `(dx_backward - dx_forward) / 2`, ensuring the correction vector opposes the motion. A new test `tests/test_bidirectional_drift_sign.py` was created to verify the sign of correction for a known drift direction, catching any future regression into positive feedback.
+
+## 2025-02-24 - Dimensionality Parser Inferred Reduction Bug
+**Learning:** The `dimensionality_parser` decorator was brittle: it assumed that any mismatch between dummy output size and input size implied a dimension was "reduced" (removed). This caused it to fail for operations that resize dimensions (e.g., downsampling) without removing them, as it would incorrectly flag them as reduced and incorrectly calculate output shapes.
+**Action:** The parser logic was updated to assume "Rank Preservation implies No Reduction". If `len(output_shape) == len(input_shape)`, `reduced_dims` is set to empty, and output shapes are explicitly mapped from the dummy output, supporting resizing operations.
