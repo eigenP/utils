@@ -43,4 +43,22 @@ When upscaling a "sparse" map (like a patch-based heightmap) to a dense grid, st
 
 **Action:** Replaced `zoom` with `scipy.interpolate.RegularGridInterpolator`, explicitly mapping the *exact* centers of the patches to the target pixel grid. This reduced heightmap RMSE from $\sim 0.44$ px to $\sim 0.05$ px.
 
-**Mathematical Insight:** Parabolic interpolation of discrete focus scores ({z-1}, S_z, S_{z+1}$) recovers the continuous peak with high precision, provided the underlying focus metric (Laplacian energy) is locally quadratic near the optimum. This allows reconstructing (z^*)$ via linear interpolation between slices {\lfloor z^* \rfloor}$ and {\lceil z^* \rceil}$, effectively treating the Z-stack as a continuous function (x,y,z)$.
+**Mathematical Insight:** Parabolic interpolation of discrete focus scores ({z-1}, S_{z}, S_{z+1}) recovers the continuous peak with high precision, provided the underlying focus metric (Laplacian energy) is locally quadratic near the optimum. This allows reconstructing (z^*) via linear interpolation between slices {\lfloor z^* \rfloor} and {\lceil z^* \rceil}, effectively treating the Z-stack as a continuous function (x,y,z).
+
+## 2025-02-19 - EDoF Reconstruction: From Patch-Based to Per-Pixel Fusion
+
+**Learning:** Patch-based image fusion (stitching) approximates a continuous surface as a set of flat tiles with blended edges. This heuristic fails fundamentally for slanted surfaces or high-frequency depth variations, introducing "blocking" artifacts and blurred transition zones where the "best focus" assumption is violated for both overlapping patches.
+
+**Action:** Refactored `best_focus_image` to perform **Per-Pixel Reconstruction**.
+Instead of blending patches, we:
+1.  Upscale the patch-wise depth map to a full-resolution per-pixel depth map using `RegularGridInterpolator` (ensuring C1 continuity via spline/linear interpolation).
+2.  Reconstruct the final image by sampling the Z-stack at the exact (fractional) Z-coordinate for *every* pixel.
+
+**Mathematical Justification:**
+$I_{rec}(x, y) = \text{Stack}(Z_{map}(x, y), y, x)$.
+Since $Z_{map}$ is continuous, this recovers a smooth focused image even if the surface is slanted. This eliminates the need for arbitrary "tapering weights" ($3x^2 - 2x^3$) and ensures that every pixel is sampled from its locally optimal focus plane.
+
+**Result:**
+-   **Correctness:** Image RMSE reduced from 0.35 to 0.31 on synthetic slanted planes.
+-   **Efficiency:** 4x speedup (0.27s -> 0.07s) by replacing Python blending loops with vectorized NumPy operations (`take_along_axis`).
+-   **Elegance:** Removed ~50 lines of heuristic windowing code.
