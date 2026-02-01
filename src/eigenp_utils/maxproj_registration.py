@@ -171,16 +171,25 @@ def estimate_drift_2D(frame1, frame2, return_ccm = False):
     # shift, error, diffphase = phase_cross_correlation(frame1, frame2)
 
     min_size_pixels = min(frame1.shape)
+    overlap = min_size_pixels // 3
 
-    frame1 = _2D_weighted_image(frame1, min_size_pixels // 3)
-    frame2 = _2D_weighted_image(frame2, min_size_pixels // 3)
+    # Calculate 1D profiles first
+    profile_y, profile_x = _get_weight_profiles(frame1.shape, overlap)
 
-
+    # 1. Compute Max Projections (on raw data) to avoid cross-axis modulation
     frame1_max_proj_x = np.max(frame1, axis = 0)
     frame2_max_proj_x = np.max(frame2, axis = 0)
 
     frame1_max_proj_y = np.max(frame1, axis = 1)
     frame2_max_proj_y = np.max(frame2, axis = 1)
+
+    # 2. Apply Windowing (1D) to projections
+    # Use out-of-place multiplication to promote integer types to float
+    frame1_max_proj_x = frame1_max_proj_x * profile_x
+    frame2_max_proj_x = frame2_max_proj_x * profile_x
+
+    frame1_max_proj_y = frame1_max_proj_y * profile_y
+    frame2_max_proj_y = frame2_max_proj_y * profile_y
 
     # Apply gaussian smoothing for robustness
     # frame1_max_proj_x = gaussian_filter1d(frame1_max_proj_x, sigma = 3, radius = 5)
@@ -295,22 +304,24 @@ def apply_drift_correction_2D(
     overlap = min_size_pixels // 3
 
     # Pre-calculate weight profiles once
+    # profiles[0] is Y-profile (H,), profiles[1] is X-profile (W,)
     profiles = _get_weight_profiles((x_shape, y_shape), overlap)
 
     # Store projections: (T, W) and (T, H)
     projections_x = []
     projections_y = []
 
-    # Pre-allocate buffer for weighted frame to avoid repeated allocations
-    # Determine dtype based on input (if int, result is float32 due to weights being float32)
-    w_dtype = np.result_type(video_data.dtype, np.float32)
-    w_frame_buffer = np.empty((x_shape, y_shape), dtype=w_dtype)
-
     # Iterate once to compute all projections
     for t in range(t_shape):
-        w_frame = _2D_weighted_image(video_data[t], overlap, profiles=profiles, out=w_frame_buffer)
-        projections_x.append(np.max(w_frame, axis=0))
-        projections_y.append(np.max(w_frame, axis=1))
+        # 1. Compute Max Projections (on raw data) first
+        # We explicitly cast to float32 later if needed, but multiplication with float profile promotes type.
+        raw_x = np.max(video_data[t], axis=0)
+        raw_y = np.max(video_data[t], axis=1)
+
+        # 2. Apply Windowing (1D) to projections
+        # This prevents Y-axis position from modulating X-axis projection intensity (Orthogonality).
+        projections_x.append(raw_x * profiles[1])
+        projections_y.append(raw_y * profiles[0])
 
     # Convert to arrays for easy indexing
     projections_x = np.array(projections_x)
