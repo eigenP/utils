@@ -2642,20 +2642,16 @@ def annotate_clusters_by_markers(
                 # Remove NaNs if any (score_genes shouldn't produce mixed NaNs usually, but safe to check)
                 valid_diff = diff[np.isfinite(diff)]
 
-                if valid_diff.size > 1:
-                    mu_d = np.mean(valid_diff)
-                    std_d = np.std(valid_diff, ddof=1) # Sample std
+                if valid_diff.size > 0:
+                    # matth: Use Empirical Probability of Superiority (Mann-Whitney U statistic)
+                    # instead of parametric Z-score. This is robust to outliers and does not
+                    # assume Normality of score differences.
+                    # Formula: P(S1 > S2) + 0.5 * P(S1 == S2)
+                    n_total = valid_diff.size
+                    n_pos = np.count_nonzero(valid_diff > 0)
+                    n_tie = np.count_nonzero(valid_diff == 0)
 
-                    if std_d > 1e-12:
-                        # Z-score of the mean difference being > 0 ?
-                        # No, we want P(random cell score 1 > score 2).
-                        # Assuming diff is Normal(mu, sigma), P(diff > 0) = 1 - CDF(0) = CDF(mu/sigma)
-                        z = mu_d / std_d
-                        softmax_p = norm.cdf(z)
-                    elif mu_d > 0:
-                        softmax_p = 1.0
-                    else:
-                        softmax_p = 0.5 # Indistinguishable or worse
+                    softmax_p = (n_pos + 0.5 * n_tie) / n_total
                 else:
                     softmax_p = 0.5 # Not enough data
 
