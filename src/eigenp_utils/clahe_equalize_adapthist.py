@@ -53,9 +53,10 @@ def _my_clahe_(image, kernel_size=None,
         ``image.ndim`` (without color channel). If integer, it is broadcasted
         to each `image` dimension. By default, ``kernel_size`` is 1/8 of
         ``image`` height by 1/8 of its width.
-    clip_limit : float, optional
+    clip_limit : float or None, optional
         Clipping limit, normalized between 0 and 1 (higher values give more
-        contrast).
+        contrast). 0.0 gives Identity (min contrast). 1.0 (or None) gives
+        standard AHE (max contrast).
     nbins : int, optional
         Number of gray bins for histogram ("data range").
     nbins = 2 ** 8 : number of grayscale levels to use in CLAHE algorithm
@@ -130,8 +131,9 @@ def _clahe(image, kernel_size, clip_limit, nbins):
 
     The number of "effective" graylevels in the output image is set by `nbins`;
     selecting a small value (e.g. 128) speeds up processing and still produces
-    an output image of good quality. A clip limit of 0 or larger than or equal
-    to 1 results in standard (non-contrast limited) AHE.
+    an output image of good quality. A clip limit of 1.0 (or None) results
+    in standard (non-contrast limited) AHE. A clip limit of 0.0 results in
+    Identity (minimum contrast).
     """
     ndim = image.ndim
     dtype = image.dtype
@@ -169,11 +171,17 @@ def _clahe(image, kernel_size, clip_limit, nbins):
     hist_blocks = hist_blocks.reshape((np.prod(ns_hist), -1))
 
     # Calculate actual clip limit
-    if clip_limit > 0.0:
-        clim = int(np.clip(clip_limit * np.prod(kernel_size), 1, None))
+    # matth: Ensure monotonicity.
+    # clip_limit=0.0 -> clim=1 (Identity, min contrast)
+    # clip_limit=1.0 -> clim=N (AHE, max contrast)
+    # clip_limit=None -> clim=N (AHE, explicit)
+
+    n_pixels = np.prod(kernel_size)
+
+    if clip_limit is None:
+        clim = n_pixels
     else:
-        # largest possible value, i.e., do not clip (AHE)
-        clim = np.prod(kernel_size)
+        clim = int(np.clip(clip_limit * n_pixels, 1, n_pixels))
 
     hist = np.apply_along_axis(np.bincount, -1, hist_blocks, minlength=nbins)
     hist = np.apply_along_axis(clip_histogram, -1, hist, clip_limit=clim)
