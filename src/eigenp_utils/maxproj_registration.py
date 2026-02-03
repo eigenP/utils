@@ -316,6 +316,11 @@ def apply_drift_correction_2D(
     projections_x = np.array(projections_x)
     projections_y = np.array(projections_y)
 
+    # Pre-allocate buffers for subpixel shift to avoid memory churn
+    # Reusing these buffers saves 2 full-frame allocations per iteration
+    shift_input_buffer = np.empty((x_shape, y_shape), dtype=np.float32)
+    shift_output_buffer = np.empty((x_shape, y_shape), dtype=np.float32)
+
     # Loop through each time point in the video data, starting from the second frame
     # Wrap the range function with tqdm for a progress bar
 
@@ -367,12 +372,14 @@ def apply_drift_correction_2D(
                 # Subpixel correction using bicubic interpolation
                 s_dy, s_dx = cum_dy, cum_dx
 
-                # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+                # Copy into pre-allocated buffer (implicit cast if needed)
+                shift_input_buffer[:] = video_data[time_point - OFFSET]
 
-                shifted_slice = shift(
-                    input_frame,
+                # Perform shift directly into output buffer
+                shift(
+                    shift_input_buffer,
                     shift=(s_dy, s_dx),
+                    output=shift_output_buffer,
                     order=3,
                     mode='constant',
                     cval=min_value
@@ -380,10 +387,10 @@ def apply_drift_correction_2D(
 
                 # Robust clipping to prevent integer wraparound if bicubic overshoots
                 if dtype_min is not None and dtype_max is not None:
-                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
+                    np.clip(shift_output_buffer, dtype_min, dtype_max, out=shift_output_buffer)
 
                 # Assign (implicit cast back to original dtype)
-                corrected_data[time_point] = shifted_slice
+                corrected_data[time_point] = shift_output_buffer
 
             else:
                 # Integer correction
@@ -446,21 +453,23 @@ def apply_drift_correction_2D(
                 # Subpixel correction using bicubic interpolation
                 s_dy, s_dx = cum_dy, cum_dx
 
-                # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+                # Copy into pre-allocated buffer (implicit cast if needed)
+                shift_input_buffer[:] = video_data[time_point - OFFSET]
 
-                shifted_slice = shift(
-                    input_frame,
+                # Perform shift directly into output buffer
+                shift(
+                    shift_input_buffer,
                     shift=(s_dy, s_dx),
+                    output=shift_output_buffer,
                     order=3,
                     mode='constant',
                     cval=min_value
                 )
 
                 if dtype_min is not None and dtype_max is not None:
-                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
+                    np.clip(shift_output_buffer, dtype_min, dtype_max, out=shift_output_buffer)
 
-                corrected_data[time_point] = shifted_slice
+                corrected_data[time_point] = shift_output_buffer
 
             else:
                 shift_dx = int(round(cum_dx))
