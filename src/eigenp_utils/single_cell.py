@@ -1551,6 +1551,8 @@ def plot_archetype_summary(
     *,
     k: int = 5,
     use_rep: str = "X_umap",
+    cmap: Optional[str] = "Purples",
+    archetype_cmap: str = "PiYG",
     **kwargs
 ) -> None:
     """
@@ -1562,6 +1564,8 @@ def plot_archetype_summary(
         archetype_id: The cluster ID (1-based) of the archetype to plot.
         k: The number of top correlated genes to plot.
         use_rep: The embedding to use (e.g., "X_umap", "X_pca").
+        cmap: Colormap to use for the gene expression plots. Defaults to 'Purples'.
+        archetype_cmap: Colormap to use for the archetype score plot. Defaults to 'PiYG'.
         **kwargs: Additional arguments passed to `sc.pl.embedding`.
     """
     # Extract results
@@ -1616,7 +1620,7 @@ def plot_archetype_summary(
         basis=basis,
         color=profile_name,
         title=f'Archetype {archetype_id} Score',
-        cmap='PiYG',
+        cmap=archetype_cmap,
         **kwargs
     )
 
@@ -1627,6 +1631,7 @@ def plot_archetype_summary(
             basis=basis,
             color=top_k_genes,
             # title=f'Top {len(top_k_genes)} Genes for Archetype {archetype_id}',
+            cmap=cmap,
             **kwargs
         )
 
