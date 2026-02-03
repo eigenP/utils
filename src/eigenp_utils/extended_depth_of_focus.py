@@ -98,17 +98,28 @@ def _get_fractional_peak(score_matrix):
     v_l = score_matrix[z_l, grid_y, grid_x]
     v_r = score_matrix[z_r, grid_y, grid_x]
 
-    # Parabolic fit
-    # Delta = (v_l - v_r) / (2 * (v_l - 2*v_c + v_r))
-    denom = v_l - 2*v_c + v_r
+    # matth: Gaussian fit (Log-Parabolic)
+    # Use log-likelihood for Gaussian peak estimation to remove bias.
+    # Focus metrics generally decay as e^(-x^2), so log(metric) is parabolic.
+    # Fitting a parabola to raw Gaussian values biases the peak.
+
+    # Add epsilon to prevent log(0)
+    eps = 1e-10
+    y_c = np.log(np.maximum(v_c, eps))
+    y_l = np.log(np.maximum(v_l, eps))
+    y_r = np.log(np.maximum(v_r, eps))
+
+    # Parabolic fit on log values
+    # Delta = (y_l - y_r) / (2 * (y_l - 2*y_c + y_r))
+    denom = y_l - 2*y_c + y_r
 
     # Handle denominator close to zero (flat or linear)
-    # v_c is max, so denom is <= 0.
+    # y_c is max, so denom is <= 0.
     delta = np.zeros_like(v_c, dtype=np.float32)
     mask = np.abs(denom) > 1e-9
 
     # We expect negative denominator for a maximum
-    delta[mask] = (v_l[mask] - v_r[mask]) / (2 * denom[mask])
+    delta[mask] = (y_l[mask] - y_r[mask]) / (2 * denom[mask])
 
     # Clamp delta to [-0.5, 0.5] to prevent instability
     # Also clamp to 0 if we are at the boundaries of the stack
