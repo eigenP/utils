@@ -58,3 +58,22 @@ This effectively reduced the Field of View for registration, causing failure whe
 2. Apply a 1D Tukey window ($\alpha=0.1$) to the *projections* to satisfy the periodic boundary requirement for the 1D FFT in `phase_cross_correlation`.
 
 **Result:** The algorithm now robustly detects drift even when the only trackable object is at the extreme edge of the FOV (verified by `test_drift_edge_robustness.py`), while still preventing FFT edge ringing.
+
+## 2025-02-19 - Drift Correction: The Random Walk Trap
+
+**Learning:** Sequential drift correction is a Random Walk process.
+
+The standard "frame-to-frame" registration ($x_t = x_{t-1} + \Delta_t$) accumulates estimation error at each step.
+The variance of the position error grows linearly with time: $\text{Var}(x_T) \propto T \cdot \text{Var}(\Delta)$.
+For long timelapse videos ($T \approx 1000$), even sub-pixel precision ($\sigma \approx 0.05$ px) accumulates to visible jitter ($\sigma_T \approx 1.5$ px).
+
+**Action:** Implemented **Global Projection Alignment** (`mode='global'`).
+Instead of relying on the chain of pairwise shifts, we:
+1. Use sequential shifts to roughly align 1D projections.
+2. Compute a robust **Global Reference** (Median of aligned projections).
+3. Re-register every frame's projection directly against this global reference.
+
+**Mathematical Result:** This changes the error model from Random Walk ($\sigma \propto \sqrt{T}$) to Bounded Error ($\sigma \approx \text{const}$).
+Validation on sparse synthetic data ($T=50$) showed RMSE reduction from 0.023 px (Sequential) to 0.011 px (Global), consistent with theoretical predictions.
+
+**Caveat:** FFT-based registration on *windowed* projections is sensitive to large displacements if the window is stationary (Windowing Bias). Global registration works best for sparse data (fluorescence) where windowing is less critical, or where initial drift is small enough that the window doesn't mask features.
