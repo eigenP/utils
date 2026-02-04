@@ -306,6 +306,12 @@ def apply_drift_correction_2D(
     w_dtype = np.result_type(video_data.dtype, np.float32)
     w_frame_buffer = np.empty((x_shape, y_shape), dtype=w_dtype)
 
+    # Pre-allocate buffers for shift operation to avoid repeated allocations in the loop
+    # shift_input_buffer: to hold the input frame cast to float32
+    # shift_output_buffer: to hold the result of the shift (always float for spline interpolation)
+    shift_input_buffer = np.zeros((x_shape, y_shape), dtype=np.float32)
+    shift_output_buffer = np.zeros((x_shape, y_shape), dtype=np.float32)
+
     # Iterate once to compute all projections
     for t in range(t_shape):
         w_frame = _2D_weighted_image(video_data[t], overlap, profiles=profiles, out=w_frame_buffer)
@@ -368,15 +374,19 @@ def apply_drift_correction_2D(
                 s_dy, s_dx = cum_dy, cum_dx
 
                 # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+                # bolt: Reuse buffer for casting
+                shift_input_buffer[:] = video_data[time_point - OFFSET]
 
-                shifted_slice = shift(
-                    input_frame,
+                # bolt: Reuse buffer for output
+                shift(
+                    shift_input_buffer,
                     shift=(s_dy, s_dx),
                     order=3,
                     mode='constant',
-                    cval=min_value
+                    cval=min_value,
+                    output=shift_output_buffer
                 )
+                shifted_slice = shift_output_buffer
 
                 # Robust clipping to prevent integer wraparound if bicubic overshoots
                 if dtype_min is not None and dtype_max is not None:
@@ -447,15 +457,19 @@ def apply_drift_correction_2D(
                 s_dy, s_dx = cum_dy, cum_dx
 
                 # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+                # bolt: Reuse buffer for casting
+                shift_input_buffer[:] = video_data[time_point - OFFSET]
 
-                shifted_slice = shift(
-                    input_frame,
+                # bolt: Reuse buffer for output
+                shift(
+                    shift_input_buffer,
                     shift=(s_dy, s_dx),
                     order=3,
                     mode='constant',
-                    cval=min_value
+                    cval=min_value,
+                    output=shift_output_buffer
                 )
+                shifted_slice = shift_output_buffer
 
                 if dtype_min is not None and dtype_max is not None:
                     np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
