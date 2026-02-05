@@ -58,3 +58,20 @@ This effectively reduced the Field of View for registration, causing failure whe
 2. Apply a 1D Tukey window ($\alpha=0.1$) to the *projections* to satisfy the periodic boundary requirement for the 1D FFT in `phase_cross_correlation`.
 
 **Result:** The algorithm now robustly detects drift even when the only trackable object is at the extreme edge of the FOV (verified by `test_drift_edge_robustness.py`), while still preventing FFT edge ringing.
+
+## 2025-02-20 - Moran's I: The Danger of Hidden Assumptions (Row Standardization)
+
+**Learning:** Optimized formulas often carry implicit assumptions that break in general cases.
+
+The optimized Moran's I implementation used the simplified formula:
+$$ I \propto X^T W X - \mu (X^T C) $$
+This formulation is **only valid** if the weight matrix $W$ is row-standardized (where row sums $R \approx 1 \implies X^T R \approx N \mu \implies \mu X^T R \approx \mu^2 S_0$).
+
+For general weights (e.g., symmetric binary adjacency or distance-decay), this cancellation fails.
+Specifically, if the signal $X$ is correlated with the node degree (e.g., hubs have high expression), the missing term $\mu (X^T R)$ introduces significant bias. In a star graph test case, this caused an error of 0.375 (True -1.0 vs Fast -0.625).
+
+**Action:** Implemented the full expansion of the centered quadratic form:
+$$ \text{Num} = X^T W X - \mu (X^T C) - \mu (X^T R) + \mu^2 S_0 $$
+This correctly handles any weight structure (symmetric, asymmetric, binary, general) with negligible computational overhead (one extra sparse matrix-vector product).
+
+**Validation:** Verified against the ground-truth formula on Star Graphs (hubs) and Random General Matrices. The new implementation matches exact values while maintaining the speed of the optimized block-wise calculation.
