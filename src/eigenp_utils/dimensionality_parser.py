@@ -38,61 +38,66 @@ def dimensionality_parser(target_dims : str, iterate_dims : dict = None):
 
             # Get the image's dimensions
             image_dims = DIMS_ORDER[-image.ndim:]
-            print('image_dims : ', image_dims)
-
-            # # Find out which dimensions are reduced by the downstream function
-            # dummy_input_shape = tuple(image.shape[image_dims.index(dim)] for dim in target_dims if dim in image_dims)
-            # print('dummy_input_shape : ', dummy_input_shape)
-            # dummy_input = np.ones(dummy_input_shape, dtype=image.dtype)
-            # dummy_output_shape = func(dummy_input).shape
-            # print('dummy_output_shape : ', dummy_output_shape)
             
-
-            # reduced_dims = [target_dims[idx] for idx, (i, j) in enumerate(zip(dummy_input.shape, dummy_output_shape)) if i != j]
-            # print('reduced_dims : ', reduced_dims)
-
             # Find out which dimensions are reduced by the downstream function
-            dummy_input_shape = tuple(image.shape[image_dims.index(dim)] for dim in target_dims if dim in image_dims)
-            dummy_input = np.ones(dummy_input_shape, dtype=image.dtype)
-            dummy_output_shape = func(dummy_input).shape
-            
-            # Determine reduced dimensions
-            # Fix: Ensure aligned_input_dims only contains dimensions present in the input image
+            # Step 1: Run on original shape to detect rank preservation and get correct output sizes.
             present_target_dims = [dim for dim in target_dims if dim in image_dims]
             aligned_input_dims = present_target_dims
 
+            original_shape_tuple = tuple(image.shape[image_dims.index(dim)] for dim in target_dims if dim in image_dims)
+            original_dummy_input = np.ones(original_shape_tuple, dtype=image.dtype)
+            original_output_shape = func(original_dummy_input).shape
+
+            reduced_dims = []
+            dim_size_map = {}
+
             # Rank Preservation Check:
             # If the rank (number of dimensions) is preserved, we assume resizing (all dims kept).
-            # Otherwise, we use the size-matching heuristic to identify reduced dimensions.
-            if len(dummy_input_shape) == len(dummy_output_shape):
+            if len(original_shape_tuple) == len(original_output_shape):
                 reduced_dims = []
-                dim_size_map = dict(zip(aligned_input_dims, dummy_output_shape))
+                dim_size_map = dict(zip(aligned_input_dims, original_output_shape))
             else:
-                reduced_dims = []
-                output_dim_pointer = -1  # start at the last dimension of dummy_output_shape
-                dim_size_map = {}
+                # Rank Reduced. We need to identify WHICH dimensions were reduced.
+                # If input has duplicate sizes (e.g. square), standard matching is ambiguous.
+                # We use a unique-dimension dummy to disambiguate.
+
+                # Construct unique shape
+                original_shape_list = list(original_shape_tuple)
+                unique_shape_list = []
+                seen_sizes = set()
+                for s in original_shape_list:
+                    candidate = s
+                    while candidate in seen_sizes:
+                        candidate += 1
+                    seen_sizes.add(candidate)
+                    unique_shape_list.append(candidate)
+
+                unique_dummy_shape = tuple(unique_shape_list)
+                unique_dummy_input = np.ones(unique_dummy_shape, dtype=image.dtype)
+                unique_output_shape = func(unique_dummy_input).shape
+
+                # Use the size-matching heuristic on the UNIQUE shapes
+                output_dim_pointer = -1
 
                 for input_dim in reversed(aligned_input_dims):
-                    input_size = dummy_input_shape[aligned_input_dims.index(input_dim)]
+                    input_size = unique_dummy_shape[aligned_input_dims.index(input_dim)]
 
-                    if output_dim_pointer >= -len(dummy_output_shape) and dummy_output_shape[output_dim_pointer] == input_size:
-                        # this dimension exists in the output; decrement the output pointer and continue
+                    if output_dim_pointer >= -len(unique_output_shape) and unique_output_shape[output_dim_pointer] == input_size:
+                        # Match found in unique output
                         output_dim_pointer -= 1
                     else:
-                        # this dimension is missing in the output and therefore is a reduced dimension
                         reduced_dims.append(input_dim)
 
-                reduced_dims = list(reversed(reduced_dims))  # reverse it back to the original order
+                reduced_dims = list(reversed(reduced_dims))
 
-
-
-            print('dummy_input_shape : ', dummy_input_shape)
-            print('dummy_output_shape : ', dummy_output_shape)
-
-
-            # reduced_dims = [dim for idx, dim in enumerate(target_dims) if (idx >= len(dummy_output_shape)) or (dummy_input_shape[idx] != dummy_output_shape[idx])]
-            print('reduced_dims : ', reduced_dims)
-
+                # Now map preserved dims to ORIGINAL output sizes
+                # The remaining dims in aligned_input_dims correspond to original_output_shape
+                preserved_dims = [d for d in aligned_input_dims if d not in reduced_dims]
+                if len(preserved_dims) == len(original_output_shape):
+                    dim_size_map = dict(zip(preserved_dims, original_output_shape))
+                else:
+                    # Fallback or weird case where ranks don't match expectation?
+                    pass
 
             # Construct the main dimensions to iterate over:
             main_dims = [dim for dim in image_dims if dim not in reduced_dims]
@@ -103,24 +108,20 @@ def dimensionality_parser(target_dims : str, iterate_dims : dict = None):
                 iterate_dims_arg = {dim: '0:{}'.format(image.shape[image_dims.index(dim)]) for dim in iterate_over_dims}
 
             # Construct the output shape based on the main_dims:
-            # Check dim_size_map for resized dimensions (only populated if Rank Preserved)
+            # Check dim_size_map for resized dimensions
             output_shape = []
             for dim in main_dims:
                 if dim in dim_size_map:
                     output_shape.append(dim_size_map[dim])
                 else:
                     output_shape.append(image.shape[image_dims.index(dim)])
-            print('output_shape : ', output_shape)
-
 
             # Adjust the output shape based on iterate_dims:
             for dim, slice_str in iterate_dims_arg.items():
-                output_shape[main_dims.index(dim)] = len(range(*parse_slice(slice_str)))
-
-            print('sliced_output_shape : ', output_shape)
+                if dim in main_dims:
+                    output_shape[main_dims.index(dim)] = len(range(*parse_slice(slice_str)))
 
             result = np.empty(output_shape, dtype=image.dtype)
-            print('result.shape : ',result.shape)
 
             # Use iterate_dims_arg keys directly for ordering
             iterate_dims_order = list(iterate_dims_arg.keys())
