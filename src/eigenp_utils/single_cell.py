@@ -221,25 +221,18 @@ def preprocess_subset(
             warnings.warn(f"Could not build 'log1p' layer: {e}. Proceeding with '{X_layer_for_pca}'...")
 
     # ---------- HVG selection ----------
-    if hvg_flavor == "triku":
-        # Run Triku on specified layer (recommended log1p or scvi), then rely on its 'highly_variable' output
-        run_triku(A, layer=X_layer_for_pca, n_features=n_top_genes)
-        # Ensure 'highly_variable' column exists for subsetting
-        if "triku_highly_variable" in A.var:
-            A.var["highly_variable"] = A.var["triku_highly_variable"]
-    else:
-        if batch_key is None and "batch" in A.obs:
-            batch_key = "batch"
-        hvg_kwargs = dict(n_top_genes=n_top_genes, flavor=hvg_flavor, batch_key=batch_key)
+    if batch_key is None and "batch" in A.obs:
+        batch_key = "batch"
+    hvg_kwargs = dict(n_top_genes=n_top_genes, flavor=hvg_flavor, batch_key=batch_key)
 
-        if hvg_flavor == "seurat_v3":
-            hvg_kwargs["layer"] = counts_layer
-        elif X_layer_for_pca is not None and X_layer_for_pca in A.layers:
-            # Use the target PCA layer for HVG selection (e.g. scvi_normalized)
-            # Standard seurat flavor works on log-normalized data.
-            hvg_kwargs["layer"] = X_layer_for_pca
+    if hvg_flavor == "seurat_v3":
+        hvg_kwargs["layer"] = counts_layer
+    elif X_layer_for_pca is not None and X_layer_for_pca in A.layers:
+        # Use the target PCA layer for HVG selection (e.g. scvi_normalized)
+        # Standard seurat flavor works on log-normalized data.
+        hvg_kwargs["layer"] = X_layer_for_pca
 
-        sc.pp.highly_variable_genes(A, **hvg_kwargs)
+    sc.pp.highly_variable_genes(A, **hvg_kwargs)
 
     # ---------- subset HVGs (optional but common) ----------
     if subset_to_hvgs:
@@ -1778,8 +1771,7 @@ def run_triku(
     layer: Optional[str] = "log1p",   # <- run Triku on log1p by default
     use_raw: bool = False,
     n_features: int = 2000,
-    n_neighbors: int = 15,
-    n_pcs_for_knn: int = 30,
+    knn_key: Optional[str] = None,
     max_genes_for_triku: int = 20000,
 ) -> pd.DataFrame:
     """
@@ -1788,9 +1780,12 @@ def run_triku(
     To avoid memory issues or warnings with large gene sets, this function:
       1. Creates a temporary subset of genes (filtering < 3 cells and keeping top
          `max_genes_for_triku` by total counts).
-      2. Runs Triku on this subset (using a copy to protect the original adata).
-      3. Maps the results back to `adata.var` (setting unselected genes to False/NaN).
+      2. Maps existing neighbors (standard or from `knn_key`) to this temporary object.
+      3. Runs Triku on this subset (using a copy to protect the original adata).
+      4. Maps the results back to `adata.var`.
     """
+    from copy import deepcopy
+
     if tk is None:
         raise ImportError("The 'triku' package is required for this function. Please install it.")
 
@@ -1842,19 +1837,38 @@ def run_triku(
             raise KeyError(f"Requested layer '{layer}' not found. Build it before Triku.")
         adata_triku.X = adata_triku.layers[layer].copy()
 
-    # Note: Triku works with both raw counts and log-transformed data.
-    # We pass the data as-is from the specified layer.
-    # If the user passed a log-transformed layer (e.g. 'log1p'), we use it directly.
-    # If the user passed 'scvi_normalized' (floats), we use it directly.
-    # We do NOT apply log1p here to avoid double-logging.
+    # --- 3. Ensure Neighbors are Present (from existing) ---
 
-    # KNN graph for Triku on the current X (log1p); use PCA for stability/speed
-    # This avoids the earlier "X_pca doesn't exist" issue.
-    # Note: We run this on the *subset* (adata_triku), which is faster.
-    sc.tl.pca(adata_triku, n_comps=min(50, adata_triku.n_vars - 1), random_state=0)
-    ensure_neighbors(adata_triku, n_neighbors=n_neighbors, use_rep=None, n_pcs=n_pcs_for_knn)
+    if knn_key is None:
+        # Check for standard neighbors
+        if "neighbors" not in adata.uns:
+             raise ValueError("Neighbors not found in adata.uns['neighbors']. Please run sc.pp.neighbors() first or provide `knn_key`.")
+        # `adata_triku` is a copy, so it inherits neighbors. We are good.
+    else:
+        # Custom key provided (e.g. 'scvi')
+        if knn_key not in adata.uns:
+             raise ValueError(f"Key '{knn_key}' not found in adata.uns.")
 
-    # Run Triku on the subset
+        # Map adata.uns[knn_key] -> adata_triku.uns['neighbors']
+        adata_triku.uns["neighbors"] = deepcopy(adata.uns[knn_key])
+
+        # Resolve connectivity/distance keys
+        uns_entry = adata_triku.uns["neighbors"]
+        conn_key = uns_entry.get("connectivities_key", f"{knn_key}_connectivities")
+        dist_key = uns_entry.get("distances_key", f"{knn_key}_distances")
+
+        # Map OBSP
+        if conn_key in adata.obsp:
+             adata_triku.obsp["connectivities"] = adata.obsp[conn_key].copy()
+             uns_entry["connectivities_key"] = "connectivities"
+        else:
+             raise ValueError(f"Connectivity matrix '{conn_key}' not found in adata.obsp.")
+
+        if dist_key in adata.obsp:
+             adata_triku.obsp["distances"] = adata.obsp[dist_key].copy()
+             uns_entry["distances_key"] = "distances"
+
+    # --- 4. Run Triku on the subset ---
     tk.tl.triku(
         adata_triku,
         n_features=n_features,
