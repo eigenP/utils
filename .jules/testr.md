@@ -91,3 +91,11 @@
 ## 2025-02-24 - Bidirectional Drift Sign Inversion
 **Learning:** The `reverse_time='both'` mode in `apply_drift_correction_2D` was incorrectly calculating the average drift as `(dx_forward - dx_backward) / 2`. Since `dx_backward` and `dx_forward` have opposite signs for the same motion (e.g., -0.5 and +0.5 for +0.5 motion), this formula resulted in a correction vector with the **same sign** as the motion (e.g., +0.5), exacerbating drift instead of correcting it (Positive Feedback Loop).
 **Action:** The formula was corrected to `(dx_backward - dx_forward) / 2`, ensuring the correction vector opposes the motion. A new test `tests/test_bidirectional_drift_sign.py` was created to verify the sign of correction for a known drift direction, catching any future regression into positive feedback.
+
+## 2025-02-24 - Dimensionality Parser Resizing Logic
+**Learning:** The `dimensionality_parser` decorator relied on a strict size-matching heuristic to determine if a dimension was preserved or reduced. This caused it to fail on **Resizing** operations (e.g., downscaling) where dimensions are preserved but sizes change.
+**Action:** Implemented a **Rank Preservation Check** (`rank_in == rank_out`) to override the heuristic. If the number of dimensions is preserved, the parser now assumes all dimensions are kept and correctly maps the new output sizes. A new test `tests/test_dimensionality_parser_resizing.py` validates this invariant.
+
+## 2025-02-24 - Drift Correction Pairwise Bias
+**Learning:** Verified that the pairwise drift correction algorithm (`estimate_drift_2D`) exhibits a systematic linear bias when processing periodic motion. For a sinusoidal trajectory ($A=3.0$, $T=10$), the accumulated error grows linearly by approx 0.2 pixels per cycle. This "Drift Walk" is characteristic of pairwise registration where small asymmetric errors (likely from stationary windowing of moving content) accumulate $O(T)$.
+**Action:** Acknowledged this limitation in `tests/test_drift_bias_oscillation.py` by relaxing the zero-mean tolerance to 1.0 px (for 50 frames). Future improvements must implement **Global Registration** (registering each frame to a temporally stable median reference) to bound the error to $O(1)$ and eliminate this bias.

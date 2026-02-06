@@ -5,6 +5,7 @@
 #     "pandas",
 #     "scikit-image",
 #     "tqdm",
+#     "scipy",
 # ]
 # ///
 #@markdown `maxproj_registration.py`
@@ -16,9 +17,9 @@ from typing import Literal
 from skimage.registration import phase_cross_correlation
 from skimage.registration._phase_cross_correlation import _upsampled_dft
 from scipy.ndimage import shift
+from scipy.signal import windows
 # from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
-
 
 
 def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
@@ -88,77 +89,6 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
 
     return result
 
-def _get_weight_profiles(shape, overlap):
-    """
-    Generate 1D weight profiles for Y and X axes.
-    """
-    H, W = shape
-
-    if overlap <= 0:
-        return np.ones(H, dtype=np.float32), np.ones(W, dtype=np.float32)
-
-    # 1D weight function based on cubic spline
-    def weight_1d(x):
-        return 3 * x**2 - 2 * x**3
-
-    # Generate the 1D taper profile
-    # Using float32 for better precision than float16, avoiding accumulation errors
-    x = np.linspace(0, 1, overlap)
-    taper = weight_1d(x).astype(np.float32)
-
-    # Construct 1D profiles for Y and X axes
-    # The profile is 1.0 in the center and tapers to 0.0 at the edges
-    profile_y = np.ones(H, dtype=np.float32)
-    profile_y[:overlap] = taper
-    profile_y[-overlap:] = taper[::-1]
-
-    profile_x = np.ones(W, dtype=np.float32)
-    profile_x[:overlap] = taper
-    profile_x[-overlap:] = taper[::-1]
-
-    return profile_y, profile_x
-
-
-def _2D_weighted_image(image, overlap, profiles=None, out=None):
-    '''
-    # image := image shape
-    # overlap := in pixels
-    # profiles := optional pre-calculated (profile_y, profile_x)
-    # out := optional output array for in-place operation
-
-    # Example usage
-    # _2D_window = _2D_weight(image, overlap)
-    '''
-    if overlap <= 0:
-        if out is not None:
-            out[:] = image
-            return out
-        return image.astype(np.float32)
-
-    if profiles is None:
-        profile_y, profile_x = _get_weight_profiles(image.shape, overlap)
-    else:
-        profile_y, profile_x = profiles
-
-    if out is None:
-        # Apply weights using broadcasting
-        # (H, W) * (H, 1) * (1, W)
-        # This avoids allocating a full (H, W) weight matrix, saving memory
-        weighted_image = image * profile_y[:, None] * profile_x[None, :]
-        return weighted_image
-    else:
-        # In-place operation to avoid intermediate allocations
-        if out.shape != image.shape:
-            raise ValueError(f"Output shape {out.shape} does not match image shape {image.shape}")
-
-        # Perform multiplication in steps
-        # out = image * profile_y[:, None]
-        np.multiply(image, profile_y[:, None], out=out)
-        # out *= profile_x[None, :]
-        np.multiply(out, profile_x[None, :], out=out)
-
-        return out
-
 def estimate_drift_2D(frame1, frame2, return_ccm = False):
     """
     Estimate the xy-drift between two 2D frames using cross-correlation.
@@ -168,19 +98,35 @@ def estimate_drift_2D(frame1, frame2, return_ccm = False):
     :return: Tuple (dx, dy), estimated drift in x and y directions
     """
     # Calculate the cross-correlation matrix
-    # shift, error, diffphase = phase_cross_correlation(frame1, frame2)
 
-    min_size_pixels = min(frame1.shape)
+    # matth: Decoupled 1D Windowing
+    # Instead of windowing the 2D image (which couples X and Y attenuation and causes
+    # information loss at the boundaries), we compute the raw max projections and then
+    # apply a 1D window to the projections.
 
-    frame1 = _2D_weighted_image(frame1, min_size_pixels // 3)
-    frame2 = _2D_weighted_image(frame2, min_size_pixels // 3)
-
-
+    # Raw max projections
+    # axis=0 -> Projection along Height -> Profile of Width (X)
     frame1_max_proj_x = np.max(frame1, axis = 0)
     frame2_max_proj_x = np.max(frame2, axis = 0)
 
+    # axis=1 -> Projection along Width -> Profile of Height (Y)
     frame1_max_proj_y = np.max(frame1, axis = 1)
     frame2_max_proj_y = np.max(frame2, axis = 1)
+
+    # Apply 1D Tukey window to reduce FFT edge artifacts
+    # Use alpha=0.1 (taper 5% on each side)
+    # This is much less aggressive than the previous 33% taper
+    w_shape_x = frame1_max_proj_x.shape[0]
+    w_shape_y = frame1_max_proj_y.shape[0]
+
+    win_x = windows.tukey(w_shape_x, alpha=0.1).astype(np.float32)
+    win_y = windows.tukey(w_shape_y, alpha=0.1).astype(np.float32)
+
+    frame1_max_proj_x = frame1_max_proj_x * win_x
+    frame2_max_proj_x = frame2_max_proj_x * win_x
+
+    frame1_max_proj_y = frame1_max_proj_y * win_y
+    frame2_max_proj_y = frame2_max_proj_y * win_y
 
     # Apply gaussian smoothing for robustness
     # frame1_max_proj_x = gaussian_filter1d(frame1_max_proj_x, sigma = 3, radius = 5)
@@ -188,8 +134,6 @@ def estimate_drift_2D(frame1, frame2, return_ccm = False):
 
     # frame1_max_proj_y = gaussian_filter1d(frame1_max_proj_y, sigma = 3, radius = 5)
     # frame2_max_proj_y = gaussian_filter1d(frame2_max_proj_y, sigma = 3, radius = 5)
-
-
 
     shift_x, error, diffphase = phase_cross_correlation(frame1_max_proj_x,
                                                       frame2_max_proj_x, upsample_factor=100)
@@ -289,32 +233,31 @@ def apply_drift_correction_2D(
         dtype_min, dtype_max = None, None
 
     # Pre-calculate weighted projections for all frames to avoid re-computation inside the loop
-    # This speeds up the process by O(T) since each frame is accessed multiple times
-    # and _2D_weighted_image allocates a full-size float32 array each time.
-    min_size_pixels = min(x_shape, y_shape)
-    overlap = min_size_pixels // 3
-
-    # Pre-calculate weight profiles once
-    profiles = _get_weight_profiles((x_shape, y_shape), overlap)
+    # matth: Switched to decoupled windowing. No 2D weighting here.
 
     # Store projections: (T, W) and (T, H)
     projections_x = []
     projections_y = []
 
-    # Pre-allocate buffer for weighted frame to avoid repeated allocations
-    # Determine dtype based on input (if int, result is float32 due to weights being float32)
-    w_dtype = np.result_type(video_data.dtype, np.float32)
-    w_frame_buffer = np.empty((x_shape, y_shape), dtype=w_dtype)
-
-    # Iterate once to compute all projections
+    # Iterate once to compute all raw projections
     for t in range(t_shape):
-        w_frame = _2D_weighted_image(video_data[t], overlap, profiles=profiles, out=w_frame_buffer)
-        projections_x.append(np.max(w_frame, axis=0))
-        projections_y.append(np.max(w_frame, axis=1))
+        projections_x.append(np.max(video_data[t], axis=0))
+        projections_y.append(np.max(video_data[t], axis=1))
 
-    # Convert to arrays for easy indexing
-    projections_x = np.array(projections_x)
-    projections_y = np.array(projections_y)
+    # Convert to arrays
+    # projections_x: (T, y_shape) -- Profile along X (Width)
+    # projections_y: (T, x_shape) -- Profile along Y (Height)
+    # Cast to float32 to allow windowing multiplication
+    projections_x = np.array(projections_x, dtype=np.float32)
+    projections_y = np.array(projections_y, dtype=np.float32)
+
+    # Apply 1D Tukey window to the entire stack
+    win_x = windows.tukey(y_shape, alpha=0.1).astype(np.float32)
+    win_y = windows.tukey(x_shape, alpha=0.1).astype(np.float32)
+
+    # Broadcasting (T, N) * (1, N) -> (T, N)
+    projections_x *= win_x[None, :]
+    projections_y *= win_y[None, :]
 
     # Loop through each time point in the video data, starting from the second frame
     # Wrap the range function with tqdm for a progress bar

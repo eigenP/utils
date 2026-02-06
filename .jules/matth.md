@@ -69,3 +69,16 @@ The `clip_limit` parameter in CLAHE had a sentinel value: `0` meant "Maximum Con
 - Values in between scale monotonically.
 
 This restores the mathematical intuition that a limit of zero implies zero effect.
+## 2025-02-19 - Drift Correction: The Perils of Coupled Windowing
+
+**Learning:** Windowing for FFT must respect the projection geometry.
+
+The original implementation of `estimate_drift_2D` applied a 2D weighting window (tapering 33% of the image!) to the raw image *before* computing max projections.
+This coupled the X and Y axes: a feature located at the top edge (Y=0) was attenuated to zero, making it invisible to the X-projection (which should only care about X-position).
+This effectively reduced the Field of View for registration, causing failure when valid features were only present near the boundaries.
+
+**Action:** Decoupled the windowing process.
+1. Compute raw Max Projections (capturing full signal intensity regardless of orthogonal position).
+2. Apply a 1D Tukey window ($\alpha=0.1$) to the *projections* to satisfy the periodic boundary requirement for the 1D FFT in `phase_cross_correlation`.
+
+**Result:** The algorithm now robustly detects drift even when the only trackable object is at the extreme edge of the FOV (verified by `test_drift_edge_robustness.py`), while still preventing FFT edge ringing.
