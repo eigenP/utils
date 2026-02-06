@@ -10,6 +10,7 @@ class TestDepthOfFocusSubpixel(unittest.TestCase):
 
         Prior to improvement (integer argmax + naive zoom), RMSE was ~0.44 px.
         With parabolic interpolation + RegularGridInterpolator, RMSE is ~0.05 px.
+        With Log-Parabolic interpolation, RMSE is ~0.018 px.
         """
         # 1. Synthesis Parameters
         W, H = 128, 128
@@ -52,7 +53,7 @@ class TestDepthOfFocusSubpixel(unittest.TestCase):
         # 4. Assertions
         # Quantization noise limit for integer steps is ~0.29 px.
         # We demand significantly better than that.
-        self.assertLess(rmse, 0.15, "Subpixel accuracy failed! RMSE is too high.")
+        self.assertLess(rmse, 0.05, "Subpixel accuracy failed! RMSE is too high.")
 
         return rmse
 
