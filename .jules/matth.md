@@ -69,6 +69,7 @@ The `clip_limit` parameter in CLAHE had a sentinel value: `0` meant "Maximum Con
 - Values in between scale monotonically.
 
 This restores the mathematical intuition that a limit of zero implies zero effect.
+
 ## 2025-02-19 - Drift Correction: The Perils of Coupled Windowing
 
 **Learning:** Windowing for FFT must respect the projection geometry.
@@ -82,3 +83,25 @@ This effectively reduced the Field of View for registration, causing failure whe
 2. Apply a 1D Tukey window ($\alpha=0.1$) to the *projections* to satisfy the periodic boundary requirement for the 1D FFT in `phase_cross_correlation`.
 
 **Result:** The algorithm now robustly detects drift even when the only trackable object is at the extreme edge of the FOV (verified by `test_drift_edge_robustness.py`), while still preventing FFT edge ringing.
+
+## 2025-02-23 - Surface Extraction: The Grid Shift Mystery
+
+**Learning:** Implicit coordinate systems are silent killers of precision.
+
+When upscaling a downsampled map (e.g., a block-averaged surface height map), the spatial location of the samples must be respected.
+The standard `scipy.ndimage.zoom` function implicitly assumes that the input samples are located at integer coordinates $(0, 0), (0, 1) \dots$ of the output grid (or uses corner alignment).
+However, block averaging produces samples located at the *spatial center* of each block. For a block size $S$, the center is at $(S-1)/2$.
+Using `zoom` naively introduces a systematic shift of $\approx S/2$ pixels in Y and X.
+
+Additionally, when scaling the Z-values from the downsampled index space back to the full resolution, a simple multiplication $Z_{full} = Z_{reduced} \times S$ assumes the samples represent the *start* of the block.
+The correct mapping for a block-centered feature is $Z_{full} = Z_{reduced} \times S + (S-1)/2$.
+
+**Action:**
+1. Replaced `scipy.ndimage.zoom` with `scipy.interpolate.RegularGridInterpolator` in `surface_extraction.py` and `extended_depth_of_focus.py`.
+2. Explicitly calculated the source grid coordinates as `k * S + (S-1)/2`.
+3. Corrected the Z-scaling formula.
+
+**Validation:**
+- On a synthetic plane, the Y/X spatial shift error (RMSE) dropped from **~0.2 px** to **0.00 px**.
+- On a synthetic step edge, the Z-bias dropped from **-2.0 px** to **-0.5 px** (accounting for block smoothing effects).
+- Verified that Otsu thresholding on unbalanced volumes can introduce separate statistical bias, but the geometric correction remains valid.

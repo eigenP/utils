@@ -49,6 +49,39 @@ class TestSurfaceAccuracy(unittest.TestCase):
 
         return vol_u8, gt_height
 
+    def test_surface_precision_downsampled(self):
+        """
+        Measure the RMSE of the extracted surface with downsampling.
+        """
+        # Parameters
+        shape = (40, 64, 64)
+        # Use a slanted plane
+        vol, gt_height = self.generate_slanted_plane(shape, slope_y=0.1, slope_x=0.05, z_offset=10.0, noise_sigma=0.0)
+
+        # Run extraction with downsampling factor 4
+        # Use moderate sigma to avoid Otsu threshold bias on unbalanced volume
+        surface_mask, height_map = extract_surface(vol, downscale_factor=4, gaussian_sigma=0.5, clahe_clip=0.0, return_heightmap=True)
+
+        found_mask = np.any(surface_mask, axis=0)
+
+        # Valid region
+        H, W = height_map.shape
+        crop = 8 # Crop boundary artifacts from downsampling
+
+        valid_mask = np.zeros_like(found_mask)
+        valid_mask[crop:-crop, crop:-crop] = found_mask[crop:-crop, crop:-crop]
+
+        # Error
+        error = height_map[valid_mask] - gt_height[valid_mask]
+        rmse = np.sqrt(np.mean(error**2))
+
+        print(f"Downsampled Surface RMSE (Float): {rmse:.4f} pixels")
+
+        # Matth: With corrected upscaling, this should be low.
+        # Previously (without correction) it would be > 1.5 pixels due to shift.
+        # Now it should be < 0.5 pixels (mostly due to block averaging smoothing).
+        self.assertLess(rmse, 0.50, "RMSE should be low even with downsampling")
+
     def test_surface_precision(self):
         """
         Measure the RMSE of the extracted surface against the ground truth.

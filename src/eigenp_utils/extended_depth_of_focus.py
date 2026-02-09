@@ -12,6 +12,7 @@ import numpy as np
 import skimage.io
 
 from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
+from .upscaling_utils import upscale_from_grid
 
 from skimage.filters import median
 from skimage.morphology import disk
@@ -378,7 +379,6 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         # matth: Use RegularGridInterpolator for spatially accurate upscaling
         # scipy.ndimage.zoom assumes a different coordinate system that introduces
         # a systematic shift. We map the exact patch centers to the pixel grid.
-        from scipy.interpolate import RegularGridInterpolator
 
         n_patches_y = height_map_small.shape[0]
         n_patches_x = height_map_small.shape[1]
@@ -392,34 +392,7 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
         y_c = y_starts + patch_size // 2
         x_c = x_starts + patch_size // 2
 
-        # Create interpolator
-        # bounds_error=False, fill_value=None -> Linear extrapolation
-        interp = RegularGridInterpolator((y_c, x_c), height_map_small, bounds_error=False, fill_value=None)
-
-        # Target grid coordinates
-        gy = np.arange(original_shape[0])
-        gx = np.arange(original_shape[1])
-
-        # Meshgrid for interpolation (indexing='ij')
-        # We can optimize by broadcasting if grid is huge, but RegularGridInterpolator
-        # usually expects (N, 2) points or tuple of grids.
-        # interp((gy[:, None], gx[None, :])) works if grid is tuple?
-        # No, RegularGridInterpolator.__call__ expects points (N, D) or (y, x) if method='linear'.
-        # Actually it supports meshgrid style inputs in newer scipy.
-        # Let's use the explicit meshgrid to be safe and clear.
-        GY, GX = np.meshgrid(gy, gx, indexing='ij')
-
-        # Flatten for interpolation then reshape, or pass directly if supported.
-        # Passing tuple (GY, GX) is supported in SciPy 1.9+.
-        # We'll assume a reasonably modern SciPy.
-        try:
-            height_map_full = interp((GY, GX))
-        except (TypeError, ValueError):
-            # Fallback for older SciPy
-            pts = np.array([GY.ravel(), GX.ravel()]).T
-            height_map_full = interp(pts).reshape(original_shape)
-
-        height_map_full = height_map_full.astype(np.float32)
+        height_map_full = upscale_from_grid(height_map_small, y_c, x_c, original_shape)
 
         return final_img, height_map_full
 
