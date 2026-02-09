@@ -18,6 +18,7 @@ from scipy import ndimage
 from scipy.ndimage import binary_erosion, binary_dilation
 from skimage import exposure, filters
 from typing import Union, Tuple
+from .upscaling_utils import upscale_heightmap
 
 def extract_surface(
     image: np.ndarray,
@@ -137,14 +138,16 @@ def extract_surface(
     surface_z_red[has_surface] = z_refined
 
     # Upscale in Y/X only
-    surface_z_full = ndimage.zoom(
+    Z, Y, X = image.shape
+    surface_z_full = upscale_heightmap(
         surface_z_red,
-        zoom=(sy, sx),
-        order=3
+        (Y, X),
+        (sy, sx)
     )
 
     # Scale Z back to full resolution
-    surface_z_full *= sz
+    # matth: Correct Z scaling by adding the block centering offset
+    surface_z_full = surface_z_full * sz + (sz - 1) / 2.0
 
     # Ensure dimensions match original image (handle padding/scaling mismatch)
     # The padding added during binning can cause surface_z_full to be larger than image.
