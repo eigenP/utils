@@ -52,22 +52,46 @@ def dimensionality_parser(target_dims : str, iterate_dims : dict = None):
             # print('reduced_dims : ', reduced_dims)
 
             # Find out which dimensions are reduced by the downstream function
-            dummy_input_shape = tuple(image.shape[image_dims.index(dim)] for dim in target_dims if dim in image_dims)
-            dummy_input = np.ones(dummy_input_shape, dtype=image.dtype)
-            dummy_output_shape = func(dummy_input).shape
+            # matth: Robust Dimensionality Inference via Unique Probing
+            # To handle ambiguous cases (e.g., square inputs where multiple dimensions have the same size),
+            # we probe the function with a dummy input having unique dimension sizes.
             
-            # Determine reduced dimensions
-            # Fix: Ensure aligned_input_dims only contains dimensions present in the input image
+            original_input_shape = tuple(image.shape[image_dims.index(dim)] for dim in target_dims if dim in image_dims)
             present_target_dims = [dim for dim in target_dims if dim in image_dims]
             aligned_input_dims = present_target_dims
 
+            # First, run with the original shape to handle Resizing correctly and check for Rank Reduction
+            dummy_input = np.ones(original_input_shape, dtype=image.dtype)
+            original_output_shape = func(dummy_input).shape
+
+            dummy_input_shape = original_input_shape
+            dummy_output_shape = original_output_shape
+
             # Rank Preservation Check:
-            # If the rank (number of dimensions) is preserved, we assume resizing (all dims kept).
-            # Otherwise, we use the size-matching heuristic to identify reduced dimensions.
-            if len(dummy_input_shape) == len(dummy_output_shape):
+            # If the rank is preserved, we assume resizing (all dims kept).
+            # We must use the original shapes to get the correct resize factors.
+            if len(original_input_shape) == len(original_output_shape):
                 reduced_dims = []
-                dim_size_map = dict(zip(aligned_input_dims, dummy_output_shape))
+                dim_size_map = dict(zip(aligned_input_dims, original_output_shape))
             else:
+                # Rank Reduced. Check for ambiguity (duplicate sizes) in input.
+                is_ambiguous = len(set(original_input_shape)) != len(original_input_shape)
+
+                if is_ambiguous:
+                    # Generate unique probe shape using distinct integers to disambiguate reduced dims
+                    unique_probe_shape = tuple(range(2, 2 + len(original_input_shape)))
+                    try:
+                        probe_input = np.ones(unique_probe_shape, dtype=image.dtype)
+                        probe_output_shape = func(probe_input).shape
+
+                        # Use probe shapes for the reduction logic
+                        dummy_input_shape = unique_probe_shape
+                        dummy_output_shape = probe_output_shape
+                    except Exception:
+                        # Fallback to original shape if probe fails
+                        pass
+
+                # Calculate reduced_dims using (potentially probed) shapes
                 reduced_dims = []
                 output_dim_pointer = -1  # start at the last dimension of dummy_output_shape
                 dim_size_map = {}
