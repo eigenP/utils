@@ -82,3 +82,7 @@ This effectively reduced the Field of View for registration, causing failure whe
 2. Apply a 1D Tukey window ($\alpha=0.1$) to the *projections* to satisfy the periodic boundary requirement for the 1D FFT in `phase_cross_correlation`.
 
 **Result:** The algorithm now robustly detects drift even when the only trackable object is at the extreme edge of the FOV (verified by `test_drift_edge_robustness.py`), while still preventing FFT edge ringing.
+
+## 2024-05-23 - Per-Pixel Sampling in EDOF
+**Learning:** Patch-based image reconstruction (stitching weighted patches) introduces visible block artifacts when the underlying focus surface is continuous but slanted. Per-pixel sampling (x,y) = V(x,y, Z(x,y))$ using a smoothly interpolated height map eliminates these artifacts and respects the sub-pixel continuity of the focus manifold. Additionally, reflection padding creates artificial derivative discontinuities at boundaries which distort spline interpolation; filtering boundary points allows for safer linear extrapolation of the surface.
+**Action:** Replace patch blending with vectorized per-pixel sampling in EDOF. Ensure interpolation grid excludes padding-dominated points.
