@@ -1224,6 +1224,10 @@ def morans_i_all_fast(
         # B = (n^2 - n) * S1 - 2*n * S2 + 6 * S0^2
         term_B_coeff = (n**2 - n) * S1 - 2*n * S2 + 6 * S0**2
 
+    # Precompute Row Sums for General Weights support
+    # W is CSR float32. sum(axis=1) returns matrix of shape (N, 1).
+    W_row_sums = np.asarray(W.sum(axis=1)).ravel().astype(np.float32)
+
     # precompute means if centering
     if center:
         if sp.issparse(X):
@@ -1261,7 +1265,24 @@ def morans_i_all_fast(
 
         if center:
             sum_WXb = WXb.sum(axis=0, dtype=np.float64)
-            num = sum_cross - mub * sum_WXb
+
+            # For general weights (not row-standardized), we need extra terms:
+            # Num = X^T W X - mu * X^T (ColSums) - mu * X^T (RowSums) + mu^2 * S0
+            # sum_WXb implements X^T (ColSums)  [since WXb = WX, and sum(WX) = X^T W^T 1 = X^T C]
+
+            # Calculate X^T (RowSums)
+            # Xb is (N, Block). W_row_sums is (N,).
+            if sp.issparse(Xb):
+                sum_XR = Xb.T @ W_row_sums
+                sum_XR = sum_XR.astype(np.float64)
+            else:
+                # Dense
+                sum_XR = np.einsum('ij,i->j', Xb, W_row_sums, dtype=np.float64)
+
+            # Combine terms
+            # num = sum_cross - mub * sum_WXb - mub * sum_XR + (S0 * mub**2)
+            num = sum_cross - mub * (sum_WXb + sum_XR) + (S0 * (mub ** 2))
+
             den = sum_sq - n * (mub ** 2)
 
             # Bolt: Optimize memory. WXb is no longer needed.
