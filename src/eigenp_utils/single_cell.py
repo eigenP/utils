@@ -223,7 +223,47 @@ def preprocess_subset(
     # ---------- HVG selection ----------
     if hvg_flavor == "triku":
         # Run Triku on specified layer (recommended log1p or scvi), then rely on its 'highly_variable' output
-        run_triku(A, layer=X_layer_for_pca, n_features=n_top_genes)
+        # Update strategy: Decouple graph (X_layer_for_pca) from scoring (log1p).
+
+        # 1. Select robust expression layer for Triku scoring (avoids crash on small floats)
+        triku_expr_layer = X_layer_for_pca
+        if "log1p" in A.layers:
+            triku_expr_layer = "log1p"
+        elif counts_layer in A.layers:
+            triku_expr_layer = counts_layer
+
+        # 2. Build graph on the INTENDED layer/rep (X_layer_for_pca)
+        # We compute neighbors on the full A so Triku can use them.
+        knn_key = "triku_internal"
+
+        # Determine how to build graph from X_layer_for_pca
+        # If it's a layer (genes x cells), we typically need PCA first.
+        # To avoid side effects on A.X or A.obsm['X_pca'] before the main pipeline,
+        # we do this carefully or just overwrite since we are in a preprocessing pipeline.
+
+        # If we just let run_triku fallback, it uses triku_expr_layer for graph,
+        # which might ignore X_layer_for_pca (e.g. scvi).
+        # So we explicitly build the graph on X_layer_for_pca.
+
+        if X_layer_for_pca in A.layers:
+            # We need to run PCA on this layer.
+            # We temporarily set A.X for this operation if needed, or rely on sc.tl.pca using .X
+            # Since preprocess_subset overwrites A.X later anyway, we can set it now.
+            A.X = A.layers[X_layer_for_pca].copy()
+            sc.tl.pca(A, n_comps=min(50, A.n_vars - 1), random_state=0)
+            sc.pp.neighbors(A, n_neighbors=n_neighbors, n_pcs=min(n_pcs, 50), key_added=knn_key)
+
+        elif X_layer_for_pca in A.obsm: # If passed as embedding
+             # Direct neighbors
+             sc.pp.neighbors(A, n_neighbors=n_neighbors, use_rep=X_layer_for_pca, key_added=knn_key)
+
+        else:
+             # Fallback if layer missing (shouldn't happen due to earlier checks) or standard
+             # Just let run_triku handle it via fallback (knn_key=None)
+             knn_key = None
+
+        run_triku(A, layer=triku_expr_layer, knn_key=knn_key, n_features=n_top_genes)
+
         # Ensure 'highly_variable' column exists for subsetting
         if "triku_highly_variable" in A.var:
             A.var["highly_variable"] = A.var["triku_highly_variable"]
@@ -1780,6 +1820,7 @@ def run_triku(
     n_features: int = 2000,
     n_neighbors: int = 15,
     n_pcs_for_knn: int = 30,
+    knn_key: Optional[str] = None,  # NEW: Allow reusing existing neighbors
     max_genes_for_triku: int = 20000,
 ) -> pd.DataFrame:
     """
@@ -1790,6 +1831,10 @@ def run_triku(
          `max_genes_for_triku` by total counts).
       2. Runs Triku on this subset (using a copy to protect the original adata).
       3. Maps the results back to `adata.var` (setting unselected genes to False/NaN).
+
+    Args:
+        knn_key: If provided, copy neighbors from `adata.obsp[f'{knn_key}_connectivities']`.
+                 Decouples the graph (e.g. from scVI) from the expression used for scoring (e.g. log1p).
     """
     if tk is None:
         raise ImportError("The 'triku' package is required for this function. Please install it.")
@@ -1848,11 +1893,34 @@ def run_triku(
     # If the user passed 'scvi_normalized' (floats), we use it directly.
     # We do NOT apply log1p here to avoid double-logging.
 
-    # KNN graph for Triku on the current X (log1p); use PCA for stability/speed
-    # This avoids the earlier "X_pca doesn't exist" issue.
-    # Note: We run this on the *subset* (adata_triku), which is faster.
-    sc.tl.pca(adata_triku, n_comps=min(50, adata_triku.n_vars - 1), random_state=0)
-    ensure_neighbors(adata_triku, n_neighbors=n_neighbors, use_rep=None, n_pcs=n_pcs_for_knn)
+    if knn_key is not None:
+        # Expect neighbors to already exist on the parent adata
+        conn_key = f"{knn_key}_connectivities"
+        dist_key = f"{knn_key}_distances"
+
+        if conn_key not in adata.obsp or dist_key not in adata.obsp:
+            raise KeyError(
+                f"Neighbors with key '{knn_key}' not found in adata.obsp. "
+                f"Run sc.pp.neighbors(..., key_added='{knn_key}') first."
+            )
+
+        # Copy the precomputed graph into the triku adata
+        # (This decoupling allows using e.g. scVI graph with log1p scoring)
+        adata_triku.obsp["connectivities"] = adata.obsp[conn_key].copy()
+        adata_triku.obsp["distances"] = adata.obsp[dist_key].copy()
+        # Satisfy Triku's check for neighbors metadata
+        adata_triku.uns["neighbors"] = {
+            "connectivities_key": "connectivities",
+            "distances_key": "distances",
+            "params": {"n_neighbors": n_neighbors, "method": "umap"}
+        }
+    else:
+        # Fallback: compute neighbors on X (old behavior)
+        # KNN graph for Triku on the current X (log1p); use PCA for stability/speed
+        # This avoids the earlier "X_pca doesn't exist" issue.
+        # Note: We run this on the *subset* (adata_triku), which is faster.
+        sc.tl.pca(adata_triku, n_comps=min(50, adata_triku.n_vars - 1), random_state=0)
+        ensure_neighbors(adata_triku, n_neighbors=n_neighbors, use_rep=None, n_pcs=n_pcs_for_knn)
 
     # Run Triku on the subset
     tk.tl.triku(
