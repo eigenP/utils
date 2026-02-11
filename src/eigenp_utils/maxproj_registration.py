@@ -262,6 +262,11 @@ def apply_drift_correction_2D(
     # Loop through each time point in the video data, starting from the second frame
     # Wrap the range function with tqdm for a progress bar
 
+    # Bolt: Pre-allocate buffers for subpixel shift to avoid O(T) large allocations
+    if method == 'subpixel':
+        shift_in_buf = np.zeros((x_shape, y_shape), dtype=np.float32)
+        shift_out_buf = np.zeros((x_shape, y_shape), dtype=np.float32)
+
     if reverse_time == 'both':
         # Forward order for 'both' (Bidirectional Estimation, Reference=Frame 0)
         range_values = range(1, t_shape)
@@ -311,11 +316,14 @@ def apply_drift_correction_2D(
                 s_dy, s_dx = cum_dy, cum_dx
 
                 # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+                # Bolt optimization: Use pre-allocated buffers and in-place operations
+                # shift_in_buf and shift_out_buf are allocated outside the loop
+                np.copyto(shift_in_buf, video_data[time_point - OFFSET])
 
-                shifted_slice = shift(
-                    input_frame,
+                shift(
+                    shift_in_buf,
                     shift=(s_dy, s_dx),
+                    output=shift_out_buf,
                     order=3,
                     mode='constant',
                     cval=min_value
@@ -323,10 +331,10 @@ def apply_drift_correction_2D(
 
                 # Robust clipping to prevent integer wraparound if bicubic overshoots
                 if dtype_min is not None and dtype_max is not None:
-                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
+                    np.clip(shift_out_buf, dtype_min, dtype_max, out=shift_out_buf)
 
                 # Assign (implicit cast back to original dtype)
-                corrected_data[time_point] = shifted_slice
+                corrected_data[time_point] = shift_out_buf
 
             else:
                 # Integer correction
@@ -390,20 +398,22 @@ def apply_drift_correction_2D(
                 s_dy, s_dx = cum_dy, cum_dx
 
                 # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+                # Bolt optimization: reuse buffers
+                np.copyto(shift_in_buf, video_data[time_point - OFFSET])
 
-                shifted_slice = shift(
-                    input_frame,
+                shift(
+                    shift_in_buf,
                     shift=(s_dy, s_dx),
+                    output=shift_out_buf,
                     order=3,
                     mode='constant',
                     cval=min_value
                 )
 
                 if dtype_min is not None and dtype_max is not None:
-                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
+                    np.clip(shift_out_buf, dtype_min, dtype_max, out=shift_out_buf)
 
-                corrected_data[time_point] = shifted_slice
+                corrected_data[time_point] = shift_out_buf
 
             else:
                 shift_dx = int(round(cum_dx))
