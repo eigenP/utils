@@ -94,11 +94,16 @@ def _get_fractional_peak(score_matrix):
     # Advanced indexing
     grid_y, grid_x = np.indices((H, W))
 
-    v_c = score_matrix[z_c, grid_y, grid_x]
-    v_l = score_matrix[z_l, grid_y, grid_x]
-    v_r = score_matrix[z_r, grid_y, grid_x]
+    # matth: Use Log-Parabolic Interpolation
+    # Focus metrics (squared Laplacian) often follow a Gaussian-like decay: E ~ exp(-(z-z0)^2).
+    # Fitting a parabola to the raw Gaussian yields biased peak estimates.
+    # Fitting a parabola to log(E) ~ -(z-z0)^2 recovers the peak exactly.
+    eps = 1e-12
+    v_c = np.log(score_matrix[z_c, grid_y, grid_x] + eps)
+    v_l = np.log(score_matrix[z_l, grid_y, grid_x] + eps)
+    v_r = np.log(score_matrix[z_r, grid_y, grid_x] + eps)
 
-    # Parabolic fit
+    # Parabolic fit on Log scores
     # Delta = (v_l - v_r) / (2 * (v_l - 2*v_c + v_r))
     denom = v_l - 2*v_c + v_r
 

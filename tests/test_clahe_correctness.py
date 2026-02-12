@@ -19,9 +19,8 @@ class TestCLAHECorrectness(unittest.TestCase):
        converge towards a linear rescaling of the input (preserving relative contrast),
        rather than the aggressive reshaping of Histogram Equalization.
 
-    3. Sentinel Behavior: A `clip_limit` of 0 acts as a sentinel for
-       Unlimited AHE, producing maximum contrast. This discontinuity (0 != limit->0)
-       is verified.
+    3. Monotone Zero Behavior: A `clip_limit` of 0 should correspond to
+       Identity (Minimum Contrast), preserving continuity with limit->0.
     """
 
     def setUp(self):
@@ -94,27 +93,38 @@ class TestCLAHECorrectness(unittest.TestCase):
         self.assertGreater(corr, 0.99,
             "Output with near-zero clip_limit should be highly correlated with input (Linear Transform).")
 
-    def test_sentinel_behavior(self):
+    def test_zero_behavior(self):
         """
-        Verify that clip_limit=0 is equivalent to AHE (Maximum Contrast).
+        Verify that clip_limit=0 produces Minimum Contrast (Identity),
+        and clip_limit=1.0/None produces Maximum Contrast (AHE).
         """
-        # Run with limit=0 (Sentinel)
-        out_sentinel = _my_clahe_(self.img, clip_limit=0, kernel_size=(32, 32))
-        std_sentinel = np.std(out_sentinel)
+        # Run with limit=0 (Identity)
+        out_zero = _my_clahe_(self.img, clip_limit=0, kernel_size=(32, 32))
+        std_zero = np.std(out_zero)
 
         # Run with limit=1.0 (Max Contrast explicitly)
         out_max = _my_clahe_(self.img, clip_limit=1.0, kernel_size=(32, 32))
         std_max = np.std(out_max)
 
-        print(f"\nSentinel Check: Std(0)={std_sentinel:.4f}, Std(1.0)={std_max:.4f}")
+        # Run with limit=None (Default/Max)
+        out_none = _my_clahe_(self.img, clip_limit=None, kernel_size=(32, 32))
+        std_none = np.std(out_none)
 
-        # They should be virtually identical
-        self.assertAlmostEqual(std_sentinel, std_max, delta=0.01,
-            msg="clip_limit=0 should behave like clip_limit=1.0 (AHE)")
+        print(f"\nZero Check: Std(0)={std_zero:.4f}, Std(1.0)={std_max:.4f}, Std(None)={std_none:.4f}")
 
-        # And should be higher than a low limit (proving 0 is not 'zero contrast')
-        out_low = _my_clahe_(self.img, clip_limit=0.01, kernel_size=(32, 32))
-        self.assertGreater(std_sentinel, np.std(out_low))
+        # Std(0) should be strictly less than Std(1.0)
+        self.assertLess(std_zero, std_max,
+            msg="clip_limit=0 (Identity) should have lower contrast than AHE.")
+
+        # Std(1.0) should equal Std(None)
+        self.assertAlmostEqual(std_max, std_none, delta=1e-5,
+            msg="clip_limit=None should be equivalent to clip_limit=1.0 (AHE)")
+
+        # Zero should be close to very small limit
+        out_small = _my_clahe_(self.img, clip_limit=1e-5, kernel_size=(32, 32))
+        std_small = np.std(out_small)
+        self.assertAlmostEqual(std_zero, std_small, delta=1e-2,
+            msg="clip_limit=0 should be continuous with small limits.")
 
 if __name__ == '__main__':
     unittest.main()

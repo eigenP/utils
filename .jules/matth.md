@@ -1,4 +1,5 @@
-# Matth's Journal
+## 2024-05-22 - Generalized Moran's I Formula for Irregular Graphs
+**Learning:** The standard simplified formula for Moran's I ($I = \frac{N}{S_0} \frac{x^T W x}{x^T x}$) assumes either row-standardized weights ($S_0=N$) OR ignores the impact of the mean ($\bar{x}$) on the cross-product term for irregular graphs. Specifically, the expansion of the numerator $\sum_{ij} w_{ij} (x_i - \bar{x})(x_j - \bar{x})$ includes terms $-\bar{x} \sum_i x_i R_i$ and $-\bar{x} \sum_j x_j C_j$ (where $R_i, C_j$ are row/col sums of $W$). If the graph has isolated nodes ($R_i=0$) or general weights ($R_i \neq 1$), these terms do not cancel out with $+S_0 \bar{x}^2$ as they do in the regular/standardized case. Neglecting them leads to bias when the mean is non-zero, making the statistic sensitive to simple shifts in data.
 
 ## 2025-02-19 - Drift Correction: The Cost of Integer Rounding
 
@@ -77,3 +78,4 @@ Instead of relying on the chain of pairwise shifts, we:
 Validation on sparse synthetic data ($T=50$) showed RMSE reduction from 0.023 px (Sequential) to 0.011 px (Global), consistent with theoretical predictions.
 
 **Caveat:** FFT-based registration on *windowed* projections is sensitive to large displacements if the window is stationary (Windowing Bias). Global registration works best for sparse data (fluorescence) where windowing is less critical, or where initial drift is small enough that the window doesn't mask features.
+**Action:** When implementing spatial statistics, always use the general quadratic form expansion rather than simplified versions that rely on implicit assumptions about graph regularity or weight normalization. I updated `morans_i_all_fast` to include the full expansion: $\text{Num} = x^T W x - \bar{x}(x^T W \mathbf{1}) - \bar{x}(\mathbf{1}^T W x) + \bar{x}^2 S_0$. This ensures correctness for any weight matrix (binary, inverse-distance, etc.) and any topology (including disconnected components).
