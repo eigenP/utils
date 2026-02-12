@@ -25,7 +25,8 @@ def extract_surface(
     downscale_factor: Union[int, Tuple[int, int, int]] = 4,
     gaussian_sigma: float = 4.0,
     clahe_clip: float = 0.00,
-    return_heightmap: bool = False
+    return_heightmap: bool = False,
+    threshold_method: str = 'otsu'
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
 
     # --- 1. HANDLE ANISOTROPIC FACTORS ---
@@ -81,7 +82,23 @@ def extract_surface(
         img_proc = img_u8
 
     # --- 6. THRESHOLD ---
-    thresh = filters.threshold_otsu(img_proc)
+    if threshold_method == 'otsu':
+        thresh = filters.threshold_otsu(img_proc)
+    elif threshold_method == 'triangle':
+        thresh = filters.threshold_triangle(img_proc)
+    elif threshold_method == 'li':
+        thresh = filters.threshold_li(img_proc)
+    elif threshold_method == 'yen':
+        thresh = filters.threshold_yen(img_proc)
+    elif threshold_method == 'isodata':
+        thresh = filters.threshold_isodata(img_proc)
+    elif threshold_method == 'mean':
+        thresh = filters.threshold_mean(img_proc)
+    elif threshold_method == 'minimum':
+        thresh = filters.threshold_minimum(img_proc)
+    else:
+        raise ValueError(f"Unknown threshold method: {threshold_method}")
+
     img_mask = img_proc > thresh
 
     # Identify columns with valid surface (at least one foreground pixel)
