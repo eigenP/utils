@@ -1244,6 +1244,10 @@ def morans_i_all_fast(
     else:
         E_I = np.nan
 
+    # matth: Compute row sums for the full expansion of Moran's I numerator.
+    # Essential for correctness on irregular graphs (e.g. islands) or general weights.
+    W_row_sums = np.asarray(W.sum(axis=1)).ravel().astype(np.float64)
+
     for j0 in range(0, G, block_genes):
         j1 = min(G, j0 + block_genes)
         Xb = X[:, j0:j1]
@@ -1261,7 +1265,14 @@ def morans_i_all_fast(
 
         if center:
             sum_WXb = WXb.sum(axis=0, dtype=np.float64)
-            num = sum_cross - mub * sum_WXb
+
+            # matth: Calculate sum(x * R) term
+            # Xb is (N, block), W_row_sums is (N,) -> (block,)
+            sum_xR = Xb.T @ W_row_sums
+
+            # matth: Correct general formula: sum_cross - mean*sum(xC) - mean*sum(xR) + mean^2*S0
+            num = sum_cross - mub * sum_WXb - mub * sum_xR + (mub ** 2) * S0
+
             den = sum_sq - n * (mub ** 2)
 
             # Bolt: Optimize memory. WXb is no longer needed.
