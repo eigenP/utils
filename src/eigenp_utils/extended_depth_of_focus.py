@@ -332,22 +332,70 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             x_end = x_start + patch_size
 
             # matth: Subpixel reconstruction
-            # Interpolate between floor(z) and ceil(z)
+            # Use Cubic Hermite Spline (Catmull-Rom) interpolation to recover peak intensity.
+            # Linear interpolation acts as a box filter, suppressing high frequencies (blurring).
+            # Cubic interpolation preserves sharpness by using 4 samples: z-1, z, z+1, z+2.
+
             z_floor = int(np.floor(best_z))
-            z_ceil = int(np.ceil(best_z))
-            alpha = best_z - z_floor
+            alpha = best_z - z_floor # fractional part, 0 <= alpha < 1
 
-            # Clamp indices
-            z_floor = max(0, min(z_floor, Z_dim - 1))
-            z_ceil = max(0, min(z_ceil, Z_dim - 1))
+            # Indices for 4 control points: p0, p1, p2, p3
+            # p1 corresponds to z_floor, p2 to z_ceil (z_floor + 1)
+            idx0 = z_floor - 1
+            idx1 = z_floor
+            idx2 = z_floor + 1
+            idx3 = z_floor + 2
 
-            patch_floor = _get_padded_patch(z_floor, y_start, x_start, y_end, x_end, y_start, x_start)
+            # Clamp indices to valid range [0, Z_dim-1]
+            # We use clamping (nearest padding) at boundaries.
+            idx0 = max(0, min(idx0, Z_dim - 1))
+            idx1 = max(0, min(idx1, Z_dim - 1))
+            idx2 = max(0, min(idx2, Z_dim - 1))
+            idx3 = max(0, min(idx3, Z_dim - 1))
 
-            if z_floor == z_ceil:
-                patch = patch_floor
+            # Fetch patches
+            # Optimization: Check if indices are identical to avoid redundant fetches
+
+            p1 = _get_padded_patch(idx1, y_start, x_start, y_end, x_end, y_start, x_start)
+
+            # Check for integer case optimization (alpha ~ 0)
+            if abs(alpha) < 1e-5:
+                patch = p1
             else:
-                patch_ceil = _get_padded_patch(z_ceil, y_start, x_start, y_end, x_end, y_start, x_start)
-                patch = (1.0 - alpha) * patch_floor + alpha * patch_ceil
+                # Reuse p1 if indices match (e.g. boundary clamp)
+                if idx0 == idx1:
+                    p0 = p1
+                else:
+                    p0 = _get_padded_patch(idx0, y_start, x_start, y_end, x_end, y_start, x_start)
+
+                if idx2 == idx1:
+                    p2 = p1
+                else:
+                    p2 = _get_padded_patch(idx2, y_start, x_start, y_end, x_end, y_start, x_start)
+
+                if idx3 == idx2:
+                    p3 = p2
+                elif idx3 == idx1: # Unlikely unless single slice
+                    p3 = p1
+                else:
+                    p3 = _get_padded_patch(idx3, y_start, x_start, y_end, x_end, y_start, x_start)
+
+                # Catmull-Rom Weights
+                t = alpha
+                t2 = t * t
+                t3 = t2 * t
+
+                w0 = -0.5 * t3 + t2 - 0.5 * t
+                w1 = 1.5 * t3 - 2.5 * t2 + 1.0
+                w2 = -1.5 * t3 + 2.0 * t2 + 0.5 * t
+                w3 = 0.5 * t3 - 0.5 * t2
+
+                # Combine
+                patch = w0 * p0 + w1 * p1 + w2 * p2 + w3 * p3
+
+                # Clip to prevent negative ringing artifacts
+                # Since we don't know upper bound, we only clip lower bound to 0
+                np.maximum(patch, 0, out=patch)
 
             # Create weighted patch
             try:
