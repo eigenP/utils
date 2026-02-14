@@ -72,6 +72,20 @@ def _get_1d_weight_variants(patch_size, overlap):
     return w_full, w_start, w_end, w_flat
 
 
+def _cubic_interp_1d(p0, p1, p2, p3, t):
+    """
+    Cubic Hermite spline (Catmull-Rom) interpolation.
+    p0, p1, p2, p3: values at t=-1, 0, 1, 2
+    t: fractional position between p1 and p2 (0 <= t <= 1)
+    """
+    return 0.5 * (
+        (2 * p1) +
+        (-p0 + p2) * t +
+        (2 * p0 - 5 * p1 + 4 * p2 - p3) * (t ** 2) +
+        (-p0 + 3 * p1 - 3 * p2 + p3) * (t ** 3)
+    )
+
+
 def _get_fractional_peak(score_matrix):
     """
     Refines the discrete argmax peak using parabolic interpolation.
@@ -332,22 +346,42 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             x_end = x_start + patch_size
 
             # matth: Subpixel reconstruction
-            # Interpolate between floor(z) and ceil(z)
+            # Use Cubic (Catmull-Rom) interpolation to preserve high-frequency content (contrast)
+            # Linear interpolation acts as a low-pass filter, degrading the sharpness gained by subpixel depth estimation.
+
             z_floor = int(np.floor(best_z))
-            z_ceil = int(np.ceil(best_z))
             alpha = best_z - z_floor
 
-            # Clamp indices
-            z_floor = max(0, min(z_floor, Z_dim - 1))
-            z_ceil = max(0, min(z_ceil, Z_dim - 1))
+            # Clamp indices for 4-point stencil
+            z0 = max(0, min(z_floor - 1, Z_dim - 1))
+            z1 = max(0, min(z_floor, Z_dim - 1))
+            z2 = max(0, min(z_floor + 1, Z_dim - 1))
+            z3 = max(0, min(z_floor + 2, Z_dim - 1))
 
-            patch_floor = _get_padded_patch(z_floor, y_start, x_start, y_end, x_end, y_start, x_start)
-
-            if z_floor == z_ceil:
-                patch = patch_floor
+            # Fetch patches
+            # Optimization: If integer coordinates, skip interpolation
+            if z1 == z2:  # z_floor == z_ceil implies alpha=0
+                patch = _get_padded_patch(z1, y_start, x_start, y_end, x_end, y_start, x_start)
             else:
-                patch_ceil = _get_padded_patch(z_ceil, y_start, x_start, y_end, x_end, y_start, x_start)
-                patch = (1.0 - alpha) * patch_floor + alpha * patch_ceil
+                p1 = _get_padded_patch(z1, y_start, x_start, y_end, x_end, y_start, x_start)
+                p2 = _get_padded_patch(z2, y_start, x_start, y_end, x_end, y_start, x_start)
+
+                # Fetch extra points for cubic spline
+                # If at boundaries, clamp (duplicate nearest neighbor)
+                # This corresponds to "natural" or "clamped" spline behavior at edges
+                if z0 == z1:
+                    p0 = p1
+                else:
+                    p0 = _get_padded_patch(z0, y_start, x_start, y_end, x_end, y_start, x_start)
+
+                if z3 == z2:
+                    p3 = p2
+                else:
+                    p3 = _get_padded_patch(z3, y_start, x_start, y_end, x_end, y_start, x_start)
+
+                patch = _cubic_interp_1d(p0, p1, p2, p3, alpha)
+                # matth: Clamp negative values that may arise from cubic undershoot (ringing)
+                np.maximum(patch, 0, out=patch)
 
             # Create weighted patch
             try:
