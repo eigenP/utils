@@ -311,22 +311,25 @@ def apply_drift_correction_2D(
                 s_dy, s_dx = cum_dy, cum_dx
 
                 # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+                # input_frame = video_data[time_point - OFFSET].astype(np.float32)
 
-                shifted_slice = shift(
-                    input_frame,
+                # OPTIMIZATION: Use pre-allocated buffer for output to avoid repeated allocation
+                # scipy.ndimage.shift will cast input to float internally for spline interpolation
+                shift(
+                    video_data[time_point - OFFSET],
                     shift=(s_dy, s_dx),
                     order=3,
                     mode='constant',
-                    cval=min_value
+                    cval=min_value,
+                    output=w_frame_buffer
                 )
 
                 # Robust clipping to prevent integer wraparound if bicubic overshoots
                 if dtype_min is not None and dtype_max is not None:
-                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
+                    np.clip(w_frame_buffer, dtype_min, dtype_max, out=w_frame_buffer)
 
                 # Assign (implicit cast back to original dtype)
-                corrected_data[time_point] = shifted_slice
+                corrected_data[time_point] = w_frame_buffer
 
             else:
                 # Integer correction
@@ -390,20 +393,22 @@ def apply_drift_correction_2D(
                 s_dy, s_dx = cum_dy, cum_dx
 
                 # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
+                # input_frame = video_data[time_point - OFFSET].astype(np.float32)
 
-                shifted_slice = shift(
-                    input_frame,
+                # OPTIMIZATION: Use pre-allocated buffer for output to avoid repeated allocation
+                shift(
+                    video_data[time_point - OFFSET],
                     shift=(s_dy, s_dx),
                     order=3,
                     mode='constant',
-                    cval=min_value
+                    cval=min_value,
+                    output=w_frame_buffer
                 )
 
                 if dtype_min is not None and dtype_max is not None:
-                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
+                    np.clip(w_frame_buffer, dtype_min, dtype_max, out=w_frame_buffer)
 
-                corrected_data[time_point] = shifted_slice
+                corrected_data[time_point] = w_frame_buffer
 
             else:
                 shift_dx = int(round(cum_dx))
