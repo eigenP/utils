@@ -11,7 +11,7 @@
 import numpy as np
 import skimage.io
 
-from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
+from scipy.ndimage import generic_filter, zoom, uniform_filter
 
 from skimage.filters import median
 from skimage.morphology import disk
@@ -125,6 +125,50 @@ def _get_fractional_peak(score_matrix):
     return idx.astype(np.float32) + delta
 
 
+def fast_laplace(arr, out=None):
+    """
+    Faster implementation of 3x3 Laplacian using NumPy slicing and in-place operations.
+    Equivalent to scipy.ndimage.laplace with default mode='reflect' (which matches np.pad 'symmetric').
+
+    The Laplacian kernel used is:
+       0  1  0
+       1 -4  1
+       0  1  0
+    """
+    if out is None:
+        out = np.zeros(arr.shape, dtype=np.float32)
+
+    # scipy.ndimage 'reflect' corresponds to numpy.pad 'symmetric'
+    padded = np.pad(arr, 1, mode='symmetric')
+
+    # Use in-place operations to accumulate neighbors
+    # This avoids creating multiple temporary arrays
+
+    # Top
+    np.copyto(out, padded[0:-2, 1:-1])
+
+    # Bottom
+    out += padded[2:, 1:-1]
+
+    # Left
+    out += padded[1:-1, 0:-2]
+
+    # Right
+    out += padded[1:-1, 2:]
+
+    # Center: subtract 4 * center
+    # Handle types carefully to avoid float64 intermediates if inputs are integers
+    center = padded[1:-1, 1:-1]
+
+    if out.dtype == np.float32:
+        # Multiply by float32(4.0) to ensure the term is float32
+        out -= center * np.float32(4.0)
+    else:
+        out -= 4.0 * center
+
+    return out
+
+
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
     '''
     Expecting an image with dimension order ZYX
@@ -220,7 +264,7 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
         # 2. Compute Laplacian directly into reusable float32 buffer
         # 'output=lap_buffer' reuses memory
-        laplace(slice_padded, output=lap_buffer)
+        fast_laplace(slice_padded, out=lap_buffer)
 
         # 3. Compute Energy (Squared) in-place
         np.square(lap_buffer, out=lap_buffer)
