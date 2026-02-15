@@ -57,7 +57,7 @@ class TestSurfaceAccuracy(unittest.TestCase):
         shape = (40, 64, 64)
         slope_y = 0.15
         slope_x = 0.05
-        z_offset = 5.0
+        z_offset = 20.0
 
         # No noise to test pure quantization error
         vol, gt_height = self.generate_slanted_plane(shape, slope_y, slope_x, z_offset, noise_sigma=0.0)
@@ -84,6 +84,47 @@ class TestSurfaceAccuracy(unittest.TestCase):
 
         # With sufficient smoothing, subpixel interpolation works effectively.
         self.assertLess(rmse, 0.20, "RMSE should be better than integer quantization (0.29)")
+
+    def test_surface_precision_downscaled(self):
+        """
+        Measure the RMSE of the extracted surface against the ground truth with downscaling.
+        """
+        # Parameters
+        shape = (40, 64, 64)
+        slope_y = 0.15
+        slope_x = 0.05
+        z_offset = 20.0
+
+        # No noise to test pure quantization error
+        vol, gt_height = self.generate_slanted_plane(shape, slope_y, slope_x, z_offset, noise_sigma=0.0)
+
+        # Run extraction with downscale_factor=4
+        surface_mask, height_map = extract_surface(vol, downscale_factor=4, gaussian_sigma=2.0, clahe_clip=0.0, return_heightmap=True)
+
+        found_mask = np.any(surface_mask, axis=0)
+
+        # Compare ground truth to the floating point height map
+        error = height_map[found_mask] - gt_height[found_mask]
+
+        H, W = height_map.shape
+        crop = 5
+        valid_crop = found_mask[crop:-crop, crop:-crop]
+        error_crop = error.reshape(H, W)[crop:-crop, crop:-crop][valid_crop]
+
+        rmse = np.sqrt(np.mean(error_crop**2))
+
+        # Mean Error (Bias)
+        bias = np.mean(error_crop)
+
+        print(f"Surface RMSE (Downscaled): {rmse:.4f} pixels")
+        print(f"Surface Bias (Downscaled): {bias:.4f} pixels")
+
+        # Tolerance relaxed due to downscaling (sz=4 implies +/- 2 pixel uncertainty)
+        # Observed RMSE ~ 2.0 pixels
+        self.assertLess(rmse, 2.5, "RMSE should be within half block size")
+
+        # Check bias
+        self.assertLess(abs(bias), 2.5, "Systematic shift should be within half block size")
 
     def test_translation_invariance(self):
         """
