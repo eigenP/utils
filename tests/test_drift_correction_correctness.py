@@ -1,7 +1,7 @@
 
 import numpy as np
 import pytest
-from src.eigenp_utils.maxproj_registration import compute_drift_trajectory, apply_drift_correction_2D
+from eigenp_utils.maxproj_registration import compute_drift_trajectory, apply_drift_correction_2D
 
 def test_compute_drift_trajectory_forward():
     """
