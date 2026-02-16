@@ -124,3 +124,52 @@ def test_single_candidate_edge_case():
 
     assert res_df.loc["0", "softmax_p"] == 1.0, "Single candidate should have P=1.0"
     assert res_df.loc["0", "assigned_cell_type"] == "TypeA"
+
+def test_outlier_robustness():
+    """
+    Testr 🔎: Verify that the confidence metric is robust to outliers.
+
+    Simulates a cluster where 90% of cells strongly favor Type A (score diff +1),
+    but 10% of cells (outliers) strongly favor Type B (score diff -100).
+
+    - Parametric (Mean-based): Mean diff is negative (-9). Predicts Type B or low confidence.
+    - Empirical (Robust): 90% positive signs. Predicts Type A with high confidence (0.9).
+    """
+    n_majority = 900
+    n_outliers = 100
+    n_cells = n_majority + n_outliers
+
+    obs = pd.DataFrame({"leiden": ["0"]*n_cells}, index=[f"c{i}" for i in range(n_cells)])
+
+    # Majority: Type A > Type B (1 vs 0)
+    sA_maj = np.full(n_majority, 1.0)
+    sB_maj = np.full(n_majority, 0.0)
+
+    # Outliers: Type B >>> Type A (0 vs 100) -> Diff -100
+    sA_out = np.full(n_outliers, 0.0)
+    sB_out = np.full(n_outliers, 100.0)
+
+    scores = pd.DataFrame({
+        "TypeA": np.concatenate([sA_maj, sA_out]),
+        "TypeB": np.concatenate([sB_maj, sB_out])
+    }, index=obs.index)
+
+    adata = AnnData(X=np.zeros((n_cells, 2)), obs=obs)
+
+    res_df = annotate_clusters_by_markers(
+        adata,
+        cluster_key="leiden",
+        scores=scores,
+        normalize_scores=False
+    )
+
+    row = res_df.loc["0"]
+
+    # The robust metric should favor TypeA
+    assert row["assigned_cell_type"] == "TypeA", \
+        f"Robust method should assign TypeA despite outliers. Got {row['assigned_cell_type']}"
+
+    # Confidence should be around 0.9
+    p_val = row["softmax_p"]
+    assert np.isclose(p_val, 0.9, atol=0.01), \
+        f"Expected robust confidence ~0.9, got {p_val}"
