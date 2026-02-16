@@ -224,12 +224,6 @@ def apply_drift_correction_2D(
         dtype_min = np.iinfo(video_data.dtype).min
         dtype_max = np.iinfo(video_data.dtype).max
     else:
-        # For float data, we might not want to clip arbitrarily, or use the min/max of the data?
-        # Usually float images are 0-1 or normalized.
-        # Let's use the min/max of the data range if float, or just let it float.
-        # However, to be consistent with 'zero_shift_multi_dimensional' which fills with fill_value,
-        # we might want to respect bounds.
-        # For now, we only clip integer types to prevent overflow.
         dtype_min, dtype_max = None, None
 
     # Pre-calculate weighted projections for all frames to avoid re-computation inside the loop
@@ -251,13 +245,54 @@ def apply_drift_correction_2D(
     projections_x = np.array(projections_x, dtype=np.float32)
     projections_y = np.array(projections_y, dtype=np.float32)
 
-    # Apply 1D Tukey window to the entire stack
+    # Define window functions
+    # Apply 1D Tukey window to reduce FFT edge artifacts
     win_x = windows.tukey(y_shape, alpha=0.1).astype(np.float32)
     win_y = windows.tukey(x_shape, alpha=0.1).astype(np.float32)
 
-    # Broadcasting (T, N) * (1, N) -> (T, N)
-    projections_x *= win_x[None, :]
-    projections_y *= win_y[None, :]
+    # matth: REMOVED in-place windowing. We now keep raw projections and window dynamically.
+    # projections_x *= win_x[None, :]
+    # projections_y *= win_y[None, :]
+
+    def _compute_shift_two_stage(ref, moving, window):
+        """
+        Computes the shift between ref and moving using a two-stage approach to eliminate stationary window bias.
+        1. Coarse estimation with standard windowing.
+        2. Shift the WINDOW to follow the moving object.
+        3. Fine estimation using matched windows.
+        """
+        # Stage 1: Coarse Estimation
+        shift_coarse_tup, _, _ = phase_cross_correlation(
+            ref * window,
+            moving * window,
+            upsample_factor=10
+        )
+        shift_coarse = shift_coarse_tup[0]
+
+        # If shift is very small, bias is negligible
+        if abs(shift_coarse) < 0.1:
+            return shift_coarse
+
+        # Stage 2: Matched Windowing
+        # We shift the window for the 'moving' signal so it tracks the object.
+        # PCC returns 'shift' such that Ref(x) ~ Moving(x - shift).
+        # This implies Moving is shifted by +shift relative to Ref?
+        # NO. If Ref(x) = Moving(x - s), then Moving(y) = Ref(y+s).
+        # Moving is shifted by -s relative to Ref.
+        # Example: Ref at 50. Moving at 52. s = -2. Moving is +2 relative to Ref.
+        # -s = +2.
+        # We want to shift window by +2 to center it on Moving.
+        # So we shift window by -shift_coarse.
+
+        w_shifted = shift(window, -shift_coarse, order=3, mode='constant', cval=0.0)
+
+        shift_fine_tup, _, _ = phase_cross_correlation(
+            ref * window,
+            moving * w_shifted,
+            upsample_factor=100
+        )
+
+        return shift_fine_tup[0]
 
     # Loop through each time point in the video data, starting from the second frame
     # Wrap the range function with tqdm for a progress bar
@@ -272,14 +307,12 @@ def apply_drift_correction_2D(
         for time_point in tqdm(range_values, desc='Applying Drift Correction'):
             # Estimate the drift between the current frame and the previous frame
 
-            # Use precomputed projections with subpixel precision
-            shift_x_back, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point], upsample_factor=100)
-            shift_y_back, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point], upsample_factor=100)
-            dx_backward, dy_backward = shift_x_back[0], shift_y_back[0]
+            # matth: Use Two-Stage Estimation
+            dx_backward = _compute_shift_two_stage(projections_x[time_point - 1], projections_x[time_point], win_x)
+            dy_backward = _compute_shift_two_stage(projections_y[time_point - 1], projections_y[time_point], win_y)
 
-            shift_x_fwd, _, _ = phase_cross_correlation(projections_x[time_point], projections_x[time_point - 1], upsample_factor=100)
-            shift_y_fwd, _, _ = phase_cross_correlation(projections_y[time_point], projections_y[time_point - 1], upsample_factor=100)
-            dx_forward, dy_forward = shift_x_fwd[0], shift_y_fwd[0]
+            dx_forward = _compute_shift_two_stage(projections_x[time_point], projections_x[time_point - 1], win_x)
+            dy_forward = _compute_shift_two_stage(projections_y[time_point], projections_y[time_point - 1], win_y)
 
             # dx_backward is shift T-1 -> T (e.g. -0.5 for +0.5 motion)
             # dx_forward is shift T -> T-1 (e.g. +0.5 for +0.5 motion)
@@ -362,10 +395,11 @@ def apply_drift_correction_2D(
         for time_point in tqdm(range_values, desc='Applying Drift Correction'):
             # Estimate the drift between the current frame and the previous frame
 
-            # Use precomputed projections with subpixel precision
-            shift_x, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point], upsample_factor=100)
-            shift_y, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point], upsample_factor=100)
-            dx, dy = shift_x[0], shift_y[0]
+            # matth: Use Two-Stage Estimation
+            dx_res = _compute_shift_two_stage(projections_x[time_point - 1], projections_x[time_point], win_x)
+            dy_res = _compute_shift_two_stage(projections_y[time_point - 1], projections_y[time_point], win_y)
+
+            dx, dy = dx_res, dy_res
 
             dx, dy = dx * DRIFT_SIGN, dy * DRIFT_SIGN
 

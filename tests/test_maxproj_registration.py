@@ -3,9 +3,6 @@ import types
 import numpy as np
 import pytest
 
-# Provide a stub pandas module so the import succeeds
-sys.modules.setdefault('pandas', types.ModuleType('pandas'))
-
 from eigenp_utils.maxproj_registration import zero_shift_multi_dimensional
 
 def test_zero_shift_positive_negative():
