@@ -46,8 +46,11 @@ class TestDriftIntegrity(unittest.TestCase):
         # If the object moves +0.5 pixels/frame, the shift required to register
         # frame t to t-1 is -0.5.
 
-        ret_x = (np.array([0.5]), 0, 0) # Use 0.5 to signify positive accumulation if we want positive cum_dx
-        ret_y = (np.array([0.0]), 0, 0)
+        # We patch estimate_shift_1d_iterative directly to return the desired shift.
+        # It returns a float, not a tuple like phase_cross_correlation.
+
+        ret_x = 0.5
+        ret_y = 0.0
 
         # Note: The sign of accumulation depends on the code.
         # dx, dy = shift_x[0], shift_y[0]
@@ -61,7 +64,7 @@ class TestDriftIntegrity(unittest.TestCase):
             side_effect.append(ret_x)
             side_effect.append(ret_y)
 
-        with patch('eigenp_utils.maxproj_registration.phase_cross_correlation', side_effect=side_effect):
+        with patch('eigenp_utils.maxproj_registration.estimate_shift_1d_iterative', side_effect=side_effect):
             corrected, drift_table = apply_drift_correction_2D(video, save_drift_table=False)
 
         last_row = drift_table.iloc[-1]

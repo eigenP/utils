@@ -179,6 +179,41 @@ def estimate_drift_2D(frame1, frame2, return_ccm = False):
     else:
         return shift
 
+def estimate_shift_1d_iterative(ref_proj, moving_proj, window, max_iter=3, tol=0.01):
+    """
+    Estimates 1D shift using iterative windowed cross-correlation to eliminate stationary window bias.
+
+    1. Estimate shift d.
+    2. Shift moving signal by -d (aligning with ref).
+    3. Re-estimate residual shift.
+    4. Repeat until convergence.
+    """
+    current_shift = 0.0
+
+    for _ in range(max_iter):
+        shift_val = current_shift
+
+        # Apply shift to align moving with ref
+        # Using cubic interpolation (order=3) for accuracy
+        if abs(shift_val) > 0.001:
+            aligned_mov = shift(moving_proj, shift_val, order=3, mode='constant', cval=0)
+        else:
+            aligned_mov = moving_proj
+
+        # Estimate residual shift
+        # We multiply by window here. The window is stationary (matched to ref).
+        # Since aligned_mov is aligned to ref, the window is correctly placed for both.
+        res, _, _ = phase_cross_correlation(ref_proj * window, aligned_mov * window, upsample_factor=100)
+        res = res[0]
+
+        current_shift += res
+
+        # Convergence check
+        if abs(res) < tol:
+            break
+
+    return current_shift
+
 def apply_drift_correction_2D(
     video_data,
     reverse_time = False,
@@ -255,10 +290,6 @@ def apply_drift_correction_2D(
     win_x = windows.tukey(y_shape, alpha=0.1).astype(np.float32)
     win_y = windows.tukey(x_shape, alpha=0.1).astype(np.float32)
 
-    # Broadcasting (T, N) * (1, N) -> (T, N)
-    projections_x *= win_x[None, :]
-    projections_y *= win_y[None, :]
-
     # Loop through each time point in the video data, starting from the second frame
     # Wrap the range function with tqdm for a progress bar
 
@@ -272,14 +303,12 @@ def apply_drift_correction_2D(
         for time_point in tqdm(range_values, desc='Applying Drift Correction'):
             # Estimate the drift between the current frame and the previous frame
 
-            # Use precomputed projections with subpixel precision
-            shift_x_back, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point], upsample_factor=100)
-            shift_y_back, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point], upsample_factor=100)
-            dx_backward, dy_backward = shift_x_back[0], shift_y_back[0]
+            # matth: Use iterative robust estimation
+            dx_backward = estimate_shift_1d_iterative(projections_x[time_point - 1], projections_x[time_point], win_x)
+            dy_backward = estimate_shift_1d_iterative(projections_y[time_point - 1], projections_y[time_point], win_y)
 
-            shift_x_fwd, _, _ = phase_cross_correlation(projections_x[time_point], projections_x[time_point - 1], upsample_factor=100)
-            shift_y_fwd, _, _ = phase_cross_correlation(projections_y[time_point], projections_y[time_point - 1], upsample_factor=100)
-            dx_forward, dy_forward = shift_x_fwd[0], shift_y_fwd[0]
+            dx_forward = estimate_shift_1d_iterative(projections_x[time_point], projections_x[time_point - 1], win_x)
+            dy_forward = estimate_shift_1d_iterative(projections_y[time_point], projections_y[time_point - 1], win_y)
 
             # dx_backward is shift T-1 -> T (e.g. -0.5 for +0.5 motion)
             # dx_forward is shift T -> T-1 (e.g. +0.5 for +0.5 motion)
@@ -362,10 +391,9 @@ def apply_drift_correction_2D(
         for time_point in tqdm(range_values, desc='Applying Drift Correction'):
             # Estimate the drift between the current frame and the previous frame
 
-            # Use precomputed projections with subpixel precision
-            shift_x, _, _ = phase_cross_correlation(projections_x[time_point - 1], projections_x[time_point], upsample_factor=100)
-            shift_y, _, _ = phase_cross_correlation(projections_y[time_point - 1], projections_y[time_point], upsample_factor=100)
-            dx, dy = shift_x[0], shift_y[0]
+            # matth: Use iterative robust estimation
+            dx = estimate_shift_1d_iterative(projections_x[time_point - 1], projections_x[time_point], win_x)
+            dy = estimate_shift_1d_iterative(projections_y[time_point - 1], projections_y[time_point], win_y)
 
             dx, dy = dx * DRIFT_SIGN, dy * DRIFT_SIGN
 
