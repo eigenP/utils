@@ -7,3 +7,13 @@
 **Learning:** In Extended Depth of Focus (EDOF), using linear interpolation to reconstruct pixel intensities from fractional Z-depths acts as a low-pass filter, significantly attenuating contrast and peak intensity (by >10% for sharp foci). This degradation counteracts the benefits of sub-pixel depth estimation. While linear interpolation is sufficient for smooth geometric transformations, it fails to preserve the spectral characteristics of the in-focus image, which is by definition a local maximum in sharpness/intensity.
 
 **Action:** Use Cubic (Catmull-Rom) interpolation for intensity reconstruction when sampling from a discrete stack at fractional coordinates. This preserves the high-frequency content and peak intensity of the focused features, aligning the reconstruction quality with the precision of the depth map.
+
+## 2024-05-24 - Continuous Manifold Sampling vs Patch-Based Reconstruction in EDoF
+**Learning:** Patch-based Extended Depth of Focus (EDoF) algorithms that assume piecewise-constant depth per patch inherently introduce $C^0$ discontinuities in the effective sampling surface. This zeroth-order approximation causes geometric distortions (shearing) within patches for slanted surfaces and intensity seams at boundaries, even with alpha blending. The correct mathematical model for a smooth surface is a continuous manifold $z(x,y)$. Reconstructing the image by sampling the volumetric data $V(x,y,z)$ on this manifold via bicubic interpolation eliminates blocking artifacts and preserves texture geometry consistent with the estimated depth map.
+
+**Action:** Replace procedural patch-blending loops with explicit surface reconstruction: first upscale the discrete depth estimates to a continuous pixel-wise depth map $z(x,y)$ (e.g., via `RegularGridInterpolator`), then sample the volume $V$ at $(x, y, z(x,y))$ using high-order interpolation. This formulation is cleaner, vectorizable, and mathematically consistent with the underlying physical model of a continuous object surface.
+
+## 2024-05-24 - Integer Overflow in Vectorized Interpolation
+**Learning:** When implementing manual vectorized interpolation (e.g., cubic spline) on image data, always explicitly cast the input array to floating-point (e.g., `float32`) before performing arithmetic. Standard image data is often `uint8` or `uint16`. Operations like `p2 - p0` where `p0 > p2` will wrap around (underflow) in unsigned integer arithmetic, producing large erroneous values. This is particularly dangerous in cubic interpolation where negative coefficients (like $-p_0$) are common.
+
+**Action:** Added explicit `.astype(np.float32)` casts in `_sample_volume_cubic` when gathering pixel neighbors.
