@@ -12,6 +12,7 @@ import numpy as np
 import skimage.io
 
 from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
+from scipy.interpolate import RegularGridInterpolator
 
 from skimage.filters import median
 from skimage.morphology import disk
@@ -34,42 +35,6 @@ def apply_median_filter(height_map):
     filtered_map = median(height_map, selem, mode='reflect')
 
     return filtered_map
-
-
-def _get_1d_weight_variants(patch_size, overlap):
-    """
-    Generate 1D weight variants:
-    - full: Taper Start, Taper End (Internal)
-    - start: Flat Start, Taper End (Top/Left Boundary)
-    - end: Taper Start, Flat End (Bottom/Right Boundary)
-    - flat: Flat Start, Flat End (Single Patch)
-    """
-    def weight_1d(x):
-        return 3 * x**2 - 2 * x**3
-
-    x = np.linspace(0, 1, overlap)
-    taper = weight_1d(x).astype(np.float32)
-
-    # Base: Flat
-    w_base = np.ones(patch_size, dtype=np.float32)
-
-    # Full (Internal)
-    w_full = w_base.copy()
-    w_full[:overlap] *= taper
-    w_full[-overlap:] *= taper[::-1]
-
-    # Start (Top/Left Edge -> Flat Start, Taper End)
-    w_start = w_base.copy()
-    w_start[-overlap:] *= taper[::-1]
-
-    # End (Bottom/Right Edge -> Taper Start, Flat End)
-    w_end = w_base.copy()
-    w_end[:overlap] *= taper
-
-    # Flat (Single Patch -> No Taper)
-    w_flat = w_base.copy()
-
-    return w_full, w_start, w_end, w_flat
 
 
 def _cubic_interp_1d(p0, p1, p2, p3, t):
@@ -137,6 +102,63 @@ def _get_fractional_peak(score_matrix):
     delta = np.clip(delta, -0.5, 0.5)
 
     return idx.astype(np.float32) + delta
+
+
+def _sample_volume_cubic(volume, z_map):
+    """
+    Sample a 3D volume at specific z-coordinates for each (y, x) pixel
+    using cubic interpolation along the z-axis.
+
+    Parameters:
+    volume (ndarray): 3D array (Z, Y, X)
+    z_map (ndarray): 2D array (Y, X) of z-coordinates to sample at.
+
+    Returns:
+    ndarray: 2D array (Y, X) of sampled values.
+    """
+    Z, H, W = volume.shape
+
+    # Ensure z_map is within bounds
+    # We clip to [0, Z-1] but for cubic interpolation we need safe neighbors
+    # The logic below handles boundary clamping for neighbors.
+    z_map_clamped = np.clip(z_map, 0, Z - 1)
+
+    z_floor = np.floor(z_map_clamped).astype(int)
+    alpha = (z_map_clamped - z_floor).astype(np.float32)
+
+    # Calculate neighbor indices with clamping
+    z0 = np.clip(z_floor - 1, 0, Z - 1)
+    z1 = np.clip(z_floor, 0, Z - 1)
+    z2 = np.clip(z_floor + 1, 0, Z - 1)
+    z3 = np.clip(z_floor + 2, 0, Z - 1)
+
+    # Grid indices for Y and X
+    # Using open grid to broadcast
+    grid_y = np.arange(H)
+    grid_x = np.arange(W)
+
+    # Advanced indexing: volume[z_idx, y_idx, x_idx]
+    # We need to broadcast y and x to match z's shape (H, W) if we pass meshgrids
+    # Or rely on broadcasting rules. volume[z_indices, grid_y[:, None], grid_x[None, :]]
+
+    # Using explicit meshgrid for clarity and robustness with older numpy versions
+    # However, broadcasting is faster and uses less memory.
+    # volume[z1, :, :] works if z1 is same shape as volume slice? No.
+    # z1 is (H, W).
+    # volume[z1, np.arange(H)[:, None], np.arange(W)[None, :]]
+
+    gy = grid_y[:, None]
+    gx = grid_x[None, :]
+
+    p0 = volume[z0, gy, gx]
+    p1 = volume[z1, gy, gx]
+    p2 = volume[z2, gy, gx]
+    p3 = volume[z3, gy, gx]
+
+    patch = _cubic_interp_1d(p0, p1, p2, p3, alpha)
+
+    # Clamp negative values
+    return np.maximum(patch, 0)
 
 
 def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
@@ -257,204 +279,49 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     # Apply median filter (works on floats, preserves edges while removing outliers)
     height_map_small = apply_median_filter(height_map_small)
 
-    # 5. Combine patches to create the final image
-    # Use float32 for accumulation to save memory
-    final_img = np.zeros((padded_H, padded_W), dtype=np.float32)
-    counts = np.zeros((padded_H, padded_W), dtype=np.float32) # matth: Restored counts
-
-    # Precompute 1D weight variants to handle boundaries
-    wy_full, wy_start, wy_end, wy_flat = _get_1d_weight_variants(patch_size, overlap)
-    wx_full, wx_start, wx_end, wx_flat = _get_1d_weight_variants(patch_size, overlap)
+    # 5. Continuous Surface Reconstruction
+    # matth: Replace patch-blending with explicit surface sampling.
+    # 1. Upscale the low-res depth map to full resolution.
+    # 2. Sample the 3D volume at the interpolated depth coordinates using cubic interpolation.
+    # This avoids block artifacts and preserves texture geometry on slanted/curved surfaces.
 
     n_patches_y = height_map_small.shape[0]
     n_patches_x = height_map_small.shape[1]
 
-    Z_dim = img.shape[0]
+    # Coordinates of the centers where height_map_small is defined
+    # Note: In scoring, y_centers = y_starts + patch_size // 2
+    # y_starts = i * (patch_size - overlap)
+    y_starts = np.arange(n_patches_y) * (patch_size - overlap)
+    x_starts = np.arange(n_patches_x) * (patch_size - overlap)
 
-    # Helper to extract a padded patch from a specific Z slice
-    def _get_padded_patch(z_idx, y_s, x_s, y_e, x_e, y_start, x_start):
-        # Determine safe extraction bounds from original image
-        y_s_clamped = y_s
-        y_e_clamped = min(y_e, img.shape[1])
-        pad_bottom = 0
+    y_c = y_starts + patch_size // 2
+    x_c = x_starts + patch_size // 2
 
-        if y_e > img.shape[1]:
-            pad_bottom = pad_y
-            needed_history = max(pad_bottom + 1, y_e - img.shape[1] + 2)
-            y_s_clamped = min(y_s_clamped, img.shape[1] - needed_history)
-            y_s_clamped = max(0, y_s_clamped)
-            y_e_clamped = img.shape[1]
+    # Create interpolator
+    # bounds_error=False, fill_value=None -> Linear extrapolation
+    # We use linear interpolation for the depth map itself to avoid overshoot (ringing)
+    # that cubic interpolation might introduce in the depth domain.
+    interp = RegularGridInterpolator((y_c, x_c), height_map_small, bounds_error=False, fill_value=None)
 
-        x_s_clamped = x_s
-        x_e_clamped = min(x_e, img.shape[2])
-        pad_right = 0
+    # Target grid coordinates (original shape)
+    gy = np.arange(original_shape[0])
+    gx = np.arange(original_shape[1])
 
-        if x_e > img.shape[2]:
-            pad_right = pad_x
-            needed_history = max(pad_right + 1, x_e - img.shape[2] + 2)
-            x_s_clamped = min(x_s_clamped, img.shape[2] - needed_history)
-            x_s_clamped = max(0, x_s_clamped)
-            x_e_clamped = img.shape[2]
+    GY, GX = np.meshgrid(gy, gx, indexing='ij')
 
-        # Extract chunk
-        chunk = img[z_idx, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
+    try:
+        height_map_full = interp((GY, GX))
+    except (TypeError, ValueError):
+        # Fallback for older SciPy
+        pts = np.array([GY.ravel(), GX.ravel()]).T
+        height_map_full = interp(pts).reshape(original_shape)
 
-        # Pad chunk locally
-        if pad_bottom > 0 or pad_right > 0:
-            chunk_padded = np.pad(chunk, ((0, pad_bottom), (0, pad_right)), mode='reflect')
-        else:
-            chunk_padded = chunk
+    height_map_full = height_map_full.astype(np.float32)
 
-        # Slice out the exact target region relative to chunk start
-        y_rel = y_start - y_s_clamped
-        x_rel = x_start - x_s_clamped
-
-        return chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
-
-
-    for i in range(n_patches_y):
-        # Select Y-weight
-        if n_patches_y == 1:
-            wy = wy_flat
-        elif i == 0:
-            wy = wy_start
-        elif i == n_patches_y - 1:
-            wy = wy_end
-        else:
-            wy = wy_full
-
-        for j in range(n_patches_x):
-            # Select X-weight
-            if n_patches_x == 1:
-                wx = wx_flat
-            elif j == 0:
-                wx = wx_start
-            elif j == n_patches_x - 1:
-                wx = wx_end
-            else:
-                wx = wx_full
-
-            # Construct 2D window on the fly
-            _2D_window = wy[:, None] * wx[None, :]
-
-            y_start = i * (patch_size - overlap)
-            x_start = j * (patch_size - overlap)
-            best_z = height_map_small[i, j]
-
-            # Patch bounds
-            y_end = y_start + patch_size
-            x_end = x_start + patch_size
-
-            # matth: Subpixel reconstruction
-            # Use Cubic (Catmull-Rom) interpolation to preserve high-frequency content (contrast)
-            # Linear interpolation acts as a low-pass filter, degrading the sharpness gained by subpixel depth estimation.
-
-            z_floor = int(np.floor(best_z))
-            alpha = best_z - z_floor
-
-            # Clamp indices for 4-point stencil
-            z0 = max(0, min(z_floor - 1, Z_dim - 1))
-            z1 = max(0, min(z_floor, Z_dim - 1))
-            z2 = max(0, min(z_floor + 1, Z_dim - 1))
-            z3 = max(0, min(z_floor + 2, Z_dim - 1))
-
-            # Fetch patches
-            # Optimization: If integer coordinates, skip interpolation
-            if z1 == z2:  # z_floor == z_ceil implies alpha=0
-                patch = _get_padded_patch(z1, y_start, x_start, y_end, x_end, y_start, x_start)
-            else:
-                p1 = _get_padded_patch(z1, y_start, x_start, y_end, x_end, y_start, x_start)
-                p2 = _get_padded_patch(z2, y_start, x_start, y_end, x_end, y_start, x_start)
-
-                # Fetch extra points for cubic spline
-                # If at boundaries, clamp (duplicate nearest neighbor)
-                # This corresponds to "natural" or "clamped" spline behavior at edges
-                if z0 == z1:
-                    p0 = p1
-                else:
-                    p0 = _get_padded_patch(z0, y_start, x_start, y_end, x_end, y_start, x_start)
-
-                if z3 == z2:
-                    p3 = p2
-                else:
-                    p3 = _get_padded_patch(z3, y_start, x_start, y_end, x_end, y_start, x_start)
-
-                patch = _cubic_interp_1d(p0, p1, p2, p3, alpha)
-                # matth: Clamp negative values that may arise from cubic undershoot (ringing)
-                np.maximum(patch, 0, out=patch)
-
-            # Create weighted patch
-            try:
-                # weighted_patch = patch * _2D_window
-                # In-place multiplication
-                np.multiply(patch, _2D_window, out=patch)
-                weight_matrix = _2D_window
-            except ValueError:
-                # Boundary case
-                min_shape = tuple(min(s1, s2) for s1, s2 in zip(patch.shape, _2D_window.shape))
-                patch = patch * _2D_window[:min_shape[0], :min_shape[1]]
-                weight_matrix = _2D_window[:min_shape[0], :min_shape[1]]
-
-            # Add to accumulators
-            final_img[y_start:y_start+patch_size, x_start:x_start+patch_size] += patch
-            counts[y_start:y_start+patch_size, x_start:x_start+patch_size] += weight_matrix
-
-    # Normalize by the weight counts
-    # Avoid division by zero
-    counts[counts < 1e-9] = 1.0
-    # In-place division
-    np.divide(final_img, counts, out=final_img)
-
-    # 6. Recrop
-    final_img = final_img[:original_shape[0], :original_shape[1]]
+    # Sample the volume using the smooth depth map
+    final_img = _sample_volume_cubic(img, height_map_full)
 
     if return_heightmap:
-        # matth: Use RegularGridInterpolator for spatially accurate upscaling
-        # scipy.ndimage.zoom assumes a different coordinate system that introduces
-        # a systematic shift. We map the exact patch centers to the pixel grid.
-        from scipy.interpolate import RegularGridInterpolator
-
-        n_patches_y = height_map_small.shape[0]
-        n_patches_x = height_map_small.shape[1]
-
-        # Coordinates of the centers where height_map_small is defined
-        # Note: In scoring, y_centers = y_starts + patch_size // 2
-        # y_starts = i * (patch_size - overlap)
-        y_starts = np.arange(n_patches_y) * (patch_size - overlap)
-        x_starts = np.arange(n_patches_x) * (patch_size - overlap)
-
-        y_c = y_starts + patch_size // 2
-        x_c = x_starts + patch_size // 2
-
-        # Create interpolator
-        # bounds_error=False, fill_value=None -> Linear extrapolation
-        interp = RegularGridInterpolator((y_c, x_c), height_map_small, bounds_error=False, fill_value=None)
-
-        # Target grid coordinates
-        gy = np.arange(original_shape[0])
-        gx = np.arange(original_shape[1])
-
-        # Meshgrid for interpolation (indexing='ij')
-        # We can optimize by broadcasting if grid is huge, but RegularGridInterpolator
-        # usually expects (N, 2) points or tuple of grids.
-        # interp((gy[:, None], gx[None, :])) works if grid is tuple?
-        # No, RegularGridInterpolator.__call__ expects points (N, D) or (y, x) if method='linear'.
-        # Actually it supports meshgrid style inputs in newer scipy.
-        # Let's use the explicit meshgrid to be safe and clear.
-        GY, GX = np.meshgrid(gy, gx, indexing='ij')
-
-        # Flatten for interpolation then reshape, or pass directly if supported.
-        # Passing tuple (GY, GX) is supported in SciPy 1.9+.
-        # We'll assume a reasonably modern SciPy.
-        try:
-            height_map_full = interp((GY, GX))
-        except (TypeError, ValueError):
-            # Fallback for older SciPy
-            pts = np.array([GY.ravel(), GX.ravel()]).T
-            height_map_full = interp(pts).reshape(original_shape)
-
-        height_map_full = height_map_full.astype(np.float32)
-
         return final_img, height_map_full
 
     return final_img

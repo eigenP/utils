@@ -7,3 +7,8 @@
 **Learning:** In Extended Depth of Focus (EDOF), using linear interpolation to reconstruct pixel intensities from fractional Z-depths acts as a low-pass filter, significantly attenuating contrast and peak intensity (by >10% for sharp foci). This degradation counteracts the benefits of sub-pixel depth estimation. While linear interpolation is sufficient for smooth geometric transformations, it fails to preserve the spectral characteristics of the in-focus image, which is by definition a local maximum in sharpness/intensity.
 
 **Action:** Use Cubic (Catmull-Rom) interpolation for intensity reconstruction when sampling from a discrete stack at fractional coordinates. This preserves the high-frequency content and peak intensity of the focused features, aligning the reconstruction quality with the precision of the depth map.
+
+## 2024-05-23 - Continuous Surface Reconstruction in EDoF
+**Learning:** Patch-based EDoF reconstruction implicitly assumes a piecewise constant depth map, leading to $C^0$ discontinuities and geometric shearing of textures on slanted surfaces (parallax error). This violates the physical prior of continuous object surfaces and introduces blocking artifacts that simple blending cannot fully remove.
+
+**Action:** Replace patch blending with explicit surface reconstruction: interpolate the discrete depth estimates to a continuous manifold $z(x,y)$ (using linear interpolation to avoid depth-ringing), and sample the volume intensity $I(x,y) = V(x,y,z(x,y))$ using cubic interpolation along the Z-axis. This ensures geometric consistency and eliminates blocking artifacts without sacrificing sharpness.
