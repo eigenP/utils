@@ -30,7 +30,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
 
     # Data traits
-    image_data = traitlets.Unicode(sync=True)
+    image_data = traitlets.Unicode().tag(sync=True)
 
     # Sliders
     x_s = traitlets.Int(0).tag(sync=True)
@@ -58,6 +58,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     min_thickness = traitlets.Int(1).tag(sync=True)
 
+    # Channels
+    channel_names = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    channel_visible = traitlets.List(traitlets.Bool()).tag(sync=True)
+
     # Save UI
     save_filename = traitlets.Unicode("filepath_save.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
@@ -77,6 +81,9 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
         # Observe all parameters to update plot
         self.observe(self._render_wrapper, names=['x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t'])
+
+        # Observe channel visibility
+        self.observe(self._render_wrapper, names=['channel_visible'])
 
         # Observe save trigger
         self.observe(self._save_svg, names='save_trigger')
@@ -144,15 +151,37 @@ class TNIASliceWidget(TNIAWidgetBase):
 
         super().__init__(X, Y, Z)
 
-        self.im = im
+        self.im_orig = im
         self.sxy = sxy
         self.sz = sz
         self.figsize = figsize
         self.colormap = colormap
-        self.vmin = vmin
-        self.vmax = vmax
-        self.gamma = gamma
-        self.colors = colors
+        self.vmin_orig = vmin
+        self.vmax_orig = vmax
+        self.gamma_orig = gamma
+        self.colors_orig = colors
+
+        # Initialize Channel info
+        if isinstance(im, list):
+            self.num_channels = len(im)
+            self.channel_names = [f"Channel {i}" for i in range(self.num_channels)]
+            self.channel_visible = [True] * self.num_channels
+
+            # Resolve default colors to ensure stability when toggling
+            if colors is None:
+                 defaults = ['magenta', 'cyan', 'yellow', 'green', 'red', 'lime', 'blue', 'orange']
+                 # Extend if needed
+                 while len(defaults) < self.num_channels:
+                     defaults += defaults
+                 self.colors_resolved = defaults[:self.num_channels]
+            else:
+                 self.colors_resolved = colors
+        else:
+            self.num_channels = 1
+            self.colors_resolved = colors
+            # No channel names for single image (or we could add one if we wanted a toggle)
+            self.channel_names = []
+            self.channel_visible = []
 
         # Set initial values if provided
         if x_t is not None: self.x_t = int(x_t)
@@ -171,13 +200,54 @@ class TNIASliceWidget(TNIAWidgetBase):
         y_lims = [self.y_s - self.y_t, self.y_s + self.y_t]
         z_lims = [self.z_s - self.z_t, self.z_s + self.z_t]
 
+        # Prepare arguments based on visibility
+        if isinstance(self.im_orig, list):
+            # Indices of visible channels
+            visible_indices = [i for i, v in enumerate(self.channel_visible) if v]
+
+            # If no channels visible, what to do?
+            # We can pass an empty list, but show_xyz_max_slabs might fail.
+            # Let's pass empty list and see, or handle gracefully.
+            if not visible_indices:
+                # Create a placeholder figure
+                fig = plt.figure(figsize=self.figsize if self.figsize else (10, 10))
+                fig.text(0.5, 0.5, "No Channels Visible", ha='center', va='center', color='white')
+                fig.patch.set_facecolor('black')
+                return fig
+
+            im_curr = [self.im_orig[i] for i in visible_indices]
+
+            # Filter colors
+            # colors_resolved is a list if num_channels > 1 or if explicit list passed
+            if isinstance(self.colors_resolved, list) and len(self.colors_resolved) == self.num_channels:
+                 colors_curr = [self.colors_resolved[i] for i in visible_indices]
+            else:
+                 colors_curr = self.colors_resolved
+
+            # Filter vmin/vmax/gamma if they are lists
+            def _filter_arg(arg):
+                if isinstance(arg, (list, tuple)) and len(arg) == self.num_channels:
+                    return [arg[i] for i in visible_indices]
+                return arg
+
+            vmin_curr = _filter_arg(self.vmin_orig)
+            vmax_curr = _filter_arg(self.vmax_orig)
+            gamma_curr = _filter_arg(self.gamma_orig)
+
+        else:
+            im_curr = self.im_orig
+            colors_curr = self.colors_resolved
+            vmin_curr = self.vmin_orig
+            vmax_curr = self.vmax_orig
+            gamma_curr = self.gamma_orig
+
         # Call original logic
         # Note: We need to handle show_crosshair manually or assume it's part of the original function?
         # show_xyz_max_slabs returns a Figure
         fig = show_xyz_max_slabs(
-            self.im, x_lims, y_lims, z_lims,
+            im_curr, x_lims, y_lims, z_lims,
             sxy=self.sxy, sz=self.sz, figsize=self.figsize, colormap=self.colormap,
-            vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, colors=self.colors
+            vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, colors=colors_curr
         )
 
         # Crosshairs logic (copied from original interactive wrapper)
@@ -537,6 +607,11 @@ def show_xyz_max_slice_interactive(
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
+    """
+    Interactive 3D slice viewer using AnyWidget.
+
+    Inspired by show_xyz_max_slice_interactive in tnia_plotting_3d.py (ipywidgets version).
+    """
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
     z_xy_ratio = (sz / sxy) if sxy != sz else 1
@@ -629,7 +704,7 @@ def show_xyz_max_scatter_interactive(
 class IsoScatterWidget(anywidget.AnyWidget):
     _esm = ir.files("eigenp_utils").joinpath("iso_scatter.js")
 
-    image_data = traitlets.Unicode(sync=True)
+    image_data = traitlets.Unicode().tag(sync=True)
     elev = traitlets.Float(30).tag(sync=True)
     azim = traitlets.Float(-60).tag(sync=True)
     save_filename = traitlets.Unicode("iso_scatter.svg").tag(sync=True)
