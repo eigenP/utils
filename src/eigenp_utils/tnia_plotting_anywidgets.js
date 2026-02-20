@@ -114,6 +114,50 @@ export default {
     el.appendChild(imgContainer);
 
     const controlsDiv = document.createElement("div");
+
+    // Channels
+    const channelNames = model.get("channel_names");
+    if (channelNames && channelNames.length > 0) {
+      const chanContainer = document.createElement("div");
+      chanContainer.style.display = "flex";
+      chanContainer.style.flexWrap = "wrap";
+      chanContainer.style.gap = "10px";
+      chanContainer.style.marginBottom = "10px";
+
+      function updateCheckboxes() {
+        const visible = model.get("channel_visible");
+        chanContainer.innerHTML = ""; // Clear to rebuild
+        channelNames.forEach((name, index) => {
+          const label = document.createElement("label");
+          label.style.display = "flex";
+          label.style.alignItems = "center";
+          label.style.gap = "4px";
+          label.style.fontSize = "14px";
+
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = visible[index];
+
+          cb.addEventListener("change", () => {
+             const currentVisible = [...model.get("channel_visible")];
+             currentVisible[index] = cb.checked;
+             model.set("channel_visible", currentVisible);
+             model.save_changes();
+          });
+
+          label.appendChild(cb);
+          label.appendChild(document.createTextNode(name));
+          chanContainer.appendChild(label);
+        });
+      }
+
+      model.on("change:channel_visible", updateCheckboxes);
+      updateCheckboxes();
+
+      controlsDiv.appendChild(chanContainer);
+      controlsDiv.appendChild(document.createElement("hr"));
+    }
+
     controlsDiv.appendChild(xThick);
     controlsDiv.appendChild(yThick);
     controlsDiv.appendChild(zThick);
