@@ -3,14 +3,6 @@ import types
 import numpy as np
 import pytest
 
-# Stub ipywidgets if missing to satisfy imports
-widgets = types.ModuleType("ipywidgets")
-widgets.interact = lambda *args, **kwargs: None
-widgets.IntSlider = type("IntSlider", (), {})
-widgets.FloatRangeSlider = type("FloatRangeSlider", (), {})
-widgets.Layout = type("Layout", (), {})
-sys.modules.setdefault("ipywidgets", widgets)
-
 matplotlib = pytest.importorskip("matplotlib")
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
