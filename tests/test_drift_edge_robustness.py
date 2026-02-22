@@ -83,7 +83,7 @@ def test_apply_drift_correction_edge():
     print(table)
 
     dx_vals = table['dx'].values
-    # Note: table has entry for t=1, t=2.
-    assert len(dx_vals) == 2
+    # Note: table has entry for t=0 (ref), t=1, t=2.
+    assert len(dx_vals) == 3
 
-    assert np.allclose(dx_vals, -10.0, atol=1.0)
+    assert np.allclose(dx_vals[1:], -10.0, atol=1.0)

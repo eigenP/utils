@@ -214,6 +214,121 @@ def estimate_shift_1d_iterative(ref_proj, moving_proj, window, max_iter=3, tol=0
 
     return current_shift
 
+def compute_drift_trajectory(
+    projections_x: np.ndarray,
+    projections_y: np.ndarray,
+    mode: Literal['forward', 'reverse', 'both'] = 'forward',
+    shape_limit: tuple = None,
+    windows: tuple = None
+) -> pd.DataFrame:
+    """
+    Computes the drift trajectory (cumulative corrections) for the video.
+
+    Returns a DataFrame with columns: ['Time Point', 'dx', 'dy', 'cum_dx', 'cum_dy']
+    where cum_dx/cum_dy are the shifts needed to align the frame to the reference.
+    """
+    T = projections_x.shape[0]
+
+    # Initialize cumulative drift
+    # We use an array to store cumulative drift for all timepoints
+    cum_dx_arr = np.zeros(T, dtype=np.float32)
+    cum_dy_arr = np.zeros(T, dtype=np.float32)
+
+    # Steps
+    dx_arr = np.zeros(T, dtype=np.float32)
+    dy_arr = np.zeros(T, dtype=np.float32)
+
+    win_x, win_y = windows if windows else (None, None)
+
+    x_shape, y_shape = shape_limit if shape_limit else (1e9, 1e9) # Arbitrary large if None
+
+    # Helper to clamp drift steps
+    def clamp(val, limit):
+        if abs(val) > limit:
+            return 0.0
+        return val
+
+    if mode == 'reverse':
+        # Reference is T-1
+        # Iterate backwards: T-1 -> 1
+        # We estimate shift to align t-1 to t
+
+        for t in tqdm(range(T - 1, 0, -1), desc='Computing Drift Trajectory (Reverse)'):
+            # t goes T-1, ..., 1. We are processing pair (t-1, t).
+            # Target: Align t-1 to t.
+            # estimate(ref, mov) returns shift to align mov to ref.
+            # We want shift for t-1. So t-1 is moving. t is ref.
+
+            # Using estimate_shift_1d_iterative(ref, mov)
+            # Ref: t, Mov: t-1
+            dx = estimate_shift_1d_iterative(projections_x[t], projections_x[t-1], win_x)
+            dy = estimate_shift_1d_iterative(projections_y[t], projections_y[t-1], win_y)
+
+            dx = clamp(dx, x_shape//5)
+            dy = clamp(dy, y_shape//5)
+
+            # P_{t-1} = P_t + dx
+            # Since P is "correction vector", Correction(t-1) = Correction(t) + dx
+            cum_dx_arr[t-1] = cum_dx_arr[t] + dx
+            cum_dy_arr[t-1] = cum_dy_arr[t] + dy
+
+            dx_arr[t-1] = dx
+            dy_arr[t-1] = dy
+
+    else:
+        # Forward or Both
+        # Reference is 0
+
+        for t in tqdm(range(1, T), desc=f'Computing Drift Trajectory ({mode})'):
+            # Align t to t-1
+
+            if mode == 'both':
+                # Bidirectional
+                # dx_bwd: Align t to t-1 (Ref t-1, Mov t)
+                dx_bwd = estimate_shift_1d_iterative(projections_x[t-1], projections_x[t], win_x)
+                dy_bwd = estimate_shift_1d_iterative(projections_y[t-1], projections_y[t], win_y)
+
+                # dx_fwd: Align t-1 to t (Ref t, Mov t-1)
+                dx_fwd = estimate_shift_1d_iterative(projections_x[t], projections_x[t-1], win_x)
+                dy_fwd = estimate_shift_1d_iterative(projections_y[t], projections_y[t-1], win_y)
+
+                # Average step to align t to t-1
+                # We want shift for t.
+                # dx_bwd is shift for t.
+                # dx_fwd is shift for t-1 (relative to t).
+                # shift(t) approx -shift(t-1).
+                # dx = (dx_bwd - dx_fwd) / 2
+                dx = (dx_bwd - dx_fwd) / 2
+                dy = (dy_bwd - dy_fwd) / 2
+
+            else:
+                # Forward only
+                # Ref t-1, Mov t
+                dx = estimate_shift_1d_iterative(projections_x[t-1], projections_x[t], win_x)
+                dy = estimate_shift_1d_iterative(projections_y[t-1], projections_y[t], win_y)
+
+            dx = clamp(dx, x_shape//5)
+            dy = clamp(dy, y_shape//5)
+
+            # Correction(t) = Correction(t-1) + dx
+            cum_dx_arr[t] = cum_dx_arr[t-1] + dx
+            cum_dy_arr[t] = cum_dy_arr[t-1] + dy
+
+            dx_arr[t] = dx
+            dy_arr[t] = dy
+
+    # Create DataFrame
+    df = pd.DataFrame({
+        'Time Point': np.arange(T),
+        'dx': dx_arr,
+        'dy': dy_arr,
+        'cum_dx': cum_dx_arr,
+        'cum_dy': cum_dy_arr
+    })
+
+    return df
+
+
 def apply_drift_correction_2D(
     video_data,
     reverse_time = False,
@@ -290,166 +405,59 @@ def apply_drift_correction_2D(
     win_x = windows.tukey(y_shape, alpha=0.1).astype(np.float32)
     win_y = windows.tukey(x_shape, alpha=0.1).astype(np.float32)
 
-    # Loop through each time point in the video data, starting from the second frame
-    # Wrap the range function with tqdm for a progress bar
-
+    mode = 'forward'
     if reverse_time == 'both':
-        # Forward order for 'both' (Bidirectional Estimation, Reference=Frame 0)
-        range_values = range(1, t_shape)
+        mode = 'both'
+    elif reverse_time:
+        mode = 'reverse'
 
-        # Ensure first frame is copied
-        corrected_data[0] = video_data[0]
+    # Compute trajectory first
+    drift_table = compute_drift_trajectory(
+        projections_x, projections_y,
+        mode=mode,
+        shape_limit=(x_shape, y_shape),
+        windows=(win_x, win_y)
+    )
 
-        for time_point in tqdm(range_values, desc='Applying Drift Correction'):
-            # Estimate the drift between the current frame and the previous frame
+    # Iterate all frames to apply correction
+    for t in tqdm(range(t_shape), desc='Applying Drift Correction'):
+        # Lookup drift
+        # drift_table is indexed 0..T-1 and guaranteed to be sorted by Time Point by compute_drift_trajectory
+        cum_dx = drift_table.loc[t, 'cum_dx']
+        cum_dy = drift_table.loc[t, 'cum_dy']
 
-            # matth: Use iterative robust estimation
-            dx_backward = estimate_shift_1d_iterative(projections_x[time_point - 1], projections_x[time_point], win_x)
-            dy_backward = estimate_shift_1d_iterative(projections_y[time_point - 1], projections_y[time_point], win_y)
+        # Apply correction: shift by (cum_dy, cum_dx)
+        # Note: input coords (y, x). shift=(dy, dx).
 
-            dx_forward = estimate_shift_1d_iterative(projections_x[time_point], projections_x[time_point - 1], win_x)
-            dy_forward = estimate_shift_1d_iterative(projections_y[time_point], projections_y[time_point - 1], win_y)
+        # NOTE: We cast to integer for the shift operation, but keep cumulative drift as float
+        # to prevent integrator windup/loss of precision for slow drifts.
 
-            # dx_backward is shift T-1 -> T (e.g. -0.5 for +0.5 motion)
-            # dx_forward is shift T -> T-1 (e.g. +0.5 for +0.5 motion)
-            # We want the average of (dx_backward) and (-dx_forward)
-            # (dx_backward - dx_forward) / 2
-            dx = (dx_backward - dx_forward) / 2
-            dy = (dy_backward - dy_forward) / 2
+        if method == 'subpixel':
+            input_frame = video_data[t].astype(np.float32)
 
+            shifted_slice = shift(
+                input_frame,
+                shift=(cum_dy, cum_dx),
+                order=3,
+                mode='constant',
+                cval=min_value
+            )
 
-            ##### if too large, then keep as zero ####
-            if abs(dx) > x_shape//5:
-                dx = 0.0
-            if abs(dy) > y_shape//5:
-                # print('Whaa')
-                dy = 0.0
+            if dtype_min is not None and dtype_max is not None:
+                np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
 
-            # Update the cumulative drift
-            cum_dx, cum_dy = cum_dx + dx, cum_dy + dy
+            corrected_data[t] = shifted_slice
 
-            # Apply drift correction to the current frame
-            # NOTE: We cast to integer for the shift operation, but keep cumulative drift as float
-            # to prevent integrator windup/loss of precision for slow drifts.
-
-            # OFFSET = 0 for Forward iteration
-            OFFSET = 0
-
-            if method == 'subpixel':
-                # Subpixel correction using bicubic interpolation
-                s_dy, s_dx = cum_dy, cum_dx
-
-                # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
-
-                shifted_slice = shift(
-                    input_frame,
-                    shift=(s_dy, s_dx),
-                    order=3,
-                    mode='constant',
-                    cval=min_value
-                )
-
-                # Robust clipping to prevent integer wraparound if bicubic overshoots
-                if dtype_min is not None and dtype_max is not None:
-                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
-
-                # Assign (implicit cast back to original dtype)
-                corrected_data[time_point] = shifted_slice
-
-            else:
-                # Integer correction
-                shift_dx = int(round(cum_dx))
-                shift_dy = int(round(cum_dy))
-
-                zero_shift_multi_dimensional(
-                    video_data[time_point - OFFSET],
-                    shifts=(shift_dy, shift_dx),
-                    fill_value=min_value,
-                    out=corrected_data[time_point]
-                )
-
-            # Record the drift values and cumulative drift for the current time point
-            drift_records.append({'Time Point': time_point, 'dx': dx, 'dy': dy, 'cum_dx': cum_dx, 'cum_dy': cum_dy})
-    else:
-
-        if not reverse_time:
-            # Regular order
-            range_values = range(1, t_shape)
-            DRIFT_SIGN = 1
-
-            # The first frame does not need correction
-            corrected_data[0] = video_data[0]
         else:
-            # Reversed order
-            range_values = range(t_shape - 1, 0, -1)
-            DRIFT_SIGN = -1
+            shift_dx = int(round(cum_dx))
+            shift_dy = int(round(cum_dy))
 
-            # The first frame does not need correction
-            corrected_data[-1] = video_data[-1]
-
-        for time_point in tqdm(range_values, desc='Applying Drift Correction'):
-            # Estimate the drift between the current frame and the previous frame
-
-            # matth: Use iterative robust estimation
-            dx = estimate_shift_1d_iterative(projections_x[time_point - 1], projections_x[time_point], win_x)
-            dy = estimate_shift_1d_iterative(projections_y[time_point - 1], projections_y[time_point], win_y)
-
-            dx, dy = dx * DRIFT_SIGN, dy * DRIFT_SIGN
-
-            ##### if too large, then keep as zero ####
-            if abs(dx) > x_shape//5:
-                dx = 0.0
-            if abs(dy) > y_shape//5:
-                # print('Whaa')
-                dy = 0.0
-
-            # Update the cumulative drift
-            cum_dx, cum_dy = cum_dx + dx, cum_dy + dy
-
-            # Apply drift correction to the current frame
-            # NOTE: We cast to integer for the shift operation, but keep cumulative drift as float
-            # to prevent integrator windup/loss of precision for slow drifts.
-
-            OFFSET = 1 if reverse_time else 0 
-
-            if method == 'subpixel':
-                # Subpixel correction using bicubic interpolation
-                s_dy, s_dx = cum_dy, cum_dx
-
-                # Perform shift on float data to avoid wrapping of negative/overshot values
-                input_frame = video_data[time_point - OFFSET].astype(np.float32)
-
-                shifted_slice = shift(
-                    input_frame,
-                    shift=(s_dy, s_dx),
-                    order=3,
-                    mode='constant',
-                    cval=min_value
-                )
-
-                if dtype_min is not None and dtype_max is not None:
-                    np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
-
-                corrected_data[time_point] = shifted_slice
-
-            else:
-                shift_dx = int(round(cum_dx))
-                shift_dy = int(round(cum_dy))
-
-                zero_shift_multi_dimensional(
-                    video_data[time_point - OFFSET],
-                    shifts=(shift_dy, shift_dx),
-                    fill_value=min_value,
-                    out=corrected_data[time_point]
-                )
-
-            # Record the drift values and cumulative drift for the current time point
-            drift_records.append({'Time Point': time_point, 'dx': dx, 'dy': dy, 'cum_dx': cum_dx, 'cum_dy': cum_dy})
-
-    # Create a DataFrame from the list of drift records
-    drift_table = pd.DataFrame(drift_records)
-    drift_table.sort_values(by=['Time Point'], inplace=True)
+            zero_shift_multi_dimensional(
+                video_data[t],
+                shifts=(shift_dy, shift_dx),
+                fill_value=min_value,
+                out=corrected_data[t]
+            )
 
     # Optionally, save the drift table to a CSV file
     if save_drift_table:

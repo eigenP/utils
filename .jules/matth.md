@@ -12,3 +12,15 @@
 **Learning:** Applying a stationary window (e.g., Tukey) to moving objects before cross-correlation introduces a systematic bias towards zero shift. The window attenuates the signal overlap asymmetrically, pulling the correlation peak towards the window center. This bias is small per step but accumulates linearly in pairwise registration (random walk drift), leading to significant errors over long sequences (e.g., >0.8 px over 5 cycles).
 Wait, "random walk" usually implies variance growing as sqrt(T), but here the bias is *linear* with T.
 **Action:** Implement iterative windowing or "shift-compensated windowing". Estimate the shift, align the moving signal to the reference (using high-order interpolation to preserve spectral content), and re-estimate the residual shift. This ensures the window is applied symmetrically to the aligned signals, eliminating the bias. Using cubic interpolation for the alignment step is crucial to prevent interpolation smoothing from biasing the correlation peak.
+
+## 2024-05-25 - Trajectory Integration for Robust Drift Correction
+**Learning:**
+Accumulating drift corrections by adding pairwise estimates (`cum_dx += dx`) introduces "integrator windup" or random walk drift, where small errors accumulate over time (variance $\propto T$).
+Furthermore, coupling the trajectory estimation (integration) with the correction application (shifting) inside a single loop complicates logic (especially for reverse time or bidirectional modes) and leads to off-by-one indexing errors.
+The standard approach of calculating drift between $t$ and $t-1$ for correction leads to ambiguity in reverse mode about whether the correction is for $t$ or $t-1$ relative to the reference.
+
+**Action:**
+Decouple the problem into two distinct phases:
+1. **Trajectory Estimation:** Calculate the global absolute position $P_t$ for every frame relative to a fixed reference (Frame 0). This allows global smoothing or constraints to be applied to the trajectory $P(t)$ before any image data is modified.
+2. **Correction Application:** Treat correction as a functional mapping $I'_t(x) = I_t(x - P_t)$. This is stateless and parallelizable.
+For bidirectional estimation, explicitly average the forward step $\Delta P_{fwd} = P_t - P_{t-1}$ and backward step $\Delta P_{bwd} = -(P_{t-1} - P_t)$ to reduce bias, rather than relying on implicit loop ordering.
