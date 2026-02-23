@@ -14,7 +14,7 @@
 ##################
 
 import numpy as np
-from scipy import ndimage
+from scipy import ndimage, interpolate
 from scipy.ndimage import binary_erosion, binary_dilation
 from skimage import exposure, filters
 from typing import Union, Tuple
@@ -136,20 +136,46 @@ def extract_surface(
     surface_z_red = np.full((Y_red, X_red), -1.0, dtype=np.float32)
     surface_z_red[has_surface] = z_refined
 
-    # Upscale in Y/X only
-    surface_z_full = ndimage.zoom(
+    # Upscale in Y/X using Coordinate-Aware Interpolation
+    # matth: 'ndimage.zoom' assumes corner alignment which causes spatial shifts for block-averaged data.
+    # Block averages are centered at (i + 0.5) * scale - 0.5.
+    # We map these reduced coordinates to the full pixel grid.
+
+    y_red_centers = (np.arange(Y_red) + 0.5) * sy - 0.5
+    x_red_centers = (np.arange(X_red) + 0.5) * sx - 0.5
+
+    # Create interpolator
+    # bounds_error=False, fill_value=-1.0 (or extrapolate?)
+    # Since we padded the image before reduction, the reduced grid should cover the original FOV mostly.
+    # We use nearest extrapolation for boundaries to avoid artifacts.
+    # Check for small dimensions where cubic interpolation fails (needs >= 4 points)
+    method = 'cubic'
+    min_dim = min(Y_red, X_red)
+    if min_dim < 4:
+        method = 'linear'
+    if min_dim < 2:
+        method = 'nearest'
+
+    interpolator = interpolate.RegularGridInterpolator(
+        (y_red_centers, x_red_centers),
         surface_z_red,
-        zoom=(sy, sx),
-        order=3
+        method=method,
+        bounds_error=False,
+        fill_value=None # Linear extrapolation
     )
 
-    # Scale Z back to full resolution
-    surface_z_full *= sz
-
-    # Ensure dimensions match original image (handle padding/scaling mismatch)
-    # The padding added during binning can cause surface_z_full to be larger than image.
     Z, Y, X = image.shape
-    surface_z_full = surface_z_full[:Y, :X]
+
+    # Target grid
+    gy, gx = np.meshgrid(np.arange(Y), np.arange(X), indexing='ij')
+    pts = np.array([gy.ravel(), gx.ravel()]).T
+
+    surface_z_full = interpolator(pts).reshape(Y, X).astype(np.float32)
+
+    # Scale Z back to full resolution
+    # matth: Correct Z-coordinate mapping for block-averaged downscaling.
+    # z_reduced corresponds to physical z = (z_reduced + 0.5) * sz - 0.5
+    surface_z_full = (surface_z_full + 0.5) * sz - 0.5
 
     # FIX: mask-aware smoothing
     valid_mask = surface_z_full >= 0
