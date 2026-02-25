@@ -121,5 +121,55 @@ class TestSurfaceAccuracy(unittest.TestCase):
         # With sigma=2.0, the "staircase" effect is smoothed out, so the shift should be consistent.
         self.assertLess(diff_std, 0.15, "Shift StdDev should be low for rigid shift")
 
+    def test_downscaling_alignment(self):
+        """
+        Verify that surface extraction with downscaling does not introduce
+        spatial shift bias or boundary artifacts.
+        """
+        # Create a simple block volume
+        Z, Y, X = 64, 64, 64
+        vol = np.zeros((Z, Y, X), dtype=np.uint8)
+
+        # Surface at Z=32 in the center
+        # Margin 16 ensures alignment with 4x4 blocks
+        margin = 16
+        vol[32:, margin:-margin, margin:-margin] = 200
+        vol[:32, margin:-margin, margin:-margin] = 50
+
+        # Background
+        # vol[:, :margin, :] = 10
+        # etc... implicitly handled by initialization
+
+        downscale = 4
+        # Use low sigma to see the edge clearly
+        mask, hmap = extract_surface(vol, downscale_factor=downscale, gaussian_sigma=0.5, return_heightmap=True)
+
+        # Check alignment at the left edge (X=margin)
+        # The first valid pixel should be at margin
+        center_y = Y // 2
+        profile = hmap[center_y, :]
+
+        valid_indices = np.where(profile > 0)[0]
+        self.assertTrue(len(valid_indices) > 0, "Surface not found")
+
+        first_valid = valid_indices[0]
+        self.assertEqual(first_valid, margin, f"Surface start shifted! Expected {margin}, got {first_valid}")
+
+        # Check for boundary artifacts (curl down)
+        # The value at the edge should be close to the value inside
+        val_edge = profile[margin]
+        val_inside = profile[margin + 2]
+
+        diff = abs(val_inside - val_edge)
+        self.assertLess(diff, 2.0, f"Significant boundary artifact detected: edge={val_edge}, inside={val_inside}")
+
+        # Check Z value (should be ~31.5 due to interpolation of transition 31-32)
+        # Ground truth is step at 32. Otsu threshold ~125.
+        # Transition happens between 31 (50) and 32 (200).
+        # Linear interp for 125: (125-50)/(200-50) = 75/150 = 0.5.
+        # So Z = 31 + 0.5 = 31.5.
+        # Relaxed delta to account for Otsu threshold variability
+        self.assertAlmostEqual(val_inside, 31.5, delta=2.0)
+
 if __name__ == '__main__':
     unittest.main()
