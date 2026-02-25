@@ -68,10 +68,14 @@ interpolated_colors = [tab20(x) for x in new_colors]
 rng = np.random.RandomState(42)
 
 rng.shuffle(interpolated_colors)
-final_colors = [(0, 0, 0)] + interpolated_colors  # Black at the zero index
+final_colors = [(0, 0, 0, 0)] + interpolated_colors  # Transparent black at the zero index
 
 # Create the new colormap
 labels_cmap = LinearSegmentedColormap.from_list("labels_cmap", final_colors)
+
+# Print a hint for users who might need the background to be black
+print("Hint: labels_cmap background is transparent by default. To set it to black, run:")
+print("labels_cmap._init(); labels_cmap._lut[0] = [0, 0, 0, 1]")
 
 
 def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_kwargs):

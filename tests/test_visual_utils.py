@@ -42,8 +42,8 @@ def test_hist_imshow_axes_dict_contents():
 def test_labels_cmap():
     # Verify labels_cmap is a valid colormap and has correct structure
     assert labels_cmap.name == "labels_cmap"
-    # It's a LinearSegmentedColormap, so we can check it returns black for 0
-    assert labels_cmap(0.0) == (0.0, 0.0, 0.0, 1.0) # RGBA for black
+    # It's a LinearSegmentedColormap, so we can check it returns transparent for 0
+    assert labels_cmap(0.0) == (0.0, 0.0, 0.0, 0.0) # RGBA for transparent
 
     # Check that we can import it and it's not None
     assert labels_cmap is not None
