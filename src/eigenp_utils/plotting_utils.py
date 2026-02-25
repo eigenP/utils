@@ -223,7 +223,8 @@ def raincloud_plot(data,
                    ax=None,
                    orientation='vertical',
                    palette=None,
-                   figsize=(4, 4)):
+                   figsize=(4, 4),
+                   x=None, y=None, hue=None):
     """
     Creates a raincloud plot (half-violin + boxplot + jittered scatter).
 
@@ -249,6 +250,12 @@ def raincloud_plot(data,
         Colors to use.
     figsize : tuple, default (4, 4)
         Figure size if creating a new figure.
+    x : str, optional
+        If data is a DataFrame, column name for x-axis variable.
+    y : str, optional
+        If data is a DataFrame, column name for y-axis variable.
+    hue : str, optional
+        If data is a DataFrame, column name for grouping variable.
 
     Returns
     -------
@@ -257,55 +264,192 @@ def raincloud_plot(data,
     """
 
     # --- 1. Normalize Input Data ---
-    plot_data = [] # List of (label, values)
+    # We will convert all inputs into a list of "PlotItems".
+    # Each PlotItem is a dict: {'values': array, 'position': float, 'color': Any, 'width': float, 'label': str}
 
-    if isinstance(data, pd.DataFrame):
-        for col in data.columns:
-            vals = data[col].dropna().values
-            plot_data.append((str(col), vals))
-    elif isinstance(data, dict):
-        for label, values in data.items():
-            vals = np.asarray(values)
-            vals = vals[~np.isnan(vals)] # Remove NaNs
-            plot_data.append((str(label), vals))
-    elif isinstance(data, (list, np.ndarray)):
-        # Check if it's a list of arrays (multiple groups) or a single array
-        data_arr = np.asarray(data, dtype=object)
+    plot_items = []
+    xtick_labels = []
+    xtick_positions = []
 
-        # Logic to determine if it's a single group or multiple:
-        # 1. If it's a 1D array of numbers -> Single group
-        # 2. If it's a list of lists/arrays -> Multiple groups
-        # 3. If it's a 2D array -> Multiple groups (rows or cols? assume rows are groups)
+    vert = (orientation == 'vertical')
 
-        is_multiple = False
-
-        # Try to convert to a numeric array
-        try:
-            numeric_arr = np.asarray(data, dtype=float)
-            # If successful conversion
-            if numeric_arr.ndim > 1:
-                # 2D+ array -> treat as multiple groups (iterate over first dimension)
-                is_multiple = True
-            else:
-                # 1D array -> single group
-                is_multiple = False
-        except (ValueError, TypeError):
-            # Could not convert to a regular float array (likely jagged list of lists)
-            # Treat as multiple groups
-            is_multiple = True
-
-        if is_multiple:
-            for i, d in enumerate(data):
-                vals = np.asarray(d, dtype=float)
-                vals = vals[~np.isnan(vals)]
-                plot_data.append((str(i), vals))
+    # Branch A: DataFrame with x/y specified (Seaborn-style)
+    if isinstance(data, pd.DataFrame) and (x is not None or y is not None):
+        if vert:
+            cat_col = x
+            val_col = y
+            if val_col is None: raise ValueError("For vertical plot, y must be specified (as value).")
         else:
-            # Single group
-            vals = np.asarray(data, dtype=float)
-            vals = vals[~np.isnan(vals)]
-            plot_data.append(("Data", vals))
+            cat_col = y
+            val_col = x
+            if val_col is None: raise ValueError("For horizontal plot, x must be specified (as value).")
+
+        # Check columns exist
+        if val_col and val_col not in data.columns: raise ValueError(f"Column {val_col} not found.")
+        if cat_col and cat_col not in data.columns: raise ValueError(f"Column {cat_col} not found.")
+        if hue and hue not in data.columns: raise ValueError(f"Column {hue} not found.")
+
+        # Get Data and Drop NaNs
+        cols_to_check = [c for c in [val_col, cat_col, hue] if c]
+        df_clean = data.dropna(subset=cols_to_check)
+
+        # Get Categories
+        if cat_col:
+            cats = df_clean[cat_col].unique()
+            # Try to respect pandas categorical order if present
+            if isinstance(df_clean[cat_col].dtype, pd.CategoricalDtype):
+                cats = df_clean[cat_col].cat.categories
+                cats = [c for c in cats if c in df_clean[cat_col].values]
+            else:
+                try:
+                    cats = np.sort(cats)
+                except:
+                    pass
+        else:
+            cats = ["Data"]
+
+        # Get Hues
+        if hue:
+            hues = df_clean[hue].unique()
+            if isinstance(df_clean[hue].dtype, pd.CategoricalDtype):
+                hues = df_clean[hue].cat.categories
+                hues = [h for h in hues if h in df_clean[hue].values]
+            else:
+                try:
+                    hues = np.sort(hues)
+                except:
+                    pass
+        else:
+            hues = [None]
+
+        # Resolve Palette
+        if hue:
+            if isinstance(palette, dict):
+                color_map = palette
+            else:
+                if palette is None:
+                    pal_list = ["#4C78A8", "#F58518", "#E45756", "#72B7B2", "#54A24B", "#EECA3B", "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC"]
+                    pal_iter = itertools.cycle(pal_list)
+                elif isinstance(palette, str):
+                    pal_iter = itertools.cycle([palette])
+                else:
+                    pal_iter = itertools.cycle(palette)
+
+                color_map = {h: next(pal_iter) for h in hues}
+        else:
+             # Legacy default: all blue if no palette, or cycle if palette
+             pass
+
+        # Build PlotItems
+        total_width = 0.8
+        n_hues = len(hues)
+        slot_width = total_width / n_hues
+
+        for i_cat, cat in enumerate(cats):
+            xtick_positions.append(i_cat)
+            xtick_labels.append(str(cat))
+
+            if cat_col:
+                sub_df = df_clean[df_clean[cat_col] == cat]
+            else:
+                sub_df = df_clean
+
+            for i_hue, h in enumerate(hues):
+                if hue:
+                    group_data = sub_df[sub_df[hue] == h]
+                    label = f"{cat} - {h}"
+                    offset = (i_hue - (n_hues - 1) / 2) * slot_width
+                    pos = i_cat + offset
+                    col = color_map.get(h, "#4C78A8")
+                else:
+                    group_data = sub_df
+                    label = str(cat)
+                    pos = i_cat
+                    offset = 0
+
+                    if palette is None:
+                        col = "#4C78A8"
+                    elif isinstance(palette, str):
+                        col = palette
+                    elif isinstance(palette, dict):
+                         col = palette.get(cat, "#4C78A8")
+                    else:
+                        pal_cycle = itertools.cycle(palette)
+                        col = next(itertools.islice(pal_cycle, i_cat, i_cat + 1))
+
+                vals = group_data[val_col].values
+
+                if len(vals) == 0: continue
+
+                plot_items.append({
+                    'values': vals,
+                    'position': pos,
+                    'width': slot_width,
+                    'color': col,
+                    'label': label
+                })
+
+        if x_label is None: x_label = cat_col if vert else val_col
+        if y_label is None: y_label = val_col if vert else cat_col
+
     else:
-        raise ValueError("Unsupported data type")
+        # Branch B: Legacy Input Processing
+        raw_plot_data = [] # List of (label, values)
+
+        if isinstance(data, pd.DataFrame):
+            for col in data.columns:
+                vals = data[col].dropna().values
+                raw_plot_data.append((str(col), vals))
+        elif isinstance(data, dict):
+            for label, values in data.items():
+                vals = np.asarray(values)
+                vals = vals[~np.isnan(vals)]
+                raw_plot_data.append((str(label), vals))
+        elif isinstance(data, (list, np.ndarray)):
+            data_arr = np.asarray(data, dtype=object)
+            is_multiple = False
+            try:
+                numeric_arr = np.asarray(data, dtype=float)
+                if numeric_arr.ndim > 1:
+                    is_multiple = True
+                else:
+                    is_multiple = False
+            except (ValueError, TypeError):
+                is_multiple = True
+
+            if is_multiple:
+                for i, d in enumerate(data):
+                    vals = np.asarray(d, dtype=float)
+                    vals = vals[~np.isnan(vals)]
+                    raw_plot_data.append((str(i), vals))
+            else:
+                vals = np.asarray(data, dtype=float)
+                vals = vals[~np.isnan(vals)]
+                raw_plot_data.append(("Data", vals))
+        else:
+            raise ValueError("Unsupported data type")
+
+        # Colors
+        n_groups = len(raw_plot_data)
+        if palette is None:
+            colors = ["#4C78A8"] * n_groups
+        elif isinstance(palette, str):
+             # If single color string
+            colors = [palette] * n_groups
+        else:
+            # List of colors
+            colors = list(itertools.islice(itertools.cycle(palette), n_groups))
+
+        for i, (label, vals) in enumerate(raw_plot_data):
+            plot_items.append({
+                'values': vals,
+                'position': float(i),
+                'width': 0.8,
+                'color': colors[i],
+                'label': label
+            })
+            xtick_positions.append(i)
+            xtick_labels.append(label)
 
     # --- 2. Setup Figure/Axes ---
     if ax is None:
@@ -313,28 +457,15 @@ def raincloud_plot(data,
     else:
         fig = ax.figure
 
-    # --- 3. Colors ---
-    n_groups = len(plot_data)
-    if palette is None:
-        # Default color
-        colors = ["#4C78A8"] * n_groups
-    elif isinstance(palette, str):
-         # If single color string
-        colors = [palette] * n_groups
-    else:
-        # List of colors
-        colors = list(itertools.islice(itertools.cycle(palette), n_groups))
-
     # --- 4. Plotting Loop ---
-    vert = (orientation == 'vertical')
-
-    # Iterate over groups
-    for i, (label, vals) in enumerate(plot_data):
-        col = colors[i]
-        pos = i # Position on categorical axis
+    for item in plot_items:
+        vals = item['values']
+        pos = item['position']
+        col = item['color']
+        width = item['width']
 
         # A. Violin
-        parts = ax.violinplot(vals, positions=[pos], widths=0.8,
+        parts = ax.violinplot(vals, positions=[pos], widths=width,
                               showextrema=False, vert=vert)
 
         for pc in parts["bodies"]:
@@ -348,36 +479,25 @@ def raincloud_plot(data,
 
             if vert:
                 # Vertical: x is dim 0. Center is 'pos'.
-                # To keep left half, we want x <= mean_x (or pos).
-                # The violinplot draws symmetrically around 'pos'.
-                # mean_x should be approx 'pos'.
-                # We clip the Right side to the center, effectively removing it?
-                # Original code: verts[:, 0] = np.clip(verts[:, 0], None, mean_x)
-                # This clips x to (-inf, mean). So it keeps the left side.
                 mean_val = verts[:, 0].mean()
                 verts[:, 0] = np.clip(verts[:, 0], None, mean_val)
             else:
                 # Horizontal: y is dim 1. Center is 'pos'.
-                # Violin is drawn along y-axis centered at pos.
-                # User wants violin "atop" (Y >= pos).
-                # To keep "top" half (y >= mean), we clip (mean, None).
                 mean_val = verts[:, 1].mean()
                 verts[:, 1] = np.clip(verts[:, 1], mean_val, None)
 
         # B. Scatter (Rain)
         rng = np.random.default_rng(0)
-        jitter_vals = rng.normal(loc=0, scale=0.04, size=len(vals))
-
-        # Scatter needs to be offset to the "right" (or top) of the violin
-        # Violin is on the "left" (or bottom)
-        offset = 0.20
+        # Scale jitter and offset by width ratio relative to 0.8 (default)
+        scale_factor = width / 0.8
+        jitter_vals = rng.normal(loc=0, scale=0.04 * scale_factor, size=len(vals))
+        offset = 0.20 * scale_factor
 
         if vert:
             x_scatter = pos + offset + jitter_vals
             y_scatter = vals
         else:
             x_scatter = vals
-            # Horizontal: Violin is "atop" (above), so Scatter is "below" (pos - offset)
             y_scatter = pos - offset + jitter_vals
 
         ax.scatter(x_scatter, y_scatter, color=col, alpha=0.50,
@@ -387,43 +507,36 @@ def raincloud_plot(data,
         q1, med, q3 = np.percentile(vals, [25, 50, 75])
 
         if vert:
-            # Vertical line for IQR at x=pos
             ax.vlines(pos, q1, q3, color="k", linewidth=5, zorder=2)
-            # Dot for median
             ax.scatter(pos, med, color="white", edgecolor="k", linewidth=2, s=90, zorder=3)
         else:
-            # Horizontal line for IQR at y=pos
             ax.hlines(pos, q1, q3, color="k", linewidth=5, zorder=2)
             ax.scatter(med, pos, color="white", edgecolor="k", linewidth=2, s=90, zorder=3)
 
     # --- 5. Cosmetics ---
-    labels = [p[0] for p in plot_data]
-    ticks = np.arange(len(plot_data))
-
-    # Handle custom category labels passed via x_label (if vertical) or y_label (if horizontal)
     if vert:
-        if x_label is not None and isinstance(x_label, (list, tuple, np.ndarray)):
-            if len(x_label) == len(plot_data):
-                labels = x_label
+        if x_label is not None and isinstance(x_label, (list, tuple, np.ndarray)) and not isinstance(x_label, str):
+            if len(x_label) == len(xtick_labels):
+                xtick_labels = x_label
                 x_label = None
             else:
-                print(f"Warning: x_label list length ({len(x_label)}) does not match number of groups ({len(plot_data)}). Using as axis label.")
+                print(f"Warning: x_label list length ({len(x_label)}) does not match number of groups ({len(xtick_labels)}). Using as axis label.")
     else:
-        if y_label is not None and isinstance(y_label, (list, tuple, np.ndarray)):
-            if len(y_label) == len(plot_data):
-                labels = y_label
+        if y_label is not None and isinstance(y_label, (list, tuple, np.ndarray)) and not isinstance(y_label, str):
+            if len(y_label) == len(xtick_labels):
+                xtick_labels = y_label
                 y_label = None
             else:
-                print(f"Warning: y_label list length ({len(y_label)}) does not match number of groups ({len(plot_data)}). Using as axis label.")
+                print(f"Warning: y_label list length ({len(y_label)}) does not match number of groups ({len(xtick_labels)}). Using as axis label.")
 
     if vert:
-        ax.set_xticks(ticks)
-        ax.set_xticklabels(labels)
-        if x_label: ax.set_xlabel(x_label) # Use xlabel if provided (original used xticklabels header)
+        ax.set_xticks(xtick_positions)
+        ax.set_xticklabels(xtick_labels)
+        if x_label: ax.set_xlabel(x_label)
         if y_label: ax.set_ylabel(y_label)
     else:
-        ax.set_yticks(ticks)
-        ax.set_yticklabels(labels)
+        ax.set_yticks(xtick_positions)
+        ax.set_yticklabels(xtick_labels)
         if x_label: ax.set_xlabel(x_label)
         if y_label: ax.set_ylabel(y_label)
 
