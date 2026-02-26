@@ -13,6 +13,7 @@
 Wait, "random walk" usually implies variance growing as sqrt(T), but here the bias is *linear* with T.
 **Action:** Implement iterative windowing or "shift-compensated windowing". Estimate the shift, align the moving signal to the reference (using high-order interpolation to preserve spectral content), and re-estimate the residual shift. This ensures the window is applied symmetrically to the aligned signals, eliminating the bias. Using cubic interpolation for the alignment step is crucial to prevent interpolation smoothing from biasing the correlation peak.
 
+<<<<<<< matth/decouple-drift-estimation-2279110621154388654
 ## 2024-05-25 - Trajectory Integration for Robust Drift Correction
 **Learning:**
 Accumulating drift corrections by adding pairwise estimates (`cum_dx += dx`) introduces "integrator windup" or random walk drift, where small errors accumulate over time (variance $\propto T$).
@@ -24,3 +25,9 @@ Decouple the problem into two distinct phases:
 1. **Trajectory Estimation:** Calculate the global absolute position $P_t$ for every frame relative to a fixed reference (Frame 0). This allows global smoothing or constraints to be applied to the trajectory $P(t)$ before any image data is modified.
 2. **Correction Application:** Treat correction as a functional mapping $I'_t(x) = I_t(x - P_t)$. This is stateless and parallelizable.
 For bidirectional estimation, explicitly average the forward step $\Delta P_{fwd} = P_t - P_{t-1}$ and backward step $\Delta P_{bwd} = -(P_{t-1} - P_t)$ to reduce bias, rather than relying on implicit loop ordering.
+=======
+## 2024-05-25 - Spatial Shift Bias in Binned Surface Extraction
+**Learning:** Using `scipy.ndimage.zoom` or standard interpolation on binned data introduces a systematic spatial shift of 0.5 reduced pixels ($\approx S/2$ original pixels) because `zoom` assumes input samples are at integers $0, 1, \dots$ rather than block centers $(i+0.5)S - 0.5$. This causes misalignment between the extracted surface and the original image. Additionally, interpolating against a sentinel value (e.g., -1.0) causes catastrophic boundary artifacts ("curl down") where valid surface values are pulled towards the sentinel, creating false surfaces.
+
+**Action:** Replace `ndimage.zoom` with `RegularGridInterpolator` using explicit block-center coordinates for the source grid. Before upscaling, inpaint invalid regions with the nearest valid neighbor to define proper boundary conditions (0th-order extension) for cubic interpolation, preventing ringing and boundary corruption. Correct the Z-scaling formula to $Z_{full} = (Z_{red} + 0.5)S - 0.5$ to account for bin centering.
+>>>>>>> main

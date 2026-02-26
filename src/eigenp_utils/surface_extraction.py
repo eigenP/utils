@@ -15,7 +15,8 @@
 
 import numpy as np
 from scipy import ndimage
-from scipy.ndimage import binary_erosion, binary_dilation
+from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt
+from scipy.interpolate import RegularGridInterpolator
 from skimage import exposure, filters
 from typing import Union, Tuple
 
@@ -136,30 +137,122 @@ def extract_surface(
     surface_z_red = np.full((Y_red, X_red), -1.0, dtype=np.float32)
     surface_z_red[has_surface] = z_refined
 
-    # Upscale in Y/X only
-    surface_z_full = ndimage.zoom(
-        surface_z_red,
-        zoom=(sy, sx),
-        order=3
-    )
+    # matth: Robust Upscaling
+    # 1. Inpaint invalid regions (-1.0) with nearest valid value to prevent
+    #    interpolation artifacts (ringing/undershoot) at boundaries.
+    # 2. Use RegularGridInterpolator with correct block centers to eliminate
+    #    spatial shift bias caused by ndimage.zoom assuming top-left alignment.
+
+    # Inpainting using Distance Transform
+    if np.any(has_surface):
+        # Calculate indices of nearest valid pixel for every pixel
+        # distance_transform_edt computes distance to background (0).
+        # We want distance to valid pixels (has_surface=1).
+        # So input is ~has_surface (0 at valid, 1 at invalid).
+        _, inds = distance_transform_edt(~has_surface, return_indices=True)
+        surface_z_inpainted = surface_z_red[tuple(inds)]
+    else:
+        # Fallback if no surface found at all
+        surface_z_inpainted = np.zeros_like(surface_z_red)
+
+    # Define coordinate systems
+    # Reduced grid: centers of blocks. Block i spans [i*S, (i+1)*S). Center: (i+0.5)*S - 0.5.
+    y_red_coords = (np.arange(Y_red) + 0.5) * sy - 0.5
+    x_red_coords = (np.arange(X_red) + 0.5) * sx - 0.5
+
+    # Handle single pixel dimensions (avoid RegularGridInterpolator error if length < 2)
+    # If length is 1, coordinates are just [center]. Interpolation is constant.
+    # RegularGridInterpolator requires points to be strictly ascending.
+    # It handles length=1 if we are careful, or we can use fill_value.
+
+    # Create Interpolator for Height
+    # We use 'cubic' for smooth surface reconstruction, or 'linear' if very small.
+    interp_method = 'cubic' if (Y_red > 3 and X_red > 3) else 'linear'
+
+    # Check bounds to avoid errors with empty/small arrays
+    if Y_red > 0 and X_red > 0:
+        # Handle dimensions with size 1 by padding to size 2 (replicating)
+        # RegularGridInterpolator requires at least 2 points for interpolation
+
+        # Copy to avoid modifying original
+        grid_y = y_red_coords
+        grid_x = x_red_coords
+        data_z = surface_z_inpainted
+        data_mask = has_surface.astype(np.float32)
+
+        if Y_red == 1:
+            grid_y = np.array([y_red_coords[0], y_red_coords[0] + 1.0])
+            data_z = np.stack([data_z[0], data_z[0]], axis=0)
+            data_mask = np.stack([data_mask[0], data_mask[0]], axis=0)
+
+        if X_red == 1:
+            grid_x = np.array([x_red_coords[0], x_red_coords[0] + 1.0])
+            # If we padded Y, data is (2, 1). If not, (Y, 1).
+            data_z = np.stack([data_z[..., 0], data_z[..., 0]], axis=-1)
+            data_mask = np.stack([data_mask[..., 0], data_mask[..., 0]], axis=-1)
+
+        interp_z = RegularGridInterpolator(
+            (grid_y, grid_x),
+            data_z,
+            method=interp_method,
+            bounds_error=False,
+            fill_value=None # Extrapolate using spline
+        )
+
+        # Create Interpolator for Mask (Nearest Neighbor)
+        # We interpolate the boolean mask to find valid regions at full resolution
+        interp_mask = RegularGridInterpolator(
+            (grid_y, grid_x),
+            data_mask,
+            method='nearest',
+            bounds_error=False,
+            fill_value=0.0
+        )
+
+        # Generate Full Resolution Grid
+        Z, Y, X = image.shape
+        # We only need to interpolate up to the original image size
+        # Generating grid only for relevant area saves time if padding was huge (unlikely here)
+        gy = np.arange(Y)
+        gx = np.arange(X)
+
+        # Optimization: Pass tuple of coordinates to save memory (requires scipy >= 1.9)
+        # Use try-except to fallback for older scipy
+        try:
+            surface_z_full = interp_z((gy, gx))
+            mask_full = interp_mask((gy, gx)) > 0.5
+
+            # Check if output is 1D (older scipy treating tuple as points)
+            if surface_z_full.ndim == 1 and Y > 1 and X > 1:
+                 raise ValueError("Scipy returned 1D array for grid interpolation")
+
+        except (TypeError, ValueError):
+            # Fallback for older scipy (or if tuple is not supported)
+            GY, GX = np.meshgrid(gy, gx, indexing='ij')
+            # Stack to create (Y, X, 2) array for interpolator
+            points = np.stack([GY, GX], axis=-1)
+            surface_z_full = interp_z(points)
+            mask_full = interp_mask(points) > 0.5
+    else:
+        Z, Y, X = image.shape
+        surface_z_full = np.zeros((Y, X), dtype=np.float32)
+        mask_full = np.zeros((Y, X), dtype=bool)
 
     # Scale Z back to full resolution
-    surface_z_full *= sz
+    # matth: Correct mapping from block centers to pixels
+    # Z_full = (Z_red + 0.5) * sz - 0.5
+    surface_z_full = (surface_z_full + 0.5) * sz - 0.5
 
-    # Ensure dimensions match original image (handle padding/scaling mismatch)
-    # The padding added during binning can cause surface_z_full to be larger than image.
-    Z, Y, X = image.shape
-    surface_z_full = surface_z_full[:Y, :X]
-
-    # FIX: mask-aware smoothing
-    valid_mask = surface_z_full >= 0
-    surface_z_full[~valid_mask] = 0
-
+    # Smoothing (Post-Upscale)
+    # We smooth the fully populated (inpainted) surface.
+    # This ensures the surface is smooth even at the valid/invalid boundary.
+    # Since we mask *after* smoothing, the valid region will be smooth up to the cut.
     surface_z_full = ndimage.gaussian_filter(
         surface_z_full, sigma=(0.75, 0.75)
     )
 
-    surface_z_full[~valid_mask] = -1
+    # Apply Mask and Sentinel
+    surface_z_full[~mask_full] = -1.0
 
     # Keep float map for return if requested
     surface_z_float = surface_z_full.copy()
