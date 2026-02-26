@@ -30,4 +30,13 @@ For bidirectional estimation, explicitly average the forward step $\Delta P_{fwd
 **Learning:** Using `scipy.ndimage.zoom` or standard interpolation on binned data introduces a systematic spatial shift of 0.5 reduced pixels ($\approx S/2$ original pixels) because `zoom` assumes input samples are at integers $0, 1, \dots$ rather than block centers $(i+0.5)S - 0.5$. This causes misalignment between the extracted surface and the original image. Additionally, interpolating against a sentinel value (e.g., -1.0) causes catastrophic boundary artifacts ("curl down") where valid surface values are pulled towards the sentinel, creating false surfaces.
 
 **Action:** Replace `ndimage.zoom` with `RegularGridInterpolator` using explicit block-center coordinates for the source grid. Before upscaling, inpaint invalid regions with the nearest valid neighbor to define proper boundary conditions (0th-order extension) for cubic interpolation, preventing ringing and boundary corruption. Correct the Z-scaling formula to $Z_{full} = (Z_{red} + 0.5)S - 0.5$ to account for bin centering.
+
+## 2024-05-26 - Topological Filtering for Surface Robustness
+**Learning:**
+Extracting surfaces via `argmax` (finding the first threshold-crossing voxel) is inherently sensitive to disconnected outliers ("floating debris"). A single bright voxel above the true surface causes a catastrophic false positive for that column.
+Simple median filtering or Gaussian smoothing is insufficient because outliers can be bright enough to persist through linear filters.
+The "surface" is by definition a large, coherent structure.
+
+**Action:**
+Enforce topological coherence by identifying connected components in the thresholded volume. Filter out any component that is significantly smaller than the largest foreground component (e.g., $< 10\% S_{max}$). This robustly rejects floating debris regardless of intensity, provided it is spatially disconnected from the main body.
 >>>>>>> main
