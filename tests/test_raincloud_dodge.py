@@ -3,7 +3,7 @@ import pytest
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from src.eigenp_utils.plotting_utils import raincloud_plot
+from eigenp_utils.plotting_utils import raincloud_plot
 
 def test_raincloud_dodge_explicit():
     np.random.seed(42)
