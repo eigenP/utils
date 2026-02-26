@@ -224,7 +224,7 @@ def raincloud_plot(data,
                    orientation='vertical',
                    palette=None,
                    figsize=(4, 4),
-                   x=None, y=None, hue=None):
+                   x=None, y=None, hue=None, dodge=None):
     """
     Creates a raincloud plot (half-violin + boxplot + jittered scatter).
 
@@ -256,6 +256,9 @@ def raincloud_plot(data,
         If data is a DataFrame, column name for y-axis variable.
     hue : str, optional
         If data is a DataFrame, column name for grouping variable.
+    dodge : bool, optional
+        When hue is nested, whether to draw elements at different positions.
+        If None, defaults to True unless hue matches x or y variable.
 
     Returns
     -------
@@ -322,6 +325,13 @@ def raincloud_plot(data,
         else:
             hues = [None]
 
+        # Auto-detect dodge
+        if dodge is None:
+            if hue and cat_col and (hue == cat_col):
+                dodge = False
+            else:
+                dodge = True
+
         # Resolve Palette
         if hue:
             if isinstance(palette, dict):
@@ -331,7 +341,18 @@ def raincloud_plot(data,
                     pal_list = ["#4C78A8", "#F58518", "#E45756", "#72B7B2", "#54A24B", "#EECA3B", "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC"]
                     pal_iter = itertools.cycle(pal_list)
                 elif isinstance(palette, str):
-                    pal_iter = itertools.cycle([palette])
+                    # Check if it's a colormap
+                    try:
+                        cmap = mpl_colormaps[palette]
+                        # Sample colors from colormap
+                        if len(hues) > 1:
+                            colors = cmap(np.linspace(0, 1, len(hues)))
+                        else:
+                            colors = [cmap(0.5)]
+                        pal_iter = itertools.cycle(colors)
+                    except (KeyError, ValueError):
+                        # Not a colormap, treat as single color
+                        pal_iter = itertools.cycle([palette])
                 else:
                     pal_iter = itertools.cycle(palette)
 
@@ -343,7 +364,10 @@ def raincloud_plot(data,
         # Build PlotItems
         total_width = 0.8
         n_hues = len(hues)
-        slot_width = total_width / n_hues
+        if dodge:
+            slot_width = total_width / n_hues
+        else:
+            slot_width = total_width
 
         for i_cat, cat in enumerate(cats):
             xtick_positions.append(i_cat)
@@ -358,7 +382,12 @@ def raincloud_plot(data,
                 if hue:
                     group_data = sub_df[sub_df[hue] == h]
                     label = f"{cat} - {h}"
-                    offset = (i_hue - (n_hues - 1) / 2) * slot_width
+
+                    if dodge:
+                        offset = (i_hue - (n_hues - 1) / 2) * slot_width
+                    else:
+                        offset = 0
+
                     pos = i_cat + offset
                     col = color_map.get(h, "#4C78A8")
                 else:
