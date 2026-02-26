@@ -460,8 +460,36 @@ def raincloud_plot(data,
 
         # Colors
         n_groups = len(raw_plot_data)
+
+        # Determine effective labels for color lookup if palette is a dict
+        effective_labels = [item[0] for item in raw_plot_data]
+
+        # Check if user provided custom labels via x_label (vertical) or y_label (horizontal)
+        labels_override = None
+        if vert:
+             if x_label is not None and isinstance(x_label, (list, tuple, np.ndarray)) and not isinstance(x_label, str):
+                 if len(x_label) == n_groups:
+                     labels_override = x_label
+        else:
+             if y_label is not None and isinstance(y_label, (list, tuple, np.ndarray)) and not isinstance(y_label, str):
+                 if len(y_label) == n_groups:
+                     labels_override = y_label
+
+        if labels_override is not None:
+            effective_labels = labels_override
+
         if palette is None:
             colors = ["#4C78A8"] * n_groups
+        elif isinstance(palette, dict):
+            colors = []
+            for lbl in effective_labels:
+                # Try exact match first, then string match
+                if lbl in palette:
+                    colors.append(palette[lbl])
+                elif str(lbl) in palette:
+                    colors.append(palette[str(lbl)])
+                else:
+                    colors.append("#4C78A8") # Fallback color
         elif isinstance(palette, str):
              # If single color string
             colors = [palette] * n_groups
