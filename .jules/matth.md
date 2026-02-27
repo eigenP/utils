@@ -39,4 +39,12 @@ The "surface" is by definition a large, coherent structure.
 
 **Action:**
 Enforce topological coherence by identifying connected components in the thresholded volume. Filter out any component that is significantly smaller than the largest foreground component (e.g., $< 10\% S_{max}$). This robustly rejects floating debris regardless of intensity, provided it is spatially disconnected from the main body.
+
+## 2024-05-26 - Package Import Standards for Tests
+**Learning:**
+Tests should not import from `src.package_name` (e.g., `from src.eigenp_utils...`). This fails in CI environments where the package is installed as `eigenp_utils`.
+Using `from eigenp_utils...` is correct but requires the package to be installed in the local environment (e.g., via `pip install -e .` or `PYTHONPATH` manipulation) to run tests locally.
+
+**Action:**
+Always write tests assuming the package is installed (`from package_name import ...`). To run tests locally, ensure the package is installed in editable mode.
 >>>>>>> main

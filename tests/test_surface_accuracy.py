@@ -1,7 +1,7 @@
 
 import unittest
 import numpy as np
-from src.eigenp_utils.surface_extraction import extract_surface
+from eigenp_utils.surface_extraction import extract_surface
 from scipy.ndimage import gaussian_filter
 
 class TestSurfaceAccuracy(unittest.TestCase):
