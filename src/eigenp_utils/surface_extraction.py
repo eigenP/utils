@@ -84,6 +84,34 @@ def extract_surface(
     thresh = filters.threshold_otsu(img_proc)
     img_mask = img_proc > thresh
 
+    # --- 6.5 TOPOLOGICAL FILTERING ---
+    # Remove floating debris (outliers) that are topologically disconnected
+    # and significantly smaller than the main surface structure.
+    # This prevents the argmax from picking up noise above the actual surface.
+    labeled_array, num_features = ndimage.label(img_mask)
+
+    if num_features > 1:
+        # Calculate component sizes (bincount is O(N) and very fast)
+        # distinct labels are 1..num_features. 0 is background.
+        component_sizes = np.bincount(labeled_array.ravel())
+
+        # component_sizes[0] is background, ignore it.
+        if len(component_sizes) > 1:
+            # Get sizes of foreground components
+            foreground_sizes = component_sizes[1:]
+            max_size = foreground_sizes.max()
+
+            # Threshold: Keep components at least 10% of the largest one
+            size_threshold = 0.1 * max_size
+
+            # Valid labels (indices in foreground_sizes are label-1)
+            # We want actual labels, so add 1 to indices
+            valid_labels = np.where(foreground_sizes >= size_threshold)[0] + 1
+
+            # Update mask
+            # Only keep pixels belonging to valid components
+            img_mask = np.isin(labeled_array, valid_labels)
+
     # Identify columns with valid surface (at least one foreground pixel)
     has_surface = np.any(img_mask, axis=0)
 
