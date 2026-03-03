@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "matplotlib",
-    "scikit-image",
     "anywidget",
     "traitlets",
     "pandas",
@@ -32,12 +31,15 @@ single-cell = [
     "leidenalg",
     "adjustText"
 ]
-widgets = [
-    "anywidget",
-    "traitlets"
-]
 dev = [
-    "pytest>=7.0.0"
+    "pytest>=7.0.0",
+    "eigenp_utils[image-analysis,plotting,single-cell]"
+]
+image-analysis = [
+    "scikit-image"
+]
+all = [
+    "eigenp_utils[image-analysis,plotting,single-cell,dev]"
 ]
 
 [tool.setuptools]
