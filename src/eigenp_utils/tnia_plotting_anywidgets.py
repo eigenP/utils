@@ -143,7 +143,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, sxy=1, sz=1, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
-                 x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
+                 show_crosshair=True, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
 
         # Determine dimensions
         im_shape = (im[0].shape if isinstance(im, list) else im.shape)
@@ -160,6 +160,7 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.vmax_orig = vmax
         self.gamma_orig = gamma
         self.colors_orig = colors
+        self.show_crosshair = show_crosshair
 
         # Initialize Channel info
         if isinstance(im, list):
@@ -251,8 +252,7 @@ class TNIASliceWidget(TNIAWidgetBase):
         )
 
         # Crosshairs logic (copied from original interactive wrapper)
-        show_crosshair = True # Hardcoded or add parameter? Original wrapper defaulted to True
-        if show_crosshair and fig:
+        if self.show_crosshair and fig:
             # XY
             fig.axes[0].axvline(x_lims[0]*self.sxy + 0.5, color='r', ls=':', alpha=0.3)
             fig.axes[0].axhline(y_lims[0]*self.sxy + 0.5, color='r', ls=':', alpha=0.3)
@@ -633,9 +633,20 @@ def show_xyz_max_slice_interactive(
     if y_s is None: y_s = Y // 2
     if z_s is None: z_s = Z // 2
 
+    # Override for max projection if thickness exceeds shape
+    if x_t >= X:
+        x_t = max(1, X // 2)
+        x_s = X // 2
+    if y_t >= Y:
+        y_t = max(1, Y // 2)
+        y_s = Y // 2
+    if z_t >= Z:
+        z_t = max(1, Z // 2)
+        z_s = Z // 2
+
     return TNIASliceWidget(
         im, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
-        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors,
+        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, show_crosshair=show_crosshair,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
 
