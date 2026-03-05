@@ -20,6 +20,8 @@
 
 ### Core Utilities
 * **I/O Utilities**: Functions to streamline file and data reading.
+* **Dimensionality Parser**: Robust dimensionality inference for arbitrary N-dimensional functions, using unique shape probing to solve ambiguity (`dimensionality_parser`).
+* **Task Calendar Scheduler**: Interactive schedule plotting application powered by Marimo, Plotly, and pandas for timeline visualization of linked events and deadlines (`task_calendar_scheduler`).
 
 ## Installation
 
@@ -50,6 +52,54 @@ uv pip install "eigenp-utils[all] @ git+https://github.com/eigenP/utils.git"
 
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+
+## Usage Examples
+
+Here are some brief examples of how to use `eigenp-utils`:
+
+**Interactive Schedule Plotting:**
+```python
+import marimo
+from eigenp_utils.task_calendar_scheduler import Calendar, Event, plot_calendar
+from datetime import datetime, timedelta
+
+events = [
+    Event("Task A", datetime(2025, 5, 12, 9, 0), timedelta(hours=2), group="Project 1", resource="Blue")
+]
+cal = Calendar(events)
+# Plots the calendar using Plotly inside marimo or Jupyter
+fig = plot_calendar(cal)
+```
+
+**Robust Dimensionality Inference:**
+```python
+from eigenp_utils.dimensionality_parser import dimensionality_parser
+
+@dimensionality_parser(target_dims='YX')
+def my_2d_filter(image_2d):
+    # Process a 2D slice
+    return image_2d * 2
+
+# Apply to a 4D image (T, Z, Y, X) and it automatically iterates over T and Z
+result_4d = my_2d_filter(image_4d)
+```
+
+**Single-Cell Cluster Annotation:**
+```python
+from eigenp_utils.single_cell import annotate_clusters_by_markers
+# Assuming `adata` is a Scanpy AnnData object
+markers = {'T-cells': ['CD3D', 'CD3E'], 'B-cells': ['CD79A', 'MS4A1']}
+annotate_clusters_by_markers(adata, markers, cluster_key='leiden')
+```
+
+## Contributing
+
+We welcome contributions! Please follow these steps to contribute:
+1. Fork the repository.
+2. Install the package in development mode with `pip install -e ".[dev]"`.
+3. Create a new branch for your feature or bugfix.
+4. Ensure all tests pass by running `pytest tests/`.
+5. Submit a pull request detailing your changes.
 
 ## License
 
