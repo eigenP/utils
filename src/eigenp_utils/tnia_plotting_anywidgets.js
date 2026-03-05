@@ -173,6 +173,19 @@ export default {
     uiTogglesContainer.style.alignItems = "center";
     uiTogglesContainer.style.marginBottom = "10px";
 
+    const warningSpan = document.createElement("span");
+    warningSpan.style.color = "red";
+    warningSpan.style.fontSize = "14px";
+    warningSpan.style.marginLeft = "auto"; // Push to right if in flex
+    warningSpan.textContent = model.get("warning_msg");
+    warningSpan.style.display = model.get("warning_msg") ? "block" : "none";
+
+    model.on("change:warning_msg", () => {
+        const msg = model.get("warning_msg");
+        warningSpan.textContent = msg;
+        warningSpan.style.display = msg ? "block" : "none";
+    });
+
     const crosshairLabel = document.createElement("label");
     crosshairLabel.style.display = "flex";
     crosshairLabel.style.alignItems = "center";
@@ -195,6 +208,111 @@ export default {
     crosshairLabel.appendChild(document.createTextNode("Show Crosshair"));
 
     uiTogglesContainer.appendChild(crosshairLabel);
+
+    // Annotation Controls (only if annotator widget)
+    const hasAnnotation = model.get("annotation_mode") !== undefined;
+    if (hasAnnotation) {
+        const annotLabel = document.createElement("label");
+        annotLabel.style.display = "flex";
+        annotLabel.style.alignItems = "center";
+        annotLabel.style.gap = "4px";
+        annotLabel.style.fontSize = "14px";
+        annotLabel.style.marginLeft = "20px";
+
+        const annotCb = document.createElement("input");
+        annotCb.type = "checkbox";
+        annotCb.checked = model.get("annotation_mode");
+        annotCb.addEventListener("change", () => {
+          model.set("annotation_mode", annotCb.checked);
+          model.save_changes();
+          actionSelect.disabled = !annotCb.checked;
+          if(annotCb.checked) {
+              img.style.cursor = "crosshair";
+          } else {
+              img.style.cursor = "default";
+          }
+        });
+
+        model.on("change:annotation_mode", () => {
+            annotCb.checked = model.get("annotation_mode");
+            actionSelect.disabled = !annotCb.checked;
+            img.style.cursor = annotCb.checked ? "crosshair" : "default";
+        });
+
+        annotLabel.appendChild(annotCb);
+        annotLabel.appendChild(document.createTextNode("ANNOTATION"));
+
+        const actionSelect = document.createElement("select");
+        actionSelect.disabled = !annotCb.checked;
+        const addOpt = document.createElement("option");
+        addOpt.value = "add";
+        addOpt.textContent = "Add";
+        const delOpt = document.createElement("option");
+        delOpt.value = "delete";
+        delOpt.textContent = "Delete";
+        actionSelect.appendChild(addOpt);
+        actionSelect.appendChild(delOpt);
+
+        actionSelect.value = model.get("annotation_action");
+        actionSelect.addEventListener("change", () => {
+            model.set("annotation_action", actionSelect.value);
+            model.save_changes();
+        });
+
+        model.on("change:annotation_action", () => {
+            actionSelect.value = model.get("annotation_action");
+        });
+
+        uiTogglesContainer.appendChild(annotLabel);
+        uiTogglesContainer.appendChild(actionSelect);
+
+        // Add click listener for the image
+        img.addEventListener("click", (e) => {
+            if (!model.get("annotation_mode")) return;
+
+            // e.offsetX and e.offsetY are relative to the padding edge of the target node
+            const x_frac = e.offsetX / img.clientWidth;
+            const y_frac = e.offsetY / img.clientHeight;
+
+            // Map the click fraction to the axes.
+            // We use the Python-computed axis_bounds to determine which axis was clicked.
+            const bounds = model.get("axis_bounds");
+            if (!bounds) return;
+
+            let clicked_plane = null;
+            // Bounds are [x0, y0, width, height] from 0 to 1 with origin at bottom-left in Matplotlib.
+            // However, JS y_frac is from top-left.
+            // Let's invert y_frac to match matplotlib's bottom-up coordinate system:
+            const mpl_y_frac = 1.0 - y_frac;
+
+            for (const [plane, b] of Object.entries(bounds)) {
+                const [bx0, by0, bw, bh] = b;
+                if (x_frac >= bx0 && x_frac <= bx0 + bw && mpl_y_frac >= by0 && mpl_y_frac <= by0 + bh) {
+                    clicked_plane = plane;
+                    break;
+                }
+            }
+
+            if (clicked_plane) {
+                // Send click directly to python
+                // We add a timestamp so that consecutive identical clicks still trigger the observer
+                model.set("click_coords", {
+                    'plane': clicked_plane,
+                    'x': x_frac,
+                    'y': y_frac,
+                    't': Date.now()
+                });
+                model.save_changes();
+            }
+        });
+
+        // Initial cursor state
+        if(model.get("annotation_mode")) {
+            img.style.cursor = "crosshair";
+        }
+    }
+
+    uiTogglesContainer.appendChild(warningSpan);
     controlsDiv.appendChild(uiTogglesContainer);
 
     el.appendChild(controlsDiv);
