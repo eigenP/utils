@@ -16,6 +16,7 @@ from pathlib import Path
 import pandas as pd
 import itertools
 import math
+import datetime
 
 # --- Initialization: Load Font and Style ---
 ROOT_DIR = Path(__file__).parent
@@ -838,3 +839,52 @@ def get_nice_number(value):
         nice_fraction = 10
 
     return int(nice_fraction * (10 ** exponent))
+
+
+def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, **kwargs):
+    """
+    Saves the currently active matplotlib figure as an SVG file.
+
+    Parameters
+    ----------
+    filename : str or Path
+        The path where the SVG will be saved. The '.svg' extension is appended if missing.
+    bgnd_color : color, default (1, 1, 1, 0.8)
+        The background color (facecolor) of the saved figure.
+    bbox_inches : str or Bbox, default 'tight'
+        Bounding box in inches: only the given portion of the figure is saved.
+    dpi : float, default 300
+        The resolution in dots per inch for rasterized elements.
+    pad_inches : float, default 0.1
+        Amount of padding around the figure when bbox_inches is 'tight'.
+    **kwargs :
+        Additional keyword arguments passed directly to `plt.savefig`.
+    """
+    fig = plt.gcf()
+
+    # Extract figure title for metadata
+    title = fig._suptitle.get_text() if fig._suptitle else str(filename)
+
+    # Initialize metadata with predefined options
+    metadata = kwargs.pop('metadata', {})
+    metadata.setdefault('Creator', 'eigenp')
+    metadata.setdefault('Date', datetime.datetime.now().isoformat())
+    metadata.setdefault('Title', title)
+
+    # Make sure we add '.svg' if it's not present
+    filename_str = str(filename)
+    if not filename_str.lower().endswith('.svg'):
+        filename_str += '.svg'
+
+    # Call savefig on the current figure
+    fig.savefig(
+        filename_str,
+        format='svg',
+        facecolor=bgnd_color,
+        bbox_inches=bbox_inches,
+        dpi=dpi,
+        pad_inches=pad_inches,
+        metadata=metadata,
+        **kwargs
+    )
+    print(f"Saved figure to {filename_str}")
