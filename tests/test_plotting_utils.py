@@ -4,7 +4,7 @@ import pytest
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from src.eigenp_utils.plotting_utils import savefig_svg
+from eigenp_utils.plotting_utils import savefig_svg
 
 def test_savefig_svg(tmp_path):
     # Set up a test figure
