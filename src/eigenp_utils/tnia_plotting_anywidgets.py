@@ -65,6 +65,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     # UI Toggles
     show_crosshair = traitlets.Bool(True).tag(sync=True)
 
+    warning_msg = traitlets.Unicode("").tag(sync=True)
+
     # Save UI
     save_filename = traitlets.Unicode("filepath_save.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
@@ -103,24 +105,24 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     def _update_bounds(self, change):
         # x
-        lo = self.x_t
-        hi = max(self.x_t, self.dims[2] - 1 - self.x_t)
+        lo = 0
+        hi = max(0, self.dims[2] - 1)
         self.x_min_pos = lo
         self.x_max_pos = hi
         if self.x_s < lo: self.x_s = lo
         if self.x_s > hi: self.x_s = hi
 
         # y
-        lo = self.y_t
-        hi = max(self.y_t, self.dims[1] - 1 - self.y_t)
+        lo = 0
+        hi = max(0, self.dims[1] - 1)
         self.y_min_pos = lo
         self.y_max_pos = hi
         if self.y_s < lo: self.y_s = lo
         if self.y_s > hi: self.y_s = hi
 
         # z
-        lo = self.z_t
-        hi = max(self.z_t, self.dims[0] - 1 - self.z_t)
+        lo = 0
+        hi = max(0, self.dims[0] - 1)
         self.z_min_pos = lo
         self.z_max_pos = hi
         if self.z_s < lo: self.z_s = lo
@@ -203,9 +205,28 @@ class TNIASliceWidget(TNIAWidgetBase):
         self._init_observers()
 
     def _render(self):
-        x_lims = [self.x_s - self.x_t, self.x_s + self.x_t]
-        y_lims = [self.y_s - self.y_t, self.y_s + self.y_t]
-        z_lims = [self.z_s - self.z_t, self.z_s + self.z_t]
+        Z, Y, X = self.dims
+
+        x0 = max(0, self.x_s - self.x_t)
+        x1 = min(X - 1, self.x_s + self.x_t)
+        y0 = max(0, self.y_s - self.y_t)
+        y1 = min(Y - 1, self.y_s + self.y_t)
+        z0 = max(0, self.z_s - self.z_t)
+        z1 = min(Z - 1, self.z_s + self.z_t)
+
+        x_lims = [x0, x1]
+        y_lims = [y0, y1]
+        z_lims = [z0, z1]
+
+        clipped = False
+        if x0 > self.x_s - self.x_t or x1 < self.x_s + self.x_t: clipped = True
+        if y0 > self.y_s - self.y_t or y1 < self.y_s + self.y_t: clipped = True
+        if z0 > self.z_s - self.z_t or z1 < self.z_s + self.z_t: clipped = True
+
+        if clipped:
+            self.warning_msg = "⚠️ Projection clipped to image boundaries"
+        else:
+            self.warning_msg = ""
 
         # Prepare arguments based on visibility
         if isinstance(self.im_orig, list):
@@ -406,9 +427,26 @@ class TNIAScatterWidget(TNIAWidgetBase):
         y_c = self.y_s + self.ymin
         z_c = self.z_s + self.zmin
 
-        x_lims = (x_c - self.x_t, x_c + self.x_t)
-        y_lims = (y_c - self.y_t, y_c + self.y_t)
-        z_lims = (z_c - self.z_t, z_c + self.z_t)
+        x0 = max(self.xmin, x_c - self.x_t)
+        x1 = min(self.xmax, x_c + self.x_t)
+        y0 = max(self.ymin, y_c - self.y_t)
+        y1 = min(self.ymax, y_c + self.y_t)
+        z0 = max(self.zmin, z_c - self.z_t)
+        z1 = min(self.zmax, z_c + self.z_t)
+
+        x_lims = (x0, x1)
+        y_lims = (y0, y1)
+        z_lims = (z0, z1)
+
+        clipped = False
+        if x0 > x_c - self.x_t or x1 < x_c + self.x_t: clipped = True
+        if y0 > y_c - self.y_t or y1 < y_c + self.y_t: clipped = True
+        if z0 > z_c - self.z_t or z1 < z_c + self.z_t: clipped = True
+
+        if clipped:
+            self.warning_msg = "⚠️ Projection clipped to data boundaries"
+        else:
+            self.warning_msg = ""
 
         # Density Mode Logic
         if self.render == 'density':

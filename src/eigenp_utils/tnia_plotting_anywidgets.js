@@ -173,6 +173,19 @@ export default {
     uiTogglesContainer.style.alignItems = "center";
     uiTogglesContainer.style.marginBottom = "10px";
 
+    const warningSpan = document.createElement("span");
+    warningSpan.style.color = "red";
+    warningSpan.style.fontSize = "14px";
+    warningSpan.style.marginLeft = "auto"; // Push to right if in flex
+    warningSpan.textContent = model.get("warning_msg");
+    warningSpan.style.display = model.get("warning_msg") ? "block" : "none";
+
+    model.on("change:warning_msg", () => {
+        const msg = model.get("warning_msg");
+        warningSpan.textContent = msg;
+        warningSpan.style.display = msg ? "block" : "none";
+    });
+
     const crosshairLabel = document.createElement("label");
     crosshairLabel.style.display = "flex";
     crosshairLabel.style.alignItems = "center";
@@ -195,6 +208,7 @@ export default {
     crosshairLabel.appendChild(document.createTextNode("Show Crosshair"));
 
     uiTogglesContainer.appendChild(crosshairLabel);
+    uiTogglesContainer.appendChild(warningSpan);
     controlsDiv.appendChild(uiTogglesContainer);
 
     el.appendChild(controlsDiv);
