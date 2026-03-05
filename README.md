@@ -1,14 +1,33 @@
-# utils
-helper files
+# eigenp-utils
 
+`eigenp-utils` is a comprehensive toolkit of helper utilities for scientific Python. It provides modules for image analysis, single-cell data processing, advanced plotting, and core Python utilities.
 
-# Install
+## Features
+
+### Image Analysis
+* **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
+* **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`.
+* **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
+* **Intensity Rescaling**: Tools for contrast enhancement, including CLAHE.
+
+### Plotting & Visualization
+* **Interactive 3D Widgets**: Jupyter-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`) and dynamic point cloud visualization (`IsoScatterWidget`) with interactive channel visibility and manual matrix-driven rotation.
+* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), and utility functions to generate SVGs.
+
+### Single-Cell Analysis
+* **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
+* **Spatial Autocorrelation**: Fast Moran's I implementation (`morans_i_all_fast`) that correctly handles general (non-row-standardized) spatial weights.
+
+### Core Utilities
+* **I/O Utilities**: Functions to streamline file and data reading.
+
+## Installation
 
 By default, the package installs a minimal set of dependencies (like `numpy`, `scipy`, `pandas`, `matplotlib`, etc).
 To install it, run:
 
 ```bash
-uv pip install git+https://github.com/eigenP/utils.git
+pip install "eigenp_utils @ git+https://github.com/eigenP/utils.git"
 ```
 
 ### Optional Dependencies
@@ -21,22 +40,17 @@ You can choose to install optional dependencies if you need functionality such a
 - `[all]` - installs all of the optional dependencies above.
 - `[dev]` - installs all dependencies and additional tools for testing (e.g. `pytest`).
 
-**Installing with `uv`:**
+e.g. (uv install)
 
 ```bash
 uv pip install "eigenp-utils[all] @ git+https://github.com/eigenP/utils.git"
 ```
 *(Note: quotes are required so the shell doesn't misinterpret the brackets.)*
 
-**Installing with standard `pip`:**
 
-```bash
-pip install "eigenp-utils[all] @ git+https://github.com/eigenP/utils.git"
-```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
 
-
-# License
+## License
 
 License CC BY-NC https://creativecommons.org/licenses/by-nc/4.0/
