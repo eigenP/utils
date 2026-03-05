@@ -165,6 +165,37 @@ export default {
     controlsDiv.appendChild(xPos);
     controlsDiv.appendChild(yPos);
     controlsDiv.appendChild(zPos);
+    controlsDiv.appendChild(document.createElement("hr"));
+
+    const uiTogglesContainer = document.createElement("div");
+    uiTogglesContainer.style.display = "flex";
+    uiTogglesContainer.style.gap = "10px";
+    uiTogglesContainer.style.alignItems = "center";
+    uiTogglesContainer.style.marginBottom = "10px";
+
+    const crosshairLabel = document.createElement("label");
+    crosshairLabel.style.display = "flex";
+    crosshairLabel.style.alignItems = "center";
+    crosshairLabel.style.gap = "4px";
+    crosshairLabel.style.fontSize = "14px";
+
+    const crosshairCb = document.createElement("input");
+    crosshairCb.type = "checkbox";
+    crosshairCb.checked = model.get("show_crosshair");
+    crosshairCb.addEventListener("change", () => {
+      model.set("show_crosshair", crosshairCb.checked);
+      model.save_changes();
+    });
+
+    model.on("change:show_crosshair", () => {
+        crosshairCb.checked = model.get("show_crosshair");
+    });
+
+    crosshairLabel.appendChild(crosshairCb);
+    crosshairLabel.appendChild(document.createTextNode("Show Crosshair"));
+
+    uiTogglesContainer.appendChild(crosshairLabel);
+    controlsDiv.appendChild(uiTogglesContainer);
 
     el.appendChild(controlsDiv);
     el.appendChild(saveContainer);

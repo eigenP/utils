@@ -62,12 +62,16 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     channel_names = traitlets.List(traitlets.Unicode()).tag(sync=True)
     channel_visible = traitlets.List(traitlets.Bool()).tag(sync=True)
 
+    # UI Toggles
+    show_crosshair = traitlets.Bool(True).tag(sync=True)
+
     # Save UI
     save_filename = traitlets.Unicode("filepath_save.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
 
-    def __init__(self, X, Y, Z, **kwargs):
+    def __init__(self, X, Y, Z, show_crosshair=True, **kwargs):
         super().__init__(**kwargs)
+        self.show_crosshair = show_crosshair
         self.dims = (Z, Y, X) # (Z, Y, X) convention from numpy shape
 
         # Set max thickness bounds
@@ -84,6 +88,9 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
         # Observe channel visibility
         self.observe(self._render_wrapper, names=['channel_visible'])
+
+        # Observe crosshair toggle
+        self.observe(self._render_wrapper, names=['show_crosshair'])
 
         # Observe save trigger
         self.observe(self._save_svg, names='save_trigger')
@@ -149,7 +156,7 @@ class TNIASliceWidget(TNIAWidgetBase):
         im_shape = (im[0].shape if isinstance(im, list) else im.shape)
         Z, Y, X = im_shape
 
-        super().__init__(X, Y, Z)
+        super().__init__(X, Y, Z, show_crosshair=show_crosshair)
 
         self.im_orig = im
         self.sxy = sxy
@@ -160,7 +167,6 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.vmax_orig = vmax
         self.gamma_orig = gamma
         self.colors_orig = colors
-        self.show_crosshair = show_crosshair
 
         # Initialize Channel info
         if isinstance(im, list):
@@ -275,7 +281,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=1, sz=1, render='points', bins=512,
                  point_size=4, alpha=0.6, colors=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
+                 show_crosshair=True, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
 
         self.X_arr = np.asarray(X_arr)
         self.Y_arr = np.asarray(Y_arr)
@@ -290,7 +296,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         Y_dim = int(np.ceil(ymax - ymin + 1))
         Z_dim = int(np.ceil(zmax - zmin + 1))
 
-        super().__init__(X_dim, Y_dim, Z_dim)
+        super().__init__(X_dim, Y_dim, Z_dim, show_crosshair=show_crosshair)
 
         self.channels = channels
         self.sxy = sxy
@@ -483,8 +489,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 ax.set_facecolor("black")
 
             # Crosshairs
-            show_crosshair = True
-            if show_crosshair:
+            if self.show_crosshair:
                 axXY, axZY, axXZ = fig.axes[0], fig.axes[1], fig.axes[2]
                 axXY.vlines([x_lims[0]*self.sxy + 0.5, (x_lims[1]+1)*self.sxy + 0.5], self.ymin*self.sxy, (self.ymax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
                 axXY.hlines([y_lims[0]*self.sxy + 0.5, (y_lims[1]+1)*self.sxy + 0.5], self.xmin*self.sxy, (self.xmax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
@@ -563,8 +568,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
             axXZ.set_xlim([self.xmin*self.sxy, (self.xmax+1)*self.sxy]); axXZ.set_ylim([(self.zmax+1)*self.sz,  self.zmin*self.sz ])
             axZY.set_xlim([self.zmin*self.sz,  (self.zmax+1)*self.sz ]); axZY.set_ylim([(self.ymax+1)*self.sxy, self.ymin*self.sxy])
 
-            show_crosshair = True
-            if show_crosshair:
+            if self.show_crosshair:
                 axXY.vlines([x_lims[0]*self.sxy, (x_lims[1]+1)*self.sxy], self.ymin*self.sxy, (self.ymax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
                 axXY.hlines([y_lims[0]*self.sxy, (y_lims[1]+1)*self.sxy], self.xmin*self.sxy, (self.xmax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
                 axZY.vlines([z_lims[0]*self.sz,  (z_lims[1]+1)*self.sz],  self.ymin*self.sxy, (self.ymax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
