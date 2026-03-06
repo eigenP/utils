@@ -29,15 +29,15 @@ single-cell = [
     "libpysal",
     "triku",
     "leidenalg",
-    "adjustText"
+    "adjustText",
 ]
 dev = [
     "pytest>=7.0.0",
     "eigenp_utils[image-analysis,plotting,single-cell]"
 ]
 image-analysis = [
-    "scikit-image"
-    "xarray"
+    "scikit-image",
+    "xarray",
 ]
 all = [
     "eigenp_utils[image-analysis,plotting,single-cell,dev]"
