@@ -1952,6 +1952,7 @@ def tl_pacmap(
     n_components: int = 2,
     use_rep: str = "X_pca",
     random_state: int = 42,
+    init: Optional[Union[str, np.ndarray]] = None,
     **kwargs,
 ) -> None:
     """
@@ -1974,6 +1975,14 @@ def tl_pacmap(
         Default is 'X_pca'. If 'X_pca' is not present, it will fall back to .X.
     random_state
         Random seed for reproducibility.
+    init
+        How to initialize the embedding. Options are:
+        - None: Let PaCMAP decide automatically based on feature count ('pca' or 'random').
+        - 'paga': positions from `scanpy.pl.paga`.
+        - 'pca': PCA initialization.
+        - 'random': Random initialization.
+        - An `obsm` key (e.g., 'X_pca').
+        - A numpy array of initial embedding positions.
     **kwargs
         Additional arguments passed to pacmap.PaCMAP.
 
@@ -2024,8 +2033,11 @@ def tl_pacmap(
     # Filter out None values from kwargs to let defaults shine
     pmap_kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
-    # Extract 'init' if present, so it's not passed to the constructor
-    user_init = pmap_kwargs.pop("init", None)
+    # Extract 'init' if passed in kwargs for backwards compatibility
+    if init is None:
+        init = pmap_kwargs.pop("init", None)
+    elif "init" in pmap_kwargs:
+        del pmap_kwargs["init"]
 
     # Pass n_neighbors only if not None
     if n_neighbors is not None:
@@ -2040,8 +2052,30 @@ def tl_pacmap(
     )
 
     # Determine initialization method
-    if user_init is not None:
-        init_method = user_init
+    init_method = None
+    if init is not None:
+        if isinstance(init, str) and init == "paga":
+            from scanpy.tools._utils import get_init_pos_from_paga
+            init_coords = get_init_pos_from_paga(adata, random_state=random_state)
+            init_method = init_coords
+        elif isinstance(init, str) and init in adata.obsm:
+            init_coords = adata.obsm[init]
+            init_method = init_coords
+        elif isinstance(init, np.ndarray):
+            init_method = init
+        elif isinstance(init, str) and init in ["pca", "random"]:
+            init_method = init
+        else:
+            raise ValueError(f"Unknown initialization method or key not in adata.obsm: {init}")
+
+        if isinstance(init_method, np.ndarray):
+            # Ensure shape matches (n_samples, n_components)
+            if init_method.shape[1] < n_components:
+                # Pad with small random noise or zeros to reach n_components
+                padding = np.random.normal(scale=1e-4, size=(init_method.shape[0], n_components - init_method.shape[1]))
+                init_method = np.hstack([init_method, padding])
+            elif init_method.shape[1] > n_components:
+                init_method = init_method[:, :n_components]
     else:
         # Check feature count to determine initialization method
         n_features = X_in.shape[1]
@@ -2054,7 +2088,11 @@ def tl_pacmap(
             )
             init_method = "random"
 
-    print(f"Fitting PaCMAP using init='{init_method}'...")
+    if isinstance(init_method, np.ndarray):
+        print(f"Fitting PaCMAP using user-provided {init_method.shape} array for init...")
+    else:
+        print(f"Fitting PaCMAP using init='{init_method}'...")
+
     X_embedded = embedder.fit_transform(X_in, init=init_method)
 
     # 4. Store Result

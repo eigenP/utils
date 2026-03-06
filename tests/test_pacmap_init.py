@@ -51,6 +51,29 @@ def test_tl_pacmap_init_override():
     assert "X_pacmap" in adata.obsm
 
 @pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
+def test_tl_pacmap_init_paga():
+    # Case 4: init='paga'
+    n_obs = 50
+    n_vars = 50
+    X = np.random.rand(n_obs, n_vars)
+    adata = sc.AnnData(X=X)
+
+    # Need to compute neighbors and paga first
+    sc.pp.neighbors(adata, n_neighbors=5, use_rep="X")
+    sc.tl.leiden(adata, resolution=1.0)
+    sc.tl.paga(adata, groups="leiden")
+    sc.pl.paga(adata, show=False)
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X", init="paga")
+
+        for warning in w:
+            assert "Switching initialization" not in str(warning.message)
+
+    assert "X_pacmap" in adata.obsm
+
+@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
 def test_tl_pacmap_init_small_features():
     # Case 2: <= 100 features (should switch to random and warn)
     n_obs = 50
