@@ -314,7 +314,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     points = traitlets.List().tag(sync=True) # List of [z, y, x] lists
     axis_bounds = traitlets.Dict().tag(sync=True) # Bounding boxes of axes in figure coords
 
-    def __init__(self, im, colors=None, *args, **kwargs):
+    def __init__(self, im, colors=None, point_size_scale=0.01, *args, **kwargs):
         # Normalize input to list
         if not isinstance(im, list):
             im_list = [im]
@@ -338,7 +338,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         im_shape = im_list[0].shape
         Z, Y, X = im_shape
         min_dim = min(X, Y, Z)
-        self.point_size = max(3, int(np.ceil(0.005 * min_dim)))
+        self.point_size = max(3, int(np.ceil(point_size_scale * min_dim)))
 
         # Create persistent annotation channel
         self._annot_img = np.zeros((Z, Y, X), dtype=np.uint8)
@@ -464,15 +464,18 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         # Update annotation mask efficiently
         self._annot_img.fill(0)
         Z, Y, X = self.dims
-        s = self.point_size // 2
+        s = max(1, self.point_size // 2)
+        R = s * min(self.sxy, self.sz)
+        s_xy = max(1, int(np.round(R / self.sxy)))
+        s_z = max(1, int(np.round(R / self.sz)))
         for p in self.points:
             pz, py, px = p
-            z0 = max(0, pz - s)
-            z1 = min(Z, pz + s + 1)
-            y0 = max(0, py - s)
-            y1 = min(Y, py + s + 1)
-            x0 = max(0, px - s)
-            x1 = min(X, px + s + 1)
+            z0 = max(0, pz - s_z)
+            z1 = min(Z, pz + s_z + 1)
+            y0 = max(0, py - s_xy)
+            y1 = min(Y, py + s_xy + 1)
+            x0 = max(0, px - s_xy)
+            x1 = min(X, px + s_xy + 1)
             self._annot_img[z0:z1, y0:y1, x0:x1] = 255
 
         self._render_wrapper(change)
@@ -855,6 +858,7 @@ def show_xyz_max_slice_interactive(
     gamma=1, figsize_scale=1,
     show_crosshair=True,
     colors=None,
+    point_size_scale=0.01,
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
@@ -952,6 +956,7 @@ def show_xyz_max_slice_interactive_point_annotator(
     return TNIAAnnotatorWidget(
         im, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
         vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, show_crosshair=show_crosshair,
+        point_size_scale=point_size_scale,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
 
