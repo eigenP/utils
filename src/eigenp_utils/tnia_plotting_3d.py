@@ -32,7 +32,7 @@ def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
 
 
 # Copyright tnia 2021 - BSD License
-def show_xyz_slice(image_to_show, x, y, z, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True):
+def show_xyz_slice(image_to_show, x, y, z, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
@@ -51,10 +51,10 @@ def show_xyz_slice(image_to_show, x, y, z, sxy=1, sz=1,figsize=(10,10), colormap
     slice_xz = image_to_show[:,y,:]
     slice_xy = image_to_show[z,:,:]
 
-    return show_xyz(slice_xy, slice_xz, slice_zy, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, use_plt = use_plt)
+    return show_xyz(slice_xy, slice_xz, slice_zy, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, use_plt = use_plt, opacity = opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_xyz_max(image_to_show, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None):
+def show_xyz_max(image_to_show, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ plots max xy, xz, and zy projections of a 3D image
 
     Args:
@@ -66,10 +66,10 @@ def show_xyz_max(image_to_show, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin
         vmax (float, optional): maximum value for display range. Defaults to None.
     """
 
-    return show_xyz_projection(image_to_show, sxy, sz, figsize, np.max, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors)
+    return show_xyz_projection(image_to_show, sxy, sz, figsize, np.max, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 
-def show_xyz_projection(image_to_show, sxy=1, sz=1,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None):
+def show_xyz_projection(image_to_show, sxy=1, sz=1,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Args:
@@ -85,10 +85,10 @@ def show_xyz_projection(image_to_show, sxy=1, sz=1,figsize=(10,10), projector=np
     projection_x = np.flip(np.rot90(projector(image_to_show,2),1),0)
     projection_z = projector(image_to_show,0)
 
-    return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors)
+    return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, colors = None):
+def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, colors = None, opacity = None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -106,7 +106,7 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
 
     if isinstance(xy,list):
         MULTI_CHANNEL = True
-        xy, xz, zy = create_multichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colors = colors)
+        xy, xz, zy = create_multichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colors = colors, opacity = opacity)
 
         # Set those back to default bcs they are dealt with in the RGB function
         vmin, vmax, gamma = None, None, 1
@@ -151,14 +151,14 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
 
     
     if gamma == 1:
-        ax0.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest')
-        ax1.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest')
-        ax2.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest')
+        ax0.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        ax1.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        ax2.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
     else:
         norm=PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax, clip=True)
-        ax0.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest')
-        ax1.imshow(zy, cmap = colormap, norm=norm, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest')
-        ax2.imshow(xz, cmap = colormap, norm=norm, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest')
+        ax0.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        ax1.imshow(zy, cmap = colormap, norm=norm, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        ax2.imshow(xz, cmap = colormap, norm=norm, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
 
     ### Axes and titles
     # ax0.set_title('xy')
@@ -220,7 +220,7 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
 
 
 ### New function
-def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None):
+def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -245,11 +245,11 @@ def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=1, sz
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy, sz, figsize, np.max, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors)
+    return show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy, sz, figsize, np.max, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 
 ### New function
-def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=1, sz=1,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None):
+def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=1, sz=1,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -278,7 +278,7 @@ def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=1
         projection_x = np.flip(np.rot90(projector(image_to_show[:,:,x_slices],2),1),0)
         projection_z = projector(image_to_show[z_slices,:,:],0)
 
-    return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors)
+    return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 
 
@@ -343,7 +343,7 @@ def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=1
 
 def create_multichannel_rgb(
     xy_list, xz_list, zy_list,
-    vmin=None, vmax=None, gamma=1, colors=None,
+    vmin=None, vmax=None, gamma=1, colors=None, opacity=None,
     blend='add',        # 'add' | 'screen' | 'max'
     soft_clip=True,     # only used for blend='add'
     eps=1e-12,
@@ -362,6 +362,8 @@ def create_multichannel_rgb(
         Power gamma applied AFTER linear [0,1] normalization (1 = linear).
     colors : list[str | tuple]
         One color per channel (default: ['magenta','cyan','yellow','green'][:n]).
+    opacity : float | list[float] | None
+        Opacity multiplier per channel (1 = full opacity).
     blend : str
         'add' (default), 'screen', or 'max'.
     soft_clip : bool
@@ -383,6 +385,7 @@ def create_multichannel_rgb(
 
     # Broadcast params
     gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+    opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
 
     if colors is None:
         colors = ['magenta', 'cyan', 'yellow', 'green'][:n]
@@ -430,11 +433,12 @@ def create_multichannel_rgb(
     for i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
         c = color_map[i]  # (3,)
         g = gammas[i]
+        o = opacities[i]
         lo, hi = vmins[i], vmaxs[i]
 
-        xy_n = _norm(xy, lo, hi, g)[..., None] * c  # (H,W,3)
-        xz_n = _norm(xz, lo, hi, g)[..., None] * c
-        zy_n = _norm(zy, lo, hi, g)[..., None] * c
+        xy_n = _norm(xy, lo, hi, g)[..., None] * c * o  # (H,W,3)
+        xz_n = _norm(xz, lo, hi, g)[..., None] * c * o
+        zy_n = _norm(zy, lo, hi, g)[..., None] * c * o
 
         if blend == 'screen':
             xy_acc *= (1.0 - xy_n)
