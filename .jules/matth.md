@@ -48,3 +48,7 @@ Using `from eigenp_utils...` is correct but requires the package to be installed
 **Action:**
 Always write tests assuming the package is installed (`from package_name import ...`). To run tests locally, ensure the package is installed in editable mode.
 >>>>>>> main
+
+## 2025-02-28 - Simplification of Moran's I Quadratic Form
+**Learning:** In computing the numerator of Moran's I ($I \propto \sum_{i,j} w_{ij} (x_i - \bar{x})(x_j - \bar{x})$), expanding the quadratic form to terms of $x$ (e.g. $x^T W x - \bar{x}(x^T W \mathbf{1}) - \dots$) is computationally inefficient, requires additional memory, and suffers from catastrophic cancellation errors when variables have large means or the graph is irregular.
+**Action:** Instead of algebraic expansion, directly center the sufficient statistics first ($z = x - \bar{x}$) and evaluate the cross product directly as $z^T W z$. This eliminates edge cases with irregular topologies (isolated nodes, unstandardized weights), strictly bounds numerical errors around zero, and drastically simplifies implementation complexity while improving runtime.
