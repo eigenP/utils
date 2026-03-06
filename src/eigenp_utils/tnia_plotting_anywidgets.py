@@ -416,40 +416,41 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         data_z = max(0, min(self.dims[0] - 1, data_z))
 
         if self.annotation_action == 'add':
-            self.add_point(data_x, data_y, data_z)
+            self.add_point(data_z, data_y, data_x)
         elif self.annotation_action == 'delete':
             if not self.points: return
 
             pts = np.array(self.points)
+            # pts are stored as [Z, Y, X] -> [:, 0] is Z, [:, 1] is Y, [:, 2] is X
             if plane == 'xy':
-                mask = (pts[:, 2] >= z0) & (pts[:, 2] <= z1)
+                mask = (pts[:, 0] >= z0) & (pts[:, 0] <= z1)
                 if not np.any(mask): return
                 visible_pts = pts[mask]
-                dist = (visible_pts[:, 0] - data_x)**2 + (visible_pts[:, 1] - data_y)**2
+                dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 1] - data_y)**2
             elif plane == 'zy':
-                mask = (pts[:, 0] >= x0) & (pts[:, 0] <= x1)
+                mask = (pts[:, 2] >= x0) & (pts[:, 2] <= x1)
                 if not np.any(mask): return
                 visible_pts = pts[mask]
-                dist = (visible_pts[:, 2] - data_z)**2 + (visible_pts[:, 1] - data_y)**2
+                dist = (visible_pts[:, 0] - data_z)**2 + (visible_pts[:, 1] - data_y)**2
             elif plane == 'xz':
                 mask = (pts[:, 1] >= y0) & (pts[:, 1] <= y1)
                 if not np.any(mask): return
                 visible_pts = pts[mask]
-                dist = (visible_pts[:, 0] - data_x)**2 + (visible_pts[:, 2] - data_z)**2
+                dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 0] - data_z)**2
 
             closest_idx_in_visible = np.argmin(dist)
             closest_pt = visible_pts[closest_idx_in_visible]
             self.remove_point(closest_pt[0], closest_pt[1], closest_pt[2])
 
-    def add_point(self, x, y, z):
-        """Programmatically add a point"""
-        pt = [int(x), int(y), int(z)]
+    def add_point(self, z, y, x):
+        """Programmatically add a point. Coordinates should be in (Z, Y, X) order."""
+        pt = [int(z), int(y), int(x)]
         if pt not in self.points:
             self.points = self.points + [pt]
 
-    def remove_point(self, x, y, z):
-        """Programmatically remove a point"""
-        pt = [int(x), int(y), int(z)]
+    def remove_point(self, z, y, x):
+        """Programmatically remove a point. Coordinates should be in (Z, Y, X) order."""
+        pt = [int(z), int(y), int(x)]
         new_points = []
         deleted = False
         for p in self.points:
@@ -466,7 +467,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         Z, Y, X = self.dims
         s = self.point_size // 2
         for p in self.points:
-            px, py, pz = p
+            pz, py, px = p
             z0 = max(0, pz - s)
             z1 = min(Z, pz + s + 1)
             y0 = max(0, py - s)
