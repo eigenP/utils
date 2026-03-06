@@ -308,30 +308,63 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     annotation_action = traitlets.Unicode('add').tag(sync=True) # 'add' or 'delete'
 
     # Communication
-    click_coords = traitlets.Dict().tag(sync=True) # {'plane': 'xy', 'x': 0.5, 'y': 0.5}
+    click_coords = traitlets.Dict().tag(sync=True) # {'plane': 'xy', 'x': 0.5, 'y': 0.5, 't': 123}
 
     # Data
     points = traitlets.List().tag(sync=True) # List of [x, y, z] lists
     axis_bounds = traitlets.Dict().tag(sync=True) # Bounding boxes of axes in figure coords
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, im, colors=None, *args, **kwargs):
+        # Normalize input to list
+        if not isinstance(im, list):
+            im_list = [im]
+        else:
+            im_list = list(im)
 
-        # Determine n for point size
-        Z, Y, X = self.dims
+        # Ensure colors is a list
+        if colors is None:
+            colors_list = ['magenta', 'cyan', 'yellow', 'green', 'blue', 'orange']
+        elif isinstance(colors, str):
+            colors_list = [colors]
+        else:
+            colors_list = list(colors)
+
+        while len(colors_list) < len(im_list):
+            colors_list.extend(['magenta', 'cyan', 'yellow', 'green', 'blue', 'orange'])
+
+        colors_list = colors_list[:len(im_list)]
+
+        # Get shape
+        im_shape = im_list[0].shape
+        Z, Y, X = im_shape
         min_dim = min(X, Y, Z)
         self.point_size = max(3, int(np.ceil(0.005 * min_dim)))
+
+        # Create persistent annotation channel
+        self._annot_img = np.zeros((Z, Y, X), dtype=np.uint8)
+
+        # Append annotation channel
+        im_list.append(self._annot_img)
+        colors_list.append('red')
+
+        # Initialize superclass
+        super().__init__(im_list, colors=colors_list, *args, **kwargs)
+
+        # Override the last channel name
+        self.channel_names = self.channel_names[:-1] + ['Annotations']
 
     def _init_observers(self):
         super()._init_observers()
         self.observe(self._handle_click, names=['click_coords'])
-        self.observe(self._render_wrapper, names=['annotation_mode', 'points'])
+        self.observe(self._on_points_changed, names=['points'])
+        # Also re-render if annotation_mode changes (so UI cursor updates)
+        self.observe(self._render_wrapper, names=['annotation_mode'])
 
     def _handle_click(self, change):
         if not self.annotation_mode:
             return
 
-        coords = change.new
+        coords = change.new if hasattr(change, 'new') else change.get('new', {})
         if not coords:
             return
 
@@ -339,44 +372,23 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         frac_x = coords.get('x')
         frac_y = coords.get('y')
 
-        # Translate fractions to data coordinates using axis_bounds
         bounds = self.axis_bounds.get(plane)
         if not bounds:
             return
 
-        # bounds: [left, bottom, width, height] in figure relative coords (0-1)
-        # However, due to how we might get click_coords, it's easier to compute
-        # the data coordinates based on the fractions within the specific axis bounding box.
-        # frac_x, frac_y are expected to be relative to the specific axes!
-        # Wait, the JS side might just send click offset within the *entire image*,
-        # so frac_x and frac_y are [0, 1] for the whole image.
-
         b_x0, b_y0, b_w, b_h = bounds
 
         # Check if click is inside this axis
-        if not (b_x0 <= frac_x <= b_x0 + b_w and b_y0 <= frac_y <= b_y0 + b_h):
+        # Note: JS y_frac is from top-left. Matplotlib bounds are from bottom-left.
+        mpl_y_frac = 1.0 - frac_y
+
+        if not (b_x0 <= frac_x <= b_x0 + b_w and b_y0 <= mpl_y_frac <= b_y0 + b_h):
             return
 
-        # Local fractions within the axis [0, 1]
         local_x = (frac_x - b_x0) / b_w
-        # y is typically inverted in images (0 at top, 1 at bottom in JS image coords)
-        # But matplotlib bounding box y0 is at bottom (0) and goes up to 1.
-        # If JS sends frac_y from top (0) to bottom (1), then:
-        # matplotlib bottom = 1 - frac_y.
-        # Let's assume JS sends frac_x, frac_y from top-left (0,0) to bottom-right (1,1).
-        # matplotlib bounds [x0, y0, w, h] have origin at BOTTOM-LEFT.
-        # Let's compute local fractions assuming y is from top-left.
-        # Actually, we will handle this in JS to send the data coordinates directly if possible,
-        # or we map it here. Let's do a simple mapping in python:
+        local_y_mpl = (mpl_y_frac - b_y0) / b_h
+        fraction_from_top = 1.0 - local_y_mpl
 
-        # The axes have extent=[0, max_data_x, max_data_y, 0]
-        # In 'xy' plane: x goes 0 to xdim*sxy, y goes 0 to ydim*sxy.
-
-        # Let's refine the logic to calculate data coords directly in JS if possible,
-        # or we just pass the raw click to python and resolve it.
-        # A simpler way is to just let the JS compute the data coords if we pass the limits,
-        # but that's complex. Let's just resolve it here.
-        # We know the limits used in _render.
         x0 = max(0, self.x_s - self.x_t)
         x1 = min(self.dims[2] - 1, self.x_s + self.x_t)
         y0 = max(0, self.y_s - self.y_t)
@@ -385,43 +397,27 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         z1 = min(self.dims[0] - 1, self.z_s + self.z_t)
 
         if plane == 'xy':
-            # Data extents for ax0 in show_xyz are [0, X*sxy, Y*sxy, 0]
-            # Since we project the whole image, the limits are 0 to X.
             data_x = int(local_x * self.dims[2])
-            # For Y, local_y = 0 is top, local_y = 1 is bottom.
-            # Matplotlib y-axis goes from 0 (top) to Y (bottom) because extent has Y at bottom.
-            # However, `axis_bounds` from Matplotlib has origin at bottom-left!
-            # So `local_y_mpl = ( (1 - frac_y) - b_y0 ) / b_h` is the fraction from bottom.
-            # Fraction from top is `1 - local_y_mpl`.
-            local_y_mpl = ((1.0 - frac_y) - b_y0) / b_h
-            fraction_from_top = 1.0 - local_y_mpl
             data_y = int(fraction_from_top * self.dims[1])
             data_z = self.z_s
         elif plane == 'zy':
             data_z = int(local_x * self.dims[0])
-            local_y_mpl = ((1.0 - frac_y) - b_y0) / b_h
-            fraction_from_top = 1.0 - local_y_mpl
             data_y = int(fraction_from_top * self.dims[1])
             data_x = self.x_s
         elif plane == 'xz':
             data_x = int(local_x * self.dims[2])
-            local_y_mpl = ((1.0 - frac_y) - b_y0) / b_h
-            fraction_from_top = 1.0 - local_y_mpl
             data_z = int(fraction_from_top * self.dims[0])
             data_y = self.y_s
         else:
             return
 
-        # Ensure within bounds
         data_x = max(0, min(self.dims[2] - 1, data_x))
         data_y = max(0, min(self.dims[1] - 1, data_y))
         data_z = max(0, min(self.dims[0] - 1, data_z))
 
         if self.annotation_action == 'add':
-            self.points = self.points + [[data_x, data_y, data_z]]
+            self.add_point(data_x, data_y, data_z)
         elif self.annotation_action == 'delete':
-            # Find closest point within the current slab of the clicked plane
-            # A point is visible on the plane if it's within the projection slab
             if not self.points: return
 
             pts = np.array(self.points)
@@ -430,45 +426,65 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
                 if not np.any(mask): return
                 visible_pts = pts[mask]
                 dist = (visible_pts[:, 0] - data_x)**2 + (visible_pts[:, 1] - data_y)**2
-                closest_idx_in_visible = np.argmin(dist)
-                closest_pt = visible_pts[closest_idx_in_visible]
             elif plane == 'zy':
                 mask = (pts[:, 0] >= x0) & (pts[:, 0] <= x1)
                 if not np.any(mask): return
                 visible_pts = pts[mask]
                 dist = (visible_pts[:, 2] - data_z)**2 + (visible_pts[:, 1] - data_y)**2
-                closest_idx_in_visible = np.argmin(dist)
-                closest_pt = visible_pts[closest_idx_in_visible]
             elif plane == 'xz':
                 mask = (pts[:, 1] >= y0) & (pts[:, 1] <= y1)
                 if not np.any(mask): return
                 visible_pts = pts[mask]
                 dist = (visible_pts[:, 0] - data_x)**2 + (visible_pts[:, 2] - data_z)**2
-                closest_idx_in_visible = np.argmin(dist)
-                closest_pt = visible_pts[closest_idx_in_visible]
 
-            # Find the original index and delete
-            # (Using list comprehension to recreate the list without that point)
-            closest_list = closest_pt.tolist()
-            new_points = []
-            deleted = False
-            for p in self.points:
-                if not deleted and p == closest_list:
-                    deleted = True
-                    continue
-                new_points.append(p)
+            closest_idx_in_visible = np.argmin(dist)
+            closest_pt = visible_pts[closest_idx_in_visible]
+            self.remove_point(closest_pt[0], closest_pt[1], closest_pt[2])
+
+    def add_point(self, x, y, z):
+        """Programmatically add a point"""
+        pt = [int(x), int(y), int(z)]
+        if pt not in self.points:
+            self.points = self.points + [pt]
+
+    def remove_point(self, x, y, z):
+        """Programmatically remove a point"""
+        pt = [int(x), int(y), int(z)]
+        new_points = []
+        deleted = False
+        for p in self.points:
+            if not deleted and p == pt:
+                deleted = True
+                continue
+            new_points.append(p)
+        if deleted:
             self.points = new_points
 
+    def _on_points_changed(self, change):
+        # Update annotation mask efficiently
+        self._annot_img.fill(0)
+        Z, Y, X = self.dims
+        s = self.point_size // 2
+        for p in self.points:
+            px, py, pz = p
+            z0 = max(0, pz - s)
+            z1 = min(Z, pz + s + 1)
+            y0 = max(0, py - s)
+            y1 = min(Y, py + s + 1)
+            x0 = max(0, px - s)
+            x1 = min(X, px + s + 1)
+            self._annot_img[z0:z1, y0:y1, x0:x1] = 255
+
+        self._render_wrapper(change)
+
     def _render_wrapper(self, change=None):
-        fig = self._render()
+        fig = super()._render()
         if fig:
-            # Extract axis bounds before saving
             if len(fig.axes) >= 3:
                 ax_xy = fig.axes[0]
                 ax_zy = fig.axes[1]
                 ax_xz = fig.axes[2]
 
-                # Get bounding boxes in figure coords (0-1)
                 def get_bounds(ax):
                     bbox = ax.get_position()
                     return [bbox.x0, bbox.y0, bbox.width, bbox.height]
@@ -480,13 +496,9 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
                 }
 
             buf = io.BytesIO()
-            # Disable bbox_inches='tight' so the axis bounding boxes remain accurate
-            # to the original figure size, guaranteeing precise coordinate mapping.
-            # We set the pad to 0 to minimize whitespace, but keep the layout predictable.
             fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
             fig.savefig(buf, format='png')
 
-            # Recompute after layout adjustments
             if len(fig.axes) >= 3:
                 self.axis_bounds = {
                     'xy': get_bounds(fig.axes[0]),
@@ -495,74 +507,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
                 }
 
             self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
-            plt.close(fig) # Close to avoid memory leak
-
-    def _render(self):
-        # We intercept _render to inject the annotation channel
-
-        # 1. Prepare annotation channel
-        Z, Y, X = self.dims
-        annot_img = np.zeros((Z, Y, X), dtype=np.uint8)
-
-        if self.points:
-            s = self.point_size // 2
-            for p in self.points:
-                px, py, pz = p
-                z0 = max(0, pz - s)
-                z1 = min(Z, pz + s + 1)
-                y0 = max(0, py - s)
-                y1 = min(Y, py + s + 1)
-                x0 = max(0, px - s)
-                x1 = min(X, px + s + 1)
-                annot_img[z0:z1, y0:y1, x0:x1] = 255
-
-        # 2. Backup original images/colors
-        orig_im = self.im_orig
-        orig_colors = self.colors_resolved
-        orig_channel_visible = self.channel_visible.copy()
-
-        # 3. Create modified lists
-        if isinstance(orig_im, list):
-            mod_im = list(orig_im) + [annot_img]
-            mod_colors = list(orig_colors) + ['red']
-            mod_visible = list(orig_channel_visible) + [True] # Force visible in this render call
-        else:
-            mod_im = [orig_im, annot_img]
-            # Ensure orig_colors is a list if it was single string or None
-            if orig_colors is None:
-                mod_colors = ['cyan', 'red']
-            elif isinstance(orig_colors, str):
-                mod_colors = [orig_colors, 'red']
-            else:
-                mod_colors = list(orig_colors) + ['red']
-            mod_visible = [True, True]
-
-        # 4. Temporarily override instance vars so super()._render uses them
-        self.im_orig = mod_im
-        self.colors_resolved = mod_colors
-
-        # We need to override channel_visible without triggering traitlet observers!
-        self.unobserve(self._render_wrapper, names=['channel_visible'])
-        self.channel_visible = mod_visible
-
-        # Also need to override num_channels temporarily for _filter_arg
-        orig_num_channels = getattr(self, 'num_channels', 1)
-        self.num_channels = len(mod_im)
-
-        # Call original render
-        try:
-            fig = super()._render()
-        finally:
-            # Restore
-            self.im_orig = orig_im
-            self.colors_resolved = orig_colors
-            self.channel_visible = orig_channel_visible
-            self.num_channels = orig_num_channels
-            self.observe(self._render_wrapper, names=['channel_visible'])
-
-        return fig
-
-
+            plt.close(fig)
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=1, sz=1, render='points', bins=512,
                  point_size=4, alpha=0.6, colors=None, gamma=1, vmin=None, vmax=None, figsize=None,
