@@ -50,3 +50,18 @@ def test_default_colors_resolution():
 
     w2 = show_xyz_max_slice_interactive(im, colors=['red', 'blue'])
     assert w2.colors_resolved == ['red', 'blue']
+
+def test_show_xyz_max_slice_interactive_point_annotator_args():
+    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive_point_annotator, TNIAAnnotatorWidget
+    im = [np.zeros((10, 10, 10)) for _ in range(2)]
+    w = show_xyz_max_slice_interactive_point_annotator(
+        im,
+        sxy=2,
+        sz=3,
+        point_size_scale=0.05,
+        colors=['red', 'blue'],
+        opacity=[0.5, 0.8]
+    )
+    assert isinstance(w, TNIAAnnotatorWidget)
+    assert w.sxy == 2
+    assert w.sz == 3

@@ -121,9 +121,9 @@ export default {
     splitContainer.style.gap = "20px";
     splitContainer.style.marginBottom = "10px";
 
-    // Left Side: Sliders (65%)
+    // Left Side: Sliders (60%)
     const slidersContainer = document.createElement("div");
-    slidersContainer.style.flex = "65%";
+    slidersContainer.style.flex = "60%";
     slidersContainer.style.display = "flex";
     slidersContainer.style.flexDirection = "column";
     slidersContainer.style.gap = "10px";
@@ -138,9 +138,9 @@ export default {
 
     splitContainer.appendChild(slidersContainer);
 
-    // Right Side: Channels (35%)
+    // Right Side: Channels (40%)
     const channelsContainer = document.createElement("div");
-    channelsContainer.style.flex = "35%";
+    channelsContainer.style.flex = "40%";
     channelsContainer.style.display = "flex";
     channelsContainer.style.flexDirection = "column";
     channelsContainer.style.gap = "10px";
@@ -150,36 +150,42 @@ export default {
 
     const channelNames = model.get("channel_names");
     const channelDtypes = model.get("channel_dtypes");
+    const channelColors = model.get("channel_colors");
 
     if (channelNames && channelNames.length > 0) {
       channelNames.forEach((name, index) => {
         const dtype = channelDtypes[index] || "unknown";
+        const color = channelColors && channelColors.length > index ? channelColors[index] : "black";
 
         const chDiv = document.createElement("div");
         chDiv.style.border = "1px solid #ccc";
         chDiv.style.padding = "5px";
         chDiv.style.borderRadius = "4px";
         chDiv.style.display = "flex";
-        chDiv.style.flexDirection = "column";
-        chDiv.style.gap = "4px";
+        chDiv.style.flexDirection = "row";
+        chDiv.style.alignItems = "center";
+        chDiv.style.gap = "8px";
 
         const chHeader = document.createElement("strong");
-        chHeader.textContent = `${name} (${dtype})`;
+        chHeader.textContent = `${index}:`;
+        chHeader.style.color = color;
+        chHeader.style.width = "15px";
         chDiv.appendChild(chHeader);
 
         const createNumberInput = (label, traitName, isFloat, minVal, maxVal, allowEmpty) => {
           const row = document.createElement("div");
           row.style.display = "flex";
-          row.style.justifyContent = "space-between";
           row.style.alignItems = "center";
+          row.style.gap = "2px";
 
           const lbl = document.createElement("span");
           lbl.textContent = label;
-          lbl.style.width = "50px";
+          lbl.style.fontSize = "11px";
 
           const inp = document.createElement("input");
           inp.type = "text"; // use text to easily handle empty string 'auto'
-          inp.style.width = "60px";
+          inp.style.width = "35px";
+          inp.style.fontSize = "11px";
 
           const updateInput = () => {
             const arr = model.get(traitName);
@@ -224,10 +230,10 @@ export default {
         else if (dtype.includes("uint16")) dtypeMax = 65535;
         else if (dtype.includes("float")) isFloatDtype = true;
 
-        chDiv.appendChild(createNumberInput("vmin", "vmin_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
-        chDiv.appendChild(createNumberInput("vmax", "vmax_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
-        chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0, undefined, false));
-        chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
+        chDiv.appendChild(createNumberInput("v-", "vmin_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
+        chDiv.appendChild(createNumberInput("v+", "vmax_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
+        chDiv.appendChild(createNumberInput("g", "gamma_list", true, 0, 2.0, false));
+        chDiv.appendChild(createNumberInput("o", "opacity_list", true, 0, 1, false));
 
         channelsContainer.appendChild(chDiv);
       });
