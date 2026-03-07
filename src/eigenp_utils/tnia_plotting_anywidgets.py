@@ -61,6 +61,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     # Channels
     channel_names = traitlets.List(traitlets.Unicode()).tag(sync=True)
     channel_dtypes = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    channel_colors = traitlets.List(traitlets.Unicode()).tag(sync=True)
 
     # Channel Parameters
     vmin_list = traitlets.List(traitlets.Any()).tag(sync=True)
@@ -204,7 +205,14 @@ class TNIASliceWidget(TNIAWidgetBase):
             self.num_channels = 1
             self.channel_names = ["Channel 0"]
             self.channel_dtypes = [im.dtype.name]
-            self.colors_resolved = colors
+            if colors is None:
+                self.colors_resolved = ['magenta']
+            elif isinstance(colors, (list, tuple)):
+                self.colors_resolved = list(colors)
+            else:
+                self.colors_resolved = [colors]
+
+        self.channel_colors = self.colors_resolved
 
         # Set traitlets lists for interactive parameters
         # Use "" to represent 'auto' for empty inputs in JS (maps to None for matplotlib)
@@ -902,7 +910,6 @@ def show_xyz_max_slice_interactive(
     gamma=1, figsize_scale=1,
     show_crosshair=True,
     colors=None, opacity=None,
-    point_size_scale=0.01,
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
@@ -957,6 +964,7 @@ def show_xyz_max_slice_interactive_point_annotator(
     gamma=1, figsize_scale=1,
     show_crosshair=True,
     colors=None, opacity=None,
+    point_size_scale=0.01,
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
