@@ -127,6 +127,8 @@ export default {
     slidersContainer.style.display = "flex";
     slidersContainer.style.flexDirection = "column";
     slidersContainer.style.gap = "10px";
+    slidersContainer.style.paddingRight = "20px";
+    slidersContainer.style.borderRight = "1px solid #ccc";
 
     slidersContainer.appendChild(xThick);
     slidersContainer.appendChild(yThick);
@@ -147,6 +149,7 @@ export default {
     channelsContainer.style.fontSize = "12px";
     channelsContainer.style.overflowY = "auto";
     channelsContainer.style.maxHeight = "300px";
+    channelsContainer.style.paddingLeft = "10px";
 
     const channelNames = model.get("channel_names");
     const channelDtypes = model.get("channel_dtypes");
@@ -230,10 +233,10 @@ export default {
         else if (dtype.includes("uint16")) dtypeMax = 65535;
         else if (dtype.includes("float")) isFloatDtype = true;
 
-        chDiv.appendChild(createNumberInput("v-", "vmin_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
-        chDiv.appendChild(createNumberInput("v+", "vmax_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
-        chDiv.appendChild(createNumberInput("g", "gamma_list", true, 0, 2.0, false));
-        chDiv.appendChild(createNumberInput("o", "opacity_list", true, 0, 1, false));
+        chDiv.appendChild(createNumberInput("vmin", "vmin_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
+        chDiv.appendChild(createNumberInput("vmax", "vmax_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
+        chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0, 2.0, false));
+        chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
 
         channelsContainer.appendChild(chDiv);
       });
