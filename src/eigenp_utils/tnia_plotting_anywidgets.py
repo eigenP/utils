@@ -60,7 +60,13 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     # Channels
     channel_names = traitlets.List(traitlets.Unicode()).tag(sync=True)
-    channel_visible = traitlets.List(traitlets.Bool()).tag(sync=True)
+    channel_dtypes = traitlets.List(traitlets.Unicode()).tag(sync=True)
+
+    # Channel Parameters
+    vmin_list = traitlets.List(traitlets.Any()).tag(sync=True)
+    vmax_list = traitlets.List(traitlets.Any()).tag(sync=True)
+    gamma_list = traitlets.List(traitlets.Float()).tag(sync=True)
+    opacity_list = traitlets.List(traitlets.Float()).tag(sync=True)
 
     # UI Toggles
     show_crosshair = traitlets.Bool(True).tag(sync=True)
@@ -88,8 +94,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         # Observe all parameters to update plot
         self.observe(self._render_wrapper, names=['x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t'])
 
-        # Observe channel visibility
-        self.observe(self._render_wrapper, names=['channel_visible'])
+        # Observe channel parameters
+        self.observe(self._render_wrapper, names=['vmin_list', 'vmax_list', 'gamma_list', 'opacity_list'])
 
         # Observe crosshair toggle
         self.observe(self._render_wrapper, names=['show_crosshair'])
@@ -165,17 +171,25 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.sz = sz
         self.figsize = figsize
         self.colormap = colormap
-        self.vmin_orig = vmin
-        self.vmax_orig = vmax
-        self.gamma_orig = gamma
         self.colors_orig = colors
-        self.opacity_orig = opacity
+
+        # Helper to ensure args are lists of length num_channels
+        def _to_list(val, n, default):
+            if val is None:
+                return [default] * n
+            elif isinstance(val, (list, tuple)):
+                if len(val) >= n:
+                    return list(val[:n])
+                else:
+                    return list(val) + [default] * (n - len(val))
+            else:
+                return [val] * n
 
         # Initialize Channel info
         if isinstance(im, list):
             self.num_channels = len(im)
             self.channel_names = [f"Channel {i}" for i in range(self.num_channels)]
-            self.channel_visible = [True] * self.num_channels
+            self.channel_dtypes = [img.dtype.name for img in im]
 
             # Resolve default colors to ensure stability when toggling
             if colors is None:
@@ -188,10 +202,20 @@ class TNIASliceWidget(TNIAWidgetBase):
                  self.colors_resolved = colors
         else:
             self.num_channels = 1
+            self.channel_names = ["Channel 0"]
+            self.channel_dtypes = [im.dtype.name]
             self.colors_resolved = colors
-            # No channel names for single image (or we could add one if we wanted a toggle)
-            self.channel_names = []
-            self.channel_visible = []
+
+        # Set traitlets lists for interactive parameters
+        # Use "" to represent 'auto' for empty inputs in JS (maps to None for matplotlib)
+        def _resolve_vmin_vmax(val, n):
+            lst = _to_list(val, n, None)
+            return ["" if x is None else x for x in lst]
+
+        self.vmin_list = _resolve_vmin_vmax(vmin, self.num_channels)
+        self.vmax_list = _resolve_vmin_vmax(vmax, self.num_channels)
+        self.gamma_list = _to_list(gamma, self.num_channels, 1.0)
+        self.opacity_list = _to_list(opacity, self.num_channels, 1.0)
 
         # Set initial values if provided
         if x_t is not None: self.x_t = int(x_t)
@@ -229,14 +253,18 @@ class TNIASliceWidget(TNIAWidgetBase):
         else:
             self.warning_msg = ""
 
-        # Prepare arguments based on visibility
+        # Prepare arguments based on opacity
+        # Channels with opacity == 0 are considered hidden and filtered out
         if isinstance(self.im_orig, list):
-            # Indices of visible channels
-            visible_indices = [i for i, v in enumerate(self.channel_visible) if v]
+            # Map "" to None for vmin/vmax
+            vmin_resolved = [None if v == "" else float(v) for v in self.vmin_list]
+            vmax_resolved = [None if v == "" else float(v) for v in self.vmax_list]
+            gamma_resolved = [float(g) for g in self.gamma_list]
+            opacity_resolved = [float(o) for o in self.opacity_list]
 
-            # If no channels visible, what to do?
-            # We can pass an empty list, but show_xyz_max_slabs might fail.
-            # Let's pass empty list and see, or handle gracefully.
+            # Indices of visible channels
+            visible_indices = [i for i, op in enumerate(opacity_resolved) if op > 0]
+
             if not visible_indices:
                 # Create a placeholder figure
                 fig = plt.figure(figsize=self.figsize if self.figsize else (10, 10))
@@ -246,34 +274,35 @@ class TNIASliceWidget(TNIAWidgetBase):
 
             im_curr = [self.im_orig[i] for i in visible_indices]
 
-            # Filter colors
-            # colors_resolved is a list if num_channels > 1 or if explicit list passed
             if isinstance(self.colors_resolved, list) and len(self.colors_resolved) == self.num_channels:
                  colors_curr = [self.colors_resolved[i] for i in visible_indices]
             else:
                  colors_curr = self.colors_resolved
 
-            # Filter vmin/vmax/gamma if they are lists
-            def _filter_arg(arg):
-                if isinstance(arg, (list, tuple)) and len(arg) == self.num_channels:
-                    return [arg[i] for i in visible_indices]
-                return arg
-
-            vmin_curr = _filter_arg(self.vmin_orig)
-            vmax_curr = _filter_arg(self.vmax_orig)
-            gamma_curr = _filter_arg(self.gamma_orig)
-            opacity_curr = _filter_arg(self.opacity_orig)
+            vmin_curr = [vmin_resolved[i] for i in visible_indices]
+            vmax_curr = [vmax_resolved[i] for i in visible_indices]
+            gamma_curr = [gamma_resolved[i] for i in visible_indices]
+            opacity_curr = [opacity_resolved[i] for i in visible_indices]
 
         else:
+            vmin_val = None if self.vmin_list[0] == "" else float(self.vmin_list[0])
+            vmax_val = None if self.vmax_list[0] == "" else float(self.vmax_list[0])
+            gamma_val = float(self.gamma_list[0])
+            opacity_val = float(self.opacity_list[0])
+
+            if opacity_val <= 0:
+                fig = plt.figure(figsize=self.figsize if self.figsize else (10, 10))
+                fig.text(0.5, 0.5, "No Channels Visible", ha='center', va='center', color='white')
+                fig.patch.set_facecolor('black')
+                return fig
+
             im_curr = self.im_orig
             colors_curr = self.colors_resolved
-            vmin_curr = self.vmin_orig
-            vmax_curr = self.vmax_orig
-            gamma_curr = self.gamma_orig
-            opacity_curr = self.opacity_orig
+            vmin_curr = vmin_val
+            vmax_curr = vmax_val
+            gamma_curr = gamma_val
+            opacity_curr = opacity_val
 
-        # Call original logic
-        # Note: We need to handle show_crosshair manually or assume it's part of the original function?
         # show_xyz_max_slabs returns a Figure
         fig = show_xyz_max_slabs(
             im_curr, x_lims, y_lims, z_lims,
