@@ -110,7 +110,13 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
 
         # Set those back to default bcs they are dealt with in the RGB function
         vmin, vmax, gamma = None, None, 1
-
+        # Set opacity back to None, it is applied by create_multichannel_rgb
+        opacity = None
+    else:
+        # In single channel, ensure these are floats/None, not lists
+        if isinstance(opacity, list): opacity = opacity[0]
+        if isinstance(vmin, list): vmin = vmin[0]
+        if isinstance(vmax, list): vmax = vmax[0]
 
     if use_plt:
         fig=plt.figure(figsize=figsize, constrained_layout=False)
@@ -392,18 +398,27 @@ def create_multichannel_rgb(
     color_map = [np.asarray(to_rgb(c), dtype=np.float32) for c in colors]
 
     # Determine per-channel vmin/vmax if not provided
+    # vmin/vmax can be None, or a list containing floats and/or Nones
     if vmin is None:
         vmins = [0.0] * n
     else:
-        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [float(vmin)] * n
+        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
 
     if vmax is None:
-        vmaxs = []
-        for xy, xz, zy in zip(xy_list, xz_list, zy_list):
-            # global max across orientations for that channel
-            vmaxs.append(float(max(np.max(xy), np.max(xz), np.max(zy))))
+        vmaxs = [None] * n
     else:
-        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [float(vmax)] * n
+        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
+
+    for i in range(n):
+        if vmins[i] is None:
+            vmins[i] = 0.0
+        else:
+            vmins[i] = float(vmins[i])
+
+        if vmaxs[i] is None:
+            vmaxs[i] = float(max(np.max(xy_list[i]), np.max(xz_list[i]), np.max(zy_list[i])))
+        else:
+            vmaxs[i] = float(vmaxs[i])
 
     # Sanitize: ensure vmax > vmin
     for i in range(n):

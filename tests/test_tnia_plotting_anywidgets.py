@@ -9,7 +9,7 @@ def test_single_channel_instantiation():
     w = show_xyz_max_slice_interactive(im)
     assert isinstance(w, TNIASliceWidget)
     assert w.num_channels == 1
-    assert len(w.channel_names) == 0
+    assert len(w.channel_names) == 1
     # Render should produce image data (triggered by observer in init)
     assert w.image_data is not None and len(w.image_data) > 0
 
@@ -19,7 +19,7 @@ def test_multi_channel_instantiation():
     assert w.num_channels == 3
     assert len(w.channel_names) == 3
     assert w.channel_names == ["Channel 0", "Channel 1", "Channel 2"]
-    assert w.channel_visible == [True, True, True]
+    assert w.opacity_list == [1.0, 1.0, 1.0]
     assert w.image_data is not None and len(w.image_data) > 0
 
 def test_channel_visibility_update():
@@ -31,14 +31,14 @@ def test_channel_visibility_update():
     assert initial_data
 
     # Hide channel 1 (the bright one)
-    w.channel_visible = [True, False]
+    w.opacity_list = [1.0, 0.0]
 
     # Check that image data changed (re-rendered)
     new_data = w.image_data
     assert new_data != initial_data
 
     # Hide all channels
-    w.channel_visible = [False, False]
+    w.opacity_list = [0.0, 0.0]
     empty_data = w.image_data
     assert empty_data != new_data
     assert empty_data != initial_data

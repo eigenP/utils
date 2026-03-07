@@ -115,56 +115,127 @@ export default {
 
     const controlsDiv = document.createElement("div");
 
-    // Channels
+    // Create Layout Split: Left (Sliders) vs Right (Channels)
+    const splitContainer = document.createElement("div");
+    splitContainer.style.display = "flex";
+    splitContainer.style.gap = "20px";
+    splitContainer.style.marginBottom = "10px";
+
+    // Left Side: Sliders (65%)
+    const slidersContainer = document.createElement("div");
+    slidersContainer.style.flex = "65%";
+    slidersContainer.style.display = "flex";
+    slidersContainer.style.flexDirection = "column";
+    slidersContainer.style.gap = "10px";
+
+    slidersContainer.appendChild(xThick);
+    slidersContainer.appendChild(yThick);
+    slidersContainer.appendChild(zThick);
+    slidersContainer.appendChild(document.createElement("hr"));
+    slidersContainer.appendChild(xPos);
+    slidersContainer.appendChild(yPos);
+    slidersContainer.appendChild(zPos);
+
+    splitContainer.appendChild(slidersContainer);
+
+    // Right Side: Channels (35%)
+    const channelsContainer = document.createElement("div");
+    channelsContainer.style.flex = "35%";
+    channelsContainer.style.display = "flex";
+    channelsContainer.style.flexDirection = "column";
+    channelsContainer.style.gap = "10px";
+    channelsContainer.style.fontSize = "12px";
+    channelsContainer.style.overflowY = "auto";
+    channelsContainer.style.maxHeight = "300px";
+
     const channelNames = model.get("channel_names");
+    const channelDtypes = model.get("channel_dtypes");
+
     if (channelNames && channelNames.length > 0) {
-      const chanContainer = document.createElement("div");
-      chanContainer.style.display = "flex";
-      chanContainer.style.flexWrap = "wrap";
-      chanContainer.style.gap = "10px";
-      chanContainer.style.marginBottom = "10px";
+      channelNames.forEach((name, index) => {
+        const dtype = channelDtypes[index] || "unknown";
 
-      function updateCheckboxes() {
-        const visible = model.get("channel_visible");
-        chanContainer.innerHTML = ""; // Clear to rebuild
-        channelNames.forEach((name, index) => {
-          const label = document.createElement("label");
-          label.style.display = "flex";
-          label.style.alignItems = "center";
-          label.style.gap = "4px";
-          label.style.fontSize = "14px";
+        const chDiv = document.createElement("div");
+        chDiv.style.border = "1px solid #ccc";
+        chDiv.style.padding = "5px";
+        chDiv.style.borderRadius = "4px";
+        chDiv.style.display = "flex";
+        chDiv.style.flexDirection = "column";
+        chDiv.style.gap = "4px";
 
-          const cb = document.createElement("input");
-          cb.type = "checkbox";
-          cb.checked = visible[index];
+        const chHeader = document.createElement("strong");
+        chHeader.textContent = `${name} (${dtype})`;
+        chDiv.appendChild(chHeader);
 
-          cb.addEventListener("change", () => {
-             const currentVisible = [...model.get("channel_visible")];
-             currentVisible[index] = cb.checked;
-             model.set("channel_visible", currentVisible);
-             model.save_changes();
+        const createNumberInput = (label, traitName, isFloat, minVal, maxVal, allowEmpty) => {
+          const row = document.createElement("div");
+          row.style.display = "flex";
+          row.style.justifyContent = "space-between";
+          row.style.alignItems = "center";
+
+          const lbl = document.createElement("span");
+          lbl.textContent = label;
+          lbl.style.width = "50px";
+
+          const inp = document.createElement("input");
+          inp.type = "text"; // use text to easily handle empty string 'auto'
+          inp.style.width = "60px";
+
+          const updateInput = () => {
+            const arr = model.get(traitName);
+            if (arr && arr.length > index) {
+              inp.value = arr[index];
+            }
+          };
+
+          updateInput();
+          model.on(`change:${traitName}`, updateInput);
+
+          inp.addEventListener("change", () => {
+            let val = inp.value.trim();
+            if (val === "" && allowEmpty) {
+              val = "";
+            } else {
+              val = isFloat ? parseFloat(val) : parseInt(val);
+              if (isNaN(val)) {
+                // revert
+                updateInput();
+                return;
+              }
+              if (minVal !== undefined && val < minVal) val = minVal;
+              if (maxVal !== undefined && val > maxVal) val = maxVal;
+            }
+
+            inp.value = val;
+            const arr = [...model.get(traitName)];
+            arr[index] = val;
+            model.set(traitName, arr);
+            model.save_changes();
           });
 
-          label.appendChild(cb);
-          label.appendChild(document.createTextNode(name));
-          chanContainer.appendChild(label);
-        });
-      }
+          row.appendChild(lbl);
+          row.appendChild(inp);
+          return row;
+        };
 
-      model.on("change:channel_visible", updateCheckboxes);
-      updateCheckboxes();
+        let dtypeMax = undefined;
+        let isFloatDtype = false;
+        if (dtype.includes("uint8")) dtypeMax = 255;
+        else if (dtype.includes("uint16")) dtypeMax = 65535;
+        else if (dtype.includes("float")) isFloatDtype = true;
 
-      controlsDiv.appendChild(chanContainer);
-      controlsDiv.appendChild(document.createElement("hr"));
+        chDiv.appendChild(createNumberInput("vmin", "vmin_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
+        chDiv.appendChild(createNumberInput("vmax", "vmax_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
+        chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0, undefined, false));
+        chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
+
+        channelsContainer.appendChild(chDiv);
+      });
     }
 
-    controlsDiv.appendChild(xThick);
-    controlsDiv.appendChild(yThick);
-    controlsDiv.appendChild(zThick);
-    controlsDiv.appendChild(document.createElement("hr"));
-    controlsDiv.appendChild(xPos);
-    controlsDiv.appendChild(yPos);
-    controlsDiv.appendChild(zPos);
+    splitContainer.appendChild(channelsContainer);
+
+    controlsDiv.appendChild(splitContainer);
     controlsDiv.appendChild(document.createElement("hr"));
 
     const uiTogglesContainer = document.createElement("div");
