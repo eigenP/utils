@@ -152,7 +152,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, sxy=1, sz=1, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
-                 show_crosshair=True, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
+                 show_crosshair=True, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None, opacity=None):
 
         # Determine dimensions
         im_shape = (im[0].shape if isinstance(im, list) else im.shape)
@@ -169,6 +169,7 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.vmax_orig = vmax
         self.gamma_orig = gamma
         self.colors_orig = colors
+        self.opacity_orig = opacity
 
         # Initialize Channel info
         if isinstance(im, list):
@@ -261,6 +262,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmin_curr = _filter_arg(self.vmin_orig)
             vmax_curr = _filter_arg(self.vmax_orig)
             gamma_curr = _filter_arg(self.gamma_orig)
+            opacity_curr = _filter_arg(self.opacity_orig)
 
         else:
             im_curr = self.im_orig
@@ -268,6 +270,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmin_curr = self.vmin_orig
             vmax_curr = self.vmax_orig
             gamma_curr = self.gamma_orig
+            opacity_curr = self.opacity_orig
 
         # Call original logic
         # Note: We need to handle show_crosshair manually or assume it's part of the original function?
@@ -275,7 +278,7 @@ class TNIASliceWidget(TNIAWidgetBase):
         fig = show_xyz_max_slabs(
             im_curr, x_lims, y_lims, z_lims,
             sxy=self.sxy, sz=self.sz, figsize=self.figsize, colormap=self.colormap,
-            vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, colors=colors_curr
+            vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, colors=colors_curr, opacity=opacity_curr
         )
 
         # Crosshairs logic (copied from original interactive wrapper)
@@ -314,7 +317,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     points = traitlets.List().tag(sync=True) # List of [z, y, x] lists
     axis_bounds = traitlets.Dict().tag(sync=True) # Bounding boxes of axes in figure coords
 
-    def __init__(self, im, colors=None, point_size_scale=0.01, *args, **kwargs):
+    def __init__(self, im, colors=None, opacity=None, point_size_scale=0.01, *args, **kwargs):
         # Normalize input to list
         if not isinstance(im, list):
             im_list = [im]
@@ -334,6 +337,16 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
         colors_list = colors_list[:len(im_list)]
 
+        if opacity is None:
+            opacity_list = [1.0] * len(im_list)
+        elif isinstance(opacity, (int, float)):
+            opacity_list = [opacity] * len(im_list)
+        else:
+            opacity_list = list(opacity)
+            while len(opacity_list) < len(im_list):
+                opacity_list.append(1.0)
+            opacity_list = opacity_list[:len(im_list)]
+
         # Get shape
         im_shape = im_list[0].shape
         Z, Y, X = im_shape
@@ -346,9 +359,10 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         # Append annotation channel
         im_list.append(self._annot_img)
         colors_list.append('red')
+        opacity_list.append(1.0)
 
         # Initialize superclass
-        super().__init__(im_list, colors=colors_list, *args, **kwargs)
+        super().__init__(im_list, colors=colors_list, opacity=opacity_list, *args, **kwargs)
 
         # Override the last channel name
         self.channel_names = self.channel_names[:-1] + ['Annotations']
@@ -513,7 +527,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             plt.close(fig)
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=1, sz=1, render='points', bins=512,
-                 point_size=4, alpha=0.6, colors=None, gamma=1, vmin=None, vmax=None, figsize=None,
+                 point_size=4, alpha=0.6, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
                  show_crosshair=True, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
 
         self.X_arr = np.asarray(X_arr)
@@ -539,6 +553,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.point_size = point_size
         self.alpha = alpha
         self.colors = colors
+        self.opacity = opacity
         self.gamma = gamma
         self.vmin = vmin
         self.vmax = vmax
@@ -724,13 +739,13 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb(
                 xy_list, xz_list, zy_list,
-                vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, colors=colors_for_rgb, blend='add', soft_clip=True
+                vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, colors=colors_for_rgb, opacity=self.opacity, blend='add', soft_clip=True
             )
 
             fig = show_xyz(
                 xy_rgb, xz_rgb, zy_rgb,
                 sxy=self.sxy, sz=self.sz, figsize=self.figsize, colormap=None,
-                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None
+                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=self.opacity
             )
 
             fig.patch.set_alpha(1.0)
@@ -857,7 +872,7 @@ def show_xyz_max_slice_interactive(
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
     show_crosshair=True,
-    colors=None,
+    colors=None, opacity=None,
     point_size_scale=0.01,
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
@@ -901,7 +916,7 @@ def show_xyz_max_slice_interactive(
 
     return TNIASliceWidget(
         im, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
-        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, show_crosshair=show_crosshair,
+        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity, show_crosshair=show_crosshair,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
 
@@ -912,7 +927,7 @@ def show_xyz_max_slice_interactive_point_annotator(
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
     show_crosshair=True,
-    colors=None,
+    colors=None, opacity=None,
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
@@ -955,7 +970,7 @@ def show_xyz_max_slice_interactive_point_annotator(
 
     return TNIAAnnotatorWidget(
         im, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
-        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, show_crosshair=show_crosshair,
+        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity, show_crosshair=show_crosshair,
         point_size_scale=point_size_scale,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
@@ -967,7 +982,7 @@ def show_xyz_max_scatter_interactive(
     render='density',
     bins=512,
     point_size=4, alpha=0.6,
-    colors=None,
+    colors=None, opacity=None,
     gamma=1, vmin=None, vmax=None,
     figsize=None, figsize_scale=1.0,
     show_crosshair=True,
@@ -1017,7 +1032,7 @@ def show_xyz_max_scatter_interactive(
     return TNIAScatterWidget(
         X, Y, Z,
         channels=channels, sxy=sxy, sz=sz, render=render, bins=bins,
-        point_size=point_size, alpha=alpha, colors=colors,
+        point_size=point_size, alpha=alpha, colors=colors, opacity=opacity,
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
