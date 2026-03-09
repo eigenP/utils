@@ -22,6 +22,18 @@ from skimage.transform import resize
 from matplotlib.colors import PowerNorm, to_rgb, LinearSegmentedColormap
 import matplotlib.colors as mcolors
 
+def is_colormap(c):
+    """
+    Checks if a string is a valid matplotlib colormap name.
+    """
+    if not isinstance(c, str):
+        return False
+    try:
+        plt.get_cmap(c)
+        return True
+    except ValueError:
+        return False
+
 def resolve_color(c):
     """
     Attempts to resolve a string to a valid matplotlib color.
@@ -37,12 +49,9 @@ def resolve_color(c):
     except ValueError:
         pass
 
-    try:
-        # Check if it's a colormap name
+    if is_colormap(c):
         cmap = plt.get_cmap(c)
         return mcolors.to_hex(cmap(1.0)[:3])  # Get hex of final color
-    except ValueError:
-        pass
 
     return c
 
@@ -130,7 +139,14 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
 
     if isinstance(xy,list):
         MULTI_CHANNEL = True
-        xy, xz, zy = create_multichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colors = colors, opacity = opacity)
+        has_colormap = False
+        if colors is not None:
+            has_colormap = any(is_colormap(c) for c in colors)
+
+        if has_colormap:
+            xy, xz, zy = create_multichannel_rgb_cmap(xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity)
+        else:
+            xy, xz, zy = create_multichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colors = colors, opacity = opacity)
 
         # Set those back to default bcs they are dealt with in the RGB function
         vmin, vmax, gamma = None, None, 1
@@ -540,6 +556,134 @@ def create_multichannel_rgb(
     # # return show_xyz(xy_rgb, xz_rgb, zy_rgb, vmin = None, vmax=None, gamma = 1, use_plt=True)
     # return xy_rgb, xz_rgb, zy_rgb
 
+def create_multichannel_rgb_cmap(
+    xy_list, xz_list, zy_list,
+    vmin=None, vmax=None, gamma=1, colors=None, opacity=None,
+    blend='max',        # 'add' | 'screen' | 'max'
+    soft_clip=True,     # only used for blend='add'
+    eps=1e-12,
+):
+    """
+    Compose multi-channel XY/XZ/ZY into RGB with per-channel normalization using full colormaps.
+    """
+    assert isinstance(xy_list, list) and isinstance(xz_list, list) and isinstance(zy_list, list)
+    n = len(xy_list)
+    assert len(xz_list) == n and len(zy_list) == n, "xy/xz/zy must have same number of channels"
+
+    Hxy, Wxy = xy_list[0].shape
+    Hxz, Wxz = xz_list[0].shape
+    Hzy, Wzy = zy_list[0].shape
+
+    # Prepare outputs
+    xy_rgb = np.zeros((Hxy, Wxy, 3), dtype=np.float32)
+    xz_rgb = np.zeros((Hxz, Wxz, 3), dtype=np.float32)
+    zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
+
+    # Broadcast params
+    gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+    opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
+
+    if colors is None:
+        colors = ['magenta', 'cyan', 'yellow', 'green'][:n]
+
+    cmap_list = []
+    for c in colors:
+        if is_colormap(c):
+            cmap_list.append(plt.get_cmap(c))
+        else:
+            cmap_list.append(black_to(resolve_color(c)))
+
+    # Determine per-channel vmin/vmax if not provided
+    if vmin is None:
+        vmins = [0.0] * n
+    else:
+        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
+
+    if vmax is None:
+        vmaxs = [None] * n
+    else:
+        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
+
+    for i in range(n):
+        if vmins[i] is None:
+            vmins[i] = 0.0
+        else:
+            vmins[i] = float(vmins[i])
+
+        if vmaxs[i] is None:
+            vmaxs[i] = float(max(np.max(xy_list[i]), np.max(xz_list[i]), np.max(zy_list[i])))
+        else:
+            vmaxs[i] = float(vmaxs[i])
+
+    # Sanitize: ensure vmax > vmin
+    for i in range(n):
+        if not np.isfinite(vmins[i]): vmins[i] = 0.0
+        if not np.isfinite(vmaxs[i]): vmaxs[i] = vmins[i] + 1.0
+        if vmaxs[i] <= vmins[i] + eps:
+            vmaxs[i] = vmins[i] + 1.0  # avoid zero range
+
+    # Choose blending accumulators
+    if blend == 'screen':
+        xy_acc = np.ones_like(xy_rgb)
+        xz_acc = np.ones_like(xz_rgb)
+        zy_acc = np.ones_like(zy_rgb)
+    else:
+        xy_acc = xy_rgb
+        xz_acc = xz_rgb
+        zy_acc = zy_rgb
+
+    # Helpers
+    def _norm(a, lo, hi, g):
+        out = (a.astype(np.float32, copy=False) - lo) / max(hi - lo, eps)
+        out = np.clip(out, 0.0, 1.0)
+        return out if g == 1 else np.power(out, g, dtype=np.float32)
+
+    # Per-channel accumulate
+    for i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
+        cmap = cmap_list[i]
+        g = gammas[i]
+        o = opacities[i]
+        lo, hi = vmins[i], vmaxs[i]
+
+        # Apply colormap to normalized 1D array, then reshape
+        xy_n = cmap(_norm(xy, lo, hi, g))[..., :3] * o
+        xz_n = cmap(_norm(xz, lo, hi, g))[..., :3] * o
+        zy_n = cmap(_norm(zy, lo, hi, g))[..., :3] * o
+
+        if blend == 'screen':
+            xy_acc *= (1.0 - xy_n)
+            xz_acc *= (1.0 - xz_n)
+            zy_acc *= (1.0 - zy_n)
+        elif blend == 'max':
+            xy_acc = np.maximum(xy_acc, xy_n)
+            xz_acc = np.maximum(xz_acc, xz_n)
+            zy_acc = np.maximum(zy_acc, zy_n)
+        else:  # 'add'
+            xy_acc += xy_n
+            xz_acc += xz_n
+            zy_acc += zy_n
+
+    # Finalize per blend
+    if blend == 'screen':
+        xy_rgb = 1.0 - xy_acc
+        xz_rgb = 1.0 - xz_acc
+        zy_rgb = 1.0 - zy_acc
+    else:
+        xy_rgb = xy_acc
+        xz_rgb = xz_acc
+        zy_rgb = zy_acc
+
+        if blend == 'add':
+            if soft_clip:
+                for rgb in (xy_rgb, xz_rgb, zy_rgb):
+                    m = rgb.max(axis=-1, keepdims=True)
+                    scale = np.maximum(1.0, m)
+                    rgb /= scale
+            xy_rgb = np.clip(xy_rgb, 0.0, 1.0)
+            xz_rgb = np.clip(xz_rgb, 0.0, 1.0)
+            zy_rgb = np.clip(zy_rgb, 0.0, 1.0)
+
+    return xy_rgb, xz_rgb, zy_rgb
 
 def black_to(color):
     """Return a black→color LinearSegmentedColormap."""
