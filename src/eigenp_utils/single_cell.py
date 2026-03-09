@@ -1287,11 +1287,13 @@ def morans_i_all_fast(
 
             # Kurtosis calculation: sum(x^4)
             if np.shares_memory(Xb, X):
+                 # Optimize x^4 as (x^2)^2 using repeated multiplication
                  Xb_dev = np.multiply(Xb, Xb)
                  np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
                  sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
                  del Xb_dev
             else:
+                 # Optimize x^4 as (x^2)^2 using repeated multiplication
                  np.multiply(Xb, Xb, out=Xb)
                  np.multiply(Xb, Xb, out=Xb)
                  sum_fourth = np.sum(Xb, axis=0, dtype=np.float64)
