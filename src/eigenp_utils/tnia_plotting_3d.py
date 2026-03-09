@@ -20,7 +20,31 @@ from matplotlib import gridspec
 import numpy as np
 from skimage.transform import resize
 from matplotlib.colors import PowerNorm, to_rgb, LinearSegmentedColormap
+import matplotlib.colors as mcolors
 
+def resolve_color(c):
+    """
+    Attempts to resolve a string to a valid matplotlib color.
+    If it is a valid colormap name, it returns the final color (at 1.0) of that colormap.
+    """
+    if not isinstance(c, str):
+        return c
+
+    try:
+        # Check if it's already a valid color name or hex
+        to_rgb(c)
+        return c
+    except ValueError:
+        pass
+
+    try:
+        # Check if it's a colormap name
+        cmap = plt.get_cmap(c)
+        return mcolors.to_hex(cmap(1.0)[:3])  # Get hex of final color
+    except ValueError:
+        pass
+
+    return c
 
 def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
     a = arr.astype(dtype, copy=False)
@@ -117,6 +141,26 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
         if isinstance(opacity, list): opacity = opacity[0]
         if isinstance(vmin, list): vmin = vmin[0]
         if isinstance(vmax, list): vmax = vmax[0]
+
+        # In single channel, if `colors` is provided but not `colormap`,
+        # check if `colors` resolves to a colormap or use it as a solid color colormap
+        if colormap is None and colors is not None:
+            c = colors[0] if isinstance(colors, list) else colors
+            if isinstance(c, str):
+                try:
+                    # Check if it's a colormap
+                    plt.get_cmap(c)
+                    colormap = c
+                    colors = None
+                except ValueError:
+                    # Resolve color string to final hex/RGB if possible
+                    resolved = resolve_color(c)
+                    colormap = black_to(resolved)
+                    colors = None
+            else:
+                resolved = resolve_color(c)
+                colormap = black_to(resolved)
+                colors = None
 
     if use_plt:
         fig=plt.figure(figsize=figsize, constrained_layout=False)
@@ -395,7 +439,7 @@ def create_multichannel_rgb(
 
     if colors is None:
         colors = ['magenta', 'cyan', 'yellow', 'green'][:n]
-    color_map = [np.asarray(to_rgb(c), dtype=np.float32) for c in colors]
+    color_map = [np.asarray(to_rgb(resolve_color(c)), dtype=np.float32) for c in colors]
 
     # Determine per-channel vmin/vmax if not provided
     # vmin/vmax can be None, or a list containing floats and/or Nones
