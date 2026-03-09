@@ -1106,7 +1106,8 @@ def _build_dedup_aggregator(
     """
     names = np.asarray(var_names).astype(str)
     keys = np.char.upper(names) if case_insensitive else names
-    uniq, inv = np.unique(keys, return_inverse=True)
+    uniq_keys, idx, inv = np.unique(keys, return_index=True, return_inverse=True)
+    uniq = names[idx]
     n, m = names.size, uniq.size
     data = np.ones(n, dtype=np.float32)
     rows = np.arange(n, dtype=np.int32)
@@ -1176,7 +1177,7 @@ def morans_i_all_fast(
         out_names = np.asarray(names).astype(str)
     elif deduplicate in ("mean", "sum"):
         uniq, G = _build_dedup_aggregator(np.asarray(names).astype(str), how=deduplicate)
-        X = (X @ G) if sp.issparse(X) else (np.asarray(X, dtype=dtype) @ G.toarray())
+        X = (X @ G) if sp.issparse(X) else (np.asarray(X, dtype=dtype) @ G)
         out_names = uniq
     else:  # first / last
         df = pd.DataFrame({"name": np.asarray(names).astype(str)})
@@ -1334,7 +1335,7 @@ def morans_i_all_fast(
             var_I = (term_A - b2 * term_B_coeff) / var_denom - E_I**2
 
             # Clip negative variance (numerical noise)
-            var_I = np.maximum(var_I, 1e-18)
+            var_I = np.maximum(var_I, 0.0)
 
             sd_I = np.sqrt(var_I)
 
