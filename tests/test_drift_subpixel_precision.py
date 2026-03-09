@@ -12,7 +12,7 @@
 import unittest
 import numpy as np
 from scipy.ndimage import center_of_mass, shift
-from eigenp_utils.maxproj_registration import apply_drift_correction_2D
+from eigenp_utils.maxproj_registration import apply_drift_correction
 
 class TestDriftSubpixelPrecision(unittest.TestCase):
     """
@@ -89,7 +89,7 @@ class TestDriftSubpixelPrecision(unittest.TestCase):
         video, _ = self.generate_drifting_stack(n_frames=30, drift_rate=drift_rate, size=128)
 
         # 2. Run Integer Correction (Baseline)
-        corrected_int, _ = apply_drift_correction_2D(
+        corrected_int, _ = apply_drift_correction(
             video.copy(),
             method='integer',
             save_drift_table=False
@@ -97,7 +97,7 @@ class TestDriftSubpixelPrecision(unittest.TestCase):
         rmse_int = self.measure_stability_rmse(corrected_int)
 
         # 3. Run Subpixel Correction (Test Subject)
-        corrected_sub, _ = apply_drift_correction_2D(
+        corrected_sub, _ = apply_drift_correction(
             video.copy(),
             method='subpixel',
             save_drift_table=False
@@ -125,7 +125,7 @@ class TestDriftSubpixelPrecision(unittest.TestCase):
         video, _ = self.generate_drifting_stack(n_frames=10, drift_rate=drift_rate, size=64)
 
         # Subpixel method uses interpolation, so we check for degradation
-        corrected, table = apply_drift_correction_2D(video.copy(), method='subpixel')
+        corrected, table = apply_drift_correction(video.copy(), method='subpixel')
 
         # Check detected drift
         max_cum_drift = np.max(np.abs(table[['cum_dx', 'cum_dy']].values))
@@ -194,10 +194,10 @@ class TestDriftSubpixelPrecision(unittest.TestCase):
         video, _ = self.generate_moving_gaussian(shape=(n_frames, 64, 64), drift_per_frame=drift_rate)
 
         # 1. Run Integer Correction
-        corrected_int, _ = apply_drift_correction_2D(video, method='integer', save_drift_table=False)
+        corrected_int, _ = apply_drift_correction(video, method='integer', save_drift_table=False)
 
         # 2. Run Subpixel Correction
-        corrected_sub, _ = apply_drift_correction_2D(video, method='subpixel', save_drift_table=False)
+        corrected_sub, _ = apply_drift_correction(video, method='subpixel', save_drift_table=False)
 
         # 3. Calculate Centroid Stability (Standard Deviation of positions)
         def get_centroid_std(stack):
@@ -255,7 +255,7 @@ class TestDriftSubpixelPrecision(unittest.TestCase):
         # 3. Apply Correction
         # This will estimate drift frame1->frame0 (should be ~0.5, 0.5)
         # And shift frame1 back by (-0.5, -0.5).
-        corrected, table = apply_drift_correction_2D(video, method='subpixel', save_drift_table=False)
+        corrected, table = apply_drift_correction(video, method='subpixel', save_drift_table=False)
 
         # 4. Check Residual
         # Corrected Frame 1 should match Frame 0

@@ -14,6 +14,7 @@
 import numpy as np
 import pandas as pd
 from typing import Literal
+import logging
 from skimage.registration import phase_cross_correlation
 from skimage.registration._phase_cross_correlation import _upsampled_dft
 from scipy.ndimage import shift
@@ -89,9 +90,10 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
 
     return result
 
-def estimate_drift_2D(frame1, frame2, return_ccm = False):
+def estimate_drift(frame1, frame2, return_ccm = False):
     """
     Estimate the xy-drift between two 2D frames using cross-correlation.
+    NOTE: Currently 2D only. For 3D+t data, consider projecting or using the full pipeline.
 
     :param frame1: 2D numpy array, first frame
     :param frame2: 2D numpy array, second frame
@@ -215,8 +217,7 @@ def estimate_shift_1d_iterative(ref_proj, moving_proj, window, max_iter=3, tol=0
     return current_shift
 
 def compute_drift_trajectory(
-    projections_x: np.ndarray,
-    projections_y: np.ndarray,
+    projections: list,
     mode: Literal['forward', 'reverse', 'both'] = 'forward',
     shape_limit: tuple = None,
     windows: tuple = None
@@ -224,23 +225,25 @@ def compute_drift_trajectory(
     """
     Computes the drift trajectory (cumulative corrections) for the video.
 
-    Returns a DataFrame with columns: ['Time Point', 'dx', 'dy', 'cum_dx', 'cum_dy']
-    where cum_dx/cum_dy are the shifts needed to align the frame to the reference.
+    :param projections: List of numpy arrays, one for each spatial dimension (e.g., [proj_z, proj_y, proj_x]).
+    :param mode: 'forward', 'reverse', or 'both'
+    :param shape_limit: Tuple of maximum shifts to clamp (e.g., (z_shape, y_shape, x_shape))
+    :param windows: Tuple of 1D windows to apply to each projection (e.g., (win_z, win_y, win_x))
+    Returns a DataFrame with columns: ['Time Point', 'dx', 'dy', 'dz', 'cum_dx', 'cum_dy', 'cum_dz']
+    where cum_d* are the shifts needed to align the frame to the reference.
+    If 2 spatial dimensions are provided, dz and cum_dz will be 0.
     """
-    T = projections_x.shape[0]
+    num_dims = len(projections)
+    T = projections[0].shape[0]
 
-    # Initialize cumulative drift
-    # We use an array to store cumulative drift for all timepoints
-    cum_dx_arr = np.zeros(T, dtype=np.float32)
-    cum_dy_arr = np.zeros(T, dtype=np.float32)
+    # Initialize steps and cumulative drift for 3 axes (z, y, x)
+    # If 2D (num_dims == 2), we will just map index 0 -> y, index 1 -> x
+    # If 3D (num_dims == 3), index 0 -> z, index 1 -> y, index 2 -> x
+    cum_d = np.zeros((3, T), dtype=np.float32)
+    d = np.zeros((3, T), dtype=np.float32)
 
-    # Steps
-    dx_arr = np.zeros(T, dtype=np.float32)
-    dy_arr = np.zeros(T, dtype=np.float32)
-
-    win_x, win_y = windows if windows else (None, None)
-
-    x_shape, y_shape = shape_limit if shape_limit else (1e9, 1e9) # Arbitrary large if None
+    wins = windows if windows else [None] * num_dims
+    limits = shape_limit if shape_limit else [1e9] * num_dims
 
     # Helper to clamp drift steps
     def clamp(val, limit):
@@ -248,88 +251,62 @@ def compute_drift_trajectory(
             return 0.0
         return val
 
+    # Helper to process a single time step align `mov_idx` to `ref_idx`
+    def align_step(ref_idx, mov_idx, is_bwd=False):
+        shifts = []
+        for d_idx in range(num_dims):
+            shift_val = estimate_shift_1d_iterative(
+                projections[d_idx][ref_idx],
+                projections[d_idx][mov_idx],
+                wins[d_idx]
+            )
+            shifts.append(shift_val)
+        return shifts
+
     if mode == 'reverse':
-        # Reference is T-1
         # Iterate backwards: T-1 -> 1
-        # We estimate shift to align t-1 to t
-
         for t in tqdm(range(T - 1, 0, -1), desc='Computing Drift Trajectory (Reverse)'):
-            # t goes T-1, ..., 1. We are processing pair (t-1, t).
-            # Target: Align t-1 to t.
-            # estimate(ref, mov) returns shift to align mov to ref.
-            # We want shift for t-1. So t-1 is moving. t is ref.
-
-            # Using estimate_shift_1d_iterative(ref, mov)
-            # Ref: t, Mov: t-1
-            dx = estimate_shift_1d_iterative(projections_x[t], projections_x[t-1], win_x)
-            dy = estimate_shift_1d_iterative(projections_y[t], projections_y[t-1], win_y)
-
-            dx = clamp(dx, x_shape//5)
-            dy = clamp(dy, y_shape//5)
-
-            # P_{t-1} = P_t + dx
-            # Since P is "correction vector", Correction(t-1) = Correction(t) + dx
-            cum_dx_arr[t-1] = cum_dx_arr[t] + dx
-            cum_dy_arr[t-1] = cum_dy_arr[t] + dy
-
-            dx_arr[t-1] = dx
-            dy_arr[t-1] = dy
+            shifts = align_step(t, t-1)
+            for d_idx in range(num_dims):
+                c = clamp(shifts[d_idx], limits[d_idx] // 5)
+                # target axis in output arrays:
+                # If 2D (y, x), d_idx=0 -> y (axis 1), d_idx=1 -> x (axis 2)
+                # If 3D (z, y, x), d_idx=0 -> z (axis 0), d_idx=1 -> y (axis 1), d_idx=2 -> x (axis 2)
+                out_idx = d_idx + (3 - num_dims)
+                d[out_idx, t-1] = c
+                cum_d[out_idx, t-1] = cum_d[out_idx, t] + c
 
     else:
         # Forward or Both
-        # Reference is 0
-
         for t in tqdm(range(1, T), desc=f'Computing Drift Trajectory ({mode})'):
-            # Align t to t-1
-
             if mode == 'both':
-                # Bidirectional
-                # dx_bwd: Align t to t-1 (Ref t-1, Mov t)
-                dx_bwd = estimate_shift_1d_iterative(projections_x[t-1], projections_x[t], win_x)
-                dy_bwd = estimate_shift_1d_iterative(projections_y[t-1], projections_y[t], win_y)
-
-                # dx_fwd: Align t-1 to t (Ref t, Mov t-1)
-                dx_fwd = estimate_shift_1d_iterative(projections_x[t], projections_x[t-1], win_x)
-                dy_fwd = estimate_shift_1d_iterative(projections_y[t], projections_y[t-1], win_y)
-
-                # Average step to align t to t-1
-                # We want shift for t.
-                # dx_bwd is shift for t.
-                # dx_fwd is shift for t-1 (relative to t).
-                # shift(t) approx -shift(t-1).
-                # dx = (dx_bwd - dx_fwd) / 2
-                dx = (dx_bwd - dx_fwd) / 2
-                dy = (dy_bwd - dy_fwd) / 2
-
+                shifts_bwd = align_step(t-1, t)
+                shifts_fwd = align_step(t, t-1)
+                shifts = [(b - f) / 2 for b, f in zip(shifts_bwd, shifts_fwd)]
             else:
-                # Forward only
-                # Ref t-1, Mov t
-                dx = estimate_shift_1d_iterative(projections_x[t-1], projections_x[t], win_x)
-                dy = estimate_shift_1d_iterative(projections_y[t-1], projections_y[t], win_y)
+                shifts = align_step(t-1, t)
 
-            dx = clamp(dx, x_shape//5)
-            dy = clamp(dy, y_shape//5)
-
-            # Correction(t) = Correction(t-1) + dx
-            cum_dx_arr[t] = cum_dx_arr[t-1] + dx
-            cum_dy_arr[t] = cum_dy_arr[t-1] + dy
-
-            dx_arr[t] = dx
-            dy_arr[t] = dy
+            for d_idx in range(num_dims):
+                c = clamp(shifts[d_idx], limits[d_idx] // 5)
+                out_idx = d_idx + (3 - num_dims)
+                d[out_idx, t] = c
+                cum_d[out_idx, t] = cum_d[out_idx, t-1] + c
 
     # Create DataFrame
     df = pd.DataFrame({
         'Time Point': np.arange(T),
-        'dx': dx_arr,
-        'dy': dy_arr,
-        'cum_dx': cum_dx_arr,
-        'cum_dy': cum_dy_arr
+        'dx': d[2],
+        'dy': d[1],
+        'dz': d[0],
+        'cum_dx': cum_d[2],
+        'cum_dy': cum_d[1],
+        'cum_dz': cum_d[0]
     })
 
     return df
 
 
-def apply_drift_correction_2D(
+def apply_drift_correction(
     video_data,
     reverse_time = False,
     save_drift_table=False,
@@ -337,25 +314,31 @@ def apply_drift_correction_2D(
     method: Literal['integer', 'subpixel'] = 'integer'
 ):
     """
-    Apply drift correction to video data.
+    Apply drift correction to video data (2D+t or 3D+t).
 
-    This function corrects for drift in video data frame by frame. It calculates the drift between
-    consecutive frames using the `estimate_drift` function, and applies corrections to align the frames.
-    The cumulative drift is also calculated and stored. Optionally, a table of drift values can be saved
-    to a CSV file.
+    This function corrects for drift in video data frame by frame. It projects the data
+    along spatial dimensions to estimate 1D shifts, and applies corrections to align the frames.
 
-    :param video_data: A 3D numpy array representing the video data. The dimensions should be (time, x, y).
+    :param video_data: A 3D (T, Y, X) or 4D (T, Z, Y, X) numpy array representing the video data.
     :param reverse_time: Process frames in reverse order (or 'both').
     :param save_drift_table: A boolean indicating whether to save the drift values to a CSV file. Default is False.
     :param csv_filename: The name of the CSV file to save the drift table to. Default is 'drift_table.csv'.
     :param method: 'integer' (default) for fast integer shifting, or 'subpixel' for precise bicubic interpolation.
-                   Note that 'subpixel' uses float shifts and performs range clipping to prevent integer wraparound artifacts.
     :return: A tuple containing two elements:
-        - corrected_data: A 3D numpy array of the same shape as video_data, representing the drift-corrected video.
-        - drift_table: A pandas DataFrame containing the drift values, cumulative drift, and time points.
+        - corrected_data: A numpy array of the same shape as video_data.
+        - drift_table: A pandas DataFrame containing the drift values.
     """
-    # Get the dimensions of the video data
-    t_shape, x_shape, y_shape = video_data.shape
+    ndim = video_data.ndim
+    if ndim == 3:
+        logging.info("Input is 3D (T, Y, X). Proceeding with 2D+t max-projection registration.")
+        t_shape, y_shape, x_shape = video_data.shape
+        num_spatial_dims = 2
+    elif ndim == 4:
+        logging.info("Input is 4D (T, Z, Y, X). Proceeding with 3D+t max-projection registration.")
+        t_shape, z_shape, y_shape, x_shape = video_data.shape
+        num_spatial_dims = 3
+    else:
+        raise ValueError(f"Expected 3D (T, Y, X) or 4D (T, Z, Y, X) data, got {ndim}D data.")
 
     # Initialize an array to store the corrected video data
     corrected_data = np.zeros_like(video_data)
@@ -385,25 +368,50 @@ def apply_drift_correction_2D(
     # Pre-calculate weighted projections for all frames to avoid re-computation inside the loop
     # matth: Switched to decoupled windowing. No 2D weighting here.
 
-    # Store projections: (T, W) and (T, H)
-    projections_x = []
-    projections_y = []
+    projections = []
+    shape_limit = []
+    windows_tuple = []
 
-    # Iterate once to compute all raw projections
-    for t in range(t_shape):
-        projections_x.append(np.max(video_data[t], axis=0))
-        projections_y.append(np.max(video_data[t], axis=1))
+    if num_spatial_dims == 2:
+        # 2D+t -> Y, X
+        proj_y = []
+        proj_x = []
+        for t in range(t_shape):
+            # Axis 0 in video_data[t] is Y, Axis 1 is X
+            proj_y.append(np.max(video_data[t], axis=1)) # project X, gives Y profile
+            proj_x.append(np.max(video_data[t], axis=0)) # project Y, gives X profile
 
-    # Convert to arrays
-    # projections_x: (T, y_shape) -- Profile along X (Width)
-    # projections_y: (T, x_shape) -- Profile along Y (Height)
-    # Cast to float32 to allow windowing multiplication
-    projections_x = np.array(projections_x, dtype=np.float32)
-    projections_y = np.array(projections_y, dtype=np.float32)
+        proj_y = np.array(proj_y, dtype=np.float32)
+        proj_x = np.array(proj_x, dtype=np.float32)
 
-    # Apply 1D Tukey window to the entire stack
-    win_x = windows.tukey(y_shape, alpha=0.1).astype(np.float32)
-    win_y = windows.tukey(x_shape, alpha=0.1).astype(np.float32)
+        projections = [proj_y, proj_x]
+        shape_limit = (y_shape, x_shape)
+        windows_tuple = (
+            windows.tukey(y_shape, alpha=0.1).astype(np.float32),
+            windows.tukey(x_shape, alpha=0.1).astype(np.float32)
+        )
+    else:
+        # 3D+t -> Z, Y, X
+        proj_z = []
+        proj_y = []
+        proj_x = []
+        for t in range(t_shape):
+            # Axis 0 is Z, Axis 1 is Y, Axis 2 is X in video_data[t]
+            proj_z.append(np.max(video_data[t], axis=(1, 2))) # project Y,X -> Z profile
+            proj_y.append(np.max(video_data[t], axis=(0, 2))) # project Z,X -> Y profile
+            proj_x.append(np.max(video_data[t], axis=(0, 1))) # project Z,Y -> X profile
+
+        proj_z = np.array(proj_z, dtype=np.float32)
+        proj_y = np.array(proj_y, dtype=np.float32)
+        proj_x = np.array(proj_x, dtype=np.float32)
+
+        projections = [proj_z, proj_y, proj_x]
+        shape_limit = (z_shape, y_shape, x_shape)
+        windows_tuple = (
+            windows.tukey(z_shape, alpha=0.1).astype(np.float32),
+            windows.tukey(y_shape, alpha=0.1).astype(np.float32),
+            windows.tukey(x_shape, alpha=0.1).astype(np.float32)
+        )
 
     mode = 'forward'
     if reverse_time == 'both':
@@ -413,10 +421,10 @@ def apply_drift_correction_2D(
 
     # Compute trajectory first
     drift_table = compute_drift_trajectory(
-        projections_x, projections_y,
+        projections,
         mode=mode,
-        shape_limit=(x_shape, y_shape),
-        windows=(win_x, win_y)
+        shape_limit=shape_limit,
+        windows=windows_tuple
     )
 
     # Iterate all frames to apply correction
@@ -425,19 +433,24 @@ def apply_drift_correction_2D(
         # drift_table is indexed 0..T-1 and guaranteed to be sorted by Time Point by compute_drift_trajectory
         cum_dx = drift_table.loc[t, 'cum_dx']
         cum_dy = drift_table.loc[t, 'cum_dy']
-
-        # Apply correction: shift by (cum_dy, cum_dx)
-        # Note: input coords (y, x). shift=(dy, dx).
+        cum_dz = drift_table.loc[t, 'cum_dz']
 
         # NOTE: We cast to integer for the shift operation, but keep cumulative drift as float
         # to prevent integrator windup/loss of precision for slow drifts.
+
+        if num_spatial_dims == 2:
+            shift_tuple = (cum_dy, cum_dx)
+            int_shift_tuple = (int(round(cum_dy)), int(round(cum_dx)))
+        else:
+            shift_tuple = (cum_dz, cum_dy, cum_dx)
+            int_shift_tuple = (int(round(cum_dz)), int(round(cum_dy)), int(round(cum_dx)))
 
         if method == 'subpixel':
             input_frame = video_data[t].astype(np.float32)
 
             shifted_slice = shift(
                 input_frame,
-                shift=(cum_dy, cum_dx),
+                shift=shift_tuple,
                 order=3,
                 mode='constant',
                 cval=min_value
@@ -449,12 +462,9 @@ def apply_drift_correction_2D(
             corrected_data[t] = shifted_slice
 
         else:
-            shift_dx = int(round(cum_dx))
-            shift_dy = int(round(cum_dy))
-
             zero_shift_multi_dimensional(
                 video_data[t],
-                shifts=(shift_dy, shift_dx),
+                shifts=int_shift_tuple,
                 fill_value=min_value,
                 out=corrected_data[t]
             )
