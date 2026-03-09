@@ -158,7 +158,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 plt.close(fig)
 
 class TNIASliceWidget(TNIAWidgetBase):
-    def __init__(self, im, sxy=1, sz=1, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
+    def __init__(self, im, sxy=None, sz=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
                  show_crosshair=True, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None, opacity=None):
 
         # Determine dimensions
@@ -168,8 +168,12 @@ class TNIASliceWidget(TNIAWidgetBase):
         super().__init__(X, Y, Z, show_crosshair=show_crosshair)
 
         self.im_orig = im
-        self.sxy = sxy
-        self.sz = sz
+
+        self._sxy_given = sxy is not None
+        self._sz_given = sz is not None
+        self.sxy = sxy if self._sxy_given else 1.0
+        self.sz = sz if self._sz_given else 1.0
+
         self.figsize = figsize
         self.colormap = colormap
         self.colors_orig = colors
@@ -313,10 +317,14 @@ class TNIASliceWidget(TNIAWidgetBase):
             gamma_curr = gamma_val
             opacity_curr = opacity_val
 
+        # Pass None if not originally given to trigger scale bar logic
+        pass_sxy = self.sxy if self._sxy_given else None
+        pass_sz = self.sz if self._sz_given else None
+
         # show_xyz_max_slabs returns a Figure
         fig = show_xyz_max_slabs(
             im_curr, x_lims, y_lims, z_lims,
-            sxy=self.sxy, sz=self.sz, figsize=self.figsize, colormap=self.colormap,
+            sxy=pass_sxy, sz=pass_sz, figsize=self.figsize, colormap=self.colormap,
             vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, colors=colors_curr, opacity=opacity_curr
         )
 
@@ -565,7 +573,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
             plt.close(fig)
 class TNIAScatterWidget(TNIAWidgetBase):
-    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=1, sz=1, render='points', bins=512,
+    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=None, sz=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
                  show_crosshair=True, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
 
@@ -585,8 +593,10 @@ class TNIAScatterWidget(TNIAWidgetBase):
         super().__init__(X_dim, Y_dim, Z_dim, show_crosshair=show_crosshair)
 
         self.channels = channels
-        self.sxy = sxy
-        self.sz = sz
+        self._sxy_given = sxy is not None
+        self._sz_given = sz is not None
+        self.sxy = sxy if self._sxy_given else 1.0
+        self.sz = sz if self._sz_given else 1.0
         self.render = render
         self.bins = bins
         self.point_size = point_size
@@ -781,9 +791,12 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, colors=colors_for_rgb, opacity=self.opacity, blend='add', soft_clip=True
             )
 
+            pass_sxy = self.sxy if self._sxy_given else None
+            pass_sz = self.sz if self._sz_given else None
+
             fig = show_xyz(
                 xy_rgb, xz_rgb, zy_rgb,
-                sxy=self.sxy, sz=self.sz, figsize=self.figsize, colormap=None,
+                sxy=pass_sxy, sz=pass_sz, figsize=self.figsize, colormap=None,
                 vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=self.opacity
             )
 
@@ -897,7 +910,14 @@ class TNIAScatterWidget(TNIAWidgetBase):
             fontsize_pt = max(8, min(24, fig_h_in * 72 * 0.03))
             x0 = 0.5 - bar_frac/2; x1 = 0.5 + bar_frac/2; y = 0.5
             axBar.hlines(y, x0, x1, transform=axBar.transAxes, linewidth=2, color='gray')
-            axBar.text(0.5, y - 0.1, f"{int(bar_um)} µm", transform=axBar.transAxes,
+
+            both_given = self._sxy_given and self._sz_given
+            if both_given:
+                text_label = f"{int(bar_um)} µm"
+            else:
+                text_label = "`sxy` , `sz`"
+
+            axBar.text(0.5, y - 0.1, text_label, transform=axBar.transAxes,
                        ha='center', va='top', color='gray', fontsize=fontsize_pt)
 
             fig.tight_layout(pad=0.0)
@@ -906,7 +926,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
 def show_xyz_max_slice_interactive(
     im,
-    sxy=1, sz=1,
+    sxy=None, sz=None,
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
@@ -922,7 +942,9 @@ def show_xyz_max_slice_interactive(
     """
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
-    z_xy_ratio = (sz / sxy) if sxy != sz else 1
+    _sxy = sxy if sxy is not None else 1
+    _sz = sz if sz is not None else 1
+    z_xy_ratio = (_sz / _sxy) if _sxy != _sz else 1
 
     if figsize is None:
         width_px  = X + Z * z_xy_ratio
@@ -960,7 +982,7 @@ def show_xyz_max_slice_interactive(
 
 def show_xyz_max_slice_interactive_point_annotator(
     im,
-    sxy=1, sz=1,
+    sxy=None, sz=None,
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
@@ -979,7 +1001,9 @@ def show_xyz_max_slice_interactive_point_annotator(
     """
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
-    z_xy_ratio = (sz / sxy) if sxy != sz else 1
+    _sxy = sxy if sxy is not None else 1
+    _sz = sz if sz is not None else 1
+    z_xy_ratio = (_sz / _sxy) if _sxy != _sz else 1
 
     if figsize is None:
         width_px  = X + Z * z_xy_ratio
@@ -1017,7 +1041,7 @@ def show_xyz_max_slice_interactive_point_annotator(
 def show_xyz_max_scatter_interactive(
     X, Y, Z,
     channels=None,
-    sxy=1, sz=1,
+    sxy=None, sz=None,
     render='density',
     bins=512,
     point_size=4, alpha=0.6,
@@ -1037,7 +1061,9 @@ def show_xyz_max_scatter_interactive(
     XN = xmax - xmin + 1
     YN = ymax - ymin + 1
     ZN = zmax - zmin + 1
-    z_xy_ratio = (sz / sxy) if sxy != sz else 1
+    _sxy = sxy if sxy is not None else 1
+    _sz = sz if sz is not None else 1
+    z_xy_ratio = (_sz / _sxy) if _sxy != _sz else 1
 
     if figsize is None:
         width_px  = XN + ZN * z_xy_ratio

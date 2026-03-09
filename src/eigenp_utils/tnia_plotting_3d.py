@@ -65,7 +65,7 @@ def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
 
 
 # Copyright tnia 2021 - BSD License
-def show_xyz_slice(image_to_show, x, y, z, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
+def show_xyz_slice(image_to_show, x, y, z, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
@@ -73,8 +73,8 @@ def show_xyz_slice(image_to_show, x, y, z, sxy=1, sz=1,figsize=(10,10), colormap
         x (int): x position of slice
         y (int): y position of slice
         z (int): z position of slice
-        sxy (float, optional): xy pixel size of 3D. Defaults to 1.
-        sz (float, optional): z pixel size of 3D. Defaults to 1.
+        sxy (float, optional): xy pixel size of 3D. Defaults to None.
+        sz (float, optional): z pixel size of 3D. Defaults to None.
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
@@ -87,13 +87,13 @@ def show_xyz_slice(image_to_show, x, y, z, sxy=1, sz=1,figsize=(10,10), colormap
     return show_xyz(slice_xy, slice_xz, slice_zy, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, use_plt = use_plt, opacity = opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_xyz_max(image_to_show, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_xyz_max(image_to_show, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ plots max xy, xz, and zy projections of a 3D image
 
     Args:
         image_to_show (3d numpy array): image to plot
-        sxy (float, optional): xy pixel size. Defaults to 1.
-        sz (float, optional): z pixel size. Defaults to 1.
+        sxy (float, optional): xy pixel size. Defaults to None.
+        sz (float, optional): z pixel size. Defaults to None.
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
@@ -102,13 +102,13 @@ def show_xyz_max(image_to_show, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin
     return show_xyz_projection(image_to_show, sxy, sz, figsize, np.max, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 
-def show_xyz_projection(image_to_show, sxy=1, sz=1,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_xyz_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Args:
         image_to_show (3d numpy array): image to plot
-        sxy (float, optional): xy pixel size of 3D. Defaults to 1.
-        sz (float, optional): z pixel size of 3D. Defaults to 1.
+        sxy (float, optional): xy pixel size of 3D. Defaults to None.
+        sz (float, optional): z pixel size of 3D. Defaults to None.
         figsize (tuple): size of figure to
         projector: function to project with
         colormap (_type_, optional): _description_. Defaults to None.
@@ -121,21 +121,26 @@ def show_xyz_projection(image_to_show, sxy=1, sz=1,figsize=(10,10), projector=np
     return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, colors = None, opacity = None):
+def show_xyz(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, colors = None, opacity = None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
         xy (2d numpy array): xy projection
         xz (2d numpy array): xz projection
         zy (2d numpy array): zy projection
-        sxy (float, optional): xy pixel size of 3D. Defaults to 1.
-        sz (float, optional): z pixel size of 3D. Defaults to 1.
+        sxy (float, optional): xy pixel size of 3D. Defaults to None (treats as 1).
+        sz (float, optional): z pixel size of 3D. Defaults to None (treats as 1).
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
     Returns:
         [type]: [description]
     """
+    both_given = sxy is not None and sz is not None
+    if sxy is None:
+        sxy = 1
+    if sz is None:
+        sz = 1
 
     if isinstance(xy,list):
         MULTI_CHANNEL = True
@@ -275,7 +280,13 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
     
     ax3.hlines(y, x0, x1, transform=ax3.transAxes,
                linewidth=2, color='gray')
-    ax3.text(0.5, y - 0.1, f"{int(bar_um)} µm",
+
+    if both_given:
+        text_label = f"{int(bar_um)} µm"
+    else:
+        text_label = "`sxy` , `sz`"
+
+    ax3.text(0.5, y - 0.1, text_label,
              transform=ax3.transAxes,
              ha='center', va='top',
              color='gray',
@@ -286,7 +297,7 @@ def show_xyz(xy, xz, zy, sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None
 
 
 ### New function
-def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=1, sz=1,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -296,8 +307,8 @@ def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=1, sz
         x: slices for x in format [x_1, x_2] where values are integers, to be passed as slice(x_1, x_2, None)
         y: slices for y in format [y_1, y_2] where values are integers
         z: slices for z in format [z_1, z_2] where values are integers
-        sxy (float, optional): xy pixel size of 3D. Defaults to 1.
-        sz (float, optional): z pixel size of 3D. Defaults to 1.
+        sxy (float, optional): xy pixel size of 3D. Defaults to None.
+        sz (float, optional): z pixel size of 3D. Defaults to None.
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
@@ -315,15 +326,15 @@ def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=1, sz
 
 
 ### New function
-def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=1, sz=1,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
 
     Args:
         image_to_show (3d numpy array): image to plot
-        sxy (float, optional): xy pixel size of 3D. Defaults to 1.
-        sz (float, optional): z pixel size of 3D. Defaults to 1.
+        sxy (float, optional): xy pixel size of 3D. Defaults to None.
+        sz (float, optional): z pixel size of 3D. Defaults to None.
         figsize (tuple): size of figure to
         projector: function to project with
         colormap (_type_, optional): _description_. Defaults to None.
