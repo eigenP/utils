@@ -73,8 +73,8 @@ def test_morans_i_eigenvectors():
 
     # Test uncentered constant vector
     res_const = morans_i_all_fast(adata_const, W_rowstd=W_std, center=False)
-    # The function upper-cases gene names by default due to deduplication
-    i_const = res_const.set_index("gene").loc["CONST", "I"]
+    # The function now preserves original casing
+    i_const = res_const.set_index("gene").loc["const", "I"]
 
     # For a row-standardized matrix, the constant vector is an eigenvector with eval 1.
     # I = (n/S0) * (x'Wx)/(x'x). S0 = n for row-standardized.
@@ -95,7 +95,7 @@ def test_morans_i_eigenvectors():
     # Checkerboard should be mean 0 (balanced grid), so center=True/False shouldn't matter much,
     # but let's stick to center=True (default) to test that path too.
     res_check = morans_i_all_fast(adata_check, W_rowstd=W_std, center=True)
-    i_check = res_check.set_index("gene").loc["CHECKERBOARD", "I"]
+    i_check = res_check.set_index("gene").loc["checkerboard", "I"]
 
     # For bipartite graph, x_check is eigenvector with eval -1.
     # I should be -1.
