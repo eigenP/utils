@@ -200,7 +200,7 @@ class TNIASliceWidget(TNIAWidgetBase):
                      defaults += defaults
                  self.colors_resolved = defaults[:self.num_channels]
             else:
-                 self.colors_resolved = colors
+                 self.colors_resolved = list(colors)
         else:
             self.num_channels = 1
             self.channel_names = ["Channel 0"]
@@ -212,7 +212,9 @@ class TNIASliceWidget(TNIAWidgetBase):
             else:
                 self.colors_resolved = [colors]
 
-        self.channel_colors = self.colors_resolved
+        # Use resolve_color for channel_colors (which is passed to JS)
+        from .tnia_plotting_3d import resolve_color
+        self.channel_colors = [resolve_color(c) for c in self.colors_resolved]
 
         # Set traitlets lists for interactive parameters
         # Use "" to represent 'auto' for empty inputs in JS (maps to None for matplotlib)
