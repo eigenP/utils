@@ -23,7 +23,7 @@ from .spline_utils import (
     project_onto_plane,
     normalize_vectors
 )
-from .tnia_plotting_3d import (
+from .tnia_plotting_anywidgets import (
     show_xyz_slice,
     show_xyz_max,
     show_xyz_projection,

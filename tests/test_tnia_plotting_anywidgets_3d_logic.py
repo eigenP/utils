@@ -8,7 +8,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from eigenp_utils.tnia_plotting_3d import (
+from eigenp_utils.tnia_plotting_anywidgets import (
     show_xyz_slice,
     show_xyz_max_slabs,
     create_multichannel_rgb,
@@ -44,6 +44,27 @@ def test_show_xyz_max_slabs_projection():
     assert np.array_equal(xz_img, xz_expected)
     assert np.array_equal(zy_img, zy_expected)
     plt.close(fig)
+
+
+def test_deprecated_tnia_plotting_3d_warning():
+    import warnings
+    import importlib
+
+    # Remove from sys.modules to ensure re-evaluation
+    import sys
+    if "eigenp_utils.tnia_plotting_3d" in sys.modules:
+        del sys.modules["eigenp_utils.tnia_plotting_3d"]
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        import eigenp_utils.tnia_plotting_3d as tnia3d
+
+        assert len(w) == 1
+        assert issubclass(w[-1].category, DeprecationWarning)
+        assert "deprecated" in str(w[-1].message)
+
+    # verify re-export works
+    assert hasattr(tnia3d, "show_xyz")
 
 
 def test_create_multichannel_rgb_basic():
