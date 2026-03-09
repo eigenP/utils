@@ -23,7 +23,7 @@ from .spline_utils import (
     project_onto_plane,
     normalize_vectors
 )
-from .tnia_plotting_3d import (
+from .tnia_plotting_anywidgets import (
     show_xyz_slice,
     show_xyz_max,
     show_xyz_projection,
@@ -33,8 +33,8 @@ from .tnia_plotting_3d import (
 )
 from .maxproj_registration import (
     zero_shift_multi_dimensional,
-    estimate_drift_2D,
-    apply_drift_correction_2D,
+    estimate_drift,
+    apply_drift_correction,
     apply_subpixel_drift_correction,
 )
 from .extended_depth_of_focus import apply_median_filter, best_focus_image
@@ -65,8 +65,8 @@ __all__ = [
     "show_xyz_max_slabs",
     "create_multichannel_rgb",
     "zero_shift_multi_dimensional",
-    "estimate_drift_2D",
-    "apply_drift_correction_2D",
+    "estimate_drift",
+    "apply_drift_correction",
     "apply_subpixel_drift_correction",
     "apply_median_filter",
     "best_focus_image",

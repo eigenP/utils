@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import shift
 from skimage import data, transform
-from eigenp_utils.maxproj_registration import apply_drift_correction_2D
+from eigenp_utils.maxproj_registration import apply_drift_correction
 
 class TestDriftBiasOscillation(unittest.TestCase):
     """
@@ -84,7 +84,7 @@ class TestDriftBiasOscillation(unittest.TestCase):
         video, gt_drift = self.generate_oscillating_video(n_cycles=CYCLES, period=PERIOD, amplitude=AMPLITUDE)
 
         # Run Correction (Bidirectional Subpixel)
-        corrected, table = apply_drift_correction_2D(
+        corrected, table = apply_drift_correction(
             video,
             method='subpixel',
             reverse_time='both',
@@ -144,7 +144,7 @@ class TestDriftBiasOscillation(unittest.TestCase):
         PERIOD = 12
         video, gt_drift = self.generate_oscillating_video(n_cycles=2, period=PERIOD, amplitude=AMPLITUDE)
 
-        corrected, table = apply_drift_correction_2D(
+        corrected, table = apply_drift_correction(
             video,
             method='subpixel',
             reverse_time='both',
@@ -178,10 +178,10 @@ class TestDriftBiasOscillation(unittest.TestCase):
         video, gt_drift = self.generate_oscillating_video(n_cycles=3, period=PERIOD, amplitude=AMPLITUDE)
 
         # Bidirectional
-        _, table_bi = apply_drift_correction_2D(video, reverse_time='both', save_drift_table=False)
+        _, table_bi = apply_drift_correction(video, reverse_time='both', save_drift_table=False)
 
         # Unidirectional
-        _, table_uni = apply_drift_correction_2D(video, reverse_time=False, save_drift_table=False)
+        _, table_uni = apply_drift_correction(video, reverse_time=False, save_drift_table=False)
 
         # Check endpoint of 2nd cycle (T=20)
         # T=20 corresponds to index 19 if indexed 0..N-1, or we query 'Time Point' column

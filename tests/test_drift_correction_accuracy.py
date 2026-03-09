@@ -11,7 +11,7 @@
 import unittest
 import numpy as np
 from scipy.ndimage import center_of_mass
-from eigenp_utils.maxproj_registration import apply_drift_correction_2D
+from eigenp_utils.maxproj_registration import apply_drift_correction
 
 class TestDriftCorrectionAccuracy(unittest.TestCase):
     """
@@ -85,8 +85,8 @@ class TestDriftCorrectionAccuracy(unittest.TestCase):
         )
 
         # 2. Run Drift Correction
-        # Note: apply_drift_correction_2D prints to stdout (tqdm), which we might ignore
-        corrected_video, drift_table = apply_drift_correction_2D(video, save_drift_table=False)
+        # Note: apply_drift_correction prints to stdout (tqdm), which we might ignore
+        corrected_video, drift_table = apply_drift_correction(video, save_drift_table=False)
 
         # 3. Verify Estimation (Drift Table)
         # drift_table contains 'dx', 'dy', 'cum_dx', 'cum_dy'
@@ -154,7 +154,7 @@ class TestDriftCorrectionAccuracy(unittest.TestCase):
         # Using 64x64 to avoid windowing artifacts on 32x32 images
         video, _ = self.generate_moving_gaussian(shape=(5, 64, 64), drift_per_frame=drift_rate)
 
-        _, drift_table = apply_drift_correction_2D(video, save_drift_table=False)
+        _, drift_table = apply_drift_correction(video, save_drift_table=False)
 
         # Correction 'dx' for Frame 1 (relative to Frame 0) should be -1.0
         # cum_dx at end (Frame 4) should be approx -4.0 (4 steps)

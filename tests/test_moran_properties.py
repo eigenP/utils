@@ -73,8 +73,7 @@ def test_morans_i_eigenvectors():
 
     # Test uncentered constant vector
     res_const = morans_i_all_fast(adata_const, W_rowstd=W_std, center=False)
-    # The function used to upper-case gene names by default due to deduplication,
-    # but now correctly retains the original casing.
+    # The function now preserves original casing
     i_const = res_const.set_index("gene").loc["const", "I"]
 
     # For a row-standardized matrix, the constant vector is an eigenvector with eval 1.

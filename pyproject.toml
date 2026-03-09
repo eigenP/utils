@@ -33,6 +33,7 @@ single-cell = [
 ]
 dev = [
     "pytest>=7.0.0",
+    "marimo",
     "eigenp_utils[image-analysis,plotting,single-cell]"
 ]
 image-analysis = [

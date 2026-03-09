@@ -1245,76 +1245,54 @@ def morans_i_all_fast(
     else:
         E_I = np.nan
 
-    # matth: Compute row sums for the full expansion of Moran's I numerator.
-    # Essential for correctness on irregular graphs (e.g. islands) or general weights.
-    W_row_sums = np.asarray(W.sum(axis=1)).ravel().astype(np.float64)
-
     for j0 in range(0, G, block_genes):
         j1 = min(G, j0 + block_genes)
-        Xb = X[:, j0:j1]
-        WXb = W @ Xb
-        Xb = Xb.toarray().astype(np.float32, copy=False) if sp.issparse(Xb) else np.asarray(Xb, dtype=np.float32)
-        WXb = WXb.toarray().astype(np.float32, copy=False) if sp.issparse(WXb) else np.asarray(WXb, dtype=np.float32)
+        Xb_raw = X[:, j0:j1]
 
-        # Optimize memory usage by avoiding explicit centering for cross-product
-        sum_cross = np.einsum('ij,ij->j', Xb, WXb, dtype=np.float64)
-        sum_sq = np.einsum('ij,ij->j', Xb, Xb, dtype=np.float64)
+        # Ensure dense float32 for calculations
+        Xb = Xb_raw.toarray().astype(np.float32, copy=False) if sp.issparse(Xb_raw) else np.asarray(Xb_raw, dtype=np.float32)
 
-        # For kurtosis, we need sum of 4th powers of deviations
-        # (Xb - mu)^4.
         mub = mu[j0:j1]
 
         if center:
-            sum_WXb = WXb.sum(axis=0, dtype=np.float64)
+            # matth: Operate directly on mean-centered variables to avoid catastrophic cancellation
+            # and algebraic expansions. This naturally handles irregular weights without complex terms.
+            if np.shares_memory(Xb, X):
+                Xb_dev = Xb - mub[None, :]
+            else:
+                Xb_dev = Xb
+                np.subtract(Xb_dev, mub[None, :], out=Xb_dev)
 
-            # matth: Calculate sum(x * R) term
-            # Xb is (N, block), W_row_sums is (N,) -> (block,)
-            sum_xR = Xb.T @ W_row_sums
+            WXb_dev = W @ Xb_dev
 
-            # matth: Correct general formula: sum_cross - mean*sum(xC) - mean*sum(xR) + mean^2*S0
-            num = sum_cross - mub * sum_WXb - mub * sum_xR + (mub ** 2) * S0
+            num = np.einsum('ij,ij->j', Xb_dev, WXb_dev, dtype=np.float64)
+            den = np.einsum('ij,ij->j', Xb_dev, Xb_dev, dtype=np.float64)
 
-            den = sum_sq - n * (mub ** 2)
-
-            # Bolt: Optimize memory. WXb is no longer needed.
-            del WXb
+            # Bolt: Optimize memory. WXb_dev is no longer needed.
+            del WXb_dev
 
             # Kurtosis calculation: sum((x-u)^4)
-            # We can perform this in-place on Xb if it's safe (i.e., not a view of X).
-            # If Xb shares memory with X (e.g. X is dense), we must copy first.
-            if np.shares_memory(Xb, X):
-                # Copy to avoid corrupting X
-                # Xb_dev will be (N, block) float32
-                Xb_dev = Xb - mub[None, :]
-                # Optimize x^4 as (x^2)^2 using repeated multiplication
-                np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
-                np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
-                sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
-                del Xb_dev
-            else:
-                # Xb is a copy (e.g. from sparse conversion or explicit copy), safe to reuse in-place
-                np.subtract(Xb, mub[None, :], out=Xb)
-                # Optimize x^4 as (x^2)^2 using repeated multiplication
-                np.multiply(Xb, Xb, out=Xb)
-                np.multiply(Xb, Xb, out=Xb)
-                sum_fourth = np.sum(Xb, axis=0, dtype=np.float64)
+            # Optimize x^4 as (x^2)^2 using repeated multiplication in-place
+            np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
+            np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
+            sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
 
+            if np.shares_memory(Xb, X):
+                del Xb_dev
         else:
-            num = sum_cross
-            den = sum_sq
-            # Bolt: WXb not needed
+            WXb = W @ Xb
+            num = np.einsum('ij,ij->j', Xb, WXb, dtype=np.float64)
+            den = np.einsum('ij,ij->j', Xb, Xb, dtype=np.float64)
             del WXb
 
-            # If not centered, we assume mean 0 for formula (deviations from 0)
+            # Kurtosis calculation: sum(x^4)
             if np.shares_memory(Xb, X):
-                 # Must copy (or create temp)
                  # Optimize x^4 as (x^2)^2 using repeated multiplication
                  Xb_dev = np.multiply(Xb, Xb)
                  np.multiply(Xb_dev, Xb_dev, out=Xb_dev)
                  sum_fourth = np.sum(Xb_dev, axis=0, dtype=np.float64)
                  del Xb_dev
             else:
-                 # In-place power
                  # Optimize x^4 as (x^2)^2 using repeated multiplication
                  np.multiply(Xb, Xb, out=Xb)
                  np.multiply(Xb, Xb, out=Xb)
