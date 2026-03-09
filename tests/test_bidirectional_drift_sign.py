@@ -2,7 +2,7 @@
 import unittest
 import numpy as np
 from scipy.ndimage import center_of_mass
-from eigenp_utils.maxproj_registration import apply_drift_correction_2D
+from eigenp_utils.maxproj_registration import apply_drift_correction
 
 class TestBidirectionalDriftSign(unittest.TestCase):
     """
@@ -46,7 +46,7 @@ class TestBidirectionalDriftSign(unittest.TestCase):
         video = self.generate_drifting_blob(n_frames=n_frames, drift=drift_rate)
 
         # 2. Run Bidirectional Correction
-        corrected, table = apply_drift_correction_2D(video, reverse_time='both', save_drift_table=False)
+        corrected, table = apply_drift_correction(video, reverse_time='both', save_drift_table=False)
 
         # 3. Analyze Results
         # Check drift table accumulation

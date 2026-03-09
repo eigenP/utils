@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from unittest.mock import MagicMock, patch
 import unittest
-from eigenp_utils.maxproj_registration import apply_drift_correction_2D
+from eigenp_utils.maxproj_registration import apply_drift_correction
 
 class TestDriftIntegrity(unittest.TestCase):
     """
@@ -39,9 +39,11 @@ class TestDriftIntegrity(unittest.TestCase):
         # We simulate a constant drift of 0.5 pixels per frame.
         # Over 19 intervals (frames 1 to 19), total drift should be 9.5 pixels.
 
-        # When reverse_time=False (default), the code calls phase_cross_correlation
-        # exactly TWICE per time point (once for X, once for Y).
-        # Shift is calculated as (shift_x[0], shift_y[0]).
+        # When reverse_time=False (default), the code calls estimate_shift_1d_iterative
+        # exactly TWICE per time point (once for Y, once for X).
+        # For 2D data (T, Y, X), the projections list is [proj_y, proj_x].
+        # The loop in compute_drift_trajectory calls align_step, which iterates over num_dims=2.
+        # First it estimates shift for Y, then for X.
 
         # If the object moves +0.5 pixels/frame, the shift required to register
         # frame t to t-1 is -0.5.
@@ -49,23 +51,20 @@ class TestDriftIntegrity(unittest.TestCase):
         # We patch estimate_shift_1d_iterative directly to return the desired shift.
         # It returns a float, not a tuple like phase_cross_correlation.
 
-        ret_x = 0.5
         ret_y = 0.0
+        ret_x = 0.5
 
         # Note: The sign of accumulation depends on the code.
-        # dx, dy = shift_x[0], shift_y[0]
-        # dx, dy = dx * DRIFT_SIGN (1)
-        # cum_dx += dx.
-        # So if we return 0.5, cum_dx increases by 0.5.
+        # So if we return 0.5 for x, cum_dx increases by 0.5.
 
         side_effect = []
         # Loop runs for range(1, 20) -> 19 iterations
         for _ in range(19):
-            side_effect.append(ret_x)
             side_effect.append(ret_y)
+            side_effect.append(ret_x)
 
         with patch('eigenp_utils.maxproj_registration.estimate_shift_1d_iterative', side_effect=side_effect):
-            corrected, drift_table = apply_drift_correction_2D(video, save_drift_table=False)
+            corrected, drift_table = apply_drift_correction(video, save_drift_table=False)
 
         last_row = drift_table.iloc[-1]
         final_cum_dx = last_row['cum_dx']

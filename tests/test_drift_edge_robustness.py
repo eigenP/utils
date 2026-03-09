@@ -1,7 +1,7 @@
 
 import numpy as np
 import pytest
-from eigenp_utils.maxproj_registration import estimate_drift_2D, apply_drift_correction_2D
+from eigenp_utils.maxproj_registration import estimate_drift, apply_drift_correction
 
 def create_square_frame_noisy(shape, object_pos, object_size, intensity=1.0, noise_level=0.1):
     # Set seed for reproducibility
@@ -37,12 +37,12 @@ def test_drift_edge_object():
     frame2 = create_square_frame_noisy(shape, pos2, size, 1.0, noise)
 
     # Run drift estimation
-    shift = estimate_drift_2D(frame1, frame2)
+    shift = estimate_drift(frame1, frame2)
 
     # Expected shift: (-0, -20)
-    # Note: estimate_drift_2D returns (shift_x, shift_y)
+    # Note: estimate_drift returns (shift_x, shift_y)
     # But wait, phase_cross_correlation on 1D projection returns shift along that axis.
-    # estimate_drift_2D does:
+    # estimate_drift does:
     # shift_x = pcc(proj_x_1, proj_x_2)
     # shift = (shift_x, shift_y)
     # In our case, X-shift is 20 (frame1 -> frame2).
@@ -60,7 +60,7 @@ def test_drift_edge_object():
 
 def test_apply_drift_correction_edge():
     """
-    Verifies apply_drift_correction_2D handles the edge case correctly over a sequence.
+    Verifies apply_drift_correction handles the edge case correctly over a sequence.
     """
     shape = (128, 128)
     T = 3
@@ -73,7 +73,7 @@ def test_apply_drift_correction_edge():
     for t, s in enumerate(shifts):
         video[t] = create_square_frame_noisy(shape, (10, 64 + s), (10, 10), 1.0, 0.1)
 
-    corrected, table = apply_drift_correction_2D(video, save_drift_table=False)
+    corrected, table = apply_drift_correction(video, save_drift_table=False)
 
     # Check if drift table captured the motion
     # Frame 0: Ref
