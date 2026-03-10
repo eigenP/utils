@@ -81,6 +81,19 @@ export default {
 
     const saveBtn = document.createElement("button");
     saveBtn.textContent = "Save as SVG";
+    saveBtn.style.padding = "6px 12px";
+    saveBtn.style.backgroundColor = "#e0e0e0";
+    saveBtn.style.color = "#333";
+    saveBtn.style.border = "1px solid #999";
+    saveBtn.style.borderRadius = "4px";
+    saveBtn.style.cursor = "pointer";
+    saveBtn.style.fontWeight = "bold";
+    saveBtn.addEventListener("mouseover", () => {
+        saveBtn.style.backgroundColor = "#ccc";
+    });
+    saveBtn.addEventListener("mouseout", () => {
+        saveBtn.style.backgroundColor = "#e0e0e0";
+    });
     saveBtn.addEventListener("click", () => {
       let current = model.get("save_trigger");
       model.set("save_trigger", current + 1);

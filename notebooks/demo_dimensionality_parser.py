@@ -9,6 +9,12 @@
 
 import marimo
 
+# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
+# Marimo check complains about markdown indentation inside mo.md().
+# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
+# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
+# and apply that exact structure via an automated script.
+
 __generated_with = "0.16.4"
 app = marimo.App(auto_download=["html"])
 
