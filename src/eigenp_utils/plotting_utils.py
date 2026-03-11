@@ -606,6 +606,66 @@ def raincloud_plot(data,
 
 
 # Function to adjust colormaps
+def colormap_maker(colors, positions=None, cmap_name=None):
+    """
+    Creates a new custom colormap from a list of colors and optional positions.
+
+    If `cmap_name` is provided, the colormap is registered with Matplotlib and
+    can be accessed via `plt.get_cmap(cmap_name)` or `cmap=cmap_name` in plotting functions.
+
+    Parameters
+    ----------
+    colors : list
+        A list of colors in any format accepted by Matplotlib (e.g., 'k', 'cyan',
+        (1.0, 1.0, 1.0, 0.5), '#FF5733').
+    positions : tuple or list of floats, optional
+        A sequence of floats from 0.0 to 1.0 indicating the position of each color.
+        If not provided, the colors will be equally spaced.
+    cmap_name : str, optional
+        The name to register the colormap under in Matplotlib. If None, the colormap
+        is not registered.
+
+    Returns
+    -------
+    matplotlib.colors.LinearSegmentedColormap
+        The generated colormap object.
+
+    Examples
+    --------
+    >>> # Create and register a 'cyberpunk' colormap
+    >>> cmap = colormap_maker(['#08041c', '#390b5e', '#a2217c', '#f04e4c', '#fce205'], cmap_name='cyberpunk')
+    >>> plt.imshow(data, cmap='cyberpunk')
+    """
+    if positions is not None:
+        if len(positions) != len(colors):
+            raise ValueError("The number of positions must match the number of colors.")
+        if positions[0] != 0.0 or positions[-1] != 1.0:
+            raise ValueError("Positions must start with 0.0 and end with 1.0.")
+        if not all(positions[i] < positions[i+1] for i in range(len(positions)-1)):
+            raise ValueError("Positions must be strictly monotonically increasing.")
+
+        # LinearSegmentedColormap.from_list accepts a list of (value, color) tuples
+        color_data = list(zip(positions, colors))
+    else:
+        color_data = colors
+
+    # Generate a default name for internal creation if None is provided
+    internal_name = cmap_name if cmap_name else "custom_cmap"
+
+    cmap = LinearSegmentedColormap.from_list(internal_name, color_data)
+
+    if cmap_name is not None:
+        # Register the colormap
+        # In newer Matplotlib versions, plt.colormaps.register or mpl.colormaps.register is preferred
+        # but plt.register_cmap is the classic way. Let's use mpl_colormaps for compatibility.
+        try:
+            mpl_colormaps.register(cmap, name=cmap_name, force=True)
+        except AttributeError:
+            # Fallback for older Matplotlib versions
+            plt.register_cmap(name=cmap_name, cmap=cmap)
+
+    return cmap
+
 def adjust_colormap(cmap_name, start_ = 0.25, end_ = 1.0, start_color = [0.9, 0.9, 0.9, 1]):
     '''
         # Use colormap from 25% to 100% (just the color part)
