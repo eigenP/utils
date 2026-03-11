@@ -2,9 +2,11 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "marimo",
-#     "scikit-image",
-#     "numpy",
 #     "matplotlib",
+#     "numpy",
+#     "scikit-image",
+#     "anywidget",
+#     "traitlets",
 #     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main",
 # ]
 # ///
@@ -17,20 +19,18 @@ import marimo
 # (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
 # and apply that exact structure via an automated script.
 
-__generated_with = "0.16.4"
+__generated_with = "0.20.4"
 app = marimo.App(auto_download=["html"])
-
 
 @app.cell
 def _():
     import marimo as mo
     return (mo,)
 
-
 @app.cell(hide_code=True)
 async def _(mo):
     mo.md(
-        """
+        r"""
         ## Setup
         Installing the package from GitHub...
         """
@@ -90,102 +90,93 @@ async def _(mo):
         sys,
     )
 
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+        # Multichannel Interactive Orthogonal Views
+
+        Demonstrating the interactive slice and point annotator widgets on multichannel 3D datasets.
+        """
+    )
+    return
+
+@app.cell
+def _():
+    import numpy as np
+    from skimage.data import cells3d
+    from eigenp_utils.tnia_plotting_anywidgets import (
+        show_xyz_max_slice_interactive,
+        show_xyz_max_slice_interactive_point_annotator
+    )
+
+    # Load the 3D cell data (Z, C, Y, X)
+    cells = cells3d()
+    print(f"Loaded cells3d with shape: {cells.shape}")
+
+    # Extract channels and cast to float to prevent clipping/overflow issues in blending
+    nuclei = cells[:, 1, :, :].astype(float)
+    membrane = cells[:, 0, :, :].astype(float)
+    return cells, membrane, nuclei, np, show_xyz_max_slice_interactive, show_xyz_max_slice_interactive_point_annotator
 
 @app.cell
 def _(mo):
     mo.md(
+        r"""
+        ## Interactive 3D Maximum Intensity Projection & Slicing
+
+        You can use the sliders below to navigate the 3D volume along any axis. The `Thickness` sliders control the maximum intensity projection slab size, while `Position` navigates the slab center.
         """
-    # Plotting Utils Demo
-
-    Demonstrates `hist_imshow` and `color_coded_projection`.
-    """
     )
     return
 
+@app.cell
+def _(membrane, nuclei, show_xyz_max_slice_interactive):
+    # Standard Viewer
+    viewer = show_xyz_max_slice_interactive(
+        [nuclei, membrane],
+        colors=['viridis', 'magma'],
+        x_t=3,
+        y_t=3,
+        z_t=nuclei.shape[0] // 2 - 1,
+        show_crosshair=True
+    )
+    return (viewer,)
 
 @app.cell
-def _():
-    import matplotlib.pyplot as plt
-    import numpy as np
-    from skimage.io import imread
-    from eigenp_utils.io import download_file
-    from eigenp_utils.plotting_utils import (
-        hist_imshow,
-        color_coded_projection,
-        set_plotting_style
-    )
-
-    # Try to set style (might fail if files missing in checkout, but good to call)
-    set_plotting_style()
-
-    return (
-        color_coded_projection,
-        download_file,
-        hist_imshow,
-        imread,
-        np,
-        plt,
-        set_plotting_style,
-    )
-
-
-@app.cell
-def _(download_file):
-    url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
-    download_file(url_to_fetch, "./cells3d.tif")
+def _(viewer):
+    viewer
     return
-
-
-@app.cell
-def _(imread):
-    cells = imread("./cells3d.tif")
-    # Normalize for color projection (it expects floats often or handles it)
-    # The function docs say "Normalize ... if frame_max > frame_min" internally.
-    stack = cells[:, 1, :, :].astype(float)
-    stack = (stack - stack.min()) / (stack.max() - stack.min())
-    return cells, stack
-
 
 @app.cell
 def _(mo):
-    cmap_dropdown = mo.ui.dropdown(
-        options=['plasma', 'viridis', 'inferno', 'magma', 'cividis'],
-        value='plasma',
-        label="Colormap for Projection"
+    mo.md(
+        r"""
+        ## Point Annotator Widget
+
+        Toggle the "ANNOTATION" checkbox to start adding or deleting points. Points added are persistent and sync directly back to the `widget.points` list in Python.
+        """
     )
-    cmap_dropdown
-    return (cmap_dropdown,)
-
-
-@app.cell
-def _(color_coded_projection, cmap_dropdown, stack):
-    proj_img = color_coded_projection(stack, color_map=cmap_dropdown.value)
-    return (proj_img,)
-
-
-@app.cell
-def _(plt, proj_img):
-    fig_p, ax_p = plt.subplots(figsize=(5, 5))
-    ax_p.imshow(proj_img)
-    ax_p.set_title("Color Coded Projection (Time/Z)")
-    ax_p.axis('off')
-    fig_p
-    return ax_p, fig_p
-
-
-@app.cell
-def _(mo):
-    mo.md("## Histogram + Image (`hist_imshow`)")
     return
 
+@app.cell
+def _(membrane, nuclei, show_xyz_max_slice_interactive_point_annotator):
+    # Annotator Viewer
+    annotator = show_xyz_max_slice_interactive_point_annotator(
+        [nuclei, membrane],
+        colors=['green', 'magenta'],
+        x_t=5,
+        y_t=5,
+        z_t=nuclei.shape[0] // 2 - 1,
+        show_crosshair=True,
+        point_size_scale=0.015  # Adjust marker size
+    )
+    return (annotator,)
 
 @app.cell
-def _(hist_imshow, stack):
-    # Just pass the 3D stack, it should slice middle automatically
-    _res = hist_imshow(stack, bins=100)
-    _res['fig']
-    return (_res,)
-
+def _(annotator):
+    annotator
+    return
 
 if __name__ == "__main__":
     app.run()
