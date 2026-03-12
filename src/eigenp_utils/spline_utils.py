@@ -170,15 +170,26 @@ def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=Fal
 
 
     # Calculate the overlap region if overlap_only is True
-    start = max(np.min(spline_origin, axis=0), np.min(spline_endpoint, axis=0))
-    end = min(np.max(spline_origin, axis=0), np.max(spline_endpoint, axis=0))
+    # Bounding box of the overlapping region
+    start = np.maximum(np.min(spline_origin, axis=0), np.min(spline_endpoint, axis=0))
+    end = np.minimum(np.max(spline_origin, axis=0), np.max(spline_endpoint, axis=0))
 
-    # Resample to the overlap region; you may need a custom function to handle this
-    # For simplicity, this example will use linear interpolation to simulate this
-    # Usually you would use an interpolation library or extend the splprep/splev usage here
-    common_u = np.linspace(start, end, num_points)
-    common_origin = np.interp(common_u, np.linspace(0, 1, len(spline_origin)), spline_origin)
-    common_endpoint = np.interp(common_u, np.linspace(0, 1, len(spline_endpoint)), spline_endpoint)
+    # Mask to keep only the points that fall inside the geometric bounding box overlap
+    mask_origin = np.all((spline_origin >= start) & (spline_origin <= end), axis=1)
+    mask_endpoint = np.all((spline_endpoint >= start) & (spline_endpoint <= end), axis=1)
+
+    overlap_origin = spline_origin[mask_origin]
+    overlap_endpoint = spline_endpoint[mask_endpoint]
+
+    # Resample the cropped splines to the common number of points
+    # This requires that the overlap region has enough points and spans a valid curve segment
+    if len(overlap_origin) > 1 and len(overlap_endpoint) > 1:
+        common_origin = create_resampled_spline(overlap_origin, num_points=num_points)
+        common_endpoint = create_resampled_spline(overlap_endpoint, num_points=num_points)
+    else:
+        # Fallback if there is no significant overlap
+        common_origin = np.zeros((num_points, spline_origin.shape[1]))
+        common_endpoint = np.zeros((num_points, spline_endpoint.shape[1]))
 
     vectors = common_endpoint - common_origin
     return vectors
