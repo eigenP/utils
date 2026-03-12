@@ -10,7 +10,6 @@ export default {
     const imgContainer = document.createElement("div");
     const img = document.createElement("img");
     img.style.maxWidth = "100%";
-    img.style.maxHeight = "600px";
     imgContainer.appendChild(img);
 
     function createSlider(label, traitName, minTrait, maxTrait, scaleTrait) {
