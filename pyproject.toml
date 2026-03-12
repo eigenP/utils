@@ -20,7 +20,8 @@ dependencies = [
 
 [project.optional-dependencies]
 plotting = [
-    "plotly"
+    "plotly",
+    "statannotations"
 ]
 single-cell = [
     "pacmap>=0.7.3",
