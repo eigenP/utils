@@ -11,14 +11,22 @@
 * **Intensity Rescaling**: Tools for contrast enhancement, including CLAHE.
 
 ### Plotting & Visualization
-* **Interactive 3D Widgets**: Jupyter-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`) and dynamic point cloud visualization (`IsoScatterWidget`) with interactive channel visibility and manual matrix-driven rotation.
-* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), and utility functions to generate SVGs.
+* **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_xyz` for dynamic multichannel viewers), interactive point cloud visualization (`IsoScatterWidget`), and 3D point annotation (`TNIAAnnotatorWidget`).
+* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker`, and SVGs embedded with metadata via `savefig_svg`.
 
 ### Single-Cell Analysis
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
 * **Spatial Autocorrelation**: Fast Moran's I implementation (`morans_i_all_fast`) that correctly handles general (non-row-standardized) spatial weights.
+* **Dimensionality Reduction**: `tl_pacmap` for PaCMAP embeddings supporting versatile initialization strategies (e.g., PAGA, PCA, random).
+
+### Statistical Utilities
+* **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci`, `summary_stats`, `remove_outliers`, and `add_stat_annotations` for annotating plots with significance markers.
+
+### Task Scheduling & Productivity
+* **Interactive Calendar**: `task_calendar_scheduler` provides a dynamic scheduling application using Marimo, Pandas, and Plotly for visualizing events and planning tasks.
 
 ### Core Utilities
+* **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
 * **I/O Utilities**: Functions to streamline file and data reading.
 
 ## Installation
