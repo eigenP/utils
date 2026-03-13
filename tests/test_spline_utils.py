@@ -77,6 +77,39 @@ def test_calculate_vector_difference():
     assert np.allclose(vectors[:, 1], 1.0) # difference in Y is 1.0
     assert np.allclose(vectors[:, 0], 0.0) # difference in X is 0.0
 
+def test_calculate_vector_difference_overlap():
+    # line1 from (0,0) to (20,20)
+    line1 = np.array([[0,0], [5,5], [10,10], [15,15], [20,20]])
+    # line2 from (10,11) to (30,31)
+    line2 = np.array([[10,11], [15,16], [20,21], [25,26], [30,31]])
+
+    # Line 1 overlaps the Y range [11, 20] with Line 2.
+    # The bounding box of line1 is [[0, 0], [20, 20]]
+    # The bounding box of line2 is [[10, 11], [30, 31]]
+    # Intersection is start=[10, 11], end=[20, 20]
+    # For line1, X in [10, 20], Y in [11, 20] means points between [11, 11] and [20, 20].
+    # For line2, X in [10, 20], Y in [11, 20] means points between [10, 11] and [19, 20].
+    # The mathematical vector difference between the re-parameterized segments should be [10-11, 11-11] = [-1, 0]
+    # Wait, line1 is y=x, line2 is y=x+1.
+    # If line1 is parameterized from (11, 11) to (20, 20)
+    # and line2 is parameterized from (10, 11) to (19, 20).
+    # Then the difference (line2 - line1) at corresponding parameter values is [-1, 0].
+
+    resampled1 = create_resampled_spline(line1, num_points=20)
+    resampled2 = create_resampled_spline(line2, num_points=20)
+
+    vectors = calculate_vector_difference(resampled1, resampled2, overlap_only=True, num_points=5)
+
+    # Overlap origin range: from [11.57, 11.57] to [20.0, 20.0]
+    # Overlap endpoint range: from [10.0, 11.0] to [18.42, 19.42]
+    # Difference = endpoint - origin = [-1.57, -0.57] uniformly over re-parameterization.
+
+    assert vectors.shape == (5, 2)
+    diff_y = vectors[0, 1]
+    diff_x = vectors[0, 0]
+    assert np.allclose(vectors[:, 1], diff_y)
+    assert np.allclose(vectors[:, 0], diff_x)
+
 def test_calculate_tangent_vectors():
     # Line along X axis
     line = np.array([
