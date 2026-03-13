@@ -123,6 +123,46 @@ export default {
     saveContainer.appendChild(saveInput);
     saveContainer.appendChild(saveBtn);
 
+    const hasAnnotation = model.get("annotation_mode") !== undefined;
+    if (hasAnnotation) {
+        const saveCsvLabel = document.createElement("span");
+        saveCsvLabel.textContent = "CSV:";
+        saveCsvLabel.style.marginLeft = "20px";
+
+        const saveCsvInput = document.createElement("input");
+        saveCsvInput.type = "text";
+        saveCsvInput.value = model.get("save_csv_filename") || "points.csv";
+        saveCsvInput.addEventListener("change", () => {
+          model.set("save_csv_filename", saveCsvInput.value);
+          model.save_changes();
+        });
+
+        const saveCsvBtn = document.createElement("button");
+        saveCsvBtn.textContent = "Save Points as CSV";
+        saveCsvBtn.style.padding = "6px 12px";
+        saveCsvBtn.style.backgroundColor = "#e0e0e0";
+        saveCsvBtn.style.color = "#333";
+        saveCsvBtn.style.border = "1px solid #999";
+        saveCsvBtn.style.borderRadius = "4px";
+        saveCsvBtn.style.cursor = "pointer";
+        saveCsvBtn.style.fontWeight = "bold";
+        saveCsvBtn.addEventListener("mouseover", () => {
+            saveCsvBtn.style.backgroundColor = "#ccc";
+        });
+        saveCsvBtn.addEventListener("mouseout", () => {
+            saveCsvBtn.style.backgroundColor = "#e0e0e0";
+        });
+        saveCsvBtn.addEventListener("click", () => {
+          let current = model.get("save_csv_trigger");
+          model.set("save_csv_trigger", current + 1);
+          model.save_changes();
+        });
+
+        saveContainer.appendChild(saveCsvLabel);
+        saveContainer.appendChild(saveCsvInput);
+        saveContainer.appendChild(saveCsvBtn);
+    }
+
     el.appendChild(imgContainer);
 
     const controlsDiv = document.createElement("div");
@@ -301,8 +341,33 @@ export default {
 
     uiTogglesContainer.appendChild(crosshairLabel);
 
+    // Sync on hover toggle
+    const syncLabel = document.createElement("label");
+    syncLabel.style.display = "flex";
+    syncLabel.style.alignItems = "center";
+    syncLabel.style.gap = "4px";
+    syncLabel.style.fontSize = "14px";
+    syncLabel.style.marginLeft = "10px";
+
+    const syncCb = document.createElement("input");
+    syncCb.type = "checkbox";
+    syncCb.checked = model.get("sync_on_hover");
+    syncCb.addEventListener("change", () => {
+      model.set("sync_on_hover", syncCb.checked);
+      model.save_changes();
+    });
+
+    model.on("change:sync_on_hover", () => {
+        syncCb.checked = model.get("sync_on_hover");
+    });
+
+    syncLabel.appendChild(syncCb);
+    syncLabel.appendChild(document.createTextNode("Sync on Hover ('C')"));
+
+    uiTogglesContainer.appendChild(syncLabel);
+
+
     // Annotation Controls (only if annotator widget)
-    const hasAnnotation = model.get("annotation_mode") !== undefined;
     if (hasAnnotation) {
         const annotLabel = document.createElement("label");
         annotLabel.style.display = "flex";
@@ -403,6 +468,68 @@ export default {
             img.style.cursor = "crosshair";
         }
     }
+
+    // Hover + 'C' key sync logic
+    let currentHoverCoords = null;
+
+    img.addEventListener("mousemove", (e) => {
+        if (!model.get("sync_on_hover")) {
+            currentHoverCoords = null;
+            return;
+        }
+
+        const x_frac = e.offsetX / img.clientWidth;
+        const y_frac = e.offsetY / img.clientHeight;
+
+        const bounds = model.get("axis_bounds");
+        if (!bounds) return;
+
+        let hover_plane = null;
+        const mpl_y_frac = 1.0 - y_frac;
+
+        for (const [plane, b] of Object.entries(bounds)) {
+            const [bx0, by0, bw, bh] = b;
+            if (x_frac >= bx0 && x_frac <= bx0 + bw && mpl_y_frac >= by0 && mpl_y_frac <= by0 + bh) {
+                hover_plane = plane;
+                break;
+            }
+        }
+
+        if (hover_plane) {
+            currentHoverCoords = {
+                'plane': hover_plane,
+                'x': x_frac,
+                'y': y_frac
+            };
+        } else {
+            currentHoverCoords = null;
+        }
+    });
+
+    img.addEventListener("mouseleave", () => {
+        currentHoverCoords = null;
+    });
+
+    // We attach keydown to document to catch 'C' presses reliably
+    // when hovering over the image, but we only trigger if we have valid hover coords.
+    const keydownListener = (e) => {
+        if (!model.get("sync_on_hover")) return;
+        if ((e.key === "c" || e.key === "C") && currentHoverCoords) {
+            model.set("hover_coords", {
+                ...currentHoverCoords,
+                't': Date.now()
+            });
+            model.save_changes();
+        }
+    };
+
+    document.addEventListener("keydown", keydownListener);
+
+    // Cleanup listener when widget is destroyed
+    model.on("destroy", () => {
+        document.removeEventListener("keydown", keydownListener);
+    });
+
 
     uiTogglesContainer.appendChild(warningSpan);
     controlsDiv.appendChild(uiTogglesContainer);
