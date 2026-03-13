@@ -204,8 +204,12 @@ def show_xyz(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
 
 
     # compute the same-gap factor
-    figW, figH = figsize
-    hspace_factor = figW / figH
+    if figsize is not None:
+        figW, figH = figsize
+        hspace_factor = figW / figH
+    else:
+        figH = 10
+        hspace_factor = 1.0
 
     spec=gridspec.GridSpec(ncols=2, nrows=2,
                            height_ratios=[ydim,zdim*z_xy_ratio],
@@ -273,7 +277,7 @@ def show_xyz(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
     bar_frac = bar_pix / xdim    # fraction of the full width
 
     # pick fontsize
-    fig_h_in = figsize[1]
+    fig_h_in = figsize[1] if figsize is not None else 10
     fontsize_pt = max(8, min(24, fig_h_in * 72 * 0.03))
 
     ### Draw
@@ -794,16 +798,22 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     # UI Toggles
     show_crosshair = traitlets.Bool(True).tag(sync=True)
+    sync_on_hover = traitlets.Bool(False).tag(sync=True)
 
     warning_msg = traitlets.Unicode("").tag(sync=True)
+
+    # Communication
+    hover_coords = traitlets.Dict().tag(sync=True) # {'plane': 'xy', 'x': 0.5, 'y': 0.5, 't': 123}
+    axis_bounds = traitlets.Dict().tag(sync=True) # Bounding boxes of axes in figure coords
 
     # Save UI
     save_filename = traitlets.Unicode("filepath_save.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
 
-    def __init__(self, X, Y, Z, show_crosshair=True, **kwargs):
+    def __init__(self, X, Y, Z, show_crosshair=True, sync_on_hover=False, **kwargs):
         super().__init__(**kwargs)
         self.show_crosshair = show_crosshair
+        self.sync_on_hover = sync_on_hover
         self.dims = (Z, Y, X) # (Z, Y, X) convention from numpy shape
 
         # Set max thickness bounds
@@ -823,6 +833,9 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
         # Observe crosshair toggle
         self.observe(self._render_wrapper, names=['show_crosshair'])
+
+        # Observe hover synchronization
+        self.observe(self._handle_hover_sync, names=['hover_coords'])
 
         # Observe save trigger
         self.observe(self._save_svg, names='save_trigger')
@@ -861,10 +874,77 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     def _render_wrapper(self, change):
         fig = self._render()
         if fig:
+            if len(fig.axes) >= 3:
+                ax_xy = fig.axes[0]
+                ax_zy = fig.axes[1]
+                ax_xz = fig.axes[2]
+
+                def get_bounds(ax):
+                    bbox = ax.get_position()
+                    return [bbox.x0, bbox.y0, bbox.width, bbox.height]
+
+                self.axis_bounds = {
+                    'xy': get_bounds(ax_xy),
+                    'zy': get_bounds(ax_zy),
+                    'xz': get_bounds(ax_xz)
+                }
+
             buf = io.BytesIO()
             fig.savefig(buf, format='png', bbox_inches='tight')
+
+            if len(fig.axes) >= 3:
+                self.axis_bounds = {
+                    'xy': get_bounds(fig.axes[0]),
+                    'zy': get_bounds(fig.axes[1]),
+                    'xz': get_bounds(fig.axes[2])
+                }
             self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
             plt.close(fig) # Close to avoid memory leak
+
+    def _handle_hover_sync(self, change):
+        if not self.sync_on_hover:
+            return
+
+        coords = change.new if hasattr(change, 'new') else change.get('new', {})
+        if not coords:
+            return
+
+        plane = coords.get('plane')
+        frac_x = coords.get('x')
+        frac_y = coords.get('y')
+
+        bounds = self.axis_bounds.get(plane)
+        if not bounds:
+            return
+
+        b_x0, b_y0, b_w, b_h = bounds
+
+        # Check if click is inside this axis
+        # Note: JS y_frac is from top-left. Matplotlib bounds are from bottom-left.
+        mpl_y_frac = 1.0 - frac_y
+
+        if not (b_x0 <= frac_x <= b_x0 + b_w and b_y0 <= mpl_y_frac <= b_y0 + b_h):
+            return
+
+        local_x = (frac_x - b_x0) / b_w
+        local_y_mpl = (mpl_y_frac - b_y0) / b_h
+        fraction_from_top = 1.0 - local_y_mpl
+
+        if plane == 'xy':
+            data_x = int(local_x * self.dims[2])
+            data_y = int(fraction_from_top * self.dims[1])
+            self.x_s = max(0, min(self.dims[2] - 1, data_x))
+            self.y_s = max(0, min(self.dims[1] - 1, data_y))
+        elif plane == 'zy':
+            data_z = int(local_x * self.dims[0])
+            data_y = int(fraction_from_top * self.dims[1])
+            self.z_s = max(0, min(self.dims[0] - 1, data_z))
+            self.y_s = max(0, min(self.dims[1] - 1, data_y))
+        elif plane == 'xz':
+            data_x = int(local_x * self.dims[2])
+            data_z = int(fraction_from_top * self.dims[0])
+            self.x_s = max(0, min(self.dims[2] - 1, data_x))
+            self.z_s = max(0, min(self.dims[0] - 1, data_z))
 
     def _render(self):
         raise NotImplementedError
@@ -882,13 +962,13 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, sxy=None, sz=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
-                 show_crosshair=True, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None, opacity=None):
+                 show_crosshair=True, sync_on_hover=False, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None, opacity=None):
 
         # Determine dimensions
         im_shape = (im[0].shape if isinstance(im, list) else im.shape)
         Z, Y, X = im_shape
 
-        super().__init__(X, Y, Z, show_crosshair=show_crosshair)
+        super().__init__(X, Y, Z, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover)
 
         self.im_orig = im
 
@@ -1079,12 +1159,15 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     annotation_mode = traitlets.Bool(False).tag(sync=True)
     annotation_action = traitlets.Unicode('add').tag(sync=True) # 'add' or 'delete'
 
+    # Save CSV UI
+    save_csv_filename = traitlets.Unicode("points.csv").tag(sync=True)
+    save_csv_trigger = traitlets.Int(0).tag(sync=True)
+
     # Communication
     click_coords = traitlets.Dict().tag(sync=True) # {'plane': 'xy', 'x': 0.5, 'y': 0.5, 't': 123}
 
     # Data
     points = traitlets.List().tag(sync=True) # List of [z, y, x] lists
-    axis_bounds = traitlets.Dict().tag(sync=True) # Bounding boxes of axes in figure coords
 
     def __init__(self, im, colors=None, opacity=None, point_size_scale=0.01, *args, **kwargs):
         # Normalize input to list
@@ -1142,6 +1225,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         self.observe(self._on_points_changed, names=['points'])
         # Also re-render if annotation_mode changes (so UI cursor updates)
         self.observe(self._render_wrapper, names=['annotation_mode'])
+        self.observe(self._save_csv, names='save_csv_trigger')
 
     def _handle_click(self, change):
         if not self.annotation_mode:
@@ -1243,6 +1327,28 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         if deleted:
             self.points = new_points
 
+    def _save_csv(self, change):
+        if not self.points:
+            print("No points to save.")
+            return
+
+        import os
+        filename = self.save_csv_filename
+        if not filename:
+            filename = "points.csv"
+
+        filename = os.path.expanduser(os.path.expandvars(filename))
+
+        try:
+            with open(filename, 'w') as f:
+                f.write("z,y,x\n")
+                for p in self.points:
+                    f.write(f"{p[0]},{p[1]},{p[2]}\n")
+            print(f"Saved {len(self.points)} points to {filename}")
+        except Exception as e:
+            print(f"Error saving CSV: {e}")
+
+
     def _on_points_changed(self, change):
         # Update annotation mask efficiently
         self._annot_img.fill(0)
@@ -1264,6 +1370,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         self._render_wrapper(change)
 
     def _render_wrapper(self, change=None):
+        # Override to ensure tight_layout/subplots_adjust handles axes bounds correctly
+        # The parent class also updates axis_bounds now, but annotator widget modifies subplots_adjust
         fig = super()._render()
         if fig:
             if len(fig.axes) >= 3:
@@ -1294,10 +1402,11 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
             self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
             plt.close(fig)
+
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=None, sz=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
+                 show_crosshair=True, sync_on_hover=False, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
 
         self.X_arr = np.asarray(X_arr)
         self.Y_arr = np.asarray(Y_arr)
@@ -1312,7 +1421,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         Y_dim = int(np.ceil(ymax - ymin + 1))
         Z_dim = int(np.ceil(zmax - zmin + 1))
 
-        super().__init__(X_dim, Y_dim, Z_dim, show_crosshair=show_crosshair)
+        super().__init__(X_dim, Y_dim, Z_dim, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover)
 
         self.channels = channels
         self._sxy_given = sxy is not None
@@ -1652,7 +1761,7 @@ def show_xyz_max_slice_interactive(
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
-    show_crosshair=True,
+    show_crosshair=True, sync_on_hover=False,
     colors=None, opacity=None,
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
@@ -1698,7 +1807,7 @@ def show_xyz_max_slice_interactive(
 
     return TNIASliceWidget(
         im, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
-        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity, show_crosshair=show_crosshair,
+        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
 
@@ -1770,7 +1879,7 @@ def show_xyz_max_scatter_interactive(
     colors=None, opacity=None,
     gamma=1, vmin=None, vmax=None,
     figsize=None, figsize_scale=1.0,
-    show_crosshair=True,
+    show_crosshair=True, sync_on_hover=False,
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
@@ -1820,7 +1929,7 @@ def show_xyz_max_scatter_interactive(
         X, Y, Z,
         channels=channels, sxy=sxy, sz=sz, render=render, bins=bins,
         point_size=point_size, alpha=alpha, colors=colors, opacity=opacity,
-        gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize,
+        gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
 
