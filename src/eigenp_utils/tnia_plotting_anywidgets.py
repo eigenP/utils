@@ -890,7 +890,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 }
 
             buf = io.BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight')
+            fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
+            fig.savefig(buf, format='png')
 
             if len(fig.axes) >= 3:
                 self.axis_bounds = {
@@ -1368,40 +1369,6 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             self._annot_img[z0:z1, y0:y1, x0:x1] = 255
 
         self._render_wrapper(change)
-
-    def _render_wrapper(self, change=None):
-        # Override to ensure tight_layout/subplots_adjust handles axes bounds correctly
-        # The parent class also updates axis_bounds now, but annotator widget modifies subplots_adjust
-        fig = super()._render()
-        if fig:
-            if len(fig.axes) >= 3:
-                ax_xy = fig.axes[0]
-                ax_zy = fig.axes[1]
-                ax_xz = fig.axes[2]
-
-                def get_bounds(ax):
-                    bbox = ax.get_position()
-                    return [bbox.x0, bbox.y0, bbox.width, bbox.height]
-
-                self.axis_bounds = {
-                    'xy': get_bounds(ax_xy),
-                    'zy': get_bounds(ax_zy),
-                    'xz': get_bounds(ax_xz)
-                }
-
-            buf = io.BytesIO()
-            fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
-            fig.savefig(buf, format='png')
-
-            if len(fig.axes) >= 3:
-                self.axis_bounds = {
-                    'xy': get_bounds(fig.axes[0]),
-                    'zy': get_bounds(fig.axes[1]),
-                    'xz': get_bounds(fig.axes[2])
-                }
-
-            self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
-            plt.close(fig)
 
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=None, sz=None, render='points', bins=512,
