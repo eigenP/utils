@@ -22,8 +22,6 @@
 ### Statistical Utilities
 * **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci`, `summary_stats`, `remove_outliers`, and `add_stat_annotations` for annotating plots with significance markers.
 
-### Task Scheduling & Productivity
-* **Interactive Calendar**: `task_calendar_scheduler` provides a dynamic scheduling application using Marimo, Pandas, and Plotly for visualizing events and planning tasks.
 
 ### Core Utilities
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
