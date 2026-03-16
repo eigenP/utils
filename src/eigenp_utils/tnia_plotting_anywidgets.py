@@ -223,12 +223,6 @@ def show_xyz(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
     ax2=fig.add_subplot(spec[2])
     ax3=fig.add_subplot(spec[3])
 
-    if z_xy_ratio!=1:
-        xz=resize(xz, (int(xz.shape[0]*z_xy_ratio), xz.shape[1]), preserve_range = True)
-        zy=resize(zy, (zy.shape[0], int(zy.shape[1]*z_xy_ratio)), preserve_range = True)
-
-
-
     if gamma == 1:
         ax0.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
         ax1.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
