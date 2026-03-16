@@ -1212,7 +1212,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         # Get shape
         im_shape = im_list[0].shape
         Z, Y, X = im_shape
-        min_dim = min(X, Y, Z)
+        min_dim = min(X, Y)
         self.point_size = max(3, int(np.ceil(point_size_scale * min_dim)))
 
         # Create persistent annotation channel

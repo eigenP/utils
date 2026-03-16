@@ -65,3 +65,17 @@ def test_show_xyz_max_slice_interactive_point_annotator_args():
     assert isinstance(w, TNIAAnnotatorWidget)
     assert w.sxy == 2
     assert w.sz == 3
+
+def test_point_size_scaling():
+    from eigenp_utils.tnia_plotting_anywidgets import TNIAAnnotatorWidget
+    im = np.zeros((1, 100, 100)) # Thin Z dimension
+
+    w1 = TNIAAnnotatorWidget(im, point_size_scale=0.1)
+    w2 = TNIAAnnotatorWidget(im, point_size_scale=0.5)
+
+    # Verify that the point size scales properly with the X/Y dimension (min(100, 100) = 100)
+    # 0.1 * 100 = 10
+    # 0.5 * 100 = 50
+    assert w1.point_size == 10
+    assert w2.point_size == 50
+    assert w1.point_size < w2.point_size
