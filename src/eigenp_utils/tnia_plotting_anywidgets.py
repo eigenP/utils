@@ -959,6 +959,13 @@ class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, sxy=None, sz=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
                  show_crosshair=True, sync_on_hover=False, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None, opacity=None):
 
+        # Handle 2D images gracefully by adding a Z dimension of 1
+        if isinstance(im, list):
+            if im[0].ndim == 2:
+                im = [img[np.newaxis, ...] for img in im]
+        elif im.ndim == 2:
+            im = im[np.newaxis, ...]
+
         # Determine dimensions
         im_shape = (im[0].shape if isinstance(im, list) else im.shape)
         Z, Y, X = im_shape
@@ -1049,6 +1056,10 @@ class TNIASliceWidget(TNIAWidgetBase):
         y1 = min(Y - 1, self.y_s + self.y_t)
         z0 = max(0, self.z_s - self.z_t)
         z1 = min(Z - 1, self.z_s + self.z_t)
+
+        if x1 <= x0: x1 = x0 + 1
+        if y1 <= y0: y1 = y0 + 1
+        if z1 <= z0: z1 = z0 + 1
 
         x_lims = [x0, x1]
         y_lims = [y0, y1]
@@ -1193,6 +1204,10 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             while len(opacity_list) < len(im_list):
                 opacity_list.append(1.0)
             opacity_list = opacity_list[:len(im_list)]
+
+        # Gracefully handle 2D
+        if im_list[0].ndim == 2:
+            im_list = [img[np.newaxis, ...] for img in im_list]
 
         # Get shape
         im_shape = im_list[0].shape
@@ -1732,6 +1747,11 @@ def show_xyz_max_slice_interactive(
 
     Inspired by show_xyz_max_slice_interactive in tnia_plotting_3d.py (ipywidgets version).
     """
+    if isinstance(im, list):
+        if im[0].ndim == 2:
+            im = [img[np.newaxis, ...] for img in im]
+    elif im.ndim == 2:
+        im = im[np.newaxis, ...]
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
     _sxy = sxy if sxy is not None else 1
@@ -1791,6 +1811,11 @@ def show_xyz_max_slice_interactive_point_annotator(
     - Left-click on any projection to add or delete points.
     Returns a widget instance `w`. The list of annotated points is accessible via `w.points`.
     """
+    if isinstance(im, list):
+        if im[0].ndim == 2:
+            im = [img[np.newaxis, ...] for img in im]
+    elif im.ndim == 2:
+        im = im[np.newaxis, ...]
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
     _sxy = sxy if sxy is not None else 1
