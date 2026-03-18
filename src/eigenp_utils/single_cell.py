@@ -2615,7 +2615,11 @@ def annotate_clusters_by_markers(
         if scores is not None:
              warnings.warn("Scores provided and normalize_scores=True. This may result in double normalization.")
         # NORMALIZE SCORES (Robust Median/MAD)
-        S = S.apply(lambda x: (x - np.nanmedian(x)) / (np.nanmedian(np.abs(x - np.nanmedian(x))) + 1e-8))
+        # Bolt optimization: Vectorized across columns instead of Pandas .apply
+        arr = S.to_numpy()
+        medians = np.nanmedian(arr, axis=0)
+        mads = np.nanmedian(np.abs(arr - medians), axis=0)
+        S = pd.DataFrame((arr - medians) / (mads + 1e-8), index=S.index, columns=S.columns)
 
     cts = list(S.columns)
     clabs = adata.obs[cluster_key].astype(str)
@@ -2766,7 +2770,11 @@ def sweep_leiden_and_annotate(
     )
 
     if normalize_scores:
-        S = S.apply(lambda x: (x - np.nanmedian(x)) / (np.nanmedian(np.abs(x - np.nanmedian(x))) + 1e-8))
+        # Bolt optimization: Vectorized across columns instead of Pandas .apply
+        arr = S.to_numpy()
+        medians = np.nanmedian(arr, axis=0)
+        mads = np.nanmedian(np.abs(arr - medians), axis=0)
+        S = pd.DataFrame((arr - medians) / (mads + 1e-8), index=S.index, columns=S.columns)
 
     res_list = [float(r) for r in resolutions]
     cluster_annotations = {}
