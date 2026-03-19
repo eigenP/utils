@@ -89,6 +89,17 @@ def carry_palette(src_adata, dst_adata, key: str, fallback_color: str = "#BBBBBB
     return dst_adata
 
 
+def pacmap_heuristic_n_neighbors(n_samples: int) -> int:
+    """
+    Returns the PaCMAP heuristic for the number of neighbors based on sample size.
+    https://github.com/YingfanWang/PaCMAP/blob/master/pacmap/pacmap.py#L427
+    """
+    if n_samples <= 10000:
+        return 10
+    else:
+        return int(round(10 + 15 * (np.log10(n_samples) - 4)))
+
+
 def _has_integer_like_counts(X, n_check=200000):
     if sp.issparse(X):
         data = X.data
@@ -163,7 +174,7 @@ def preprocess_subset(
     scale_max_value: float = 10.0,
     n_comps: int = 32,
     svd_solver: str = "arpack",
-    n_neighbors: int = 15,
+    n_neighbors: Optional[int] = None,
     n_pcs: int = 30,
     use_rep: Optional[str] = None,
     cluster_key: str = "leiden",
@@ -267,6 +278,10 @@ def preprocess_subset(
     )
 
     # ---------- neighbors ----------
+
+    if n_neighbors is None:
+
+        n_neighbors = pacmap_heuristic_n_neighbors(A.n_obs)
     if use_rep is not None:
         sc.pp.neighbors(A, n_neighbors=n_neighbors, use_rep=use_rep)
     else:
@@ -918,7 +933,7 @@ def check_gene_adata(adata, gene):
 
 def ensure_neighbors(
     adata,
-    n_neighbors: int = 15,
+    n_neighbors: Optional[int] = None,
     use_rep: Optional[str] = "X_pca",
     key: str = "connectivities",
     n_pcs: Optional[int] = None,
@@ -927,6 +942,8 @@ def ensure_neighbors(
     Make sure adata.obsp[key] exists; builds neighbors in-place if missing.
     Supports both standard Scanpy usage (via use_rep) and Triku usage (via n_pcs).
     """
+    if n_neighbors is None:
+        n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
     if key not in adata.obsp:
         if use_rep is None and n_pcs is not None:
             # Triku-style: use specific number of PCs without a named representation
@@ -1007,13 +1024,15 @@ def build_rowstd_connectivities(
     *,
     key: str = "connectivities",
     recompute: bool = False,
-    n_neighbors: int = 15,
+    n_neighbors: Optional[int] = None,
     use_rep: Optional[str] = "X_pca",
 ) -> sp.csr_matrix:
     """
     Return row-standardized SciPy CSR (W) from Scanpy's neighbor graph.
     Suitable for fast block matmuls used in morans_i_all_fast.
     """
+    if n_neighbors is None:
+        n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
     if recompute or key not in adata.obsp:
         sc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=use_rep)
     W = adata.obsp[key].tocsr(copy=True)
@@ -1041,7 +1060,7 @@ def build_pysal_weights(
     key: str = "connectivities",
     *,
     recompute: bool = False,
-    n_neighbors: int = 15,
+    n_neighbors: Optional[int] = None,
     use_rep: str = "X_pca",
     method: str = "umap",
     random_state: int = 0,
@@ -1049,6 +1068,8 @@ def build_pysal_weights(
     """
     Return a row-standardized PySAL weights object built from adata.obsp[key].
     """
+    if n_neighbors is None:
+        n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
     if recompute or (key not in adata.obsp):
         sc.pp.neighbors(
             adata,
@@ -1768,7 +1789,7 @@ def run_triku(
     layer: Optional[str] = "log1p",   # <- run Triku on log1p by default
     use_raw: bool = False,
     n_features: int = 2000,
-    n_neighbors: int = 15,
+    n_neighbors: Optional[int] = None,
     n_pcs_for_knn: int = 30,
     max_genes_for_triku: int = 20000,
 ) -> pd.DataFrame:
@@ -1781,6 +1802,8 @@ def run_triku(
       2. Runs Triku on this subset (using a copy to protect the original adata).
       3. Maps the results back to `adata.var` (setting unselected genes to False/NaN).
     """
+    if n_neighbors is None:
+        n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
     if tk is None:
         raise ImportError("The 'triku' package is required for this function. Please install it.")
 
@@ -1979,7 +2002,11 @@ def tl_pacmap(
 
     # 1. Print Parameters
     print(f"Computing PaCMAP with parameters:")
-    print(f"  n_neighbors: {n_neighbors}")
+    if n_neighbors is None:
+        computed_n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
+        print(f"  n_neighbors: {n_neighbors} (heuristic: {computed_n_neighbors})")
+    else:
+        print(f"  n_neighbors: {n_neighbors}")
     print(f"  MN_ratio: {MN_ratio}")
     print(f"  FP_ratio: {FP_ratio}")
     print(f"  n_components: {n_components}")
