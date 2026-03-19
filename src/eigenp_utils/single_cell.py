@@ -702,8 +702,10 @@ def import_obs_to_adata_from_csv(
 def plot_marker_genes_dict_on_embedding(
     adata,
     marker_genes: Dict[str, List[str] | str],
+    negative_marker_genes: Optional[Dict[str, List[str] | str]] = None,
     basis: str = 'X_umap',
     colormaps: Optional[List[str] | str | Any] = None,
+    score_method: Union[Literal["scanpy", "binned", "binned_weighted"], List[Literal["scanpy", "binned", "binned_weighted"]]] = "scanpy",
     **pl_kwargs
 ) -> List[plt.Axes]:
     """
@@ -714,12 +716,18 @@ def plot_marker_genes_dict_on_embedding(
     adata
         Annotated data matrix.
     marker_genes
-        Dictionary where keys are tissue names (or categories) and values are lists of gene names.
+        Dictionary where keys are tissue names (or categories) and values are lists of positive gene names.
+    negative_marker_genes
+        Optional dictionary where keys are tissue names and values are lists of negative gene names.
+        These are only used for calculating the module score, not plotted individually.
     basis
         The basis to plot on (e.g., 'X_umap', 'X_pca'). Defaults to 'X_umap'.
     colormaps
         List of colormap names (or objects) to cycle through for different tissues.
         Can also be a single colormap (string or object) which will be used for all.
+    score_method
+        Method for calculating the module score: "scanpy", "binned", or "binned_weighted".
+        Can be a string or a list of strings to plot multiple score methods side-by-side.
     **pl_kwargs
         Additional keyword arguments passed to `sc.pl.embedding`.
         Defaults set: s=50, show=False, frameon=False.
@@ -759,6 +767,8 @@ def plot_marker_genes_dict_on_embedding(
     # 2. Check Genes
     # Updates the marker_genes dict to only include found genes
     marker_genes = check_gene_adata(adata, marker_genes)
+    if negative_marker_genes is not None:
+        negative_marker_genes = check_gene_adata(adata, negative_marker_genes)
 
     # 3. Setup Colormaps
     if colormaps is None:
@@ -771,12 +781,20 @@ def plot_marker_genes_dict_on_embedding(
         # If a single colormap (str or object) is passed, wrap it in a list
         colormaps = [colormaps]
 
-    # 4. Default Kwargs
+    # 4. Normalize score_method
+    if isinstance(score_method, str):
+        methods_to_run = [score_method]
+    elif isinstance(score_method, (list, tuple)):
+        methods_to_run = list(score_method)
+    else:
+        methods_to_run = ["scanpy"]
+
+    # 5. Default Kwargs
     pl_kwargs.setdefault('s', 50)
     pl_kwargs.setdefault('show', False)
     pl_kwargs.setdefault('frameon', False)
 
-    # 5. Plotting Loop
+    # 6. Plotting Loop
     axes_list = []
 
     for idx_i, (tissue, genes) in enumerate(marker_genes.items()):
@@ -784,30 +802,55 @@ def plot_marker_genes_dict_on_embedding(
             print(f"Skipping {tissue}: No valid marker genes found.")
             continue
 
-        # Calculate module score
-        score_name = f"{tissue}_score"
-        # Check if use_raw is in pl_kwargs to pass to score_genes
-        use_raw = pl_kwargs.get("use_raw", None)
-
-        score_computed = False
-        try:
-            sc.tl.score_genes(
-                adata,
-                gene_list=genes,
-                score_name=score_name,
-                use_raw=use_raw
-            )
-            score_computed = True
-        except Exception as e:
-            print(f"Could not compute score for {tissue}: {e}")
-            score_name = None
-
         current_cmap = colormaps[idx_i % len(colormaps)]
 
-        # Prepare items to plot
+        # Prepare items to plot: expression of positive genes
         items_to_plot = list(genes)
-        if score_computed and score_name:
-            items_to_plot.append(score_name)
+
+        # Check if use_raw is in pl_kwargs to pass to score_genes
+        # Default to True as it's scanpy's default, unless provided
+        use_raw = pl_kwargs.get("use_raw", True)
+
+        computed_score_names = []
+
+        for method in methods_to_run:
+            score_name = f"{tissue}_score_{method}"
+            try:
+                # We use score_celltypes to leverage the new methods
+                # It expects a dictionary of markers
+                ct_dict = {tissue: genes}
+
+                # Check for negative markers
+                neg_dict = None
+                if negative_marker_genes and tissue in negative_marker_genes:
+                    neg_dict = {tissue: negative_marker_genes[tissue]}
+
+                # score_celltypes calculates the score
+                scores_df = score_celltypes(
+                    adata,
+                    cell_type_markers_dict=ct_dict,
+                    cell_type_negative_markers_dict=neg_dict,
+                    use_raw=use_raw,
+                    score_method=method,
+                    min_markers=1
+                )
+
+                # Extract the column
+                if tissue in scores_df.columns:
+                    score_col = scores_df[tissue]
+                    if not score_col.isna().all():
+                        adata.obs[score_name] = score_col.values
+                        computed_score_names.append(score_name)
+                    else:
+                        print(f"Could not compute score for {tissue} ({method}): Not enough markers found.")
+                else:
+                    print(f"Could not compute score for {tissue} ({method}): Tissue missing from results.")
+
+            except Exception as e:
+                print(f"Could not compute score for {tissue} ({method}): {e}")
+
+        # Add all computed scores to the plot list
+        items_to_plot.extend(computed_score_names)
 
         # sc.pl.embedding returns a list of axes if show=False and multiple genes are plotted,
         # or a single axis if one gene. Or None if show=True.
@@ -820,9 +863,10 @@ def plot_marker_genes_dict_on_embedding(
             **pl_kwargs
         )
 
-        # Remove the score column from obs
-        if score_computed and score_name in adata.obs:
-            del adata.obs[score_name]
+        # Remove the score columns from obs
+        for name in computed_score_names:
+            if name in adata.obs:
+                del adata.obs[name]
 
         # Normalize result to a single axis or list of axes
         # Scanpy's embedding returns: Union[Axes, List[Axes], None]
