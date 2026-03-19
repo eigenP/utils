@@ -2511,12 +2511,17 @@ def filter_markers_by_moran(
 def score_celltypes(
     adata: sc.AnnData,
     cell_type_markers_dict: Dict[str, Sequence[str]],
+    cell_type_negative_markers_dict: Optional[Dict[str, Sequence[str]]] = None,
     layer: Optional[str] = None,
     use_raw: bool = True,
     min_markers: int = 1,
 ) -> pd.DataFrame:
     """
     Compute per-cell scores for each cell type using sc.tl.score_genes.
+    Supports negative selection:
+      - Computes positive and negative scores per cell type.
+      - Normalizes both sets of scores robustly (Median/MAD).
+      - Returns Net Score = Z_pos - Z_neg.
     Notes:
       - If fewer than `min_markers` genes are present, that cell type's score is NaN.
     """
@@ -2527,33 +2532,106 @@ def score_celltypes(
     else:
         gene_universe = set(map(str, adata.var_names))
 
-    scores = {}
     missing_report = {}
     tmp_cols = []
+
+    # --- 1. Batch Gene Sets ---
+
+    # We want to uniquely identify sets of genes to avoid redundant score_genes calls
+    # for identical gene sets used in different cell types.
+    unique_pos_sets = {} # hash -> list of present genes
+    unique_neg_sets = {} # hash -> list of present genes
+
+    ct_to_pos_hash = {}
+    ct_to_neg_hash = {}
 
     for ct, markers in cell_type_markers_dict.items():
         markers = [str(g) for g in markers]
         present = [g for g in markers if g in gene_universe]
         missing = [g for g in markers if g not in gene_universe]
-        missing_report[ct] = missing
+        missing_report[f"{ct}_pos"] = missing
 
         if len(present) < min_markers:
-            scores[ct] = np.full(adata.n_obs, np.nan, dtype=float)
-            continue
+            ct_to_pos_hash[ct] = None
+        else:
+            genes_tuple = tuple(sorted(present))
+            h = hash(genes_tuple)
+            unique_pos_sets[h] = present
+            ct_to_pos_hash[ct] = h
 
-        tmp_name = f"__ctscore__{ct}__{uuid4().hex}"
+        if cell_type_negative_markers_dict and ct in cell_type_negative_markers_dict:
+            neg_markers = [str(g) for g in cell_type_negative_markers_dict[ct]]
+            neg_present = [g for g in neg_markers if g in gene_universe]
+            neg_missing = [g for g in neg_markers if g not in gene_universe]
+            missing_report[f"{ct}_neg"] = neg_missing
+
+            if len(neg_present) > 0:
+                neg_tuple = tuple(sorted(neg_present))
+                neg_h = hash(neg_tuple)
+                unique_neg_sets[neg_h] = neg_present
+                ct_to_neg_hash[ct] = neg_h
+            else:
+                ct_to_neg_hash[ct] = None
+        else:
+            ct_to_neg_hash[ct] = None
+
+    # --- 2. Compute Raw Scores ---
+
+    raw_pos_scores = {} # hash -> numpy array of scores
+    raw_neg_scores = {} # hash -> numpy array of scores
+
+    for h, genes in unique_pos_sets.items():
+        tmp_name = f"__ctscore_pos_{h}_{uuid4().hex[:8]}"
         sc.tl.score_genes(
             adata,
-            gene_list=present,
+            gene_list=genes,
             score_name=tmp_name,
             use_raw=use_raw,
             layer=layer,
         )
-        scores[ct] = adata.obs[tmp_name].to_numpy()
+        raw_pos_scores[h] = adata.obs[tmp_name].to_numpy()
         tmp_cols.append(tmp_name)
 
+    for h, genes in unique_neg_sets.items():
+        tmp_name = f"__ctscore_neg_{h}_{uuid4().hex[:8]}"
+        sc.tl.score_genes(
+            adata,
+            gene_list=genes,
+            score_name=tmp_name,
+            use_raw=use_raw,
+            layer=layer,
+        )
+        raw_neg_scores[h] = adata.obs[tmp_name].to_numpy()
+        tmp_cols.append(tmp_name)
+
+    # --- 3. Robust Independent Standardization & Integration ---
+
+    final_scores = {}
+
+    def robust_scale(x):
+        med = np.nanmedian(x)
+        mad = np.nanmedian(np.abs(x - med))
+        return (x - med) / (mad + 1e-8)
+
+    for ct in cell_type_markers_dict.keys():
+        pos_h = ct_to_pos_hash[ct]
+        if pos_h is None:
+            final_scores[ct] = np.full(adata.n_obs, np.nan, dtype=float)
+            continue
+
+        x_pos = raw_pos_scores[pos_h]
+        z_pos = robust_scale(x_pos)
+
+        neg_h = ct_to_neg_hash[ct]
+        if neg_h is not None:
+            x_neg = raw_neg_scores[neg_h]
+            z_neg = robust_scale(x_neg)
+            final_scores[ct] = z_pos - z_neg
+        else:
+            final_scores[ct] = z_pos
+
     # Assemble result DF and clean up temp columns
-    df = pd.DataFrame(scores, index=adata.obs_names)
+    df = pd.DataFrame(final_scores, index=adata.obs_names)
     if tmp_cols:
         adata.obs.drop(columns=[c for c in tmp_cols if c in adata.obs.columns], inplace=True, errors="ignore")
 
@@ -2568,6 +2646,7 @@ def annotate_clusters_by_markers(
     adata: sc.AnnData,
     cluster_key: str,
     cell_type_markers_dict: Optional[Dict[str, Sequence[str]]] = None,
+    cell_type_negative_markers_dict: Optional[Dict[str, Sequence[str]]] = None,
     layer: Optional[str] = None,
     use_raw: bool = True,
     beta: float = None,  # Deprecated
@@ -2601,6 +2680,7 @@ def annotate_clusters_by_markers(
         S = score_celltypes(
             adata,
             cell_type_markers_dict,
+            cell_type_negative_markers_dict=cell_type_negative_markers_dict,
             layer=layer,
             use_raw=use_raw,
             min_markers=min_markers,
@@ -2740,6 +2820,7 @@ def annotate_clusters_by_markers(
 def sweep_leiden_and_annotate(
     adata: sc.AnnData,
     cell_type_markers_dict: Dict[str, Sequence[str]],
+    cell_type_negative_markers_dict: Optional[Dict[str, Sequence[str]]] = None,
     resolutions: Sequence[float] = (0.2, 0.5, 1.0, 2.0, 5.0),
     neighbors_already_computed: bool = True,
     random_state: int = 0,
@@ -2764,6 +2845,7 @@ def sweep_leiden_and_annotate(
     S = score_celltypes(
         adata,
         cell_type_markers_dict,
+        cell_type_negative_markers_dict=cell_type_negative_markers_dict,
         layer=layer,
         use_raw=use_raw,
         min_markers=min_markers,
