@@ -1045,10 +1045,12 @@ def _extract_gene_vector(
             j = idx[0] if duplicate_policy != "last" else idx[-1]
             x = M[:, j].toarray().ravel()
         elif duplicate_policy == "sum":
-            x = M[:, idx].sum(axis=1).A1
+            x = M[:, idx].sum(axis=1)
+            x = x.A1 if hasattr(x, "A1") else np.ravel(x)
         else:  # mean
             k = idx.size
-            x = (M[:, idx] @ np.full((k, 1), 1.0 / k, dtype=M.dtype)).A1
+            x = M[:, idx] @ np.full((k, 1), 1.0 / k, dtype=float)
+            x = x.A1 if hasattr(x, "A1") else np.ravel(x)
     else:
         M = np.asarray(M)
         if idx.size == 1 or duplicate_policy in ("first", "last"):
