@@ -717,8 +717,10 @@ def import_obs_to_adata_from_csv(
 def plot_marker_genes_dict_on_embedding(
     adata,
     marker_genes: Dict[str, List[str] | str],
+    negative_marker_genes: Optional[Dict[str, List[str] | str]] = None,
     basis: str = 'X_umap',
     colormaps: Optional[List[str] | str | Any] = None,
+    score_method: Union[Literal["scanpy", "binned", "binned_weighted"], List[Literal["scanpy", "binned", "binned_weighted"]]] = "scanpy",
     **pl_kwargs
 ) -> List[plt.Axes]:
     """
@@ -729,12 +731,18 @@ def plot_marker_genes_dict_on_embedding(
     adata
         Annotated data matrix.
     marker_genes
-        Dictionary where keys are tissue names (or categories) and values are lists of gene names.
+        Dictionary where keys are tissue names (or categories) and values are lists of positive gene names.
+    negative_marker_genes
+        Optional dictionary where keys are tissue names and values are lists of negative gene names.
+        These are only used for calculating the module score, not plotted individually.
     basis
         The basis to plot on (e.g., 'X_umap', 'X_pca'). Defaults to 'X_umap'.
     colormaps
         List of colormap names (or objects) to cycle through for different tissues.
         Can also be a single colormap (string or object) which will be used for all.
+    score_method
+        Method for calculating the module score: "scanpy", "binned", or "binned_weighted".
+        Can be a string or a list of strings to plot multiple score methods side-by-side.
     **pl_kwargs
         Additional keyword arguments passed to `sc.pl.embedding`.
         Defaults set: s=50, show=False, frameon=False.
@@ -774,6 +782,8 @@ def plot_marker_genes_dict_on_embedding(
     # 2. Check Genes
     # Updates the marker_genes dict to only include found genes
     marker_genes = check_gene_adata(adata, marker_genes)
+    if negative_marker_genes is not None:
+        negative_marker_genes = check_gene_adata(adata, negative_marker_genes)
 
     # 3. Setup Colormaps
     if colormaps is None:
@@ -786,12 +796,20 @@ def plot_marker_genes_dict_on_embedding(
         # If a single colormap (str or object) is passed, wrap it in a list
         colormaps = [colormaps]
 
-    # 4. Default Kwargs
+    # 4. Normalize score_method
+    if isinstance(score_method, str):
+        methods_to_run = [score_method]
+    elif isinstance(score_method, (list, tuple)):
+        methods_to_run = list(score_method)
+    else:
+        methods_to_run = ["scanpy"]
+
+    # 5. Default Kwargs
     pl_kwargs.setdefault('s', 50)
     pl_kwargs.setdefault('show', False)
     pl_kwargs.setdefault('frameon', False)
 
-    # 5. Plotting Loop
+    # 6. Plotting Loop
     axes_list = []
 
     for idx_i, (tissue, genes) in enumerate(marker_genes.items()):
@@ -799,30 +817,55 @@ def plot_marker_genes_dict_on_embedding(
             print(f"Skipping {tissue}: No valid marker genes found.")
             continue
 
-        # Calculate module score
-        score_name = f"{tissue}_score"
-        # Check if use_raw is in pl_kwargs to pass to score_genes
-        use_raw = pl_kwargs.get("use_raw", None)
-
-        score_computed = False
-        try:
-            sc.tl.score_genes(
-                adata,
-                gene_list=genes,
-                score_name=score_name,
-                use_raw=use_raw
-            )
-            score_computed = True
-        except Exception as e:
-            print(f"Could not compute score for {tissue}: {e}")
-            score_name = None
-
         current_cmap = colormaps[idx_i % len(colormaps)]
 
-        # Prepare items to plot
+        # Prepare items to plot: expression of positive genes
         items_to_plot = list(genes)
-        if score_computed and score_name:
-            items_to_plot.append(score_name)
+
+        # Check if use_raw is in pl_kwargs to pass to score_genes
+        # Default to True as it's scanpy's default, unless provided
+        use_raw = pl_kwargs.get("use_raw", True)
+
+        computed_score_names = []
+
+        for method in methods_to_run:
+            score_name = f"{tissue}_score_{method}"
+            try:
+                # We use score_celltypes to leverage the new methods
+                # It expects a dictionary of markers
+                ct_dict = {tissue: genes}
+
+                # Check for negative markers
+                neg_dict = None
+                if negative_marker_genes and tissue in negative_marker_genes:
+                    neg_dict = {tissue: negative_marker_genes[tissue]}
+
+                # score_celltypes calculates the score
+                scores_df = score_celltypes(
+                    adata,
+                    cell_type_markers_dict=ct_dict,
+                    cell_type_negative_markers_dict=neg_dict,
+                    use_raw=use_raw,
+                    score_method=method,
+                    min_markers=1
+                )
+
+                # Extract the column
+                if tissue in scores_df.columns:
+                    score_col = scores_df[tissue]
+                    if not score_col.isna().all():
+                        adata.obs[score_name] = score_col.values
+                        computed_score_names.append(score_name)
+                    else:
+                        print(f"Could not compute score for {tissue} ({method}): Not enough markers found.")
+                else:
+                    print(f"Could not compute score for {tissue} ({method}): Tissue missing from results.")
+
+            except Exception as e:
+                print(f"Could not compute score for {tissue} ({method}): {e}")
+
+        # Add all computed scores to the plot list
+        items_to_plot.extend(computed_score_names)
 
         # sc.pl.embedding returns a list of axes if show=False and multiple genes are plotted,
         # or a single axis if one gene. Or None if show=True.
@@ -835,9 +878,10 @@ def plot_marker_genes_dict_on_embedding(
             **pl_kwargs
         )
 
-        # Remove the score column from obs
-        if score_computed and score_name in adata.obs:
-            del adata.obs[score_name]
+        # Remove the score columns from obs
+        for name in computed_score_names:
+            if name in adata.obs:
+                del adata.obs[name]
 
         # Normalize result to a single axis or list of axes
         # Scanpy's embedding returns: Union[Axes, List[Axes], None]
@@ -2542,13 +2586,23 @@ def score_celltypes(
     layer: Optional[str] = None,
     use_raw: bool = True,
     min_markers: int = 1,
+    score_method: Literal["scanpy", "binned", "binned_weighted"] = "scanpy",
 ) -> pd.DataFrame:
     """
-    Compute per-cell scores for each cell type using sc.tl.score_genes.
+    Compute per-cell scores for each cell type.
+
+    score_method options:
+      - "scanpy": Uses `sc.tl.score_genes` and robustly standardizes scores (Median/MAD).
+      - "binned": Converts gene expression to "Low" (0), "Mid" (0.5), "High" (1.0) using
+        median of non-zero values, then averages across markers. Normalization is skipped.
+      - "binned_weighted": Same as "binned", but multiplies the average by the fraction
+        of markers detected (>0) per cell.
+
     Supports negative selection:
       - Computes positive and negative scores per cell type.
-      - Normalizes both sets of scores robustly (Median/MAD).
-      - Returns Net Score = Z_pos - Z_neg.
+      - For "scanpy", returns Net Score = Z_pos - Z_neg.
+      - For "binned" methods, returns Net Score = avg_pos - avg_neg.
+
     Notes:
       - If fewer than `min_markers` genes are present, that cell type's score is NaN.
     """
@@ -2607,29 +2661,79 @@ def score_celltypes(
     raw_pos_scores = {} # hash -> numpy array of scores
     raw_neg_scores = {} # hash -> numpy array of scores
 
-    for h, genes in unique_pos_sets.items():
-        tmp_name = f"__ctscore_pos_{h}_{uuid4().hex[:8]}"
-        sc.tl.score_genes(
-            adata,
-            gene_list=genes,
-            score_name=tmp_name,
-            use_raw=use_raw,
-            layer=layer,
-        )
-        raw_pos_scores[h] = adata.obs[tmp_name].to_numpy()
-        tmp_cols.append(tmp_name)
+    def _compute_binned_scores(genes: List[str]) -> np.ndarray:
+        if not genes:
+            return np.zeros(adata.n_obs, dtype=float)
 
-    for h, genes in unique_neg_sets.items():
-        tmp_name = f"__ctscore_neg_{h}_{uuid4().hex[:8]}"
-        sc.tl.score_genes(
-            adata,
-            gene_list=genes,
-            score_name=tmp_name,
-            use_raw=use_raw,
-            layer=layer,
-        )
-        raw_neg_scores[h] = adata.obs[tmp_name].to_numpy()
-        tmp_cols.append(tmp_name)
+        binned_matrix = np.zeros((adata.n_obs, len(genes)), dtype=float)
+        detected_mask = np.zeros((adata.n_obs, len(genes)), dtype=bool)
+
+        for i, g in enumerate(genes):
+            # Extract expression vector
+            x = _extract_gene_vector(
+                adata,
+                g,
+                source="raw" if use_raw and getattr(adata, "raw", None) is not None else layer if layer else "X",
+                duplicate_policy="mean"
+            )
+            # Find non-zero values
+            nz_mask = x > 0
+            if not np.any(nz_mask):
+                continue
+
+            nz_vals = x[nz_mask]
+            med = np.median(nz_vals)
+
+            # Map to 0.5 (Mid) and 1.0 (High)
+            binned = np.zeros_like(x)
+            binned[nz_mask & (x <= med)] = 0.5
+            binned[x > med] = 1.0
+
+            binned_matrix[:, i] = binned
+            detected_mask[:, i] = nz_mask
+
+        # Average across genes
+        avg_scores = binned_matrix.mean(axis=1)
+
+        if score_method == "binned_weighted":
+            # Fraction of markers detected
+            frac_detected = detected_mask.sum(axis=1) / len(genes)
+            return avg_scores * frac_detected
+
+        return avg_scores
+
+    if score_method in ("binned", "binned_weighted"):
+        # Binned execution path
+        for h, genes in unique_pos_sets.items():
+            raw_pos_scores[h] = _compute_binned_scores(genes)
+
+        for h, genes in unique_neg_sets.items():
+            raw_neg_scores[h] = _compute_binned_scores(genes)
+    else:
+        # Scanpy execution path
+        for h, genes in unique_pos_sets.items():
+            tmp_name = f"__ctscore_pos_{h}_{uuid4().hex[:8]}"
+            sc.tl.score_genes(
+                adata,
+                gene_list=genes,
+                score_name=tmp_name,
+                use_raw=use_raw,
+                layer=layer,
+            )
+            raw_pos_scores[h] = adata.obs[tmp_name].to_numpy()
+            tmp_cols.append(tmp_name)
+
+        for h, genes in unique_neg_sets.items():
+            tmp_name = f"__ctscore_neg_{h}_{uuid4().hex[:8]}"
+            sc.tl.score_genes(
+                adata,
+                gene_list=genes,
+                score_name=tmp_name,
+                use_raw=use_raw,
+                layer=layer,
+            )
+            raw_neg_scores[h] = adata.obs[tmp_name].to_numpy()
+            tmp_cols.append(tmp_name)
 
     # --- 3. Robust Independent Standardization & Integration ---
 
@@ -2647,12 +2751,19 @@ def score_celltypes(
             continue
 
         x_pos = raw_pos_scores[pos_h]
-        z_pos = robust_scale(x_pos)
+
+        if score_method == "scanpy":
+            z_pos = robust_scale(x_pos)
+        else:
+            z_pos = x_pos  # Already 0 to 1 bounded
 
         neg_h = ct_to_neg_hash[ct]
         if neg_h is not None:
             x_neg = raw_neg_scores[neg_h]
-            z_neg = robust_scale(x_neg)
+            if score_method == "scanpy":
+                z_neg = robust_scale(x_neg)
+            else:
+                z_neg = x_neg # Already 0 to 1 bounded
             final_scores[ct] = z_pos - z_neg
         else:
             final_scores[ct] = z_pos
@@ -2682,6 +2793,7 @@ def annotate_clusters_by_markers(
     write_to_obs: bool = True,
     obs_prefix: Optional[str] = None,
     scores: Optional[pd.DataFrame] = None,
+    score_method: Literal["scanpy", "binned", "binned_weighted"] = "scanpy",
 ) -> pd.DataFrame:
     """
     Annotate clusters based on cell type scores using a probabilistic confidence metric.
@@ -2711,6 +2823,7 @@ def annotate_clusters_by_markers(
             layer=layer,
             use_raw=use_raw,
             min_markers=min_markers,
+            score_method=score_method,
         )
     else:
         S = scores
@@ -2718,7 +2831,7 @@ def annotate_clusters_by_markers(
         if not S.index.equals(adata.obs_names):
             S = S.reindex(adata.obs_names)
 
-    if normalize_scores:
+    if normalize_scores and score_method == "scanpy":
         if scores is not None:
              warnings.warn("Scores provided and normalize_scores=True. This may result in double normalization.")
         # NORMALIZE SCORES (Robust Median/MAD)
@@ -2857,6 +2970,7 @@ def sweep_leiden_and_annotate(
     min_markers: int = 1,
     beta: float = None, # Deprecated
     leiden_key_prefix: str = "leiden",
+    score_method: Literal["scanpy", "binned", "binned_weighted"] = "scanpy",
 ) -> Dict[str, Any]:
     """
     For a fixed graph (recommended), run Leiden at multiple `resolutions`,
@@ -2876,9 +2990,10 @@ def sweep_leiden_and_annotate(
         layer=layer,
         use_raw=use_raw,
         min_markers=min_markers,
+        score_method=score_method,
     )
 
-    if normalize_scores:
+    if normalize_scores and score_method == "scanpy":
         # Bolt optimization: Vectorized across columns instead of Pandas .apply
         arr = S.to_numpy()
         medians = np.nanmedian(arr, axis=0)
@@ -2913,6 +3028,7 @@ def sweep_leiden_and_annotate(
             write_to_obs=True,
             obs_prefix=key,
             scores=S,  # <- reuse
+            score_method=score_method,
         )
         cluster_annotations[r] = cdf
         celltype_labels[r] = adata.obs[f"{key}_cell_type"].astype(str).copy()
