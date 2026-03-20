@@ -68,9 +68,12 @@ def add_stat_annotations(
         return ax, annotator
     return ax
 
-def cohens_d(group1, group2):
+import scipy.special
+
+def cohens_d(group1, group2, correction=True):
     """
     Calculate Cohen's d effect size for two independent samples.
+    By default, applies Hedges' exact correction factor to yield an unbiased estimator (Hedges' g).
 
     Parameters
     ----------
@@ -78,11 +81,14 @@ def cohens_d(group1, group2):
         The first group of observations.
     group2 : array-like
         The second group of observations.
+    correction : bool, default True
+        Whether to apply Hedges' correction for small sample sizes.
+        If True, returns Hedges' g. If False, returns Cohen's d (biased sample estimate).
 
     Returns
     -------
     float
-        The calculated Cohen's d.
+        The calculated effect size.
     """
     x1 = np.asarray(group1)
     x2 = np.asarray(group2)
@@ -103,9 +109,19 @@ def cohens_d(group1, group2):
         return 0.0
 
     d = (np.mean(x1) - np.mean(x2)) / s_pooled
+
+    if correction:
+        # Apply Hedges' exact correction factor J(df)
+        df = n1 + n2 - 2
+        # J(df) = Gamma(df/2) / (sqrt(df/2) * Gamma((df-1)/2))
+        # Calculated via log-gamma for numerical stability:
+        # exp(gammaln(df/2) - 0.5 * log(df/2) - gammaln((df-1)/2))
+        j_factor = np.exp(scipy.special.gammaln(df / 2.0) - 0.5 * np.log(df / 2.0) - scipy.special.gammaln((df - 1) / 2.0))
+        d = d * j_factor
+
     return float(d)
 
-def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, random_state=None):
+def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc', random_state=None):
     """
     Compute bootstrapped confidence intervals for an array.
 
@@ -119,6 +135,10 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, random_sta
         The number of bootstrap samples.
     ci : float, default 0.95
         The confidence interval width (between 0 and 1).
+    method : str, default 'bc'
+        The bootstrap method to use. Options are:
+        - 'bc': Bias-Corrected (BC) bootstrap. Corrects for median bias in the bootstrap distribution.
+        - 'percentile': Standard percentile bootstrap.
     random_state : int or np.random.Generator, optional
         Seed or Generator for reproducibility.
 
@@ -137,13 +157,46 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, random_sta
     # Note: apply_along_axis expects a 1D array as input to the lambda, so data[x] gives us the resampled data for that row
     bootstrapped_stats = np.apply_along_axis(lambda x: stat_func(data[x]), 1, indices)
 
-    # Calculate confidence interval
     alpha = 1.0 - ci
-    lower_percentile = (alpha / 2.0) * 100
-    upper_percentile = (1.0 - alpha / 2.0) * 100
 
-    lower_bound = np.percentile(bootstrapped_stats, lower_percentile)
-    upper_bound = np.percentile(bootstrapped_stats, upper_percentile)
+    if method == 'percentile':
+        lower_percentile = (alpha / 2.0) * 100
+        upper_percentile = (1.0 - alpha / 2.0) * 100
+
+        lower_bound = np.percentile(bootstrapped_stats, lower_percentile)
+        upper_bound = np.percentile(bootstrapped_stats, upper_percentile)
+
+    elif method == 'bc':
+        # Bias-Corrected (BC) Bootstrap
+        theta_hat = stat_func(data)
+
+        # Calculate empirical bias correction factor z0
+        # z0 = Phi^-1 ( proportion of bootstrapped_stats < theta_hat )
+        prop_less = np.mean(bootstrapped_stats < theta_hat)
+
+        # Handle edge cases where all stats are >= or <= theta_hat
+        if prop_less == 0:
+            prop_less = 1 / (n_bootstraps + 1)
+        elif prop_less == 1:
+            prop_less = n_bootstraps / (n_bootstraps + 1)
+
+        z0 = stats.norm.ppf(prop_less)
+
+        # Calculate adjusted percentiles
+        z_alpha_2 = stats.norm.ppf(alpha / 2.0)
+        z_1_alpha_2 = stats.norm.ppf(1.0 - alpha / 2.0)
+
+        adj_alpha_1 = stats.norm.cdf(2 * z0 + z_alpha_2)
+        adj_alpha_2 = stats.norm.cdf(2 * z0 + z_1_alpha_2)
+
+        lower_percentile = adj_alpha_1 * 100
+        upper_percentile = adj_alpha_2 * 100
+
+        lower_bound = np.percentile(bootstrapped_stats, lower_percentile)
+        upper_bound = np.percentile(bootstrapped_stats, upper_percentile)
+
+    else:
+        raise ValueError(f"Unknown bootstrap method '{method}'. Use 'bc' or 'percentile'.")
 
     return float(lower_bound), float(upper_bound)
 
@@ -189,7 +242,9 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     data : pd.DataFrame or array-like
         The data to filter.
     method : str, default 'iqr'
-        The method to use ('iqr' or 'zscore').
+        The method to use ('iqr', 'zscore', or 'robust_zscore').
+        'robust_zscore' uses Median Absolute Deviation (MAD) which is less susceptible
+        to extreme outliers inflating variance compared to 'zscore'.
     threshold : float, default 1.5
         The threshold for filtering (IQR multiplier or Z-score threshold).
     column : str, optional
@@ -201,6 +256,15 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     pd.DataFrame or array-like
         The filtered data.
     """
+    def _robust_zscore(x):
+        median = np.nanmedian(x)
+        mad = np.nanmedian(np.abs(x - median))
+        if mad == 0:
+            return np.zeros_like(x)
+        # 0.6745 is the 75th percentile of the standard normal distribution
+        # making the robust z-score comparable in magnitude to the standard z-score
+        return 0.6745 * (x - median) / mad
+
     if isinstance(data, pd.DataFrame):
         df_out = data.copy()
 
@@ -218,6 +282,11 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                 valid_mask = df_out[column].notna()
                 z_scores = pd.Series(index=df_out.index, dtype=float)
                 z_scores[valid_mask] = np.abs(stats.zscore(df_out.loc[valid_mask, column]))
+                mask = valid_mask & (z_scores <= threshold)
+            elif method == 'robust_zscore':
+                valid_mask = df_out[column].notna()
+                z_scores = pd.Series(index=df_out.index, dtype=float)
+                z_scores[valid_mask] = np.abs(_robust_zscore(df_out.loc[valid_mask, column].values))
                 mask = valid_mask & (z_scores <= threshold)
             else:
                 raise ValueError(f"Unknown method '{method}'")
@@ -248,6 +317,10 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                     z_scores = pd.Series(index=df_out.index, dtype=float)
                     z_scores[valid_mask] = np.abs(stats.zscore(df_out.loc[valid_mask, col]))
                     col_mask = valid_mask & (z_scores <= threshold)
+                elif method == 'robust_zscore':
+                    z_scores = pd.Series(index=df_out.index, dtype=float)
+                    z_scores[valid_mask] = np.abs(_robust_zscore(df_out.loc[valid_mask, col].values))
+                    col_mask = valid_mask & (z_scores <= threshold)
                 else:
                     raise ValueError(f"Unknown method '{method}'")
 
@@ -276,6 +349,9 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             keep_valid = (valid_values >= lower_bound) & (valid_values <= upper_bound)
         elif method == 'zscore':
             z_scores = np.abs(stats.zscore(valid_values))
+            keep_valid = z_scores <= threshold
+        elif method == 'robust_zscore':
+            z_scores = np.abs(_robust_zscore(valid_values))
             keep_valid = z_scores <= threshold
         else:
             raise ValueError(f"Unknown method '{method}'")

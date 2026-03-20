@@ -40,14 +40,21 @@ def test_cohens_d():
     group1 = np.array([1, 2, 3, 4, 5])
     group2 = np.array([2, 3, 4, 5, 6])
 
-    # known value calculation
+    # known value calculation without correction
     # mean1 = 3, var1 = 2.5
     # mean2 = 4, var2 = 2.5
     # spooled = sqrt(2.5)
     # d = (3 - 4) / sqrt(2.5) = -1 / 1.5811 = -0.63245
 
-    d = cohens_d(group1, group2)
+    d = cohens_d(group1, group2, correction=False)
     np.testing.assert_almost_equal(d, -0.63245, decimal=4)
+
+    # Test with Hedges' g correction (default)
+    # df = 5 + 5 - 2 = 8
+    # J(8) ~ 0.9027
+    # g = -0.63245 * 0.9027 = -0.5709
+    d_corrected = cohens_d(group1, group2)
+    np.testing.assert_almost_equal(d_corrected, -0.5709, decimal=4)
 
     # Test with exact same groups
     d_same = cohens_d(group1, group1)
