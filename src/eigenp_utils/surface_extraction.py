@@ -38,40 +38,49 @@ def extract_surface(
 
     # --- 2. BINNING & DOWNSAMPLING ---
     # Optimized to avoid large intermediate allocation and redundant computation
-    # Uses block averaging (binning) instead of dense convolution + subsampling
+    # Uses chunk-based block averaging (binning) instead of padding the full volume.
 
     pad_z = (sz - image.shape[0] % sz) % sz
     pad_y = (sy - image.shape[1] % sy) % sy
     pad_x = (sx - image.shape[2] % sx) % sx
 
-    if pad_z or pad_y or pad_x:
-        image_padded = np.pad(image, ((0, pad_z), (0, pad_y), (0, pad_x)), mode='reflect')
-    else:
-        image_padded = image
+    new_d = (image.shape[0] + pad_z) // sz
+    new_h = (image.shape[1] + pad_y) // sy
+    new_w = (image.shape[2] + pad_x) // sx
 
-    new_d = image_padded.shape[0] // sz
-    new_h = image_padded.shape[1] // sy
-    new_w = image_padded.shape[2] // sx
+    img_reduced = np.empty((new_d, new_h, new_w), dtype=np.float32)
 
-    img_reduced = image_padded.reshape(new_d, sz, new_h, sy, new_w, sx).mean(
-        axis=(1, 3, 5), dtype=np.float32
-    )
+    for i in range(new_d):
+        z_start = i * sz
+        z_end = min(z_start + sz, image.shape[0])
+        z_chunk = image[z_start:z_end]
+
+        pad_z_chunk = sz - z_chunk.shape[0]
+        if pad_z_chunk > 0 or pad_y > 0 or pad_x > 0:
+            z_chunk = np.pad(z_chunk, ((0, pad_z_chunk), (0, pad_y), (0, pad_x)), mode='reflect')
+
+        img_reduced[i] = z_chunk.reshape(sz, new_h, sy, new_w, sx).mean(axis=(0, 2, 4))
 
     # --- 3. SMOOTHING ---
     img_blurred = ndimage.gaussian_filter(
         img_reduced, sigma=gaussian_sigma, output=np.float32
     )
+    # Free memory
+    del img_reduced
 
     # --- 4. NORMALIZE TO UINT8 ---
     min_val = img_blurred.min()
     max_val = img_blurred.max()
 
     if max_val > min_val:
-        img_norm = (img_blurred - min_val) * (255.0 / (max_val - min_val))
+        # In-place normalization to avoid new array allocation
+        img_blurred -= min_val
+        img_blurred *= (255.0 / (max_val - min_val))
     else:
-        img_norm = np.zeros_like(img_blurred)
+        img_blurred.fill(0)
 
-    img_u8 = img_norm.astype(np.uint8)
+    img_u8 = img_blurred.astype(np.uint8)
+    del img_blurred
 
     # --- 5. CLAHE ---
     if clahe_clip > 0.0:
@@ -79,6 +88,9 @@ def extract_surface(
         img_proc = (img_proc * 255).astype(np.uint8)
     else:
         img_proc = img_u8
+
+    if img_u8 is not img_proc:
+        del img_u8
 
     # --- 6. THRESHOLD ---
     thresh = filters.threshold_otsu(img_proc)
@@ -159,6 +171,8 @@ def extract_surface(
 
     # If z_int was 0, z_prev is 0, val_at == val_prev, delta=0. Refined z=0. Correct.
     z_refined = z_prev.astype(np.float32) + delta
+
+    del img_proc, img_mask
 
     # --- 8. SURFACE UPSCALING VIA HEIGHT MAP ---
     # Use float32 for the height map to preserve subpixel precision during zoom

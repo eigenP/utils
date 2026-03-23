@@ -118,9 +118,9 @@ def show_xyz_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projec
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
     """
-    projection_y = projector(image_to_show,1)
-    projection_x = np.flip(np.rot90(projector(image_to_show,2),1),0)
-    projection_z = projector(image_to_show,0)
+    projection_y = projector(image_to_show, axis=1)
+    projection_x = np.flip(np.rot90(projector(image_to_show, axis=2), 1), 0)
+    projection_z = projector(image_to_show, axis=0)
 
     return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
@@ -348,14 +348,16 @@ def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=N
         projection_y = []
         projection_x = []
         projection_z = []
-        for image_to_show in images_to_show_list:
-            projection_y.append(projector(image_to_show[:,y_slices,:],1))
-            projection_x.append(np.flip(np.rot90(projector(image_to_show[:,:,x_slices],2),1),0))
-            projection_z.append(projector(image_to_show[z_slices,:,:],0))
+        for img in images_to_show_list:
+            # Slicing creates a view. Some projectors might make copies. np.max over an axis
+            # might allocate a temporary buffer if the memory is not contiguous in that axis.
+            projection_y.append(projector(img[:, y_slices, :], axis=1))
+            projection_x.append(np.flip(np.rot90(projector(img[:, :, x_slices], axis=2), 1), 0))
+            projection_z.append(projector(img[z_slices, :, :], axis=0))
     else:
-        projection_y = projector(image_to_show[:,y_slices,:],1)
-        projection_x = np.flip(np.rot90(projector(image_to_show[:,:,x_slices],2),1),0)
-        projection_z = projector(image_to_show[z_slices,:,:],0)
+        projection_y = projector(image_to_show[:, y_slices, :], axis=1)
+        projection_x = np.flip(np.rot90(projector(image_to_show[:, :, x_slices], axis=2), 1), 0)
+        projection_z = projector(image_to_show[z_slices, :, :], axis=0)
 
     return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
@@ -489,7 +491,11 @@ def create_multichannel_rgb(
             vmins[i] = float(vmins[i])
 
         if vmaxs[i] is None:
-            vmaxs[i] = float(max(np.max(xy_list[i]), np.max(xz_list[i]), np.max(zy_list[i])))
+            # max over 2D slices instead of concatenating
+            m_xy = float(np.max(xy_list[i]))
+            m_xz = float(np.max(xz_list[i]))
+            m_zy = float(np.max(zy_list[i]))
+            vmaxs[i] = float(max(m_xy, m_xz, m_zy))
         else:
             vmaxs[i] = float(vmaxs[i])
 
@@ -514,8 +520,10 @@ def create_multichannel_rgb(
     def _norm(a, lo, hi, g):
         # linear normalize to [0,1] then gamma
         out = (a.astype(np.float32, copy=False) - lo) / max(hi - lo, eps)
-        out = np.clip(out, 0.0, 1.0)
-        return out if g == 1 else np.power(out, g, dtype=np.float32)
+        out = np.clip(out, 0.0, 1.0, out=out)
+        if g != 1:
+            out = np.power(out, g, out=out)
+        return out
 
     # Per-channel accumulate
     for i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
@@ -524,9 +532,12 @@ def create_multichannel_rgb(
         o = opacities[i]
         lo, hi = vmins[i], vmaxs[i]
 
-        xy_n = _norm(xy, lo, hi, g)[..., None] * c * o  # (H,W,3)
-        xz_n = _norm(xz, lo, hi, g)[..., None] * c * o
-        zy_n = _norm(zy, lo, hi, g)[..., None] * c * o
+        # multiply by color * opacity
+        c_o = (c * o).astype(np.float32)
+
+        xy_n = _norm(xy, lo, hi, g)[..., None] * c_o  # (H,W,3)
+        xz_n = _norm(xz, lo, hi, g)[..., None] * c_o
+        zy_n = _norm(zy, lo, hi, g)[..., None] * c_o
 
         if blend == 'screen':
             xy_acc *= (1.0 - xy_n)
@@ -624,7 +635,10 @@ def create_multichannel_rgb_cmap(
             vmins[i] = float(vmins[i])
 
         if vmaxs[i] is None:
-            vmaxs[i] = float(max(np.max(xy_list[i]), np.max(xz_list[i]), np.max(zy_list[i])))
+            m_xy = float(np.max(xy_list[i]))
+            m_xz = float(np.max(xz_list[i]))
+            m_zy = float(np.max(zy_list[i]))
+            vmaxs[i] = float(max(m_xy, m_xz, m_zy))
         else:
             vmaxs[i] = float(vmaxs[i])
 
@@ -648,8 +662,10 @@ def create_multichannel_rgb_cmap(
     # Helpers
     def _norm(a, lo, hi, g):
         out = (a.astype(np.float32, copy=False) - lo) / max(hi - lo, eps)
-        out = np.clip(out, 0.0, 1.0)
-        return out if g == 1 else np.power(out, g, dtype=np.float32)
+        out = np.clip(out, 0.0, 1.0, out=out)
+        if g != 1:
+            out = np.power(out, g, out=out)
+        return out
 
     # Per-channel accumulate
     for i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
@@ -658,10 +674,10 @@ def create_multichannel_rgb_cmap(
         o = opacities[i]
         lo, hi = vmins[i], vmaxs[i]
 
-        # Apply colormap to normalized 1D array, then reshape
-        xy_n = cmap(_norm(xy, lo, hi, g))[..., :3] * o
-        xz_n = cmap(_norm(xz, lo, hi, g))[..., :3] * o
-        zy_n = cmap(_norm(zy, lo, hi, g))[..., :3] * o
+        # Apply colormap to normalized array
+        xy_n = (cmap(_norm(xy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
+        xz_n = (cmap(_norm(xz, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
+        zy_n = (cmap(_norm(zy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
 
         if blend == 'screen':
             xy_acc *= (1.0 - xy_n)
