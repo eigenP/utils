@@ -68,11 +68,26 @@ def test_bootstrap_ci():
     data = np.random.normal(10, 2, 100)
 
     # For a normal distribution, mean CI should contain true mean
-    lower, upper = bootstrap_ci(data, np.mean, n_bootstraps=500, random_state=42)
+    lower, upper = bootstrap_ci(data, np.mean, n_bootstraps=500, method='bc', random_state=42)
 
     assert lower < np.mean(data) < upper
     assert lower > 9.0  # reasonable bounds
     assert upper < 11.0
+
+def test_bootstrap_ci_bca():
+    np.random.seed(42)
+    # Right-skewed data where BCa makes a difference
+    data = np.random.lognormal(mean=0, sigma=1, size=20)
+
+    # Calculate BCa CI
+    lower, upper = bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bca', random_state=42)
+
+    assert lower < np.mean(data) < upper
+
+    # BCa should typically give a higher upper bound than BC for right-skewed distributions
+    lower_bc, upper_bc = bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc', random_state=42)
+
+    assert upper > upper_bc
 
 def test_summary_stats():
     df = pd.DataFrame({
