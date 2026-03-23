@@ -121,7 +121,7 @@ def cohens_d(group1, group2, correction=True):
 
     return float(d)
 
-def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc', random_state=None):
+def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bca', random_state=None):
     """
     Compute bootstrapped confidence intervals for an array.
 
@@ -135,8 +135,9 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
         The number of bootstrap samples.
     ci : float, default 0.95
         The confidence interval width (between 0 and 1).
-    method : str, default 'bc'
+    method : str, default 'bca'
         The bootstrap method to use. Options are:
+        - 'bca': Bias-Corrected and Accelerated (BCa) bootstrap. Corrects for median bias and skewness.
         - 'bc': Bias-Corrected (BC) bootstrap. Corrects for median bias in the bootstrap distribution.
         - 'percentile': Standard percentile bootstrap.
     random_state : int or np.random.Generator, optional
@@ -149,9 +150,10 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
     """
     data = np.asarray(data)
     rng = np.random.default_rng(random_state)
+    n = len(data)
 
     # Generate bootstrap indices
-    indices = rng.integers(0, len(data), size=(n_bootstraps, len(data)))
+    indices = rng.integers(0, n, size=(n_bootstraps, n))
 
     # Calculate statistic for each bootstrap sample
     # Note: apply_along_axis expects a 1D array as input to the lambda, so data[x] gives us the resampled data for that row
@@ -166,8 +168,7 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
         lower_bound = np.percentile(bootstrapped_stats, lower_percentile)
         upper_bound = np.percentile(bootstrapped_stats, upper_percentile)
 
-    elif method == 'bc':
-        # Bias-Corrected (BC) Bootstrap
+    elif method in ['bc', 'bca']:
         theta_hat = stat_func(data)
 
         # Calculate empirical bias correction factor z0
@@ -182,12 +183,30 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
 
         z0 = stats.norm.ppf(prop_less)
 
+        a = 0.0
+        if method == 'bca':
+            # Calculate acceleration factor (a) using jackknife
+            jackknife_stats = np.zeros(n)
+            for i in range(n):
+                jack_data = np.delete(data, i, axis=0)
+                jackknife_stats[i] = stat_func(jack_data)
+
+            theta_dot = np.mean(jackknife_stats)
+            diff = theta_dot - jackknife_stats
+
+            num = np.sum(diff ** 3)
+            den = 6.0 * (np.sum(diff ** 2)) ** 1.5
+
+            # Avoid division by zero
+            a = num / den if den > 0 else 0.0
+
         # Calculate adjusted percentiles
         z_alpha_2 = stats.norm.ppf(alpha / 2.0)
         z_1_alpha_2 = stats.norm.ppf(1.0 - alpha / 2.0)
 
-        adj_alpha_1 = stats.norm.cdf(2 * z0 + z_alpha_2)
-        adj_alpha_2 = stats.norm.cdf(2 * z0 + z_1_alpha_2)
+        # If a = 0 (e.g. for 'bc' method), this simplifies to the standard BC adjustment
+        adj_alpha_1 = stats.norm.cdf(z0 + (z0 + z_alpha_2) / (1.0 - a * (z0 + z_alpha_2)))
+        adj_alpha_2 = stats.norm.cdf(z0 + (z0 + z_1_alpha_2) / (1.0 - a * (z0 + z_1_alpha_2)))
 
         lower_percentile = adj_alpha_1 * 100
         upper_percentile = adj_alpha_2 * 100
@@ -196,7 +215,7 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
         upper_bound = np.percentile(bootstrapped_stats, upper_percentile)
 
     else:
-        raise ValueError(f"Unknown bootstrap method '{method}'. Use 'bc' or 'percentile'.")
+        raise ValueError(f"Unknown bootstrap method '{method}'. Use 'bca', 'bc', or 'percentile'.")
 
     return float(lower_bound), float(upper_bound)
 
