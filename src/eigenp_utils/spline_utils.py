@@ -197,8 +197,9 @@ def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=Fal
 
 # Calculate tangent vectors along the NT spline
 def calculate_tangent_vectors(spline):
-    tangents = np.diff(spline, axis=0)
-    tangents = np.vstack([tangents, tangents[-1]])  # To make it the same length as the spline
+    # matth: Use central differences (O(h^2)) instead of forward differences (O(h))
+    # to avoid the half-step phase shift and correctly handle boundary conditions.
+    tangents = np.gradient(spline, axis=0)
     return tangents
 
 
@@ -206,16 +207,23 @@ def calculate_tangent_vectors(spline):
 def project_onto_plane(vectors, tangent_vectors):
     '''
     v_plane = v - proj_t (v), where
-    proj_t (v) = ( <t⋅t> / <v⋅t> ) t
+    proj_t (v) = ( <v⋅t> / <t⋅t> ) t
     '''
     # Compute the dot product of each vector with its corresponding tangent vector
     dot_products = np.sum(vectors * tangent_vectors, axis=1)
 
     # Compute the norm squared of each tangent vector
-    tangent_norms_squared = np.linalg.norm(tangent_vectors, axis=1)**2
+    tangent_norms_squared = np.sum(tangent_vectors**2, axis=1)
+
+    # Avoid division by zero for zero-length tangents
+    # (e.g. if the curve has identical consecutive points)
+    valid = tangent_norms_squared > 0
 
     # Calculate the projection of each vector onto its corresponding tangent vector
-    projections = (dot_products[:, None] / tangent_norms_squared[:, None]) * tangent_vectors
+    projections = np.zeros_like(vectors)
+    projections[valid] = (
+        dot_products[valid, None] / tangent_norms_squared[valid, None]
+    ) * tangent_vectors[valid]
 
     # Subtract the projections from the original vectors to get the projections onto the plane
     projected_vectors = vectors - projections
