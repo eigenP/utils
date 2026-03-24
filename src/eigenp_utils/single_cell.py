@@ -3331,6 +3331,128 @@ def plot_volcano_adata(
 from sklearn.neighbors import NearestNeighbors
 from collections import Counter
 
+def kknn_classifier(
+    adata: sc.AnnData,
+    obs_key: str,
+    use_rep: str = "X_pacmap",
+    n_neighbors: Optional[int] = None,
+    min_neighbors: Optional[int] = None,
+    max_neighbors: Optional[int] = None,
+    quantile_bins: int = 10,
+    inplace: bool = True
+) -> Optional[np.ndarray]:
+    """
+    Smooth or classify an observation column based on the adaptive k-nearest neighbors (kkNN) backbone.
+
+    This function utilizes the local manifold curvature proxy from `compute_kknn_neighbors`
+    to weight and average labels or numeric values from `adata.obs`.
+
+    For categorical (discrete) observations, it performs a distance-weighted majority vote.
+    For continuous (numeric) observations, it performs a distance-weighted average.
+
+    Args:
+        adata: The AnnData object.
+        obs_key: The column name in `adata.obs` to smooth.
+        use_rep: The representation key in `.obsm` to compute neighbors (e.g., 'X_pacmap').
+        n_neighbors: The base number of neighbors P.
+        min_neighbors: Minimum neighbors to keep.
+        max_neighbors: Maximum neighbors to keep.
+        quantile_bins: Number of bins to quantize curvature scores.
+        inplace: If True, adds the smoothed values as a new column `{obs_key}_kknn` to `adata.obs`.
+                 If False, returns the smoothed values as an array.
+
+    Returns:
+        If inplace is False, returns a NumPy array or Pandas Categorical of smoothed values.
+    """
+    if obs_key not in adata.obs:
+        raise KeyError(f"Observation key '{obs_key}' not found in adata.obs")
+
+    # 1. Compute kkNN neighborhoods using the backbone function
+    # Passing the same dataset as both query and reference means each cell queries its neighbors
+    pruned_distances, pruned_indices = compute_kknn_neighbors(
+        adata_query=adata,
+        adata_ref=adata,
+        use_rep=use_rep,
+        query_use_rep=use_rep,
+        n_neighbors=n_neighbors,
+        min_neighbors=min_neighbors,
+        max_neighbors=max_neighbors,
+        quantile_bins=quantile_bins
+    )
+
+    labels = adata.obs[obs_key].values
+    N = adata.n_obs
+
+    is_categorical = isinstance(adata.obs[obs_key].dtype, pd.CategoricalDtype) or \
+                     pd.api.types.is_object_dtype(adata.obs[obs_key])
+
+    smoothed = []
+
+    for i in range(N):
+        idx = pruned_indices[i]
+        dist = pruned_distances[i]
+
+        neighbors_labels = labels[idx]
+
+        # Distance weighting: smaller distance = larger weight
+        # Add a slightly larger epsilon or distance offset to prevent the self-node (dist=0)
+        # from completely dominating the vote with 99.999% weight. We want neighbors to matter.
+        # We also clip the distances to be at least a small positive value, or
+        # just add a smoothing term (e.g. median distance)
+
+        # A robust way is to use a bandwidth or pseudo-count.
+        # Adding 1.0 gives standard 1/(1+d) behavior,
+        # so self gets weight 1, neighbor at d=1 gets weight 0.5.
+        weights = 1.0 / (dist + 1.0)
+        weights /= np.sum(weights)
+
+        if is_categorical:
+            # Tally weighted votes
+            vote_tally = {}
+            for lbl, w in zip(neighbors_labels, weights):
+                # Ignore NaNs
+                if pd.isna(lbl):
+                    continue
+                vote_tally[lbl] = vote_tally.get(lbl, 0.0) + w
+
+            if vote_tally:
+                # Find the winner
+                winner = max(vote_tally.items(), key=lambda x: x[1])[0]
+                smoothed.append(winner)
+            else:
+                # Failsafe if all neighbors were NaN
+                smoothed.append(np.nan)
+
+        else:
+            # Continuous: Distance-weighted average
+            valid_mask = ~pd.isna(neighbors_labels)
+            if np.any(valid_mask):
+                valid_labels = neighbors_labels[valid_mask]
+                valid_weights = weights[valid_mask]
+                # Re-normalize valid weights
+                valid_weights /= np.sum(valid_weights)
+                val = np.sum(valid_labels * valid_weights)
+                smoothed.append(val)
+            else:
+                smoothed.append(np.nan)
+
+    # Cast back to original categorical type if necessary
+    if is_categorical:
+        if isinstance(adata.obs[obs_key].dtype, pd.CategoricalDtype):
+            cat_dtype = adata.obs[obs_key].dtype
+            smoothed = pd.Categorical(smoothed, categories=cat_dtype.categories)
+        else:
+            smoothed = np.array(smoothed, dtype=object)
+    else:
+        smoothed = np.array(smoothed, dtype=float)
+
+    if inplace:
+        adata.obs[f"{obs_key}_kknn"] = smoothed
+        return None
+    else:
+        return smoothed
+
+
 def compute_kknn_neighbors(
     adata_query: sc.AnnData,
     adata_ref: sc.AnnData,
