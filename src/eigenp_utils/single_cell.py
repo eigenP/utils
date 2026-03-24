@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any
+from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any, Union
 import warnings
 from collections import defaultdict
 from uuid import uuid4
@@ -3321,3 +3321,272 @@ def plot_volcano_adata(
 
     plt.tight_layout()
     return ax
+
+from sklearn.neighbors import NearestNeighbors
+from collections import Counter
+
+def compute_kknn_neighbors(
+    adata_query: sc.AnnData,
+    adata_ref: sc.AnnData,
+    use_rep: str = "X_pca",
+    n_neighbors: Optional[int] = None,
+    min_neighbors: Optional[int] = None,
+    max_neighbors: Optional[int] = None,
+    quantile_bins: int = 10
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """
+    Compute adaptive k-nearest neighbors (kkNN) for a query dataset against a reference.
+
+    The number of neighbors kept for each query cell scales with the local curvature of the
+    reference manifold around the query cell. Flat regions retain more neighbors (up to max_neighbors),
+    while highly curved regions retain fewer (down to min_neighbors).
+
+    Args:
+        adata_query: The query AnnData object.
+        adata_ref: The reference AnnData object.
+        use_rep: The representation key in .obsm to use (e.g., 'X_pca').
+        n_neighbors: The base number of neighbors P (heuristic used if None).
+        min_neighbors: Minimum neighbors to keep (defaults to max(3, P // 2)).
+        max_neighbors: Maximum neighbors to keep (defaults to max(10, 2 * P)).
+        quantile_bins: Number of bins to quantize curvature scores.
+
+    Returns:
+        A tuple of (pruned_distances, pruned_indices) where each element is a list of arrays
+        (one array per query cell).
+    """
+    if use_rep not in adata_query.obsm or use_rep not in adata_ref.obsm:
+        raise ValueError(f"Both datasets must have '{use_rep}' in .obsm.")
+
+    X_query = adata_query.obsm[use_rep]
+    X_ref = adata_ref.obsm[use_rep]
+
+    N_ref = X_ref.shape[0]
+    N_query = X_query.shape[0]
+
+    if n_neighbors is None:
+        P = pacmap_heuristic_n_neighbors(N_ref)
+    else:
+        P = n_neighbors
+
+    if min_neighbors is None:
+        min_neighbors = max(3, P // 2)
+    if max_neighbors is None:
+        max_neighbors = max(10, 2 * P)
+
+    # Ensure min <= max
+    min_neighbors = min(min_neighbors, max_neighbors)
+
+    print(f"kkNN: Querying up to {max_neighbors} neighbors, pruning down to {min_neighbors} (P={P})...")
+
+    # 1. Fit Nearest Neighbors on Reference
+    nn = NearestNeighbors(n_neighbors=max_neighbors, algorithm='auto', n_jobs=-1)
+    nn.fit(X_ref)
+
+    # 2. Query neighbors for all query cells
+    distances, indices = nn.kneighbors(X_query)
+
+    curvatures = np.zeros(N_query)
+    m = X_ref.shape[1]
+
+    # 3. Compute local curvature for each query cell's neighborhood
+    for i in range(N_query):
+        neighs_idx = indices[i]
+        amostras = X_ref[neighs_idx]
+
+        ni = len(neighs_idx)
+        if ni > 1:
+            # First fundamental form proxy: local covariance
+            I = np.cov(amostras, rowvar=False)
+            if I.ndim == 0:
+                I = np.array([[I]])
+        else:
+            I = np.eye(m)
+
+        # We use a faster proxy for curvature based on PCA thickness:
+        # Sum of the smallest half of eigenvalues divided by total variance
+        try:
+            # eigh is faster for symmetric matrices like covariance
+            eigvals = np.linalg.eigvalsh(I)
+        except np.linalg.LinAlgError:
+            eigvals = np.ones(m)
+
+        # Ensure non-negative
+        eigvals = np.maximum(eigvals, 0)
+        total_var = np.sum(eigvals)
+
+        if total_var > 0:
+            # Sort ascending
+            # "Thicker" manifold in smallest dimensions means higher curvature/noise
+            num_small = max(1, m // 2)
+            curvatures[i] = np.sum(eigvals[:num_small]) / total_var
+        else:
+            curvatures[i] = 0.0
+
+    # 4. Normalize and Quantize Curvatures
+    ptp = curvatures.max() - curvatures.min()
+    if ptp == 0:
+        K = np.zeros_like(curvatures)
+    else:
+        K = (curvatures - curvatures.min()) / (ptp + 1e-9)
+
+    # Quantize K into bins
+    # K=0 is lowest curvature (flat), K=1 is highest (curved)
+    # The paper prunes edges based on curvature.
+    # High curvature -> drop more neighbors -> keep fewer neighbors
+
+    intervalos = np.linspace(0.0, 1.0, quantile_bins + 1)[1:-1] # get inner quantiles
+    quantis = np.quantile(K, intervalos)
+    bins = np.array(quantis)
+    disc_curv = np.digitize(K, bins) # 0 to quantile_bins-1
+
+    # Bins are from 0 (lowest curvature) to quantile_bins-1 (highest curvature)
+    # We want to keep max_neighbors for bin 0, min_neighbors for highest bin
+
+    pruned_distances = []
+    pruned_indices = []
+
+    for i in range(N_query):
+        bin_idx = disc_curv[i]
+
+        # Linear interpolation between max_neighbors and min_neighbors
+        # bin_idx = 0 -> keep = max_neighbors
+        # bin_idx = quantile_bins - 1 -> keep = min_neighbors
+        fraction = bin_idx / max(1, (quantile_bins - 1))
+        keep = int(round(max_neighbors - fraction * (max_neighbors - min_neighbors)))
+
+        # Failsafe bounds
+        keep = max(min_neighbors, min(max_neighbors, keep))
+
+        pruned_distances.append(distances[i, :keep])
+        pruned_indices.append(indices[i, :keep])
+
+    return pruned_distances, pruned_indices
+
+
+def kknn_ingest(
+    adata_query: sc.AnnData,
+    adata_ref: sc.AnnData,
+    obs_keys: Optional[Union[str, List[str]]] = None,
+    obsm_keys: Optional[Union[str, List[str]]] = None,
+    use_rep: str = "X_pca",
+    n_neighbors: Optional[int] = None,
+    barycenter: str = "distance",
+    **kwargs
+) -> None:
+    """
+    Map annotations and embeddings from a reference to a query dataset
+    using an adaptive curvature-based KNN (kkNN) strategy.
+
+    Args:
+        adata_query: The query dataset.
+        adata_ref: The reference dataset.
+        obs_keys: Keys in adata_ref.obs to transfer to adata_query.obs.
+        obsm_keys: Keys in adata_ref.obsm to transfer to adata_query.obsm.
+        use_rep: Shared representation space to find neighbors (default: 'X_pca').
+        n_neighbors: Base number of neighbors to use (overrides heuristic).
+        barycenter: Averaging method. Currently supports 'distance'.
+        **kwargs: Additional args for compute_kknn_neighbors (e.g., min_neighbors, max_neighbors).
+    """
+    if isinstance(obs_keys, str):
+        obs_keys = [obs_keys]
+    if isinstance(obsm_keys, str):
+        obsm_keys = [obsm_keys]
+
+    obs_keys = obs_keys or []
+    obsm_keys = obsm_keys or []
+
+    if not obs_keys and not obsm_keys:
+        print("No keys specified to transfer.")
+        return
+
+    # Verify keys exist in reference
+    for key in obs_keys:
+        if key not in adata_ref.obs:
+            raise KeyError(f"Label '{key}' not found in adata_ref.obs")
+    for key in obsm_keys:
+        if key not in adata_ref.obsm:
+            raise KeyError(f"Embedding '{key}' not found in adata_ref.obsm")
+
+    # 1. Compute kkNN neighborhoods
+    pruned_distances, pruned_indices = compute_kknn_neighbors(
+        adata_query, adata_ref, use_rep=use_rep, n_neighbors=n_neighbors, **kwargs
+    )
+
+    N_query = adata_query.shape[0]
+
+    # 2. Map .obsm (Embeddings)
+    for key in obsm_keys:
+        print(f"Mapping obsm: '{key}'...")
+        ref_coords = adata_ref.obsm[key]
+        emb_dim = ref_coords.shape[1]
+        query_coords = np.zeros((N_query, emb_dim))
+
+        for i in range(N_query):
+            idx = pruned_indices[i]
+            dist = pruned_distances[i]
+
+            coords = ref_coords[idx]
+
+            if barycenter == "distance":
+                # Inverse distance weighting
+                # Add small epsilon to avoid division by zero
+                weights = 1.0 / (dist + 1e-8)
+                weights /= np.sum(weights)
+                query_coords[i] = np.average(coords, axis=0, weights=weights)
+            elif barycenter == "wasserstein":
+                # Placeholder for optimal transport barycenter
+                warnings.warn("Wasserstein barycenter not yet fully implemented. Falling back to distance-weighted.")
+                weights = 1.0 / (dist + 1e-8)
+                weights /= np.sum(weights)
+                query_coords[i] = np.average(coords, axis=0, weights=weights)
+            else:
+                # Unweighted mean fallback
+                query_coords[i] = np.mean(coords, axis=0)
+
+        adata_query.obsm[key] = query_coords
+
+    # 3. Map .obs (Labels) and compute confidence
+    for key in obs_keys:
+        print(f"Mapping obs: '{key}'...")
+        ref_labels = adata_ref.obs[key].values
+
+        mapped_labels = []
+        confidences = []
+
+        for i in range(N_query):
+            idx = pruned_indices[i]
+            dist = pruned_distances[i]
+
+            labels_i = ref_labels[idx]
+
+            # Inverse distance weighting for votes
+            weights = 1.0 / (dist + 1e-8)
+            weights /= np.sum(weights)
+
+            # Tally weighted votes
+            vote_tally = {}
+            for lbl, w in zip(labels_i, weights):
+                vote_tally[lbl] = vote_tally.get(lbl, 0) + w
+
+            # Find the winner
+            winner = max(vote_tally.items(), key=lambda x: x[1])
+            winning_label = winner[0]
+            winning_weight_frac = winner[1] # Already normalized to 1.0
+
+            mapped_labels.append(winning_label)
+
+            # Mapping confidence: proportion of weighted vote
+            confidences.append(winning_weight_frac)
+
+        # If the original was categorical, keep it categorical
+        if isinstance(adata_ref.obs[key].dtype, pd.CategoricalDtype):
+            cat_dtype = adata_ref.obs[key].dtype
+            adata_query.obs[key] = pd.Categorical(mapped_labels, categories=cat_dtype.categories)
+        else:
+            adata_query.obs[key] = mapped_labels
+
+        # Store confidence
+        conf_key = f"mapping_confidence_{key}"
+        adata_query.obs[conf_key] = confidences
+
+    print("kkNN Ingest mapping complete!")
