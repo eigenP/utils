@@ -3436,25 +3436,19 @@ def compute_kknn_neighbors(
         else:
             curvatures[i] = 1.0  # Minimum possible participation ratio
 
-    # 4. Normalize and Quantize Curvatures
+    # 4. Normalize Curvatures (Absolute Scaling)
     ptp = curvatures.max() - curvatures.min()
     if ptp == 0:
         K = np.zeros_like(curvatures)
     else:
         K = (curvatures - curvatures.min()) / (ptp + 1e-9)
 
-    # Quantize K into bins
-    # K=0 is lowest curvature (flat), K=1 is highest (curved)
-    # The paper prunes edges based on curvature.
-    # High curvature -> drop more neighbors -> keep fewer neighbors
-
-    intervalos = np.linspace(0.0, 1.0, quantile_bins + 1)[1:-1] # get inner quantiles
-    quantis = np.quantile(K, intervalos)
-    bins = np.array(quantis)
+    # matth: Use linear bins instead of quantiles to respect the absolute structure
+    # of the dataset. If the whole dataset is flat, K will be clustered near 0.
+    # Rank-based quantiles would arbitrarily penalize 10% of the cells (if quantile_bins=10)
+    # even on a perfectly flat manifold. Absolute scaling ensures global consistency.
+    bins = np.linspace(0.0, 1.0, quantile_bins + 1)[1:-1]
     disc_curv = np.digitize(K, bins) # 0 to quantile_bins-1
-
-    # Bins are from 0 (lowest curvature) to quantile_bins-1 (highest curvature)
-    # We want to keep max_neighbors for bin 0, min_neighbors for highest bin
 
     pruned_distances = []
     pruned_indices = []
