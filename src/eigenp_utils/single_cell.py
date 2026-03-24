@@ -3397,56 +3397,63 @@ def compute_kknn_neighbors(
     # 2. Query neighbors for all query cells
     distances, indices = nn.kneighbors(X_query)
 
-    curvatures = np.zeros(N_query)
     m = X_ref.shape[1]
 
-    # 3. Compute local curvature for each query cell's neighborhood
-    for i in range(N_query):
-        neighs_idx = indices[i]
-        amostras = X_ref[neighs_idx]
+    # 3. Compute local curvature for all query cells simultaneously
 
-        ni = len(neighs_idx)
-        if ni > 1:
-            # First fundamental form proxy: local covariance
-            I = np.cov(amostras, rowvar=False)
-            if I.ndim == 0:
-                I = np.array([[I]])
-        else:
-            I = np.eye(m)
+    # matth Note: Vectorization trades memory for speed. If you have 100,000 cells,
+    # keeping 100 neighbors in a 50-dimensional PCA space, neigh_data will consume about 4GB of RAM.
+    # If you are running this on multi-million cell datasets with limited RAM, you can wrap this
+    # vectorized block in a simple generator that processes the data in chunks of 10,000 cells.
 
-        # matth: Use the Participation Ratio (PR) as a parameter-free proxy for
-        # effective dimensionality/curvature.
-        # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2
-        # A perfectly flat 1D line has PR = 1. A perfectly isotropic sphere in mD has PR = m.
-        # When a manifold bends or becomes noisy locally, its effective dimensionality (PR) increases.
-        # This replaces the arbitrary threshold of summing the smallest m//2 eigenvalues,
-        # which inappropriately assumes the intrinsic manifold dimension is strictly < m/2.
-        try:
-            # eigh is faster for symmetric matrices like covariance
-            eigvals = np.linalg.eigvalsh(I)
-        except np.linalg.LinAlgError:
-            eigvals = np.ones(m)
+    # Extract all neighborhoods at once.
+    # neigh_data shape: (N_query, max_neighbors, m)
+    neigh_data = X_ref[indices]
 
-        # Ensure non-negative
-        eigvals = np.maximum(eigvals, 0)
-        total_var = np.sum(eigvals)
+    # Mean-center the data per neighborhood
+    # neigh_mean shape: (N_query, 1, m)
+    neigh_mean = neigh_data.mean(axis=1, keepdims=True)
+    centered = neigh_data - neigh_mean
 
-        if total_var > 0:
-            curvatures[i] = (total_var ** 2) / np.sum(eigvals ** 2)
-        else:
-            curvatures[i] = 1.0  # Minimum possible participation ratio
+    # Compute covariance matrices in bulk using Einstein summation
+    # 'nij,nil->njl' means: multiply and sum over the 'i' (neighbors) dimension,
+    # resulting in N_query matrices of shape (m, m).
+    # covs shape: (N_query, m, m)
+    cov_matrices = np.einsum('nij,nil->njl', centered, centered) / max(1, (max_neighbors - 1))
 
-    # 4. Normalize Curvatures (Absolute Scaling)
-    ptp = curvatures.max() - curvatures.min()
+    # Calculate all eigenvalues simultaneously
+    # eigvals shape: (N_query, m)
+    eigvals = np.linalg.eigvalsh(cov_matrices)
+    eigvals = np.maximum(eigvals, 0)  # Handle minor numerical noise
+
+    # Compute Participation Ratios
+    # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2
+    total_var = np.sum(eigvals, axis=1)
+    sq_var = np.sum(eigvals ** 2, axis=1)
+
+    curvatures = np.ones(N_query) # Default to 1.0 (min possible PR)
+
+    # Apply PR formula where variance exists to prevent division by zero
+    mask = total_var > 0
+    curvatures[mask] = (total_var[mask] ** 2) / sq_var[mask]
+
+    # 4. Robust Normalization and Linear Binning
+
+    # Clip extreme outliers to prevent them from stretching the K space (Winsorization)
+    lower_bound = np.percentile(curvatures, 1)
+    upper_bound = np.percentile(curvatures, 99)
+    curvatures_clipped = np.clip(curvatures, lower_bound, upper_bound)
+
+    # Now perform absolute scaling on the cleaned data
+    ptp = upper_bound - lower_bound
     if ptp == 0:
-        K = np.zeros_like(curvatures)
+        K = np.zeros_like(curvatures_clipped)
     else:
-        K = (curvatures - curvatures.min()) / (ptp + 1e-9)
+        K = (curvatures_clipped - lower_bound) / (ptp + 1e-9)
 
-    # matth: Use linear bins instead of quantiles to respect the absolute structure
-    # of the dataset. If the whole dataset is flat, K will be clustered near 0.
-    # Rank-based quantiles would arbitrarily penalize 10% of the cells (if quantile_bins=10)
-    # even on a perfectly flat manifold. Absolute scaling ensures global consistency.
+    # Use linear bins on the outlier-resistant K values
+    # Absolute scaling ensures global structural consistency, while the percentile clipping
+    # prevents single massive outliers from compressing the valid variance.
     bins = np.linspace(0.0, 1.0, quantile_bins + 1)[1:-1]
     disc_curv = np.digitize(K, bins) # 0 to quantile_bins-1
 
