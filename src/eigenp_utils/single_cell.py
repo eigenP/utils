@@ -3414,8 +3414,13 @@ def compute_kknn_neighbors(
         else:
             I = np.eye(m)
 
-        # We use a faster proxy for curvature based on PCA thickness:
-        # Sum of the smallest half of eigenvalues divided by total variance
+        # matth: Use the Participation Ratio (PR) as a parameter-free proxy for
+        # effective dimensionality/curvature.
+        # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2
+        # A perfectly flat 1D line has PR = 1. A perfectly isotropic sphere in mD has PR = m.
+        # When a manifold bends or becomes noisy locally, its effective dimensionality (PR) increases.
+        # This replaces the arbitrary threshold of summing the smallest m//2 eigenvalues,
+        # which inappropriately assumes the intrinsic manifold dimension is strictly < m/2.
         try:
             # eigh is faster for symmetric matrices like covariance
             eigvals = np.linalg.eigvalsh(I)
@@ -3427,12 +3432,9 @@ def compute_kknn_neighbors(
         total_var = np.sum(eigvals)
 
         if total_var > 0:
-            # Sort ascending
-            # "Thicker" manifold in smallest dimensions means higher curvature/noise
-            num_small = max(1, m // 2)
-            curvatures[i] = np.sum(eigvals[:num_small]) / total_var
+            curvatures[i] = (total_var ** 2) / np.sum(eigvals ** 2)
         else:
-            curvatures[i] = 0.0
+            curvatures[i] = 1.0  # Minimum possible participation ratio
 
     # 4. Normalize and Quantize Curvatures
     ptp = curvatures.max() - curvatures.min()
