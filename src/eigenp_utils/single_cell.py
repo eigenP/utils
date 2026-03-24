@@ -3590,3 +3590,173 @@ def kknn_ingest(
         adata_query.obs[conf_key] = confidences
 
     print("kkNN Ingest mapping complete!")
+
+def find_correlated_features(
+    adata: sc.AnnData,
+    target: str,
+    layer: Optional[str] = None,
+    use_raw: bool = False,
+    metrics: Sequence[str] = ("pearson",),
+    exclude_features: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """
+    Find highly correlated features with respect to a given target gene or observation score.
+
+    Args:
+        adata: The annotated data matrix.
+        target: The name of the target gene (in `adata.var_names`) or observation column (in `adata.obs`).
+                The function checks `adata.obs` first, then falls back to `adata.var_names`.
+        layer: The layer to use for expression data. If None, uses `adata.X`.
+        use_raw: Whether to use `adata.raw`. Overrides `layer`.
+        metrics: A list of metrics to compute. Options are 'pearson', 'spearman', 'wasserstein'.
+                 Defaults to ['pearson'].
+        exclude_features: An optional list of feature names to exclude from the final results.
+
+    Returns:
+        A Pandas DataFrame containing the requested metrics for all features (except exclusions).
+        The DataFrame is sorted descending by the first metric requested.
+    """
+    import scipy.sparse as sp
+    import pandas as pd
+    import numpy as np
+
+    if not metrics:
+        raise ValueError("At least one metric must be requested.")
+
+    # Validate target
+    target_vec = None
+    if target in adata.obs:
+        target_vec = adata.obs[target].values.astype(float)
+    else:
+        try:
+            target_vec = _extract_gene_vector(
+                adata,
+                target,
+                source="raw" if use_raw and adata.raw is not None else layer if layer else "X",
+                duplicate_policy="mean"
+            )
+        except KeyError:
+            pass
+
+    if target_vec is None:
+        raise ValueError(f"Target '{target}' not found in adata.obs or adata.var_names.")
+
+    # Extract the main matrix
+    M, var_names = _select_matrix_and_names(
+        adata,
+        source="raw" if use_raw and adata.raw is not None else layer if layer else "X"
+    )
+
+    n_cells, n_features = M.shape
+    if n_cells <= 1:
+        raise ValueError("Cannot compute correlation with 1 or fewer cells.")
+
+    # Target vector centering/scaling
+    target_mean = np.mean(target_vec)
+    target_std = np.std(target_vec)
+    target_z = (target_vec - target_mean) / (target_std + 1e-8)
+
+    # Initialize results dictionary
+    res_dict = {}
+
+    # Pre-calculate feature means/stds if needed by any metric
+    # Pearson needs it to scale the covariance.
+    # Wasserstein needs it for Z-scoring the features.
+    need_z_stats = "pearson" in metrics or "wasserstein" in metrics
+    feature_means = None
+    feature_stds = None
+
+    if need_z_stats:
+        if sp.issparse(M):
+            # Calculate exactly without instantiating dense matrix
+            feature_means = np.asarray(M.mean(axis=0)).ravel()
+            sq_means = np.asarray(M.multiply(M).mean(axis=0)).ravel()
+            variances = np.maximum(sq_means - feature_means**2, 0.0)
+            feature_stds = np.sqrt(variances) + 1e-8
+        else:
+            feature_means = np.asarray(M.mean(axis=0)).ravel()
+            feature_stds = np.asarray(M.std(axis=0)).ravel() + 1e-8
+
+    if "pearson" in metrics:
+        # Fast Pearson using dot product with Z-scored target
+        if sp.issparse(M):
+            # M.T @ target_z gives sum(X_i * target_z_i) for each feature.
+            # To get Pearson r: (X_centered.T @ target_z) / (N * X_std)
+            # X_centered.T @ target_z = (X.T - mean).T @ target_z
+            #                         = X.T @ target_z - mean * sum(target_z)
+            # Since target_z has zero mean, sum(target_z) is ~0, so X_centered.T @ target_z ≈ X.T @ target_z
+            # (Math check: exactly true if target_z has exactly zero mean)
+
+            covar_sum = np.asarray(M.T @ target_z).ravel()
+            # Correct for small numerical offset in sum(target_z)
+            sum_tz = np.sum(target_z)
+            covar_sum -= feature_means * sum_tz
+
+            r_pearson = covar_sum / (n_cells * feature_stds)
+        else:
+            M_dense = np.asarray(M)
+            covar_sum = (M_dense.T @ target_z)
+            sum_tz = np.sum(target_z)
+            covar_sum -= feature_means * sum_tz
+            r_pearson = covar_sum / (n_cells * feature_stds)
+
+        # Clip numerical noise
+        res_dict["pearson"] = np.clip(r_pearson, -1.0, 1.0)
+
+    if "spearman" in metrics:
+        from scipy.stats import rankdata, zscore
+        target_rank_z = zscore(rankdata(target_vec))
+        r_spear = np.empty(n_features, dtype=float)
+
+        if sp.issparse(M):
+            # Process column by column to avoid dense matrix allocation
+            M_csc = M.tocsc()
+            for j in range(n_features):
+                col = M_csc[:, j].toarray().ravel()
+                col_rank_z = zscore(rankdata(col))
+                # Spearman is just Pearson of ranks
+                r_spear[j] = np.dot(col_rank_z, target_rank_z) / n_cells
+        else:
+            M_dense = np.asarray(M)
+            for j in range(n_features):
+                col_rank_z = zscore(rankdata(M_dense[:, j]))
+                r_spear[j] = np.dot(col_rank_z, target_rank_z) / n_cells
+
+        res_dict["spearman"] = np.clip(r_spear, -1.0, 1.0)
+
+    if "wasserstein" in metrics:
+        from scipy.stats import wasserstein_distance
+        w_dist = np.empty(n_features, dtype=float)
+
+        if sp.issparse(M):
+            M_csc = M.tocsc()
+            for j in range(n_features):
+                # We must dense the column to apply wasserstein, but it's only 1D
+                col = M_csc[:, j].toarray().ravel()
+                # Z-score using precomputed exact stats
+                col_z = (col - feature_means[j]) / feature_stds[j]
+                w_dist[j] = wasserstein_distance(col_z, target_z)
+        else:
+            M_dense = np.asarray(M)
+            for j in range(n_features):
+                col_z = (M_dense[:, j] - feature_means[j]) / feature_stds[j]
+                w_dist[j] = wasserstein_distance(col_z, target_z)
+
+        res_dict["wasserstein"] = w_dist
+
+    # Compile DataFrame
+    res_df = pd.DataFrame(res_dict, index=var_names)
+
+    # Apply exclusions
+    if exclude_features:
+        exclude_set = set(exclude_features)
+        # Identify which exclusions are actually in the index to avoid KeyError
+        mask = res_df.index.isin(exclude_set)
+        res_df = res_df[~mask]
+
+    # Sort by the first metric requested
+    first_metric = metrics[0]
+    ascending = first_metric == "wasserstein" # Distance metrics are better when smaller
+    res_df = res_df.sort_values(by=first_metric, ascending=ascending)
+
+    return res_df
