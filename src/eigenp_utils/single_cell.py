@@ -1992,6 +1992,31 @@ def filter_marker_dict_by_triku(
 
 # ------------------------- PaCMAP Tools -------------------------
 
+def save_pacmap_model(model: Any, filepath: str) -> None:
+    """
+    Saves a fitted PaCMAP model to disk using joblib.
+    """
+    try:
+        import joblib
+    except ImportError:
+        raise ImportError("joblib is required to save models. Install it via `pip install joblib`.")
+
+    joblib.dump(model, filepath)
+    print(f"PaCMAP model saved to {filepath}")
+
+def load_pacmap_model(filepath: str) -> Any:
+    """
+    Loads a saved PaCMAP model from disk using joblib.
+    """
+    try:
+        import joblib
+    except ImportError:
+        raise ImportError("joblib is required to load models. Install it via `pip install joblib`.")
+
+    model = joblib.load(filepath)
+    print(f"PaCMAP model loaded from {filepath}")
+    return model
+
 def tl_pacmap(
     adata: sc.AnnData,
     n_neighbors: Optional[int] = None,
@@ -3483,6 +3508,7 @@ def kknn_ingest(
     use_rep: str = "X_pca",
     n_neighbors: Optional[int] = None,
     barycenter: str = "distance",
+    embedding_models: Optional[Dict[str, Any]] = None,
     recompute_ref_PCA: bool = True,
     save_ref_PCA_key: Optional[str] = None,
     **kwargs
@@ -3595,6 +3621,34 @@ def kknn_ingest(
         print(f"Mapping obsm: '{key}'...")
         ref_coords = adata_ref.obsm[key]
         emb_dim = ref_coords.shape[1]
+
+        if barycenter == "transform":
+            if embedding_models is not None and key in embedding_models:
+                model = embedding_models[key]
+                print(f"Using provided model's .transform() for '{key}'...")
+
+                # We need the source data to transform.
+                # Since we want to map the query data, we use the query representation used to find neighbors
+                X_q = adata_query.obsm[query_use_rep]
+
+                try:
+                    import pacmap
+                    if isinstance(model, pacmap.PaCMAP):
+                        X_r = adata_ref.obsm[use_rep]
+                        query_coords = model.transform(X_q, basis=X_r)
+                    else:
+                        query_coords = model.transform(X_q)
+                except ImportError:
+                    query_coords = model.transform(X_q)
+
+                adata_query.obsm[key] = query_coords
+                continue
+            else:
+                warnings.warn(f"barycenter='transform' requested but '{key}' not found in embedding_models. Falling back to 'distance'.")
+                current_barycenter = "distance"
+        else:
+            current_barycenter = barycenter
+
         query_coords = np.zeros((N_query, emb_dim))
 
         for i in range(N_query):
@@ -3603,13 +3657,51 @@ def kknn_ingest(
 
             coords = ref_coords[idx]
 
-            if barycenter == "distance":
+            if current_barycenter == "distance":
                 # Inverse distance weighting
                 # Add small epsilon to avoid division by zero
                 weights = 1.0 / (dist + 1e-8)
                 weights /= np.sum(weights)
                 query_coords[i] = np.average(coords, axis=0, weights=weights)
-            elif barycenter == "wasserstein":
+            elif current_barycenter == "lle":
+                # Regularized Locally Linear Embedding weights
+                # Find optimal non-negative weights to reconstruct query cell from neighbors
+                x_q = adata_query.obsm[query_use_rep][i]
+                X_neigh = adata_ref.obsm[use_rep][idx]
+
+                # Center neighbors around query point
+                Z = X_neigh - x_q
+
+                # Compute Gram matrix
+                G = Z @ Z.T
+
+                # Regularize Gram matrix
+                reg_lambda = 1e-3
+                trace = np.trace(G)
+                if trace > 0:
+                    reg = reg_lambda * trace / len(idx)
+                else:
+                    reg = reg_lambda
+                G_reg = G + reg * np.eye(len(idx))
+
+                # Solve G * w = 1
+                try:
+                    w = np.linalg.solve(G_reg, np.ones(len(idx)))
+                    # Enforce non-negativity constraint
+                    w = np.maximum(w, 0)
+                    w_sum = np.sum(w)
+                    if w_sum > 0:
+                        weights = w / w_sum
+                    else:
+                        # Fallback to uniform if all weights became zero
+                        weights = np.ones(len(idx)) / len(idx)
+                except np.linalg.LinAlgError:
+                    # Fallback to inverse distance if singular
+                    weights = 1.0 / (dist + 1e-8)
+                    weights /= np.sum(weights)
+
+                query_coords[i] = np.average(coords, axis=0, weights=weights)
+            elif current_barycenter == "wasserstein":
                 # Placeholder for optimal transport barycenter
                 warnings.warn("Wasserstein barycenter not yet fully implemented. Falling back to distance-weighted.")
                 weights = 1.0 / (dist + 1e-8)
