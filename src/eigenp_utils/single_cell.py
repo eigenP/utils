@@ -3335,6 +3335,7 @@ def compute_kknn_neighbors(
     adata_query: sc.AnnData,
     adata_ref: sc.AnnData,
     use_rep: str = "X_pca",
+    query_use_rep: Optional[str] = None,
     n_neighbors: Optional[int] = None,
     min_neighbors: Optional[int] = None,
     max_neighbors: Optional[int] = None,
@@ -3360,10 +3361,15 @@ def compute_kknn_neighbors(
         A tuple of (pruned_distances, pruned_indices) where each element is a list of arrays
         (one array per query cell).
     """
-    if use_rep not in adata_query.obsm or use_rep not in adata_ref.obsm:
-        raise ValueError(f"Both datasets must have '{use_rep}' in .obsm.")
+    if query_use_rep is None:
+        query_use_rep = use_rep
 
-    X_query = adata_query.obsm[use_rep]
+    if query_use_rep not in adata_query.obsm:
+        raise ValueError(f"Query dataset must have '{query_use_rep}' in .obsm.")
+    if use_rep not in adata_ref.obsm:
+        raise ValueError(f"Reference dataset must have '{use_rep}' in .obsm.")
+
+    X_query = adata_query.obsm[query_use_rep]
     X_ref = adata_ref.obsm[use_rep]
 
     N_ref = X_ref.shape[0]
@@ -3477,6 +3483,8 @@ def kknn_ingest(
     use_rep: str = "X_pca",
     n_neighbors: Optional[int] = None,
     barycenter: str = "distance",
+    recompute_ref_PCA: bool = True,
+    save_ref_PCA_key: Optional[str] = None,
     **kwargs
 ) -> None:
     """
@@ -3513,10 +3521,72 @@ def kknn_ingest(
         if key not in adata_ref.obsm:
             raise KeyError(f"Embedding '{key}' not found in adata_ref.obsm")
 
-    # 1. Compute kkNN neighborhoods
-    pruned_distances, pruned_indices = compute_kknn_neighbors(
-        adata_query, adata_ref, use_rep=use_rep, n_neighbors=n_neighbors, **kwargs
-    )
+    query_use_rep = use_rep
+    temp_query_rep_key = None
+
+    if use_rep == "X_pca":
+        # Check if reference needs recomputing its PCA
+        if recompute_ref_PCA:
+            print("Recomputing sc.pp.pca on reference dataset...")
+            sc.tl.pca(adata_ref)
+
+        if "pca" not in adata_ref.uns or "PCs" not in adata_ref.varm:
+            raise ValueError("Reference dataset must have PCA computed (adata_ref.uns['pca'] and adata_ref.varm['PCs']).")
+
+        pca_params = adata_ref.uns["pca"]["params"]
+        pca_centered = pca_params.get("zero_center", True)
+        pca_use_hvg = pca_params.get("use_highly_variable", False)
+
+        n_pcs = adata_ref.obsm["X_pca"].shape[1]
+
+        # Extract query data
+        x_query = adata_query.X
+        if sp.issparse(x_query):
+            x_query = x_query.toarray()
+        else:
+            # Important: Ensure we copy so we don't modify the original .X in-place
+            # and that we have a numpy array to subtract mean from
+            x_query = np.asarray(x_query).copy()
+
+        if pca_use_hvg:
+            if "highly_variable" not in adata_ref.var.columns:
+                raise ValueError("Did not find `adata_ref.var['highly_variable']`.")
+            hvg_mask = adata_ref.var["highly_variable"]
+
+            # Align query columns. Assuming adata_query.var_names match adata_ref.var_names
+            if not adata_query.var_names.equals(adata_ref.var_names):
+                raise ValueError("Variables in the query adata are different from variables in the reference adata.")
+
+            x_query = x_query[:, hvg_mask]
+            pca_basis = adata_ref.varm["PCs"][hvg_mask]
+        else:
+            pca_basis = adata_ref.varm["PCs"]
+            if not adata_query.var_names.equals(adata_ref.var_names):
+                raise ValueError("Variables in the query adata are different from variables in the reference adata.")
+
+        if pca_centered:
+            x_query -= x_query.mean(axis=0)
+
+        x_pca_projected = np.dot(x_query, pca_basis[:, :n_pcs])
+
+        if save_ref_PCA_key is not None:
+            adata_query.obsm[save_ref_PCA_key] = x_pca_projected
+            query_use_rep = save_ref_PCA_key
+        else:
+            # Save temporarily
+            temp_query_rep_key = f"__temp_ingest_{uuid4().hex[:8]}"
+            adata_query.obsm[temp_query_rep_key] = x_pca_projected
+            query_use_rep = temp_query_rep_key
+
+    try:
+        # 1. Compute kkNN neighborhoods
+        pruned_distances, pruned_indices = compute_kknn_neighbors(
+            adata_query, adata_ref, use_rep=use_rep, query_use_rep=query_use_rep, n_neighbors=n_neighbors, **kwargs
+        )
+    finally:
+        # Clean up temporary query representation if used
+        if temp_query_rep_key is not None:
+            del adata_query.obsm[temp_query_rep_key]
 
     N_query = adata_query.shape[0]
 
