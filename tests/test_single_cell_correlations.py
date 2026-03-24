@@ -117,6 +117,43 @@ def test_find_correlated_features_exclude(pbmc_adata):
     assert "Gene2" in res.index
 
 
+def test_find_correlated_features_graph_smoothing(pbmc_adata):
+    """Test graph-smoothed feature correlation calculation."""
+    # Compute neighbors so `adata.obsp['connectivities']` exists
+    sc.pp.neighbors(pbmc_adata, n_neighbors=5, use_rep="X")
+
+    # Store a copy of original data to ensure it is not mutated
+    X_orig = pbmc_adata.X.copy()
+    connectivities_orig = pbmc_adata.obsp["connectivities"].copy()
+
+    res_no_graph = find_correlated_features(
+        pbmc_adata,
+        target="Gene0",
+        metrics=["pearson"]
+    )
+
+    res_with_graph = find_correlated_features(
+        pbmc_adata,
+        target="Gene0",
+        metrics=["pearson"],
+        use_graph=True,
+        weights_key="connectivities"
+    )
+
+    # Both should have computed pearson correlation
+    assert "pearson" in res_with_graph.columns
+
+    # Gene0 vs Gene0 should still be 1.0
+    assert res_with_graph.loc["Gene0", "pearson"] == pytest.approx(1.0)
+
+    # The diffused distances will be numerically different from the raw ones
+    assert res_with_graph.loc["Gene1", "pearson"] != res_no_graph.loc["Gene1", "pearson"]
+
+    # Ensure no mutation of original data
+    assert (pbmc_adata.X != X_orig).nnz == 0
+    assert (pbmc_adata.obsp["connectivities"] != connectivities_orig).nnz == 0
+
+
 def test_find_correlated_features_sorting(pbmc_adata):
     """Test sorting behavior (wasserstein ascending, others descending)."""
     # Pearson: descending
