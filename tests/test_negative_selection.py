@@ -61,7 +61,7 @@ def test_score_celltypes_negative_selection():
     # Score baseline
     scores_base = score_celltypes(adata, pos_dict)
     # Score with negative selection
-    scores_neg = score_celltypes(adata, pos_dict, cell_type_negative_markers_dict=neg_dict)
+    scores_neg = score_celltypes(adata, pos_dict, cell_type_negative_markers_dict=neg_dict, score_method="net_scanpy")
 
     # For Cell 0 (Pure T), CD14 is 0. The neg score is low.
     # The net score for T-cell on Cell 0 should be relatively high.
