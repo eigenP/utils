@@ -67,6 +67,9 @@ def test_binned_vs_net_binned():
     # They should not be equal.
     assert not np.allclose(df_binned["T1"], df_net_binned["T1"]), "binned and net_binned should not be identical when negative markers exist"
 
+    # Validate that net_binned scores are clipped to [0, 1]
+    assert np.all((df_net_binned["T1"] >= 0.0) & (df_net_binned["T1"] <= 1.0)), "net_binned scores should be clipped between 0 and 1"
+
     # Also check if no negative markers passed, they are equal
     df_binned_noneg = score_celltypes(adata, markers, cell_type_negative_markers_dict=None, score_method="binned", use_raw=False)
     df_net_binned_noneg = score_celltypes(adata, markers, cell_type_negative_markers_dict=None, score_method="net_binned", use_raw=False)

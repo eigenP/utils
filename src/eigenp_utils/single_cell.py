@@ -2768,9 +2768,11 @@ def score_celltypes(
             x_neg = raw_neg_scores[neg_h]
             if score_method == "net_scanpy":
                 z_neg = robust_scale(x_neg)
+                final_scores[ct] = z_pos - z_neg
             else:
                 z_neg = x_neg # Already 0 to 1 bounded
-            final_scores[ct] = z_pos - z_neg
+                # For binned methods, bounded between 0 and 1
+                final_scores[ct] = np.clip(z_pos - z_neg, 0.0, 1.0)
         else:
             final_scores[ct] = z_pos
 
