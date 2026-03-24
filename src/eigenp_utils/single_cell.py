@@ -720,7 +720,7 @@ def plot_marker_genes_dict_on_embedding(
     negative_marker_genes: Optional[Dict[str, List[str] | str]] = None,
     basis: str = 'X_umap',
     colormaps: Optional[List[str] | str | Any] = None,
-    score_method: Union[Literal["scanpy", "binned", "binned_weighted"], List[Literal["scanpy", "binned", "binned_weighted"]]] = "scanpy",
+    score_method: Union[Literal["scanpy", "binned", "binned_weighted", "net_scanpy", "net_binned", "net_binned_weighted"], List[Literal["scanpy", "binned", "binned_weighted", "net_scanpy", "net_binned", "net_binned_weighted"]]] = "scanpy",
     **pl_kwargs
 ) -> List[plt.Axes]:
     """
@@ -2588,7 +2588,7 @@ def score_celltypes(
     layer: Optional[str] = None,
     use_raw: bool = True,
     min_markers: int = 1,
-    score_method: Literal["scanpy", "binned", "binned_weighted"] = "scanpy",
+    score_method: Literal["scanpy", "binned", "binned_weighted", "net_scanpy", "net_binned", "net_binned_weighted"] = "scanpy",
 ) -> pd.DataFrame:
     """
     Compute per-cell scores for each cell type.
@@ -2599,11 +2599,13 @@ def score_celltypes(
         median of non-zero values, then averages across markers. Normalization is skipped.
       - "binned_weighted": Same as "binned", but multiplies the average by the fraction
         of markers detected (>0) per cell.
+      - "net_scanpy", "net_binned", "net_binned_weighted": Same as above, but subtracts
+        the score of negative markers if `cell_type_negative_markers_dict` is provided.
 
     Supports negative selection:
       - Computes positive and negative scores per cell type.
-      - For "scanpy", returns Net Score = Z_pos - Z_neg.
-      - For "binned" methods, returns Net Score = avg_pos - avg_neg.
+      - If a "net_" method is selected, returns Net Score = pos - neg.
+      - Otherwise, returns the positive score only.
 
     Notes:
       - If fewer than `min_markers` genes are present, that cell type's score is NaN.
@@ -2697,14 +2699,14 @@ def score_celltypes(
         # Average across genes
         avg_scores = binned_matrix.mean(axis=1)
 
-        if score_method == "binned_weighted":
+        if score_method in ("binned_weighted", "net_binned_weighted"):
             # Fraction of markers detected
             frac_detected = detected_mask.sum(axis=1) / len(genes)
             return avg_scores * frac_detected
 
         return avg_scores
 
-    if score_method in ("binned", "binned_weighted"):
+    if score_method in ("binned", "binned_weighted", "net_binned", "net_binned_weighted"):
         # Binned execution path
         for h, genes in unique_pos_sets.items():
             raw_pos_scores[h] = _compute_binned_scores(genes)
@@ -2754,15 +2756,17 @@ def score_celltypes(
 
         x_pos = raw_pos_scores[pos_h]
 
-        if score_method == "scanpy":
+        if score_method in ("scanpy", "net_scanpy"):
             z_pos = robust_scale(x_pos)
         else:
             z_pos = x_pos  # Already 0 to 1 bounded
 
         neg_h = ct_to_neg_hash[ct]
-        if neg_h is not None:
+        is_net_method = score_method.startswith("net_")
+
+        if is_net_method and neg_h is not None:
             x_neg = raw_neg_scores[neg_h]
-            if score_method == "scanpy":
+            if score_method == "net_scanpy":
                 z_neg = robust_scale(x_neg)
             else:
                 z_neg = x_neg # Already 0 to 1 bounded
@@ -2795,7 +2799,7 @@ def annotate_clusters_by_markers(
     write_to_obs: bool = True,
     obs_prefix: Optional[str] = None,
     scores: Optional[pd.DataFrame] = None,
-    score_method: Literal["scanpy", "binned", "binned_weighted"] = "scanpy",
+    score_method: Literal["scanpy", "binned", "binned_weighted", "net_scanpy", "net_binned", "net_binned_weighted"] = "scanpy",
 ) -> pd.DataFrame:
     """
     Annotate clusters based on cell type scores using a probabilistic confidence metric.
@@ -2972,7 +2976,7 @@ def sweep_leiden_and_annotate(
     min_markers: int = 1,
     beta: float = None, # Deprecated
     leiden_key_prefix: str = "leiden",
-    score_method: Literal["scanpy", "binned", "binned_weighted"] = "scanpy",
+    score_method: Literal["scanpy", "binned", "binned_weighted", "net_scanpy", "net_binned", "net_binned_weighted"] = "scanpy",
 ) -> Dict[str, Any]:
     """
     For a fixed graph (recommended), run Leiden at multiple `resolutions`,

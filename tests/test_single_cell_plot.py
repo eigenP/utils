@@ -33,7 +33,7 @@ def test_plot_marker_genes_dict_on_embedding_methods():
         adata,
         markers,
         negative_marker_genes=neg_markers,
-        score_method=["scanpy", "binned", "binned_weighted"],
+        score_method=["scanpy", "binned", "binned_weighted", "net_scanpy", "net_binned", "net_binned_weighted"],
         use_raw=False
     )
     assert len(axes_multi) > 0
@@ -42,3 +42,33 @@ def test_plot_marker_genes_dict_on_embedding_methods():
     assert "Type1_score_scanpy" not in adata.obs
     assert "Type1_score_binned" not in adata.obs
     assert "Type1_score_binned_weighted" not in adata.obs
+    assert "Type1_score_net_scanpy" not in adata.obs
+    assert "Type1_score_net_binned" not in adata.obs
+    assert "Type1_score_net_binned_weighted" not in adata.obs
+
+
+def test_binned_vs_net_binned():
+    # specifically test that binned and net_binned produce different scores when negative markers are present
+    from eigenp_utils.single_cell import score_celltypes
+    np.random.seed(42)
+    # 10 cells, 2 positive genes, 1 negative gene
+    X = np.random.uniform(0, 10, (10, 3))
+    adata = anndata.AnnData(X=X)
+    adata.var_names = ["P1", "P2", "N1"]
+
+    markers = {"T1": ["P1", "P2"]}
+    neg_markers = {"T1": ["N1"]}
+
+    df_binned = score_celltypes(adata, markers, cell_type_negative_markers_dict=neg_markers, score_method="binned", use_raw=False)
+    df_net_binned = score_celltypes(adata, markers, cell_type_negative_markers_dict=neg_markers, score_method="net_binned", use_raw=False)
+
+    # "binned" should ignore neg_markers and just be positive
+    # "net_binned" should be positive - negative
+    # They should not be equal.
+    assert not np.allclose(df_binned["T1"], df_net_binned["T1"]), "binned and net_binned should not be identical when negative markers exist"
+
+    # Also check if no negative markers passed, they are equal
+    df_binned_noneg = score_celltypes(adata, markers, cell_type_negative_markers_dict=None, score_method="binned", use_raw=False)
+    df_net_binned_noneg = score_celltypes(adata, markers, cell_type_negative_markers_dict=None, score_method="net_binned", use_raw=False)
+
+    assert np.allclose(df_binned_noneg["T1"], df_net_binned_noneg["T1"]), "binned and net_binned should be identical when no negative markers exist"
