@@ -1025,6 +1025,52 @@ def _match_gene_indices(var_names: np.ndarray, gene: str, case_insensitive: bool
     return np.where(arr == gene)[0]
 
 
+def smooth_expression_on_graph(
+    adata: sc.AnnData,
+    X: Union[np.ndarray, sp.spmatrix],
+    weights_key: str = "connectivities"
+) -> np.ndarray:
+    """
+    Diffuses an expression matrix over a cell-cell graph by multiplying it
+    with the row-standardized connectivities matrix. This acts as a smoothing
+    filter, averaging a cell's expression with its neighbors.
+
+    Args:
+        adata: The annotated data matrix containing the graph in `.obsp`.
+        X: The expression matrix to smooth (dense or sparse).
+        weights_key: The key in `adata.obsp` containing the graph edges.
+                     Defaults to "connectivities".
+
+    Returns:
+        A dense numpy array of the smoothed expression.
+    """
+    if weights_key not in adata.obsp:
+        raise ValueError(f"Graph weights '{weights_key}' not found in adata.obsp.")
+
+    W = adata.obsp[weights_key].tocsr().copy()
+
+    # Row-standardize W to create a diffusion operator
+    rs = np.asarray(W.sum(axis=1)).ravel()
+    nz = rs > 0
+    inv = np.zeros_like(rs, dtype=float)
+    inv[nz] = 1.0 / rs[nz]
+
+    row_nnz = np.diff(W.indptr)
+    if row_nnz.size > 0:
+        W.data *= np.repeat(inv, row_nnz)
+
+    # Apply diffusion
+    if sp.issparse(X):
+        # Result of sparse @ sparse or sparse @ dense is often dense or needs casting
+        X_smooth = W.dot(X)
+        if sp.issparse(X_smooth):
+            X_smooth = X_smooth.toarray()
+    else:
+        X_smooth = W.dot(np.asarray(X))
+
+    return np.asarray(X_smooth)
+
+
 def _extract_gene_vector(
     adata,
     gene: str,
@@ -3888,6 +3934,8 @@ def find_correlated_features(
     use_raw: bool = False,
     metrics: Sequence[str] = ("pearson",),
     exclude_features: Optional[List[str]] = None,
+    use_graph: bool = False,
+    weights_key: str = "connectivities",
 ) -> pd.DataFrame:
     """
     Find highly correlated features with respect to a given target gene or observation score.
@@ -3901,6 +3949,10 @@ def find_correlated_features(
         metrics: A list of metrics to compute. Options are 'pearson', 'spearman', 'wasserstein'.
                  Defaults to ['pearson'].
         exclude_features: An optional list of feature names to exclude from the final results.
+        use_graph: If True, uses the cell-cell graph to diffuse (smooth) the expressions before
+                   calculating the distance/correlation. This mimics a graph-based feature distance,
+                   putting a lower distance on genes that are expressed in the same graph neighborhood.
+        weights_key: The key in `adata.obsp` containing the graph edges if `use_graph` is True.
 
     Returns:
         A Pandas DataFrame containing the requested metrics for all features (except exclusions).
@@ -3940,6 +3992,12 @@ def find_correlated_features(
     n_cells, n_features = M.shape
     if n_cells <= 1:
         raise ValueError("Cannot compute correlation with 1 or fewer cells.")
+
+    if use_graph:
+        target_vec = smooth_expression_on_graph(adata, target_vec.reshape(-1, 1), weights_key=weights_key).ravel()
+        # Diffuse the entire feature matrix at once
+        M = smooth_expression_on_graph(adata, M, weights_key=weights_key)
+        # Note: M is now a dense numpy array
 
     # Target vector centering/scaling
     target_mean = np.mean(target_vec)
