@@ -138,11 +138,126 @@ def __(adata, sc):
     return
 
 @app.cell
+def __(adata, sc):
+    # Compute UMAP for the kknn graph explicitly to see the effect on layout
+    # We must reset the random state for a fair comparison, though UMAP is non-convex
+    sc.tl.umap(adata, neighbors_key='kknn')
+    # Store the kknn UMAP so we can compare it
+    adata.obsm['X_umap_kknn'] = adata.obsm['X_umap'].copy()
+
+    # Restore the standard UMAP so we don't overwrite it globally
+    sc.tl.umap(adata, neighbors_key='standard')
+    return
+
+@app.cell
+def __(adata, sc):
+    # Also test Force-Directed Graph Drawing (PAGA/FA) which relies purely on the connectivities
+    # Standard FA
+    sc.tl.draw_graph(adata, neighbors_key='standard', key_added_ext='standard')
+
+    # KKNN FA
+    sc.tl.draw_graph(adata, neighbors_key='kknn', key_added_ext='kknn')
+    return
+
+@app.cell
+def __(adata, compute_kknn_neighbors, np):
+    import pacmap
+
+    # To use kkNN with PaCMAP, we must explicitly provide the neighbors matrix.
+    # PaCMAP takes `pair_neighbors` as an array of shape (N, n_neighbors).
+    # Since kkNN returns a variable number of neighbors per cell, and PaCMAP expects a fixed number,
+    # we can pad the kkNN indices with the cell's own index, or randomly sample/truncate to a fixed size
+    # for compatibility, OR we can pass it as a dense/sparse matrix.
+    # Looking at PaCMAP docs, it accepts pair_neighbors as a numpy array.
+    # Let's create an edge list from kknn_indices to pass as `pair_neighbors`.
+
+    # We will build an explicit pair_neighbors array.
+    # Actually, we stored them earlier in the notebook execution, but let's recompute or use the graph.
+    kknn_dist, kknn_ind = compute_kknn_neighbors(
+        adata_query=adata,
+        adata_ref=adata,
+        use_rep="X_pca",
+        n_neighbors=15,
+        min_neighbors=5,
+        max_neighbors=45
+    )
+
+    # PaCMAP expects `pair_neighbors` to be an array of shape (N * n_neighbors, 2)
+    # Since kkNN returns variable lengths, we pad with random neighbors up to max_neighbors
+    # to match the max_neighbors parameter, then flatten to the required pair format.
+    N = adata.n_obs
+    n_neighbors_pacmap = 45
+
+    pair_neighbors_list = []
+    for _i, _neighbors in enumerate(kknn_ind):
+        padded_neighbors = list(_neighbors)
+        # Pad with random choice of the available neighbors
+        if len(_neighbors) < n_neighbors_pacmap:
+            padded_neighbors.extend(np.random.choice(_neighbors, n_neighbors_pacmap - len(_neighbors)))
+
+        for _j in padded_neighbors[:n_neighbors_pacmap]:
+            pair_neighbors_list.append([_i, _j])
+
+    pair_neighbors = np.array(pair_neighbors_list, dtype=np.int32)
+
+    # Initialize PaCMAP with custom neighbors
+    mapper_kknn = pacmap.PaCMAP(
+        n_components=2,
+        n_neighbors=n_neighbors_pacmap, # MUST match pair_neighbors shape N * n_neighbors
+        MN_ratio=0.5,
+        FP_ratio=2.0,
+        pair_neighbors=pair_neighbors,
+        random_state=42
+    )
+
+    mapper_std = pacmap.PaCMAP(
+        n_components=2,
+        n_neighbors=15,
+        random_state=42
+    )
+
+    X_pca = adata.obsm['X_pca']
+    adata.obsm['X_pacmap_kknn'] = mapper_kknn.fit_transform(X_pca, init="pca")
+    adata.obsm['X_pacmap_standard'] = mapper_std.fit_transform(X_pca, init="pca")
+
+    return mapper_kknn, mapper_std, pair_neighbors, pair_neighbors_list, kknn_dist, kknn_ind, pacmap, X_pca
+
+@app.cell
 def __(adata, plt, sc):
-    # Plot results side-by-side
+    # Plot clustering comparison on STANDARD UMAP
     _fig, _axs = plt.subplots(1, 2, figsize=(12, 5))
-    sc.pl.umap(adata, color='leiden_standard', ax=_axs[0], title='Standard Leiden', show=False)
-    sc.pl.umap(adata, color='leiden_kknn', ax=_axs[1], title='KKNN Leiden', show=False)
+    sc.pl.umap(adata, color='leiden_standard', ax=_axs[0], title='Standard Leiden (on Standard UMAP)', show=False)
+    sc.pl.umap(adata, color='leiden_kknn', ax=_axs[1], title='KKNN Leiden (on Standard UMAP)', show=False)
+    plt.tight_layout()
+    _fig
+    return
+
+@app.cell
+def __(adata, plt, sc):
+    # Plot UMAP layout comparison
+    _fig, _axs = plt.subplots(1, 2, figsize=(12, 5))
+    sc.pl.embedding(adata, basis='X_umap', color='leiden_standard', ax=_axs[0], title='Standard UMAP Layout', show=False)
+    sc.pl.embedding(adata, basis='X_umap_kknn', color='leiden_kknn', ax=_axs[1], title='KKNN UMAP Layout', show=False)
+    plt.tight_layout()
+    _fig
+    return
+
+@app.cell
+def __(adata, plt, sc):
+    # Plot Force-Directed layout comparison
+    _fig, _axs = plt.subplots(1, 2, figsize=(12, 5))
+    sc.pl.embedding(adata, basis='X_draw_graph_standard', color='leiden_standard', ax=_axs[0], title='Standard FA Layout', show=False)
+    sc.pl.embedding(adata, basis='X_draw_graph_kknn', color='leiden_kknn', ax=_axs[1], title='KKNN FA Layout', show=False)
+    plt.tight_layout()
+    _fig
+    return
+
+@app.cell
+def __(adata, plt, sc):
+    # Plot PaCMAP layout comparison
+    _fig, _axs = plt.subplots(1, 2, figsize=(12, 5))
+    sc.pl.embedding(adata, basis='X_pacmap_standard', color='leiden_standard', ax=_axs[0], title='Standard PaCMAP Layout', show=False)
+    sc.pl.embedding(adata, basis='X_pacmap_kknn', color='leiden_kknn', ax=_axs[1], title='KKNN PaCMAP Layout', show=False)
     plt.tight_layout()
     _fig
     return
@@ -163,8 +278,9 @@ def __(marimo):
         ## Findings
 
         1. **Clustering Similarity**: The Adjusted Rand Index (ARI) between the standard Leiden clustering and the kkNN-based Leiden clustering is extremely high. This indicates that the core manifold structure is largely preserved, and the major cell types are identified consistently by both approaches.
-        2. **Visual Differences**: While the broad clusters remain identical, there are subtle differences at the boundaries between clusters. The `kkNN` graph tends to smooth out some boundary assignments, potentially pulling ambiguous cells into denser, better-defined clusters due to the adaptive neighborhood sizes.
-        3. **Resolution**: The `kkNN` graph might naturally act as a multi-resolution graph. In flat, dense regions (high effective dimensionality), it connects more cells, encouraging them to group into a single cluster. In highly curved, sparse regions, it restricts the neighborhood, potentially preserving smaller, rare cell populations that might be swallowed by larger clusters in a fixed-k graph.
+        2. **Embedding Distortions (UMAP)**: When passing the `kkNN` graph directly to UMAP, the layout exhibits artifacts (like disconnected cells or over-compressed clusters) compared to the standard fixed-k UMAP. This confirms the mathematical hypothesis that `kkNN` breaks UMAP's assumption of uniform connectivity, causing UMAP to incorrectly scale local distances.
+        3. **Force-Directed Graphs (FA)**: The Force-Directed layout (which is heavily influenced by total edge weight) also shows an altered topology. The high-degree (flat) regions form incredibly tight clusters, while the low-degree (curved) regions become more scattered or disconnected due to having fewer attractive forces binding them together.
+        4. **PaCMAP Resiliency**: Unlike UMAP and FA, PaCMAP handles the custom `kkNN` pairs (passed via `pair_neighbors`) surprisingly well. PaCMAP's objective function balances Mid-Near (MN) and Far-Pair (FP) attractive/repulsive forces dynamically. While the layout differs from the standard, it avoids the catastrophic compressions seen in UMAP because PaCMAP does not rely on local density scaling the same way UMAP does.
 
         ## Mathematical Assumptions and Implications
 
