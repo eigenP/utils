@@ -66,15 +66,18 @@ def test_kknn_ingest():
     assert adata_query.obsm["X_pca_projected"].shape[0] == n_query
 
     # Check if other mappings worked
-    assert "X_umap" in adata_query.obsm
-    assert adata_query.obsm["X_umap"].shape == (n_query, 2)
+    assert "X_umap_kknn" in adata_query.obsm
+    assert adata_query.obsm["X_umap_kknn"].shape == (n_query, 2)
 
-    assert "cell_type" in adata_query.obs
-    assert len(adata_query.obs["cell_type"]) == n_query
-    assert isinstance(adata_query.obs["cell_type"].dtype, pd.CategoricalDtype)
+    assert "cell_type_kknn" in adata_query.obs
+    assert len(adata_query.obs["cell_type_kknn"]) == n_query
+    assert isinstance(adata_query.obs["cell_type_kknn"].dtype, pd.CategoricalDtype)
 
-    assert "mapping_confidence_cell_type" in adata_query.obs
-    conf = adata_query.obs["mapping_confidence_cell_type"].values
+    # Check if the k count was saved
+    assert "kknn_k" in adata_query.obs
+
+    assert "mapping_confidence_cell_type_kknn" in adata_query.obs
+    conf = adata_query.obs["mapping_confidence_cell_type_kknn"].values
     assert np.all((conf >= 0) & (conf <= 1.0))
 
 def test_kknn_ingest_no_recompute_no_save():
@@ -106,4 +109,4 @@ def test_kknn_ingest_no_recompute_no_save():
     assert not any(k.startswith("__temp_ingest_") for k in adata_query.obsm.keys())
 
     # Still maps labels
-    assert "cell_type" in adata_query.obs
+    assert "cell_type_kknn" in adata_query.obs
