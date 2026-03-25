@@ -3996,19 +3996,36 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve G * w = 1 subject to w >= 0
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
-                        w_sum = np.sum(w)
-                        if w_sum > 0:
-                            weights = w / w_sum
+                        # matth: The naive approach of solving the unconstrained system and clipping
+                        # negative values to zero is a mathematically unjustified heuristic that can
+                        # yield weights arbitrarily far from the true constrained optimum.
+                        # Instead, we use a Non-Negative Least Squares (NNLS) solver.
+                        # The LLE problem is min_w (1/2) w^T G_reg w - 1^T w subject to w >= 0.
+                        # This is equivalent to min_w ||C^T w - d||^2 where G_reg = C C^T (Cholesky)
+                        # and C d = 1.
+
+                        # Fast-path: check if the unconstrained optimal is already non-negative
+                        w_unc = np.linalg.solve(G_reg, np.ones(len(idx)))
+                        if np.all(w_unc >= 0):
+                            w_sum = np.sum(w_unc)
+                            if w_sum > 0:
+                                weights = w_unc / w_sum
+                            else:
+                                weights = np.ones(len(idx)) / len(idx)
                         else:
-                            # Fallback to uniform if all weights became zero
-                            weights = np.ones(len(idx)) / len(idx)
+                            from scipy.optimize import nnls
+                            C = np.linalg.cholesky(G_reg)
+                            d = np.linalg.solve(C, np.ones(len(idx)))
+                            w_nnls, _ = nnls(C.T, d)
+                            w_sum = np.sum(w_nnls)
+                            if w_sum > 0:
+                                weights = w_nnls / w_sum
+                            else:
+                                weights = np.ones(len(idx)) / len(idx)
                     except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                        # Fallback to inverse distance if singular or Cholesky fails
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
