@@ -3696,6 +3696,8 @@ def kknn_ingest(
     embedding_models: Optional[Dict[str, Any]] = None,
     recompute_ref_PCA: bool = True,
     save_ref_PCA_key: Optional[str] = None,
+    normalize_pca: bool = True,
+    lle_reg_lambda: float = 1e-3,
     **kwargs
 ) -> None:
     """
@@ -3718,7 +3720,14 @@ def kknn_ingest(
         obsm_keys: Keys in adata_ref.obsm to transfer to adata_query.obsm.
         use_rep: Shared representation space to find neighbors (default: 'X_pca').
         n_neighbors: Base number of neighbors to use (overrides heuristic).
-        barycenter: Averaging method. Currently supports 'distance'.
+        barycenter: Averaging method. Currently supports 'distance' or 'lle' (Locally Linear Embedding).
+        embedding_models: Dictionary containing scikit-learn compatible projection models (e.g., PaCMAP).
+        recompute_ref_PCA: If True, recomputes PCA on the reference dataset before projecting the query.
+        save_ref_PCA_key: Optional key to save the projected query PCA representation in `adata_query.obsm`.
+        normalize_pca: If True, L2-normalizes the PCA embeddings of both datasets. This acts as a robust
+                       scale harmonization between datasets with different read depths.
+        lle_reg_lambda: Regularization strength for Locally Linear Embedding (`barycenter='lle'`).
+                        Decreasing it (e.g., to 1e-4) forces sparser, sharper assignment to nearest neighbors.
         **kwargs: Additional args for compute_kknn_neighbors (e.g., min_neighbors, max_neighbors).
     """
     if isinstance(obs_keys, str):
@@ -3743,6 +3752,7 @@ def kknn_ingest(
 
     query_use_rep = use_rep
     temp_query_rep_key = None
+    temp_ref_rep_key = None
 
     if use_rep == "X_pca":
         # Check if reference needs recomputing its PCA
@@ -3802,6 +3812,25 @@ def kknn_ingest(
             x_query -= x_query.mean(axis=0)
 
         x_pca_projected = np.dot(x_query, pca_basis[:, :n_pcs])
+
+        if normalize_pca:
+            warnings.warn(
+                "L2-normalizing the PCA embeddings for both the reference and query datasets. "
+                "This harmonizes scales between datasets (e.g., different read depths) before finding neighbors."
+            )
+            # L2 normalize reference PCA temporarily
+            ref_norms = np.linalg.norm(adata_ref.obsm[use_rep], axis=1, keepdims=True)
+            # Avoid division by zero
+            ref_norms[ref_norms == 0] = 1.0
+
+            temp_ref_rep_key = f"__temp_ref_ingest_{uuid4().hex[:8]}"
+            adata_ref.obsm[temp_ref_rep_key] = adata_ref.obsm[use_rep] / ref_norms
+            use_rep = temp_ref_rep_key
+
+            # L2 normalize query PCA
+            query_norms = np.linalg.norm(x_pca_projected, axis=1, keepdims=True)
+            query_norms[query_norms == 0] = 1.0
+            x_pca_projected = x_pca_projected / query_norms
 
         if save_ref_PCA_key is not None:
             adata_query.obsm[save_ref_PCA_key] = x_pca_projected
@@ -3880,12 +3909,11 @@ def kknn_ingest(
                     G = Z @ Z.T
 
                     # Regularize Gram matrix
-                    reg_lambda = 1e-3
                     trace = np.trace(G)
                     if trace > 0:
-                        reg = reg_lambda * trace / len(idx)
+                        reg = lle_reg_lambda * trace / len(idx)
                     else:
-                        reg = reg_lambda
+                        reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
                     # Solve G * w = 1
@@ -3966,6 +3994,9 @@ def kknn_ingest(
         if temp_query_rep_key is not None:
             if temp_query_rep_key in adata_query.obsm:
                 del adata_query.obsm[temp_query_rep_key]
+        if temp_ref_rep_key is not None:
+            if temp_ref_rep_key in adata_ref.obsm:
+                del adata_ref.obsm[temp_ref_rep_key]
 
     print("kkNN Ingest mapping complete!")
 
