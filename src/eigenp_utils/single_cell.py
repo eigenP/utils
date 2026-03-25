@@ -3465,7 +3465,8 @@ def kknn_classifier(
         mask = np.asarray(mask, dtype=bool)
 
     is_categorical = isinstance(adata.obs[obs_key].dtype, pd.CategoricalDtype) or \
-                     pd.api.types.is_object_dtype(adata.obs[obs_key])
+                     pd.api.types.is_object_dtype(adata.obs[obs_key]) or \
+                     pd.api.types.is_string_dtype(adata.obs[obs_key])
 
     smoothed = []
 
@@ -3538,6 +3539,44 @@ def kknn_classifier(
         return smoothed
 
 
+
+def _compute_kknn_curvatures(
+    X: np.ndarray,
+    indices: np.ndarray,
+    max_neighbors: int
+) -> np.ndarray:
+    """
+    Helper function to compute local curvature (Participation Ratio)
+    given a dataset and nearest neighbor indices.
+    """
+    # Extract all neighborhoods at once.
+    # neigh_data shape: (N, max_neighbors, m)
+    neigh_data = X[indices]
+
+    # Mean-center the data per neighborhood
+    neigh_mean = neigh_data.mean(axis=1, keepdims=True)
+    centered = neigh_data - neigh_mean
+
+    # Compute covariance matrices in bulk using Einstein summation
+    cov_matrices = np.einsum('nij,nil->njl', centered, centered) / max(1, (max_neighbors - 1))
+
+    # Calculate all eigenvalues simultaneously
+    eigvals = np.linalg.eigvalsh(cov_matrices)
+    eigvals = np.maximum(eigvals, 0)  # Handle minor numerical noise
+
+    # Compute Participation Ratios
+    # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2
+    total_var = np.sum(eigvals, axis=1)
+    sq_var = np.sum(eigvals ** 2, axis=1)
+
+    curvatures = np.ones(indices.shape[0]) # Default to 1.0 (min possible PR)
+
+    # Apply PR formula where variance exists to prevent division by zero
+    mask = total_var > 0
+    curvatures[mask] = (total_var[mask] ** 2) / sq_var[mask]
+
+    return curvatures
+
 def compute_kknn_neighbors(
     adata_query: sc.AnnData,
     adata_ref: sc.AnnData,
@@ -3604,51 +3643,31 @@ def compute_kknn_neighbors(
     # 2. Query neighbors for all query cells
     distances, indices = nn.kneighbors(X_query)
 
-    m = X_ref.shape[1]
+    # 3. Compute reference curvature bounds if not cached
+    bounds_key = 'kknn_curvature_bounds'
+    if bounds_key in adata_ref.uns:
+        lower_bound, upper_bound = adata_ref.uns[bounds_key]
+    else:
+        print("kkNN: Computing and caching reference curvature bounds...")
+        # Get neighbors for the reference dataset itself
+        _, ref_indices = nn.kneighbors(X_ref)
 
-    # 3. Compute local curvature for all query cells simultaneously
+        # Compute curvatures for the reference dataset
+        ref_curvatures = _compute_kknn_curvatures(X_ref, ref_indices, max_neighbors)
 
-    # matth Note: Vectorization trades memory for speed. If you have 100,000 cells,
-    # keeping 100 neighbors in a 50-dimensional PCA space, neigh_data will consume about 4GB of RAM.
-    # If you are running this on multi-million cell datasets with limited RAM, you can wrap this
-    # vectorized block in a simple generator that processes the data in chunks of 10,000 cells.
+        # Calculate bounds and cache them
+        lower_bound = np.percentile(ref_curvatures, 1)
+        upper_bound = np.percentile(ref_curvatures, 99)
+        adata_ref.uns[bounds_key] = (lower_bound, upper_bound)
 
-    # Extract all neighborhoods at once.
-    # neigh_data shape: (N_query, max_neighbors, m)
-    neigh_data = X_ref[indices]
+    # 4. Compute local curvature for query cells
+    # Note: the query cells use the reference data for neighborhood,
+    # but we extracted the neighborhood data correctly because indices point to X_ref
+    curvatures = _compute_kknn_curvatures(X_ref, indices, max_neighbors)
 
-    # Mean-center the data per neighborhood
-    # neigh_mean shape: (N_query, 1, m)
-    neigh_mean = neigh_data.mean(axis=1, keepdims=True)
-    centered = neigh_data - neigh_mean
-
-    # Compute covariance matrices in bulk using Einstein summation
-    # 'nij,nil->njl' means: multiply and sum over the 'i' (neighbors) dimension,
-    # resulting in N_query matrices of shape (m, m).
-    # covs shape: (N_query, m, m)
-    cov_matrices = np.einsum('nij,nil->njl', centered, centered) / max(1, (max_neighbors - 1))
-
-    # Calculate all eigenvalues simultaneously
-    # eigvals shape: (N_query, m)
-    eigvals = np.linalg.eigvalsh(cov_matrices)
-    eigvals = np.maximum(eigvals, 0)  # Handle minor numerical noise
-
-    # Compute Participation Ratios
-    # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2
-    total_var = np.sum(eigvals, axis=1)
-    sq_var = np.sum(eigvals ** 2, axis=1)
-
-    curvatures = np.ones(N_query) # Default to 1.0 (min possible PR)
-
-    # Apply PR formula where variance exists to prevent division by zero
-    mask = total_var > 0
-    curvatures[mask] = (total_var[mask] ** 2) / sq_var[mask]
-
-    # 4. Robust Normalization and Linear Binning
+    # 5. Robust Normalization and Linear Binning using reference bounds
 
     # Clip extreme outliers to prevent them from stretching the K space (Winsorization)
-    lower_bound = np.percentile(curvatures, 1)
-    upper_bound = np.percentile(curvatures, 99)
     curvatures_clipped = np.clip(curvatures, lower_bound, upper_bound)
 
     # Now perform absolute scaling on the cleaned data
