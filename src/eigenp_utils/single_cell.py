@@ -3739,6 +3739,30 @@ def kknn_ingest(
     adata_query = adata_query[:, common_genes].copy()
     ```
 
+    To prevent overwriting existing data, all transferred keys will receive a `_kknn` suffix
+    in `adata_query` (e.g. `{key}_kknn`, and `mapping_confidence_{key}_kknn`). The function
+    also adds a `kknn_k` column to `adata_query.obs`, which stores the number of adapted
+    neighbors chosen for each query cell based on local manifold curvature. You can plot this
+    column on an embedding to inspect curvature adaptation.
+
+    After ingest, if you wish to concatenate the query and reference datasets, use the
+    `anndata.concat()` function (the preferred method over `.concatenate()`):
+
+    ```
+    # Option 1: Basic concatenation along observations
+    adata_combined = anndata.concat(
+        {"reference": adata_ref, "query": adata_query},
+        label="dataset"
+    )
+
+    # Option 2: Advanced concatenation, joining the .obs on intersection
+    adata_combined = anndata.concat(
+        {"reference": adata_ref, "query": adata_query},
+        label="dataset",
+        join="inner"
+    )
+    ```
+
     Args:
         adata_query: The query dataset.
         adata_ref: The reference dataset.
@@ -3897,6 +3921,9 @@ def kknn_ingest(
 
         N_query = adata_query.shape[0]
 
+        # 1.5 Store the adapted k value
+        adata_query.obs['kknn_k'] = [len(idx) for idx in pruned_indices]
+
         # 2. Map .obsm (Embeddings)
         for key in obsm_keys:
             print(f"Mapping obsm: '{key}'...")
@@ -3922,7 +3949,7 @@ def kknn_ingest(
                     except ImportError:
                         query_coords = model.transform(X_q)
 
-                    adata_query.obsm[key] = query_coords
+                    adata_query.obsm[f"{key}_kknn"] = query_coords
                     continue
                 else:
                     warnings.warn(f"barycenter='transform' requested but '{key}' not found in embedding_models. Falling back to 'distance'.")
@@ -3991,7 +4018,7 @@ def kknn_ingest(
                     # Unweighted mean fallback
                     query_coords[i] = np.mean(coords, axis=0)
 
-            adata_query.obsm[key] = query_coords
+            adata_query.obsm[f"{key}_kknn"] = query_coords
 
         # 3. Map .obs (Labels) and compute confidence
         for key in obs_keys:
@@ -4029,12 +4056,12 @@ def kknn_ingest(
             # If the original was categorical, keep it categorical
             if isinstance(adata_ref.obs[key].dtype, pd.CategoricalDtype):
                 cat_dtype = adata_ref.obs[key].dtype
-                adata_query.obs[key] = pd.Categorical(mapped_labels, categories=cat_dtype.categories)
+                adata_query.obs[f"{key}_kknn"] = pd.Categorical(mapped_labels, categories=cat_dtype.categories)
             else:
-                adata_query.obs[key] = mapped_labels
+                adata_query.obs[f"{key}_kknn"] = mapped_labels
 
             # Store confidence
-            conf_key = f"mapping_confidence_{key}"
+            conf_key = f"mapping_confidence_{key}_kknn"
             adata_query.obs[conf_key] = confidences
 
     finally:
