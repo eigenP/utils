@@ -3702,6 +3702,15 @@ def kknn_ingest(
     Map annotations and embeddings from a reference to a query dataset
     using an adaptive curvature-based KNN (kkNN) strategy.
 
+    Important: It is expected that the query and reference datasets have already
+    been intersected to contain the exact same features. For example:
+
+    ```
+    common_genes = adata_reference.var_names.intersection(adata_query.var_names)
+    adata_reference = adata_reference[:, common_genes].copy()
+    adata_query = adata_query[:, common_genes].copy()
+    ```
+
     Args:
         adata_query: The query dataset.
         adata_ref: The reference dataset.
@@ -3737,8 +3746,22 @@ def kknn_ingest(
 
     if use_rep == "X_pca":
         # Check if reference needs recomputing its PCA
+        if not adata_query.var_names.equals(adata_ref.var_names):
+            warnings.warn(
+                "Warning: adata_query.var_names and adata_ref.var_names are not identical. "
+                "It is expected that the datasets have been intersected to contain the same features. "
+                "For example:\n"
+                "common_genes = adata_ref.var_names.intersection(adata_query.var_names)\n"
+                "adata_ref = adata_ref[:, common_genes].copy()\n"
+                "adata_query = adata_query[:, common_genes].copy()"
+            )
+
         if recompute_ref_PCA:
-            print("Recomputing sc.pp.pca on reference dataset...")
+            print("Recomputing sc.pp.highly_variable_genes and sc.pp.pca on reference dataset...")
+            if "counts" in adata_ref.layers:
+                sc.pp.highly_variable_genes(adata_ref, n_top_genes=1000, subset=False, layer="counts", flavor="seurat_v3")
+            else:
+                sc.pp.highly_variable_genes(adata_ref, n_top_genes=1000, subset=False, flavor="seurat")
             sc.tl.pca(adata_ref)
 
         if "pca" not in adata_ref.uns or "PCs" not in adata_ref.varm:
