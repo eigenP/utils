@@ -3410,6 +3410,7 @@ def kknn_classifier(
     min_neighbors: Optional[int] = None,
     max_neighbors: Optional[int] = None,
     quantile_bins: int = 10,
+    mask: Optional[Union[np.ndarray, pd.Series]] = None,
     inplace: bool = True
 ) -> Optional[np.ndarray]:
     """
@@ -3429,6 +3430,8 @@ def kknn_classifier(
         min_neighbors: Minimum neighbors to keep.
         max_neighbors: Maximum neighbors to keep.
         quantile_bins: Number of bins to quantize curvature scores.
+        mask: Boolean mask indicating which cells to smooth. Only cells where mask is True are
+              reclassified, others keep their original values. Must be a boolean array/Series.
         inplace: If True, adds the smoothed values as a new column `{obs_key}_kknn` to `adata.obs`.
                  If False, returns the smoothed values as an array.
 
@@ -3454,12 +3457,23 @@ def kknn_classifier(
     labels = adata.obs[obs_key].values
     N = adata.n_obs
 
+    if mask is not None:
+        if isinstance(mask, pd.Series):
+            mask = mask.values
+        if len(mask) != N:
+            raise ValueError(f"Mask length ({len(mask)}) does not match number of observations ({N})")
+        mask = np.asarray(mask, dtype=bool)
+
     is_categorical = isinstance(adata.obs[obs_key].dtype, pd.CategoricalDtype) or \
                      pd.api.types.is_object_dtype(adata.obs[obs_key])
 
     smoothed = []
 
     for i in range(N):
+        if mask is not None and not mask[i]:
+            smoothed.append(labels[i])
+            continue
+
         idx = pruned_indices[i]
         dist = pruned_distances[i]
 
