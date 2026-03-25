@@ -2225,8 +2225,8 @@ def tl_pacmap(
 
     adata.obsm[key_added] = X_embedded
     print(f"PaCMAP embedding finished. Result stored in `adata.obsm['{key_added}']`.")
-    
-    
+
+
 # ------------------------- Multiscale Coarsening -------------------------
 
 def multiscale_coarsening(
@@ -3498,7 +3498,7 @@ def kknn_classifier(
             if vote_tally:
                 # Find the winner
                 winner = max(vote_tally.items(), key=lambda x: x[1])[0]
-                smoothed.append(winner)
+                if i == 0: print(f'dist={dist}, weights={weights}, labels={neighbors_labels}, tally={vote_tally}'); smoothed.append(winner)
             else:
                 # Failsafe if all neighbors were NaN
                 smoothed.append(np.nan)
