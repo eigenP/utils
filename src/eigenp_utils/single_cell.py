@@ -3780,153 +3780,155 @@ def kknn_ingest(
         pruned_distances, pruned_indices = compute_kknn_neighbors(
             adata_query, adata_ref, use_rep=use_rep, query_use_rep=query_use_rep, n_neighbors=n_neighbors, **kwargs
         )
+
+        N_query = adata_query.shape[0]
+
+        # 2. Map .obsm (Embeddings)
+        for key in obsm_keys:
+            print(f"Mapping obsm: '{key}'...")
+            ref_coords = adata_ref.obsm[key]
+            emb_dim = ref_coords.shape[1]
+
+            if barycenter == "transform":
+                if embedding_models is not None and key in embedding_models:
+                    model = embedding_models[key]
+                    print(f"Using provided model's .transform() for '{key}'...")
+
+                    # We need the source data to transform.
+                    # Since we want to map the query data, we use the query representation used to find neighbors
+                    X_q = adata_query.obsm[query_use_rep]
+
+                    try:
+                        import pacmap
+                        if isinstance(model, pacmap.PaCMAP):
+                            X_r = adata_ref.obsm[use_rep]
+                            query_coords = model.transform(X_q, basis=X_r)
+                        else:
+                            query_coords = model.transform(X_q)
+                    except ImportError:
+                        query_coords = model.transform(X_q)
+
+                    adata_query.obsm[key] = query_coords
+                    continue
+                else:
+                    warnings.warn(f"barycenter='transform' requested but '{key}' not found in embedding_models. Falling back to 'distance'.")
+                    current_barycenter = "distance"
+            else:
+                current_barycenter = barycenter
+
+            query_coords = np.zeros((N_query, emb_dim))
+
+            for i in range(N_query):
+                idx = pruned_indices[i]
+                dist = pruned_distances[i]
+
+                coords = ref_coords[idx]
+
+                if current_barycenter == "distance":
+                    # Inverse distance weighting
+                    # Add small epsilon to avoid division by zero
+                    weights = 1.0 / (dist + 1e-8)
+                    weights /= np.sum(weights)
+                    query_coords[i] = np.average(coords, axis=0, weights=weights)
+                elif current_barycenter == "lle":
+                    # Regularized Locally Linear Embedding weights
+                    # Find optimal non-negative weights to reconstruct query cell from neighbors
+                    x_q = adata_query.obsm[query_use_rep][i]
+                    X_neigh = adata_ref.obsm[use_rep][idx]
+
+                    # Center neighbors around query point
+                    Z = X_neigh - x_q
+
+                    # Compute Gram matrix
+                    G = Z @ Z.T
+
+                    # Regularize Gram matrix
+                    reg_lambda = 1e-3
+                    trace = np.trace(G)
+                    if trace > 0:
+                        reg = reg_lambda * trace / len(idx)
+                    else:
+                        reg = reg_lambda
+                    G_reg = G + reg * np.eye(len(idx))
+
+                    # Solve G * w = 1
+                    try:
+                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
+                        # Enforce non-negativity constraint
+                        w = np.maximum(w, 0)
+                        w_sum = np.sum(w)
+                        if w_sum > 0:
+                            weights = w / w_sum
+                        else:
+                            # Fallback to uniform if all weights became zero
+                            weights = np.ones(len(idx)) / len(idx)
+                    except np.linalg.LinAlgError:
+                        # Fallback to inverse distance if singular
+                        weights = 1.0 / (dist + 1e-8)
+                        weights /= np.sum(weights)
+
+                    query_coords[i] = np.average(coords, axis=0, weights=weights)
+                elif current_barycenter == "wasserstein":
+                    # Placeholder for optimal transport barycenter
+                    warnings.warn("Wasserstein barycenter not yet fully implemented. Falling back to distance-weighted.")
+                    weights = 1.0 / (dist + 1e-8)
+                    weights /= np.sum(weights)
+                    query_coords[i] = np.average(coords, axis=0, weights=weights)
+                else:
+                    # Unweighted mean fallback
+                    query_coords[i] = np.mean(coords, axis=0)
+
+            adata_query.obsm[key] = query_coords
+
+        # 3. Map .obs (Labels) and compute confidence
+        for key in obs_keys:
+            print(f"Mapping obs: '{key}'...")
+            ref_labels = adata_ref.obs[key].values
+
+            mapped_labels = []
+            confidences = []
+
+            for i in range(N_query):
+                idx = pruned_indices[i]
+                dist = pruned_distances[i]
+
+                labels_i = ref_labels[idx]
+
+                # Inverse distance weighting for votes
+                weights = 1.0 / (dist + 1e-8)
+                weights /= np.sum(weights)
+
+                # Tally weighted votes
+                vote_tally = {}
+                for lbl, w in zip(labels_i, weights):
+                    vote_tally[lbl] = vote_tally.get(lbl, 0) + w
+
+                # Find the winner
+                winner = max(vote_tally.items(), key=lambda x: x[1])
+                winning_label = winner[0]
+                winning_weight_frac = winner[1] # Already normalized to 1.0
+
+                mapped_labels.append(winning_label)
+
+                # Mapping confidence: proportion of weighted vote
+                confidences.append(winning_weight_frac)
+
+            # If the original was categorical, keep it categorical
+            if isinstance(adata_ref.obs[key].dtype, pd.CategoricalDtype):
+                cat_dtype = adata_ref.obs[key].dtype
+                adata_query.obs[key] = pd.Categorical(mapped_labels, categories=cat_dtype.categories)
+            else:
+                adata_query.obs[key] = mapped_labels
+
+            # Store confidence
+            conf_key = f"mapping_confidence_{key}"
+            adata_query.obs[conf_key] = confidences
+
     finally:
         # Clean up temporary query representation if used
         if temp_query_rep_key is not None:
-            del adata_query.obsm[temp_query_rep_key]
-
-    N_query = adata_query.shape[0]
-
-    # 2. Map .obsm (Embeddings)
-    for key in obsm_keys:
-        print(f"Mapping obsm: '{key}'...")
-        ref_coords = adata_ref.obsm[key]
-        emb_dim = ref_coords.shape[1]
-
-        if barycenter == "transform":
-            if embedding_models is not None and key in embedding_models:
-                model = embedding_models[key]
-                print(f"Using provided model's .transform() for '{key}'...")
-
-                # We need the source data to transform.
-                # Since we want to map the query data, we use the query representation used to find neighbors
-                X_q = adata_query.obsm[query_use_rep]
-
-                try:
-                    import pacmap
-                    if isinstance(model, pacmap.PaCMAP):
-                        X_r = adata_ref.obsm[use_rep]
-                        query_coords = model.transform(X_q, basis=X_r)
-                    else:
-                        query_coords = model.transform(X_q)
-                except ImportError:
-                    query_coords = model.transform(X_q)
-
-                adata_query.obsm[key] = query_coords
-                continue
-            else:
-                warnings.warn(f"barycenter='transform' requested but '{key}' not found in embedding_models. Falling back to 'distance'.")
-                current_barycenter = "distance"
-        else:
-            current_barycenter = barycenter
-
-        query_coords = np.zeros((N_query, emb_dim))
-
-        for i in range(N_query):
-            idx = pruned_indices[i]
-            dist = pruned_distances[i]
-
-            coords = ref_coords[idx]
-
-            if current_barycenter == "distance":
-                # Inverse distance weighting
-                # Add small epsilon to avoid division by zero
-                weights = 1.0 / (dist + 1e-8)
-                weights /= np.sum(weights)
-                query_coords[i] = np.average(coords, axis=0, weights=weights)
-            elif current_barycenter == "lle":
-                # Regularized Locally Linear Embedding weights
-                # Find optimal non-negative weights to reconstruct query cell from neighbors
-                x_q = adata_query.obsm[query_use_rep][i]
-                X_neigh = adata_ref.obsm[use_rep][idx]
-
-                # Center neighbors around query point
-                Z = X_neigh - x_q
-
-                # Compute Gram matrix
-                G = Z @ Z.T
-
-                # Regularize Gram matrix
-                reg_lambda = 1e-3
-                trace = np.trace(G)
-                if trace > 0:
-                    reg = reg_lambda * trace / len(idx)
-                else:
-                    reg = reg_lambda
-                G_reg = G + reg * np.eye(len(idx))
-
-                # Solve G * w = 1
-                try:
-                    w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                    # Enforce non-negativity constraint
-                    w = np.maximum(w, 0)
-                    w_sum = np.sum(w)
-                    if w_sum > 0:
-                        weights = w / w_sum
-                    else:
-                        # Fallback to uniform if all weights became zero
-                        weights = np.ones(len(idx)) / len(idx)
-                except np.linalg.LinAlgError:
-                    # Fallback to inverse distance if singular
-                    weights = 1.0 / (dist + 1e-8)
-                    weights /= np.sum(weights)
-
-                query_coords[i] = np.average(coords, axis=0, weights=weights)
-            elif current_barycenter == "wasserstein":
-                # Placeholder for optimal transport barycenter
-                warnings.warn("Wasserstein barycenter not yet fully implemented. Falling back to distance-weighted.")
-                weights = 1.0 / (dist + 1e-8)
-                weights /= np.sum(weights)
-                query_coords[i] = np.average(coords, axis=0, weights=weights)
-            else:
-                # Unweighted mean fallback
-                query_coords[i] = np.mean(coords, axis=0)
-
-        adata_query.obsm[key] = query_coords
-
-    # 3. Map .obs (Labels) and compute confidence
-    for key in obs_keys:
-        print(f"Mapping obs: '{key}'...")
-        ref_labels = adata_ref.obs[key].values
-
-        mapped_labels = []
-        confidences = []
-
-        for i in range(N_query):
-            idx = pruned_indices[i]
-            dist = pruned_distances[i]
-
-            labels_i = ref_labels[idx]
-
-            # Inverse distance weighting for votes
-            weights = 1.0 / (dist + 1e-8)
-            weights /= np.sum(weights)
-
-            # Tally weighted votes
-            vote_tally = {}
-            for lbl, w in zip(labels_i, weights):
-                vote_tally[lbl] = vote_tally.get(lbl, 0) + w
-
-            # Find the winner
-            winner = max(vote_tally.items(), key=lambda x: x[1])
-            winning_label = winner[0]
-            winning_weight_frac = winner[1] # Already normalized to 1.0
-
-            mapped_labels.append(winning_label)
-
-            # Mapping confidence: proportion of weighted vote
-            confidences.append(winning_weight_frac)
-
-        # If the original was categorical, keep it categorical
-        if isinstance(adata_ref.obs[key].dtype, pd.CategoricalDtype):
-            cat_dtype = adata_ref.obs[key].dtype
-            adata_query.obs[key] = pd.Categorical(mapped_labels, categories=cat_dtype.categories)
-        else:
-            adata_query.obs[key] = mapped_labels
-
-        # Store confidence
-        conf_key = f"mapping_confidence_{key}"
-        adata_query.obs[conf_key] = confidences
+            if temp_query_rep_key in adata_query.obsm:
+                del adata_query.obsm[temp_query_rep_key]
 
     print("kkNN Ingest mapping complete!")
 
