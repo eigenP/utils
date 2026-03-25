@@ -3464,8 +3464,7 @@ def kknn_classifier(
             raise ValueError(f"Mask length ({len(mask)}) does not match number of observations ({N})")
         mask = np.asarray(mask, dtype=bool)
 
-    is_categorical = isinstance(adata.obs[obs_key].dtype, pd.CategoricalDtype) or \
-                     pd.api.types.is_object_dtype(adata.obs[obs_key])
+    is_categorical = not pd.api.types.is_numeric_dtype(adata.obs[obs_key])
 
     smoothed = []
 
@@ -3480,15 +3479,11 @@ def kknn_classifier(
         neighbors_labels = labels[idx]
 
         # Distance weighting: smaller distance = larger weight
-        # Add a slightly larger epsilon or distance offset to prevent the self-node (dist=0)
-        # from completely dominating the vote with 99.999% weight. We want neighbors to matter.
-        # We also clip the distances to be at least a small positive value, or
-        # just add a smoothing term (e.g. median distance)
-
-        # A robust way is to use a bandwidth or pseudo-count.
-        # Adding 1.0 gives standard 1/(1+d) behavior,
-        # so self gets weight 1, neighbor at d=1 gets weight 0.5.
-        weights = 1.0 / (dist + 1.0)
+        # Using the median distance of the neighborhood as a bandwidth makes the weighting
+        # scale-invariant without letting the self-node (dist=0) completely dominate the vote with infinite weight.
+        epsilon = 1e-6
+        median_dist = np.median(dist[dist > 0]) if np.any(dist > 0) else 0.0
+        weights = 1.0 / (dist + median_dist + epsilon)
         weights /= np.sum(weights)
 
         if is_categorical:
@@ -3515,9 +3510,13 @@ def kknn_classifier(
                 valid_labels = neighbors_labels[valid_mask]
                 valid_weights = weights[valid_mask]
                 # Re-normalize valid weights
-                valid_weights /= np.sum(valid_weights)
-                val = np.sum(valid_labels * valid_weights)
-                smoothed.append(val)
+                sum_weights = np.sum(valid_weights)
+                if sum_weights > 0:
+                    valid_weights /= sum_weights
+                    val = np.sum(valid_labels * valid_weights)
+                    smoothed.append(val)
+                else:
+                    smoothed.append(np.nan)
             else:
                 smoothed.append(np.nan)
 
@@ -3537,6 +3536,50 @@ def kknn_classifier(
     else:
         return smoothed
 
+
+
+def _compute_kknn_curvatures(
+    X: np.ndarray,
+    indices: np.ndarray,
+    max_neighbors: int,
+    chunk_size: int = 50000
+) -> np.ndarray:
+    """
+    Helper function to compute local curvature (Participation Ratio)
+    given a dataset and nearest neighbor indices, chunked to prevent OOM errors.
+    """
+    N = indices.shape[0]
+    curvatures = np.ones(N) # Default to 1.0 (min possible PR)
+
+    for i in range(0, N, chunk_size):
+        end_i = min(i + chunk_size, N)
+        chunk_indices = indices[i:end_i]
+
+        # Extract neighborhoods for this chunk.
+        # neigh_data shape: (chunk_size, max_neighbors, m)
+        neigh_data = X[chunk_indices]
+
+        # Mean-center the data per neighborhood
+        neigh_mean = neigh_data.mean(axis=1, keepdims=True)
+        centered = neigh_data - neigh_mean
+
+        # Compute covariance matrices in bulk using Einstein summation
+        cov_matrices = np.einsum('nij,nil->njl', centered, centered) / max(1, (max_neighbors - 1))
+
+        # Calculate all eigenvalues simultaneously
+        eigvals = np.linalg.eigvalsh(cov_matrices)
+        eigvals = np.maximum(eigvals, 0)  # Handle minor numerical noise
+
+        # Compute Participation Ratios
+        # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2
+        total_var = np.sum(eigvals, axis=1)
+        sq_var = np.sum(eigvals ** 2, axis=1)
+
+        # Apply PR formula where variance exists to prevent division by zero
+        mask = total_var > 0
+        curvatures[i:end_i][mask] = (total_var[mask] ** 2) / sq_var[mask]
+
+    return curvatures
 
 def compute_kknn_neighbors(
     adata_query: sc.AnnData,
@@ -3604,51 +3647,35 @@ def compute_kknn_neighbors(
     # 2. Query neighbors for all query cells
     distances, indices = nn.kneighbors(X_query)
 
-    m = X_ref.shape[1]
+    # 3. Compute reference curvature bounds if not cached
+    bounds_key = 'kknn_curvature_bounds'
+    if bounds_key in adata_ref.uns:
+        lower_bound, upper_bound = adata_ref.uns[bounds_key]
+    else:
+        print("kkNN: Computing and caching reference curvature bounds...")
+        # Get neighbors for the reference dataset itself
+        # If the query and reference are identical arrays, reuse the already computed indices
+        if X_query is X_ref:
+            ref_indices = indices
+        else:
+            _, ref_indices = nn.kneighbors(X_ref)
 
-    # 3. Compute local curvature for all query cells simultaneously
+        # Compute curvatures for the reference dataset
+        ref_curvatures = _compute_kknn_curvatures(X_ref, ref_indices, max_neighbors)
 
-    # matth Note: Vectorization trades memory for speed. If you have 100,000 cells,
-    # keeping 100 neighbors in a 50-dimensional PCA space, neigh_data will consume about 4GB of RAM.
-    # If you are running this on multi-million cell datasets with limited RAM, you can wrap this
-    # vectorized block in a simple generator that processes the data in chunks of 10,000 cells.
+        # Calculate bounds and cache them
+        lower_bound = np.percentile(ref_curvatures, 1)
+        upper_bound = np.percentile(ref_curvatures, 99)
+        adata_ref.uns[bounds_key] = (lower_bound, upper_bound)
 
-    # Extract all neighborhoods at once.
-    # neigh_data shape: (N_query, max_neighbors, m)
-    neigh_data = X_ref[indices]
+    # 4. Compute local curvature for query cells
+    # Note: the query cells use the reference data for neighborhood,
+    # but we extracted the neighborhood data correctly because indices point to X_ref
+    curvatures = _compute_kknn_curvatures(X_ref, indices, max_neighbors)
 
-    # Mean-center the data per neighborhood
-    # neigh_mean shape: (N_query, 1, m)
-    neigh_mean = neigh_data.mean(axis=1, keepdims=True)
-    centered = neigh_data - neigh_mean
-
-    # Compute covariance matrices in bulk using Einstein summation
-    # 'nij,nil->njl' means: multiply and sum over the 'i' (neighbors) dimension,
-    # resulting in N_query matrices of shape (m, m).
-    # covs shape: (N_query, m, m)
-    cov_matrices = np.einsum('nij,nil->njl', centered, centered) / max(1, (max_neighbors - 1))
-
-    # Calculate all eigenvalues simultaneously
-    # eigvals shape: (N_query, m)
-    eigvals = np.linalg.eigvalsh(cov_matrices)
-    eigvals = np.maximum(eigvals, 0)  # Handle minor numerical noise
-
-    # Compute Participation Ratios
-    # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2
-    total_var = np.sum(eigvals, axis=1)
-    sq_var = np.sum(eigvals ** 2, axis=1)
-
-    curvatures = np.ones(N_query) # Default to 1.0 (min possible PR)
-
-    # Apply PR formula where variance exists to prevent division by zero
-    mask = total_var > 0
-    curvatures[mask] = (total_var[mask] ** 2) / sq_var[mask]
-
-    # 4. Robust Normalization and Linear Binning
+    # 5. Robust Normalization and Linear Binning using reference bounds
 
     # Clip extreme outliers to prevent them from stretching the K space (Winsorization)
-    lower_bound = np.percentile(curvatures, 1)
-    upper_bound = np.percentile(curvatures, 99)
     curvatures_clipped = np.clip(curvatures, lower_bound, upper_bound)
 
     # Now perform absolute scaling on the cleaned data
@@ -3696,7 +3723,6 @@ def kknn_ingest(
     embedding_models: Optional[Dict[str, Any]] = None,
     recompute_ref_PCA: bool = True,
     save_ref_PCA_key: Optional[str] = None,
-    normalize_pca: bool = True,
     lle_reg_lambda: float = 1e-3,
     **kwargs
 ) -> None:
@@ -3724,8 +3750,6 @@ def kknn_ingest(
         embedding_models: Dictionary containing scikit-learn compatible projection models (e.g., PaCMAP).
         recompute_ref_PCA: If True, recomputes PCA on the reference dataset before projecting the query.
         save_ref_PCA_key: Optional key to save the projected query PCA representation in `adata_query.obsm`.
-        normalize_pca: If True, L2-normalizes the PCA embeddings of both datasets. This acts as a robust
-                       scale harmonization between datasets with different read depths.
         lle_reg_lambda: Regularization strength for Locally Linear Embedding (`barycenter='lle'`).
                         Decreasing it (e.g., to 1e-4) forces sparser, sharper assignment to nearest neighbors.
         **kwargs: Additional args for compute_kknn_neighbors (e.g., min_neighbors, max_neighbors).
@@ -3767,21 +3791,48 @@ def kknn_ingest(
             )
 
         if recompute_ref_PCA:
-            print("Recomputing sc.pp.highly_variable_genes and sc.pp.pca on reference dataset...")
-            if "counts" in adata_ref.layers:
-                sc.pp.highly_variable_genes(adata_ref, n_top_genes=1000, subset=False, layer="counts", flavor="seurat_v3")
+            print("Warning: recompute_ref_PCA is True, but this function will not mutate your reference object in place.")
+            print("Creating a shallow copy of reference to recompute PCA...")
+
+            # Create a shallow copy to prevent overwriting the user's reference PCA
+            adata_ref_copy = adata_ref.copy()
+
+            if "counts" in adata_ref_copy.layers:
+                sc.pp.highly_variable_genes(adata_ref_copy, n_top_genes=1000, subset=False, layer="counts", flavor="seurat_v3")
             else:
-                sc.pp.highly_variable_genes(adata_ref, n_top_genes=1000, subset=False, flavor="seurat")
-            sc.tl.pca(adata_ref)
+                sc.pp.highly_variable_genes(adata_ref_copy, n_top_genes=1000, subset=False, flavor="seurat")
+            sc.tl.pca(adata_ref_copy)
 
-        if "pca" not in adata_ref.uns or "PCs" not in adata_ref.varm:
-            raise ValueError("Reference dataset must have PCA computed (adata_ref.uns['pca'] and adata_ref.varm['PCs']).")
+            # Store it temporarily for this run
+            temp_ref_rep_key = f"__temp_ref_ingest_{uuid4().hex[:8]}"
+            adata_ref.obsm[temp_ref_rep_key] = adata_ref_copy.obsm["X_pca"]
+            use_rep = temp_ref_rep_key
 
-        pca_params = adata_ref.uns["pca"]["params"]
-        pca_centered = pca_params.get("zero_center", True)
-        pca_use_hvg = pca_params.get("use_highly_variable", False)
+            pca_params = adata_ref_copy.uns["pca"]["params"]
+            pca_centered = pca_params.get("zero_center", True)
+            pca_use_hvg = pca_params.get("use_highly_variable", False)
+            n_pcs = adata_ref_copy.obsm["X_pca"].shape[1]
+            pca_basis = adata_ref_copy.varm["PCs"]
 
-        n_pcs = adata_ref.obsm["X_pca"].shape[1]
+            if pca_use_hvg:
+                hvg_mask = adata_ref_copy.var["highly_variable"]
+
+            del adata_ref_copy
+        else:
+            if "pca" not in adata_ref.uns or "PCs" not in adata_ref.varm:
+                raise ValueError("Reference dataset must have PCA computed (adata_ref.uns['pca'] and adata_ref.varm['PCs']).")
+
+            pca_params = adata_ref.uns["pca"]["params"]
+            pca_centered = pca_params.get("zero_center", True)
+            pca_use_hvg = pca_params.get("use_highly_variable", False)
+
+            n_pcs = adata_ref.obsm["X_pca"].shape[1]
+            pca_basis = adata_ref.varm["PCs"]
+
+            if pca_use_hvg:
+                if "highly_variable" not in adata_ref.var.columns:
+                    raise ValueError("Did not find `adata_ref.var['highly_variable']`.")
+                hvg_mask = adata_ref.var["highly_variable"]
 
         # Extract query data
         x_query = adata_query.X
@@ -3793,44 +3844,41 @@ def kknn_ingest(
             x_query = np.asarray(x_query).copy()
 
         if pca_use_hvg:
-            if "highly_variable" not in adata_ref.var.columns:
-                raise ValueError("Did not find `adata_ref.var['highly_variable']`.")
-            hvg_mask = adata_ref.var["highly_variable"]
-
             # Align query columns. Assuming adata_query.var_names match adata_ref.var_names
             if not adata_query.var_names.equals(adata_ref.var_names):
                 raise ValueError("Variables in the query adata are different from variables in the reference adata.")
 
             x_query = x_query[:, hvg_mask]
-            pca_basis = adata_ref.varm["PCs"][hvg_mask]
+            pca_basis = pca_basis[hvg_mask]
         else:
-            pca_basis = adata_ref.varm["PCs"]
             if not adata_query.var_names.equals(adata_ref.var_names):
                 raise ValueError("Variables in the query adata are different from variables in the reference adata.")
 
+        # Check if the reference was scaled (standardized to variance 1)
+        # Scanpy usually stores this in adata_ref.var['std'] if sc.pp.scale was used
+        pca_scaled = 'std' in adata_ref.var
+
+        if pca_scaled:
+            print("kkNN Ingest: Reference features were scaled. Scaling query features...")
+            # Get the standard deviations used for the reference
+            ref_gene_stds = adata_ref.var['std'].values[hvg_mask] if pca_use_hvg else adata_ref.var['std'].values
+
+            # Avoid division by zero for genes with no variance in reference
+            ref_gene_stds = np.where(ref_gene_stds == 0, 1.0, ref_gene_stds)
+
+            # Scale the query using the REFERENCE's standard deviations
+            x_query = x_query / ref_gene_stds
+
         if pca_centered:
-            x_query -= x_query.mean(axis=0)
+            # If using reference scaling, you should also center using the REFERENCE's mean
+            if 'mean' in adata_ref.var:
+                ref_gene_means = adata_ref.var['mean'].values[hvg_mask] if pca_use_hvg else adata_ref.var['mean'].values
+                x_query -= ref_gene_means
+            else:
+                # Fallback to query mean
+                x_query -= x_query.mean(axis=0)
 
         x_pca_projected = np.dot(x_query, pca_basis[:, :n_pcs])
-
-        if normalize_pca:
-            warnings.warn(
-                "L2-normalizing the PCA embeddings for both the reference and query datasets. "
-                "This harmonizes scales between datasets (e.g., different read depths) before finding neighbors."
-            )
-            # L2 normalize reference PCA temporarily
-            ref_norms = np.linalg.norm(adata_ref.obsm[use_rep], axis=1, keepdims=True)
-            # Avoid division by zero
-            ref_norms[ref_norms == 0] = 1.0
-
-            temp_ref_rep_key = f"__temp_ref_ingest_{uuid4().hex[:8]}"
-            adata_ref.obsm[temp_ref_rep_key] = adata_ref.obsm[use_rep] / ref_norms
-            use_rep = temp_ref_rep_key
-
-            # L2 normalize query PCA
-            query_norms = np.linalg.norm(x_pca_projected, axis=1, keepdims=True)
-            query_norms[query_norms == 0] = 1.0
-            x_pca_projected = x_pca_projected / query_norms
 
         if save_ref_PCA_key is not None:
             adata_query.obsm[save_ref_PCA_key] = x_pca_projected

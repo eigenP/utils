@@ -1,4 +1,8 @@
+def test_marimo_update():
+    import marimo
+    import pathlib
 
+    app_code = """
     import marimo as mo
 
     app = mo.App()
@@ -21,3 +25,6 @@
 
     if __name__ == "__main__":
         app.run()
+    """
+    with open("marimo_app.py", "w") as f:
+        f.write(app_code)
