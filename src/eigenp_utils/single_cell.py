@@ -3755,11 +3755,11 @@ def kknn_ingest(
         label="dataset"
     )
 
-    # Option 2: Advanced concatenation, joining the .obs on intersection
+    # Option 2: Advanced concatenation, joining the .obs to retain non-overlapping metadata
     adata_combined = anndata.concat(
         {"reference": adata_ref, "query": adata_query},
         label="dataset",
-        join="inner"
+        join="outer"
     )
     ```
 
@@ -3923,6 +3923,8 @@ def kknn_ingest(
 
         # 1.5 Store the adapted k value
         adata_query.obs['kknn_k'] = [len(idx) for idx in pruned_indices]
+        # Reference cells are not mapped, so we set their kknn_k to NaN
+        adata_ref.obs['kknn_k'] = np.nan
 
         # 2. Map .obsm (Embeddings)
         for key in obsm_keys:
@@ -3950,6 +3952,9 @@ def kknn_ingest(
                         query_coords = model.transform(X_q)
 
                     adata_query.obsm[f"{key}_kknn"] = query_coords
+
+                    # Duplicate the reference embedding to line up correctly with the mapped query embedding
+                    adata_ref.obsm[f"{key}_kknn"] = ref_coords
                     continue
                 else:
                     warnings.warn(f"barycenter='transform' requested but '{key}' not found in embedding_models. Falling back to 'distance'.")
@@ -4020,6 +4025,9 @@ def kknn_ingest(
 
             adata_query.obsm[f"{key}_kknn"] = query_coords
 
+            # Duplicate the reference embedding to line up correctly with the mapped query embedding
+            adata_ref.obsm[f"{key}_kknn"] = ref_coords
+
         # 3. Map .obs (Labels) and compute confidence
         for key in obs_keys:
             print(f"Mapping obs: '{key}'...")
@@ -4060,9 +4068,14 @@ def kknn_ingest(
             else:
                 adata_query.obs[f"{key}_kknn"] = mapped_labels
 
+            # Duplicate the reference label to line up correctly with the mapped label
+            adata_ref.obs[f"{key}_kknn"] = adata_ref.obs[key]
+
             # Store confidence
             conf_key = f"mapping_confidence_{key}_kknn"
             adata_query.obs[conf_key] = confidences
+            # Reference cells are not mapped, so we set their confidence to NaN
+            adata_ref.obs[conf_key] = np.nan
 
     finally:
         # Clean up temporary query representation if used
