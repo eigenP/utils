@@ -3996,19 +3996,30 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # matth: Exact Non-Negative Least Squares (NNLS) for LLE
+                    # Heuristic clipping (w = np.maximum(w, 0)) violates the optimality
+                    # conditions of the constrained projection.
+                    # We solve min 0.5 * x^T G_reg x - 1^T x subject to x >= 0.
+                    # This maps to NNLS: min || L^T x - b ||^2 where L L^T = G_reg and L b = 1.
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
-                        w_sum = np.sum(w)
-                        if w_sum > 0:
-                            weights = w / w_sum
+                        import scipy.linalg
+                        import scipy.optimize
+
+                        # G_reg is symmetric positive definite
+                        L = scipy.linalg.cholesky(G_reg, lower=True)
+                        b = scipy.linalg.solve_triangular(L, np.ones(len(idx)), lower=True)
+
+                        # Solve NNLS: argmin_x || L^T x - b ||^2 subject to x >= 0
+                        x, _ = scipy.optimize.nnls(L.T, b)
+
+                        x_sum = np.sum(x)
+                        if x_sum > 0:
+                            weights = x / x_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except Exception:
+                        # Fallback to inverse distance if singular or NNLS fails
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
