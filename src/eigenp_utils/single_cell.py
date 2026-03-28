@@ -1049,6 +1049,15 @@ def smooth_expression_on_graph(
 
     W = adata.obsp[weights_key].tocsr().copy()
 
+    # matth: Explicitly add self-loops (A + I) before row-standardization.
+    # Without self-loops, standardizing a kNN graph with zero diagonals completely
+    # discards a cell's own measured signal, replacing it entirely with its neighbors.
+    # In graph signal processing, a proper low-pass filter (lazy random walk)
+    # requires non-zero diagonal entries to prevent bipartite oscillations and
+    # ensure the node retains a fraction of its original signal.
+    W.setdiag(1.0)
+    W.eliminate_zeros()
+
     # Row-standardize W to create a diffusion operator
     rs = np.asarray(W.sum(axis=1)).ravel()
     nz = rs > 0
