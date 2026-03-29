@@ -13,7 +13,6 @@
 Wait, "random walk" usually implies variance growing as sqrt(T), but here the bias is *linear* with T.
 **Action:** Implement iterative windowing or "shift-compensated windowing". Estimate the shift, align the moving signal to the reference (using high-order interpolation to preserve spectral content), and re-estimate the residual shift. This ensures the window is applied symmetrically to the aligned signals, eliminating the bias. Using cubic interpolation for the alignment step is crucial to prevent interpolation smoothing from biasing the correlation peak.
 
-<<<<<<< matth/decouple-drift-estimation-2279110621154388654
 ## 2024-05-25 - Trajectory Integration for Robust Drift Correction
 **Learning:**
 Accumulating drift corrections by adding pairwise estimates (`cum_dx += dx`) introduces "integrator windup" or random walk drift, where small errors accumulate over time (variance $\propto T$).
@@ -25,7 +24,6 @@ Decouple the problem into two distinct phases:
 1. **Trajectory Estimation:** Calculate the global absolute position $P_t$ for every frame relative to a fixed reference (Frame 0). This allows global smoothing or constraints to be applied to the trajectory $P(t)$ before any image data is modified.
 2. **Correction Application:** Treat correction as a functional mapping $I'_t(x) = I_t(x - P_t)$. This is stateless and parallelizable.
 For bidirectional estimation, explicitly average the forward step $\Delta P_{fwd} = P_t - P_{t-1}$ and backward step $\Delta P_{bwd} = -(P_{t-1} - P_t)$ to reduce bias, rather than relying on implicit loop ordering.
-=======
 ## 2024-05-25 - Spatial Shift Bias in Binned Surface Extraction
 **Learning:** Using `scipy.ndimage.zoom` or standard interpolation on binned data introduces a systematic spatial shift of 0.5 reduced pixels ($\approx S/2$ original pixels) because `zoom` assumes input samples are at integers $0, 1, \dots$ rather than block centers $(i+0.5)S - 0.5$. This causes misalignment between the extracted surface and the original image. Additionally, interpolating against a sentinel value (e.g., -1.0) causes catastrophic boundary artifacts ("curl down") where valid surface values are pulled towards the sentinel, creating false surfaces.
 
@@ -47,7 +45,6 @@ Using `from eigenp_utils...` is correct but requires the package to be installed
 
 **Action:**
 Always write tests assuming the package is installed (`from package_name import ...`). To run tests locally, ensure the package is installed in editable mode.
->>>>>>> main
 
 ## 2025-03-23 - Central Differences for Discrete Curve Tangents
 **Learning:** Approximating tangent vectors along a discrete parametric curve using forward differences (`np.diff`) introduces a half-step phase shift. The forward difference $t_i = p_{i+1} - p_i$ corresponds to the secant over $[i, i+1]$, which best approximates the tangent at the midpoint $i+0.5$, not at $i$. This systematic misalignment reduces accuracy to $O(h)$ and introduces significant errors in normal plane projection in regions of high curvature. Furthermore, duplicating the last vector to match array lengths artificially forces zero curvature at the boundary.
@@ -90,3 +87,6 @@ Always write tests assuming the package is installed (`from package_name import 
 Using a general-purpose library function like `scipy.stats.wasserstein_distance` is a mathematically unnecessary generalization because it internally reconstructs the continuous empirical CDFs to compute the integral of the absolute difference between them. This carries immense computational overhead, especially when looped over thousands of features in single-cell data ($G \approx 20,000$). By reformulating the problem algebraically into direct matrix/vector operations on sorted arrays, we retain 100% mathematical rigor and exactly identical results while bypassing the general-case integration logic, achieving a ~10-20x speedup.
 
 **Action:** Whenever calculating the Wasserstein distance between aligned datasets or columns of identical size, bypass integration-based solvers. Instead, use exact element-wise distances on pre-sorted order statistics. When processing an entire feature matrix against a single target vector, sort the dense feature matrix column-wise (`np.sort(M, axis=0)`) and the target vector once to fully vectorize the geometric overlap computation.
+## 2025-03-05 - [Graph Signal Processing: Adding Self-Loops Mathematically]
+**Learning:** In `smooth_expression_on_graph` within `eigenp_utils/single_cell.py`, row-standardizing a k-nearest neighbor (kNN) graph ($W$) with zeros on the diagonal replaces a node's expression entirely with the mean of its neighbors, completely discarding its own measured signal. A proper low-pass filter requires adding self-loops ($A + I$). However, using SciPy's `W.setdiag(1.0)` is mathematically flawed because it strictly *overwrites* the diagonal rather than *adding* to it. If the graph already has custom weighted self-loops or affinity scores, `setdiag` erroneously erases them. Furthermore, in-place scaling in NumPy (`*=`) can trigger a `UFuncTypeError` if the array type (e.g., Scanpy's `float32` `.obsp` matrix) is multiplied by a mismatched type (e.g., Python's built-in `float`, which defaults to `float64`).
+**Action:** When mathematically enforcing $A + I$ on a graph, always use direct addition with the identity matrix: `W = W + sp.eye(W.shape[0], format="csr")`. This guarantees correct mathematical accumulation without destroying pre-existing structures or triggering sparse matrix efficiency warnings. Additionally, always dynamically inherit the graph's dtype (e.g., `inv = np.zeros_like(rs, dtype=W.dtype)`) to ensure type safety during in-place vectorized operations.

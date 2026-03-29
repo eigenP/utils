@@ -1049,10 +1049,21 @@ def smooth_expression_on_graph(
 
     W = adata.obsp[weights_key].tocsr().copy()
 
+    # matth: Mathematically compute A + I.
+    # This properly adds self-loops without overwriting existing diagonal data,
+    # and avoids SciPy SparseEfficiencyWarnings caused by setdiag.
+    # In graph signal processing, a proper low-pass filter (lazy random walk)
+    # requires non-zero diagonal entries to prevent bipartite oscillations and
+    # ensure the node retains a fraction of its original signal.
+    W = W + sp.eye(W.shape[0], format="csr")
+
     # Row-standardize W to create a diffusion operator
     rs = np.asarray(W.sum(axis=1)).ravel()
     nz = rs > 0
-    inv = np.zeros_like(rs, dtype=float)
+
+    # matth: Dynamically inherit the dtype of the matrix (usually float32)
+    # to prevent UFuncTypeError during the in-place multiplication below.
+    inv = np.zeros_like(rs, dtype=W.dtype)
     inv[nz] = 1.0 / rs[nz]
 
     row_nnz = np.diff(W.indptr)
