@@ -3577,14 +3577,15 @@ def _compute_kknn_curvatures(
         # Compute covariance matrices in bulk using Einstein summation
         cov_matrices = np.einsum('nij,nil->njl', centered, centered) / max(1, (max_neighbors - 1))
 
-        # Calculate all eigenvalues simultaneously
-        eigvals = np.linalg.eigvalsh(cov_matrices)
-        eigvals = np.maximum(eigvals, 0)  # Handle minor numerical noise
+        # matth: Compute Participation Ratios directly using exact matrix invariants.
+        # The sum of eigenvalues (\sum \lambda_i) is precisely the trace of the covariance matrix.
+        # The sum of squared eigenvalues (\sum \lambda_i^2) is exactly the squared Frobenius norm (\sum_{i,j} \Sigma_{i,j}^2).
+        # This exact algebraic equivalence eliminates the need for full O(d^3) iterative numerical
+        # eigendecompositions, significantly improving performance without loss of mathematical rigor.
 
-        # Compute Participation Ratios
-        # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2
-        total_var = np.sum(eigvals, axis=1)
-        sq_var = np.sum(eigvals ** 2, axis=1)
+        # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2 = Tr(\Sigma)^2 / ||\Sigma||_F^2
+        total_var = np.trace(cov_matrices, axis1=1, axis2=2)
+        sq_var = np.sum(cov_matrices ** 2, axis=(1, 2))
 
         # Apply PR formula where variance exists to prevent division by zero
         mask = total_var > 0
