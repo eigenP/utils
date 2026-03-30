@@ -3556,8 +3556,8 @@ def _compute_kknn_curvatures(
     chunk_size: int = 50000
 ) -> np.ndarray:
     """
-    Helper function to compute local curvature (Participation Ratio)
-    given a dataset and nearest neighbor indices, chunked to prevent OOM errors.
+    Computes local curvature (Participation Ratio) using exact matrix invariants.
+    Dynamically switches between Covariance and Gram matrix formulations to prevent OOM.
     """
     N = indices.shape[0]
     curvatures = np.ones(N) # Default to 1.0 (min possible PR)
@@ -3566,26 +3566,33 @@ def _compute_kknn_curvatures(
         end_i = min(i + chunk_size, N)
         chunk_indices = indices[i:end_i]
 
-        # Extract neighborhoods for this chunk.
-        # neigh_data shape: (chunk_size, max_neighbors, m)
+        # neigh_data shape: (chunk_size, k, d)
         neigh_data = X[chunk_indices]
+        k = neigh_data.shape[1]
+        d = neigh_data.shape[2]
 
         # Mean-center the data per neighborhood
         neigh_mean = neigh_data.mean(axis=1, keepdims=True)
         centered = neigh_data - neigh_mean
 
-        # Compute covariance matrices in bulk using Einstein summation
-        cov_matrices = np.einsum('nij,nil->njl', centered, centered) / max(1, (max_neighbors - 1))
-
         # matth: Compute Participation Ratios directly using exact matrix invariants.
-        # The sum of eigenvalues (\sum \lambda_i) is precisely the trace of the covariance matrix.
-        # The sum of squared eigenvalues (\sum \lambda_i^2) is exactly the squared Frobenius norm (\sum_{i,j} \Sigma_{i,j}^2).
-        # This exact algebraic equivalence eliminates the need for full O(d^3) iterative numerical
-        # eigendecompositions, significantly improving performance without loss of mathematical rigor.
 
-        # PR = (\sum \lambda_i)^2 / \sum \lambda_i^2 = Tr(\Sigma)^2 / ||\Sigma||_F^2
-        total_var = np.trace(cov_matrices, axis1=1, axis2=2)
-        sq_var = np.sum(cov_matrices ** 2, axis=(1, 2))
+        # OPTIMIZATION 1: Tr(X^T X) == ||X||_F^2.
+        # We bypass matrix multiplication entirely for the numerator.
+        total_var = np.sum(centered ** 2, axis=(1, 2))
+
+        # OPTIMIZATION 2: Memory-aware Frobenius norm.
+        # X^T X and X X^T share the same non-zero eigenvalues, hence the same squared Frobenius norm.
+        if k < d:
+            # Compute Gram matrix (chunk_size, k, k) - Cheaper when neighbors < dimensions
+            matrices = np.einsum('nij,nlj->nil', centered, centered)
+        else:
+            # Compute Covariance matrix (chunk_size, d, d) - Cheaper when dimensions < neighbors
+            matrices = np.einsum('nij,nil->njl', centered, centered)
+
+        # OPTIMIZATION 3: No scaling factor.
+        # The 1/(k-1) factor cancels out in the PR ratio, so we ignore it.
+        sq_var = np.sum(matrices ** 2, axis=(1, 2))
 
         # Apply PR formula where variance exists to prevent division by zero
         mask = total_var > 0
