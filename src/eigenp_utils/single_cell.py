@@ -12,6 +12,7 @@ import scipy.sparse as sp
 from scipy.cluster import hierarchy
 from scipy.linalg import svd
 from scipy.stats import norm
+from scipy.optimize import nnls
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
 import matplotlib.colors as mcolors
@@ -4007,14 +4008,16 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Exact Non-Negative Least Squares (NNLS)
+                    # We solve min_w w^T G_reg w - 2 w^T 1 subject to w >= 0
+                    # This maps to min_w || L.T w - b ||_2^2 where G_reg = L L.T and L b = 1
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
-                        w_sum = np.sum(w)
-                        if w_sum > 0:
-                            weights = w / w_sum
+                        L = np.linalg.cholesky(G_reg)
+                        b = np.linalg.solve(L, np.ones(len(idx)))
+                        v, _ = nnls(L.T, b)
+                        v_sum = np.sum(v)
+                        if v_sum > 0:
+                            weights = v / v_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
