@@ -745,8 +745,16 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
         norm = np.clip(norm, 0, 1)
         if gammas[c] != 1:
             norm = norm**gammas[c]
-        rgb = np.asarray(to_rgb(base_colors[c]))
-        colors += norm[:, None] * rgb
+
+        c_name = base_colors[c]
+        if is_colormap(c_name):
+            cmap = plt.get_cmap(c_name)
+            rgb = cmap(norm)[:, :3]
+            colors += rgb
+        else:
+            resolved_c = resolve_color(c_name)
+            rgb = np.asarray(to_rgb(resolved_c))
+            colors += norm[:, None] * rgb
 
     if soft_clip:
         maxval = colors.max(axis=1, keepdims=True)
@@ -1496,11 +1504,18 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
         if self.colors is None:
             default_cols = ['magenta', 'cyan', 'yellow', 'green', 'red', 'lime', 'blue', 'orange']
+            while len(default_cols) < self.C:
+                 default_cols += default_cols
             self.colors_use = default_cols[:max(1, self.C)]
         else:
-            self.colors_use = self.colors
+            if isinstance(self.colors, str):
+                self.colors_use = [self.colors]
+            elif isinstance(self.colors, (list, tuple)):
+                self.colors_use = list(self.colors)
+            else:
+                self.colors_use = [self.colors]
 
-        self.colors_rgb = [matplotlib.colors.to_rgb(c) for c in self.colors_use]
+        self.colors_rgb = [matplotlib.colors.to_rgb(resolve_color(c)) for c in self.colors_use]
 
         # Init values
         if x_t is not None: self.x_t = int(x_t)
@@ -1607,12 +1622,19 @@ class TNIAScatterWidget(TNIAWidgetBase):
             if self.mode in ('single', 'ids', 'idx_lists', 'cont_multi'):
                 colors_for_rgb = self.colors_use
             else:
-                colors_for_rgb = self.colors_use # handled above logic in original? no, original handles 'cont_single' separately
+                colors_for_rgb = self.colors_use
 
-            xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb(
-                xy_list, xz_list, zy_list,
-                vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, colors=colors_for_rgb, opacity=self.opacity, blend='add', soft_clip=True
-            )
+            has_colormap = any(is_colormap(c) for c in colors_for_rgb)
+            if has_colormap:
+                xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb_cmap(
+                    xy_list, xz_list, zy_list,
+                    vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, colors=colors_for_rgb, opacity=self.opacity, blend='add', soft_clip=True
+                )
+            else:
+                xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb(
+                    xy_list, xz_list, zy_list,
+                    vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, colors=colors_for_rgb, opacity=self.opacity, blend='add', soft_clip=True
+                )
 
             pass_sxy = self.sxy if self._sxy_given else None
             pass_sz = self.sz if self._sz_given else None
@@ -1662,7 +1684,11 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             if self.mode == 'cont_single':
                 vals = self.cont_single
-                cmap = black_to(self.colors_use[0])
+                c_use = self.colors_use[0]
+                if is_colormap(c_use):
+                    cmap = plt.get_cmap(c_use)
+                else:
+                    cmap = black_to(resolve_color(c_use))
                 norm = matplotlib.colors.Normalize(vmin=np.nanmin(vals), vmax=np.nanmax(vals))
 
                 if mZ_all.any():
