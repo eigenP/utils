@@ -91,17 +91,17 @@ def test_show_xyz_max_scatter_interactive_colormap():
     channels = np.random.rand(10)
 
     # Should not throw exception for invalid RGBA string, and _render should not throw NameError
-    w1 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
+    w1 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='points')
     w1._render() # Trigger render directly
 
-    w2 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
+    w2 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='density')
     w2._render() # Trigger render directly
 
     channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
+    w3 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='points')
     w3._render() # Trigger render directly
 
-    w4 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w4 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='density')
     w4._render() # Trigger render directly
 
     assert w1 is not None
