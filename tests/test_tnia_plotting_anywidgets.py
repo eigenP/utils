@@ -79,3 +79,23 @@ def test_point_size_scaling():
     assert w1.point_size == 10
     assert w2.point_size == 50
     assert w1.point_size < w2.point_size
+
+def test_show_xyz_max_scatter_interactive_colormap():
+    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_scatter_interactive
+    X = np.random.rand(10) * 10
+    Y = np.random.rand(10) * 10
+    Z = np.random.rand(10) * 10
+    channels = np.random.rand(10)
+
+    # Should not throw exception for invalid RGBA string
+    w1 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='points')
+    w2 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='density')
+
+    channels_multi = [np.random.rand(10), np.random.rand(10)]
+    w3 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='points')
+    w4 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+
+    assert w1 is not None
+    assert w2 is not None
+    assert w3 is not None
+    assert w4 is not None

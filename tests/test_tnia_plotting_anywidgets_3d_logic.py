@@ -82,3 +82,29 @@ def test_create_multichannel_rgb_basic():
     assert np.allclose(xy_rgb, expected_xy)
     assert np.allclose(xz_rgb, expected_xz)
     assert np.allclose(zy_rgb, expected_zy)
+
+def test_show_xyz_max_scatter_interactive_colormap():
+    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_scatter_interactive
+    X = np.random.rand(10) * 10
+    Y = np.random.rand(10) * 10
+    Z = np.random.rand(10) * 10
+    channels = np.random.rand(10)
+
+    # Should not throw exception for invalid RGBA string, and _render should not throw NameError
+    w1 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='points')
+    w1._render() # Trigger render directly
+
+    w2 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='density')
+    w2._render() # Trigger render directly
+
+    channels_multi = [np.random.rand(10), np.random.rand(10)]
+    w3 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='points')
+    w3._render() # Trigger render directly
+
+    w4 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w4._render() # Trigger render directly
+
+    assert w1 is not None
+    assert w2 is not None
+    assert w3 is not None
+    assert w4 is not None
