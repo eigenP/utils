@@ -1,16 +1,18 @@
+import warnings
 import numpy as np
 from skimage.segmentation import expand_labels
 from scipy.ndimage import uniform_filter
 
 
-def windowed_slice_projection(nuclei_image, window_size=11, axis=-1, operation='max'):
+def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='max'):
     """
     Apply a thick z-slice operation on a given image array, with the option to either average or take the maximum across the window.
+    Assumes the input volume is in (Z, Y, X) order.
 
     Parameters:
-        nuclei_image (np.ndarray): The input image array.
+        nuclei_image (np.ndarray): The input 3D image array, expected in (Z, Y, X) order.
         window_size (int): The size of the window for the thick slice operation.
-        axis (int): The axis along which to perform the operation.
+        axis (int): The axis along which to perform the operation. Default is 0 (Z-axis).
         operation (str): Operation to perform on the slices. Options are 'average' or 'max'.
 
     Returns:
@@ -53,6 +55,17 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=-1, operation='
 
 
 def optimized_entire_labels_touching_mask(labels_data, mask):
+    """
+    Optimized function to mask labels that touch the provided mask.
+    Assumes `labels_data` and `mask` are provided in (Z, Y, X) order.
+
+    Parameters:
+        labels_data (np.ndarray): The input label image array, expected in (Z, Y, X) order.
+        mask (np.ndarray): The mask array indicating regions of interest, expected in (Z, Y, X) order.
+
+    Returns:
+        np.ndarray: A filtered label array where only entire labels touching the mask are retained.
+    """
     # Expand labels
     dilated_labels_data = expand_labels(labels_data, distance=10)
 
@@ -70,7 +83,38 @@ def optimized_entire_labels_touching_mask(labels_data, mask):
 
 
 def sample_intensity_around_points_optimized(image_3d, points_3d, diameter=5):
-    """Sample intensities around given points in a 3D image using an optimized mean filter."""
+    """
+    Sample intensities around given points in a 3D image using an optimized mean filter.
+    Assumes `image_3d` and `points_3d` are provided in (Z, Y, X) order.
+
+    Parameters:
+        image_3d (np.ndarray): The input 3D image array, expected in (Z, Y, X) order.
+        points_3d (np.ndarray or list): The coordinates of points to sample, expected in (Z, Y, X) order.
+        diameter (int): The diameter of the cube around each point to compute the mean intensity.
+
+    Returns:
+        list: A list of sampled mean intensities for each point. Out-of-bounds points will have NaN.
+    """
+    points_3d = np.asarray(points_3d)
+
+    # Heuristic warning for likely XYZ vs ZYX mismatch
+    if len(points_3d) > 0 and image_3d.ndim == 3 and points_3d.ndim == 2 and points_3d.shape[1] == 3:
+        max_coords = np.max(points_3d, axis=0)
+        shape = image_3d.shape
+
+        # Check if Z-coord is out of bounds but would fit if it were X, and X-coord fits but would fit in Z if swapped
+        out_of_bounds_zyx = (max_coords[0] >= shape[0])
+        fits_if_xyz = (max_coords[2] < shape[0]) and (max_coords[0] < shape[2])
+
+        if out_of_bounds_zyx and fits_if_xyz:
+            warnings.warn(
+                "Points appear to be in (X, Y, Z) order. "
+                "The maximum Z coordinate exceeds the image Z dimension, but would fit if swapped with X. "
+                "Please ensure points are in (Z, Y, X) order to match the image.",
+                UserWarning,
+                stacklevel=2
+            )
+
     # Compute the radius and ensure the diameter is an integer and odd
     radius = diameter // 2
     diameter = 2 * radius + 1

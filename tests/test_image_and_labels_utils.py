@@ -67,3 +67,16 @@ def test_sample_intensity_around_points_optimized():
     assert np.isclose(res[0], 36 / 27)
     assert np.isclose(res[1], 1.0) # all ones
     assert np.isnan(res[2]) # out of bounds
+
+def test_sample_intensity_xyz_warning():
+    # Z, Y, X order: 5 slices, 20 rows, 30 columns
+    image_3d = np.zeros((5, 20, 30))
+
+    # Intentionally inverted (X, Y, Z) order
+    points_xyz = np.array([
+        [25, 10, 2]
+    ])
+
+    with pytest.warns(UserWarning, match=r"Points appear to be in \(X, Y, Z\) order"):
+        res = sample_intensity_around_points_optimized(image_3d, points_xyz, diameter=3)
+        assert np.isnan(res[0]) # Since 25 >= 5 (Z-dimension), it will be considered out of bounds
