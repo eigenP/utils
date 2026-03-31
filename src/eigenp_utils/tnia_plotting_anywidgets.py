@@ -1898,7 +1898,7 @@ def show_xyz_max_slice_interactive_point_annotator(
     )
 
 def show_xyz_max_scatter_interactive(
-    X, Y, Z,
+    points,
     channels=None,
     sxy=None, sz=None,
     render='density',
@@ -1911,7 +1911,28 @@ def show_xyz_max_scatter_interactive(
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
-    X = np.asarray(X); Y = np.asarray(Y); Z = np.asarray(Z)
+    if isinstance(points, (tuple, list)) and len(points) == 3:
+        # points is a tuple or list of 3 arrays: (Z, Y, X)
+        Z, Y, X = points[0], points[1], points[2]
+        X = np.asarray(X)
+        Y = np.asarray(Y)
+        Z = np.asarray(Z)
+    else:
+        points = np.asarray(points)
+        if points.ndim == 2 and points.shape[1] == 3:
+            # points shape is (N, 3), assume Z, Y, X
+            Z, Y, X = points[:, 0], points[:, 1], points[:, 2]
+        elif points.ndim == 2 and points.shape[0] == 3:
+            # points shape is (3, N), assume Z, Y, X
+            Z, Y, X = points[0], points[1], points[2]
+        elif points.ndim == 1 and len(points) == 3:
+            # array of 3 list-like objects
+            Z, Y, X = points[0], points[1], points[2]
+            X = np.asarray(X)
+            Y = np.asarray(Y)
+            Z = np.asarray(Z)
+        else:
+            raise ValueError("points must be an array of shape (N, 3) representing (Z, Y, X) or a tuple/list of 3 arrays (Z, Y, X).")
 
     xmin, xmax = float(np.floor(X.min())), float(np.ceil(X.max()))
     ymin, ymax = float(np.floor(Y.min())), float(np.ceil(Y.max()))

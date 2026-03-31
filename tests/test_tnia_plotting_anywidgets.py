@@ -88,14 +88,44 @@ def test_show_xyz_max_scatter_interactive_colormap():
     channels = np.random.rand(10)
 
     # Should not throw exception for invalid RGBA string
-    w1 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='points')
-    w2 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='density')
+    w1 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
+    w2 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
 
     channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='points')
-    w4 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w3 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
+    w4 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
 
     assert w1 is not None
     assert w2 is not None
     assert w3 is not None
     assert w4 is not None
+
+def test_show_xyz_max_scatter_interactive_signature():
+    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_scatter_interactive
+    X = np.random.rand(10) * 10
+    Y = np.random.rand(10) * 10
+    Z = np.random.rand(10) * 10
+    channels = np.random.rand(10)
+
+    # Test with tuple
+    w1 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, render='points')
+    assert w1 is not None
+
+    # Test with list
+    w2 = show_xyz_max_scatter_interactive([Z, Y, X], channels=channels, render='points')
+    assert w2 is not None
+
+    # Test with (N, 3) array
+    points = np.stack([Z, Y, X], axis=1)
+    w3 = show_xyz_max_scatter_interactive(points, channels=channels, render='points')
+    assert w3 is not None
+
+    # Verify that the parsed data inside is correct
+    np.testing.assert_array_equal(w3.X_arr, X)
+    np.testing.assert_array_equal(w3.Y_arr, Y)
+    np.testing.assert_array_equal(w3.Z_arr, Z)
+
+    # Test invalid shape
+    with pytest.raises(ValueError, match="points must be an array of shape .* representing \\(Z, Y, X\\) or a tuple/list of 3 arrays \\(Z, Y, X\\)."):
+        invalid_points = np.stack([Z, Y], axis=1)
+        show_xyz_max_scatter_interactive(invalid_points, channels=channels)
