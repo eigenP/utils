@@ -1050,12 +1050,25 @@ class TNIASliceWidget(TNIAWidgetBase):
 
         # Set traitlets lists for interactive parameters
         # Use "" to represent 'auto' for empty inputs in JS (maps to None for matplotlib)
-        def _resolve_vmin_vmax(val, n):
+        def _resolve_vmin(val, n):
             lst = _to_list(val, n, None)
             return ["" if x is None else x for x in lst]
 
-        self.vmin_list = _resolve_vmin_vmax(vmin, self.num_channels)
-        self.vmax_list = _resolve_vmin_vmax(vmax, self.num_channels)
+        def _resolve_vmax(val, n):
+            lst = _to_list(val, n, None)
+            resolved = []
+            for i, x in enumerate(lst):
+                if x is None:
+                    # Calculate 99.5th percentile for missing vmax
+                    channel_im = im[i] if isinstance(im, list) else im
+                    p995 = np.percentile(channel_im, 99.5)
+                    resolved.append(float(p995))
+                else:
+                    resolved.append(x)
+            return resolved
+
+        self.vmin_list = _resolve_vmin(vmin, self.num_channels)
+        self.vmax_list = _resolve_vmax(vmax, self.num_channels)
         self.gamma_list = _to_list(gamma, self.num_channels, 1.0)
         self.opacity_list = _to_list(opacity, self.num_channels, 1.0)
 
@@ -1246,6 +1259,17 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         im_list.append(self._annot_img)
         colors_list.append('red')
         opacity_list.append(1.0)
+
+        # If vmax is provided as a list, extend it for the annotation channel
+        vmax_arg = kwargs.get('vmax', None)
+        if isinstance(vmax_arg, (list, tuple)):
+            vmax_arg = list(vmax_arg)
+            vmax_arg.append(255) # vmax for the annotation channel
+            kwargs['vmax'] = vmax_arg
+        elif vmax_arg is not None:
+            kwargs['vmax'] = [vmax_arg] * (len(im_list) - 1) + [255]
+        else:
+            kwargs['vmax'] = [None] * (len(im_list) - 1) + [255]
 
         # Initialize superclass
         super().__init__(im_list, colors=colors_list, opacity=opacity_list, *args, **kwargs)
@@ -1516,6 +1540,19 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 self.colors_use = [self.colors]
 
         self.colors_rgb = [matplotlib.colors.to_rgb(resolve_color(c)) for c in self.colors_use]
+
+        # Handle vmax defaults using 99.5 percentile for continuous modes
+        if self.mode == 'cont_single':
+            if self.vmax is None:
+                self.vmax = float(np.percentile(self.cont_single, 99.5))
+        elif self.mode == 'cont_multi':
+            if self.vmax is None:
+                self.vmax = [float(np.percentile(self.cont_multi[:, i], 99.5)) for i in range(self.C)]
+            elif isinstance(self.vmax, (list, tuple)):
+                self.vmax = [
+                    float(np.percentile(self.cont_multi[:, i], 99.5)) if x is None else x
+                    for i, x in enumerate(self.vmax)
+                ]
 
         # Init values
         if x_t is not None: self.x_t = int(x_t)

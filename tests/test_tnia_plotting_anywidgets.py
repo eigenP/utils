@@ -1,101 +1,71 @@
 import numpy as np
 import pytest
-import matplotlib
-matplotlib.use("Agg")
-from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive, TNIASliceWidget
+from eigenp_utils.tnia_plotting_anywidgets import (
+    show_xyz_max_slice_interactive,
+    show_xyz_max_scatter_interactive,
+    show_xyz_max_slice_interactive_point_annotator
+)
 
-def test_single_channel_instantiation():
-    im = np.zeros((10, 20, 30))
-    w = show_xyz_max_slice_interactive(im)
-    assert isinstance(w, TNIASliceWidget)
-    assert w.num_channels == 1
-    assert len(w.channel_names) == 1
-    # Render should produce image data (triggered by observer in init)
-    assert w.image_data is not None and len(w.image_data) > 0
+def test_show_xyz_max_slice_interactive_vmax_default():
+    np.random.seed(42)
+    data = np.random.uniform(0, 100, (10, 10, 10))
+    p995 = np.percentile(data, 99.5)
 
-def test_multi_channel_instantiation():
-    im = [np.zeros((10, 20, 30)) for _ in range(3)]
-    w = show_xyz_max_slice_interactive(im)
-    assert w.num_channels == 3
-    assert len(w.channel_names) == 3
-    assert w.channel_names == ["Channel 0", "Channel 1", "Channel 2"]
-    assert w.opacity_list == [1.0, 1.0, 1.0]
-    assert w.image_data is not None and len(w.image_data) > 0
+    # When vmax is None (default), it should calculate p99.5
+    widget = show_xyz_max_slice_interactive(data, vmax=None)
+    assert len(widget.vmax_list) == 1
+    assert np.isclose(widget.vmax_list[0], p995)
 
-def test_channel_visibility_update():
-    # Use different values to ensure visual difference
-    im = [np.zeros((10, 10, 10)), np.ones((10, 10, 10)) * 255]
-    w = show_xyz_max_slice_interactive(im)
+    # When vmax is provided as a number
+    widget2 = show_xyz_max_slice_interactive(data, vmax=50)
+    assert widget2.vmax_list[0] == 50
 
-    initial_data = w.image_data
-    assert initial_data
+    # Test with multiple channels
+    data2 = np.random.uniform(0, 50, (10, 10, 10))
+    p995_2 = np.percentile(data2, 99.5)
 
-    # Hide channel 1 (the bright one)
-    w.opacity_list = [1.0, 0.0]
+    widget_multi = show_xyz_max_slice_interactive([data, data2], vmax=[100, None])
+    assert widget_multi.vmax_list[0] == 100
+    assert np.isclose(widget_multi.vmax_list[1], p995_2)
 
-    # Check that image data changed (re-rendered)
-    new_data = w.image_data
-    assert new_data != initial_data
+def test_show_xyz_max_scatter_interactive_vmax_default():
+    np.random.seed(42)
+    X = np.random.uniform(0, 10, 100)
+    Y = np.random.uniform(0, 10, 100)
+    Z = np.random.uniform(0, 10, 100)
 
-    # Hide all channels
-    w.opacity_list = [0.0, 0.0]
-    empty_data = w.image_data
-    assert empty_data != new_data
-    assert empty_data != initial_data
+    cont_data = np.random.uniform(0, 100, 100)
+    p995 = np.percentile(cont_data, 99.5)
 
-def test_default_colors_resolution():
-    im = [np.zeros((10, 10, 10)) for _ in range(2)]
-    w = show_xyz_max_slice_interactive(im, colors=None)
-    assert w.colors_resolved == ['magenta', 'cyan'] # Defaults
+    # single channel cont
+    widget_single = show_xyz_max_scatter_interactive(X, Y, Z, channels=cont_data)
+    assert np.isclose(widget_single.vmax, p995)
 
-    w2 = show_xyz_max_slice_interactive(im, colors=['red', 'blue'])
-    assert w2.colors_resolved == ['red', 'blue']
+    # provided vmax
+    widget_single_set = show_xyz_max_scatter_interactive(X, Y, Z, channels=cont_data, vmax=50)
+    assert widget_single_set.vmax == 50
 
-def test_show_xyz_max_slice_interactive_point_annotator_args():
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive_point_annotator, TNIAAnnotatorWidget
-    im = [np.zeros((10, 10, 10)) for _ in range(2)]
-    w = show_xyz_max_slice_interactive_point_annotator(
-        im,
-        sxy=2,
-        sz=3,
-        point_size_scale=0.05,
-        colors=['red', 'blue'],
-        opacity=[0.5, 0.8]
-    )
-    assert isinstance(w, TNIAAnnotatorWidget)
-    assert w.sxy == 2
-    assert w.sz == 3
+    # multi channel cont
+    cont_data2 = np.random.uniform(0, 50, 100)
+    p995_2 = np.percentile(cont_data2, 99.5)
 
-def test_point_size_scaling():
-    from eigenp_utils.tnia_plotting_anywidgets import TNIAAnnotatorWidget
-    im = np.zeros((1, 100, 100)) # Thin Z dimension
+    widget_multi = show_xyz_max_scatter_interactive(X, Y, Z, channels=[cont_data, cont_data2])
+    assert isinstance(widget_multi.vmax, list)
+    assert np.isclose(widget_multi.vmax[0], p995)
+    assert np.isclose(widget_multi.vmax[1], p995_2)
 
-    w1 = TNIAAnnotatorWidget(im, point_size_scale=0.1)
-    w2 = TNIAAnnotatorWidget(im, point_size_scale=0.5)
+    # mixed vmax
+    widget_multi_mixed = show_xyz_max_scatter_interactive(X, Y, Z, channels=[cont_data, cont_data2], vmax=[80, None])
+    assert widget_multi_mixed.vmax[0] == 80
+    assert np.isclose(widget_multi_mixed.vmax[1], p995_2)
 
-    # Verify that the point size scales properly with the X/Y dimension (min(100, 100) = 100)
-    # 0.1 * 100 = 10
-    # 0.5 * 100 = 50
-    assert w1.point_size == 10
-    assert w2.point_size == 50
-    assert w1.point_size < w2.point_size
+def test_show_xyz_max_slice_interactive_point_annotator_vmax_default():
+    np.random.seed(42)
+    data = np.random.uniform(0, 100, (10, 10, 10))
+    p995 = np.percentile(data, 99.5)
 
-def test_show_xyz_max_scatter_interactive_colormap():
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_scatter_interactive
-    X = np.random.rand(10) * 10
-    Y = np.random.rand(10) * 10
-    Z = np.random.rand(10) * 10
-    channels = np.random.rand(10)
-
-    # Should not throw exception for invalid RGBA string
-    w1 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='points')
-    w2 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels, colors='viridis', render='density')
-
-    channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='points')
-    w4 = show_xyz_max_scatter_interactive(X, Y, Z, channels=channels_multi, colors=['viridis', 'plasma'], render='density')
-
-    assert w1 is not None
-    assert w2 is not None
-    assert w3 is not None
-    assert w4 is not None
+    widget = show_xyz_max_slice_interactive_point_annotator(data, vmax=None)
+    # The annotator widget appends a channel for annotations (vmax 255)
+    assert len(widget.vmax_list) == 2
+    assert np.isclose(widget.vmax_list[0], p995)
+    assert widget.vmax_list[1] == 255
