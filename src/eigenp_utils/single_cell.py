@@ -10,7 +10,8 @@ import scanpy as sc
 import anndata
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
-from scipy.linalg import svd
+from scipy.linalg import svd, cholesky, solve_triangular
+from scipy.optimize import nnls
 from scipy.stats import norm
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
@@ -2993,18 +2994,24 @@ def annotate_clusters_by_markers(
                     mu_d = np.mean(valid_diff)
                     std_d = np.std(valid_diff, ddof=1) # Sample std
 
-                    # matth: Robust Probability of Superiority (Empirical)
-                    # Instead of assuming normality (P = Phi(mu/std)), we compute the
-                    # fraction of cells where Top1 > Top2 directly. This is robust to outliers
-                    # and multimodal distributions (e.g. doublets) which would otherwise skew the mean.
-                    # This is the non-parametric estimator of P(X > Y).
+                    # matth: Parametric Probability of Superiority (Normal Approximation)
+                    # P(X > Y) = P(X - Y > 0) = P(Z > -mu_d/std_d) = Phi(mu_d/std_d)
+                    # Unlike the empirical estimator which simply counts the fraction of positive differences,
+                    # this parametric approach correctly models the magnitude of the difference relative to its noise.
+                    # If signals are highly correlated, std_d shrinks, appropriately increasing the confidence
+                    # only if the mean difference mu_d is substantially larger than the residual noise.
+                    # This directly corresponds to the effect size (Cohen's d).
 
-                    # Count ties as 0.5 (standard practice for CLES / Mann-Whitney)
-                    n_total = valid_diff.size
-                    n_pos = np.sum(valid_diff > 0)
-                    n_ties = np.sum(valid_diff == 0)
-
-                    softmax_p = (n_pos + 0.5 * n_ties) / n_total
+                    if std_d > 0:
+                        softmax_p = norm.cdf(mu_d / std_d)
+                    else:
+                        # Zero variance edge case
+                        if mu_d > 0:
+                            softmax_p = 1.0
+                        elif mu_d < 0:
+                            softmax_p = 0.0
+                        else:
+                            softmax_p = 0.5
                 else:
                     softmax_p = 0.5 # Not enough data
 
@@ -4015,19 +4022,27 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Exact Non-Negative Least Squares (NNLS) via Cholesky decomposition.
+                    # Heuristic clipping of an unconstrained least squares solution (e.g. np.maximum(w, 0))
+                    # distorts the optimal projection for correlated variables.
+                    # Instead, we minimize the constrained objective: v^T G_reg v - 2 v^T 1 subject to v >= 0
+                    # This is equivalent to min ||L^T v - b||_2^2 where G_reg = L L^T and L b = 1.
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
-                        w_sum = np.sum(w)
-                        if w_sum > 0:
-                            weights = w / w_sum
+                        # 1. Cholesky factor of G_reg (lower triangular)
+                        L = cholesky(G_reg, lower=True)
+                        # 2. Solve L b = 1 for b
+                        b = solve_triangular(L, np.ones(len(idx)), lower=True)
+                        # 3. Solve exact NNLS problem: min_v ||L^T v - b||_2^2 s.t. v >= 0
+                        v, _ = nnls(L.T, b)
+
+                        v_sum = np.sum(v)
+                        if v_sum > 0:
+                            weights = v / v_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except Exception:
+                        # Fallback to inverse distance if Cholesky or NNLS fails
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
