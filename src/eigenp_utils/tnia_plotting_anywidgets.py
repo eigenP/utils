@@ -69,7 +69,7 @@ def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
 
 
 # Copyright tnia 2021 - BSD License
-def show_xyz_slice(image_to_show, x, y, z, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
+def show_zyx_slice(image_to_show, x, y, z, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
@@ -88,10 +88,10 @@ def show_xyz_slice(image_to_show, x, y, z, sxy=None, sz=None,figsize=(10,10), co
     slice_xz = image_to_show[:,y,:]
     slice_xy = image_to_show[z,:,:]
 
-    return show_xyz(slice_xy, slice_xz, slice_zy, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, use_plt = use_plt, opacity = opacity)
+    return show_zyx(slice_xy, slice_xz, slice_zy, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, use_plt = use_plt, opacity = opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_xyz_max(image_to_show, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_max(image_to_show, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ plots max xy, xz, and zy projections of a 3D image
 
     Args:
@@ -103,10 +103,10 @@ def show_xyz_max(image_to_show, sxy=None, sz=None,figsize=(10,10), colormap=None
         vmax (float, optional): maximum value for display range. Defaults to None.
     """
 
-    return show_xyz_projection(image_to_show, sxy, sz, figsize, np.max, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx_projection(image_to_show, sxy, sz, figsize, np.max, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 
-def show_xyz_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Args:
@@ -122,10 +122,10 @@ def show_xyz_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projec
     projection_x = np.flip(np.rot90(projector(image_to_show, axis=2), 1), 0)
     projection_z = projector(image_to_show, axis=0)
 
-    return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_xyz(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, colors = None, opacity = None):
+def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, colors = None, opacity = None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -299,7 +299,7 @@ def show_xyz(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
 
 
 ### New function
-def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -324,11 +324,11 @@ def show_xyz_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=None,
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy, sz, figsize, np.max, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy, sz, figsize, np.max, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 
 ### New function
-def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -359,7 +359,7 @@ def show_xyz_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=N
         projection_x = np.flip(np.rot90(projector(image_to_show[:, :, x_slices], axis=2), 1), 0)
         projection_z = projector(image_to_show[z_slices, :, :], axis=0)
 
-    return show_xyz(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 
 
@@ -577,7 +577,7 @@ def create_multichannel_rgb(
 
     return xy_rgb, xz_rgb, zy_rgb
 
-    # # return show_xyz(xy_rgb, xz_rgb, zy_rgb, vmin = None, vmax=None, gamma = 1, use_plt=True)
+    # # return show_zyx(xy_rgb, xz_rgb, zy_rgb, vmin = None, vmax=None, gamma = 1, use_plt=True)
     # return xy_rgb, xz_rgb, zy_rgb
 
 def create_multichannel_rgb_cmap(
@@ -1153,8 +1153,8 @@ class TNIASliceWidget(TNIAWidgetBase):
         pass_sxy = self.sxy if self._sxy_given else None
         pass_sz = self.sz if self._sz_given else None
 
-        # show_xyz_max_slabs returns a Figure
-        fig = show_xyz_max_slabs(
+        # show_zyx_max_slabs returns a Figure
+        fig = show_zyx_max_slabs(
             im_curr, x_lims, y_lims, z_lims,
             sxy=pass_sxy, sz=pass_sz, figsize=self.figsize, colormap=self.colormap,
             vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, colors=colors_curr, opacity=opacity_curr
@@ -1433,10 +1433,6 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.point_size = point_size
         self.alpha = alpha
         self.colors = colors
-        self.opacity = opacity
-        self.gamma = gamma
-        self.vmin = vmin
-        self.vmax = vmax
         self.figsize = figsize
 
         self.xmin = xmin
@@ -1515,7 +1511,37 @@ class TNIAScatterWidget(TNIAWidgetBase):
             else:
                 self.colors_use = [self.colors]
 
-        self.colors_rgb = [matplotlib.colors.to_rgb(resolve_color(c)) for c in self.colors_use]
+        if self.mode == 'ids' and len(self.colors_use) == 1 and is_colormap(self.colors_use[0]):
+            cmap = plt.get_cmap(self.colors_use[0])
+            self.colors_rgb = [cmap(i / max(1, self.C - 1))[:3] for i in range(self.C)]
+        else:
+            self.colors_rgb = [matplotlib.colors.to_rgb(resolve_color(c)) for c in self.colors_use]
+
+
+        # Set traitlets lists for interactive parameters
+        def _to_list(val, n, default):
+            if val is None:
+                return [default] * n
+            elif isinstance(val, (list, tuple)):
+                if len(val) >= n:
+                    return list(val[:n])
+                else:
+                    return list(val) + [default] * (n - len(val))
+            else:
+                return [val] * n
+
+        def _resolve_vmin_vmax(val, n):
+            lst = _to_list(val, n, None)
+            return ["" if x is None else x for x in lst]
+
+        self.vmin_list = _resolve_vmin_vmax(vmin, self.C)
+        self.vmax_list = _resolve_vmin_vmax(vmax, self.C)
+        self.gamma_list = _to_list(gamma, self.C, 1.0)
+        self.opacity_list = _to_list(opacity, self.C, 1.0)
+
+        self.channel_names = [f"Channel {i}" for i in range(self.C)]
+        self.channel_dtypes = ["float"] * self.C
+        self.channel_colors = [matplotlib.colors.to_hex(c) for c in self.colors_rgb]
 
         # Init values
         if x_t is not None: self.x_t = int(x_t)
@@ -1536,6 +1562,11 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self._init_observers()
 
     def _render(self):
+        vmin_resolved = [None if v == "" else float(v) for v in self.vmin_list]
+        vmax_resolved = [None if v == "" else float(v) for v in self.vmax_list]
+        gamma_resolved = [float(g) for g in self.gamma_list]
+        opacity_resolved = [float(o) for o in self.opacity_list]
+
         # Translate widget relative coordinates (0..Dim) to data coordinates (min..max)
         x_c = self.x_s + self.xmin
         y_c = self.y_s + self.ymin
@@ -1628,21 +1659,21 @@ class TNIAScatterWidget(TNIAWidgetBase):
             if has_colormap:
                 xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb_cmap(
                     xy_list, xz_list, zy_list,
-                    vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, colors=colors_for_rgb, opacity=self.opacity, blend='add', soft_clip=True
+                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colors=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
                 )
             else:
                 xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb(
                     xy_list, xz_list, zy_list,
-                    vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, colors=colors_for_rgb, opacity=self.opacity, blend='add', soft_clip=True
+                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colors=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
                 )
 
             pass_sxy = self.sxy if self._sxy_given else None
             pass_sz = self.sz if self._sz_given else None
 
-            fig = show_xyz(
+            fig = show_zyx(
                 xy_rgb, xz_rgb, zy_rgb,
                 sxy=pass_sxy, sz=pass_sz, figsize=self.figsize, colormap=None,
-                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=self.opacity
+                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=opacity_resolved
             )
 
             fig.patch.set_alpha(1.0)
@@ -1702,7 +1733,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                                  s=self.point_size, alpha=self.alpha, linewidths=0)
 
             elif self.mode == 'cont_multi':
-                cols = blend_colors(self.cont_multi, self.colors_use, vmin=self.vmin, vmax=self.vmax, gamma=self.gamma, soft_clip=True)
+                cols = blend_colors(self.cont_multi, self.colors_use, vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, soft_clip=True)
                 if mZ_all.any():
                     axXY.scatter(self.X_arr[mZ_all]*self.sxy, self.Y_arr[mZ_all]*self.sxy, c=cols[mZ_all], s=self.point_size, alpha=self.alpha, linewidths=0)
                 if mY_all.any():
@@ -1773,7 +1804,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
             return fig
 
 
-def show_xyz_max_slice_interactive(
+def show_zyx_max_slice_interactive(
     im,
     sxy=None, sz=None,
     figsize=None, colormap=None,
@@ -1787,7 +1818,7 @@ def show_xyz_max_slice_interactive(
     """
     Interactive 3D slice viewer using AnyWidget.
 
-    Inspired by show_xyz_max_slice_interactive in tnia_plotting_3d.py (ipywidgets version).
+    Inspired by show_zyx_max_slice_interactive in tnia_plotting_3d.py (ipywidgets version).
     """
     if isinstance(im, list):
         if im[0].ndim == 2:
@@ -1834,7 +1865,7 @@ def show_xyz_max_slice_interactive(
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
 
-def show_xyz_max_slice_interactive_point_annotator(
+def show_zyx_max_slice_interactive_point_annotator(
     im,
     sxy=None, sz=None,
     figsize=None, colormap=None,
@@ -1848,7 +1879,7 @@ def show_xyz_max_slice_interactive_point_annotator(
 ):
     """
     Interactive 3D slice viewer with point annotation using AnyWidget.
-    Features the same visualization as show_xyz_max_slice_interactive, but adds:
+    Features the same visualization as show_zyx_max_slice_interactive, but adds:
     - Point annotation toggle
     - Left-click on any projection to add or delete points.
     Returns a widget instance `w`. The list of annotated points is accessible via `w.points`.
@@ -1897,11 +1928,11 @@ def show_xyz_max_slice_interactive_point_annotator(
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
 
-def show_xyz_max_scatter_interactive(
+def show_zyx_max_scatter_interactive(
     points,
     channels=None,
     sxy=None, sz=None,
-    render='density',
+    render=None,
     bins=512,
     point_size=4, alpha=0.6,
     colors=None, opacity=None,
@@ -1933,6 +1964,13 @@ def show_xyz_max_scatter_interactive(
             Z = np.asarray(Z)
         else:
             raise ValueError("points must be an array of shape (N, 3) representing (Z, Y, X) or a tuple/list of 3 arrays (Z, Y, X).")
+
+    if render is None:
+        if len(X) < 10000:
+            render = 'points'
+        else:
+            render = 'density'
+
 
     xmin, xmax = float(np.floor(X.min())), float(np.ceil(X.max()))
     ymin, ymax = float(np.floor(Y.min())), float(np.ceil(Y.max()))
