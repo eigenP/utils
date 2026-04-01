@@ -48,3 +48,35 @@ def test_labels_cmap():
     # Check that we can import it and it's not None
     assert labels_cmap is not None
 
+
+def test_labels_cmap_diversity():
+    # Verify that the colormap colors are perceptually diverse
+    from skimage.color import rgb2lab, deltaE_ciede2000
+
+    # Extract RGB values (skip index 0 which is transparent)
+    # The colormap has 256 colors
+    cmap_colors = labels_cmap(np.linspace(0, 1, 256))[1:]
+    # Extract RGB only
+    rgb_colors = cmap_colors[:, :3]
+
+    lab_colors = rgb2lab(rgb_colors)
+
+    # Calculate min overall distance
+    min_overall_dist = float('inf')
+    for i in range(len(lab_colors)):
+        dists = deltaE_ciede2000(lab_colors[i:i+1], lab_colors)
+        dists[i] = float('inf') # ignore self distance
+        min_overall_dist = min(min_overall_dist, np.min(dists))
+
+    # Calculate min adjacent distance
+    min_adj_dist = float('inf')
+    for i in range(len(lab_colors)-1):
+        d = deltaE_ciede2000(lab_colors[i:i+1], lab_colors[i+1:i+2])[0]
+        min_adj_dist = min(min_adj_dist, d)
+
+    # Assert criteria
+    # Glasbey farthest point guaranteed minimum distance of ~8 over 255 colors
+    assert min_overall_dist > 5.0, f"Overall min distance is too small: {min_overall_dist}"
+
+    # The simulated annealing ordered it so adjacent colors are far apart (>30)
+    assert min_adj_dist > 25.0, f"Adjacent colors are too similar! Min adjacent distance: {min_adj_dist}"
