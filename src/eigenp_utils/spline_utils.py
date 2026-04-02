@@ -236,3 +236,50 @@ def normalize_vectors(vectors):
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     unit_vectors = vectors / norms
     return unit_vectors
+
+def calculate_spline_length(coords, resolution=None):
+    """
+    Calculates the arc length of a 2D or 3D spline given evaluated points.
+
+    Parameters:
+    - coords: List or tuple of arrays in order [Z, Y, X] for 3D or [Y, X] for 2D.
+    - resolution: List [Z, Y, X], dictionary {'Z','Y','X'}, or None.
+
+    Returns:
+    - Real-world length in units of the pixel size.
+    """
+    ndim = len(coords)
+    if ndim not in [2, 3]:
+        raise ValueError("coords must be a list of 2 or 3 arrays ([Z], Y, X)")
+
+    # Default resolutions
+    res = {'X': 1.0, 'Y': 1.0, 'Z': 1.0}
+
+    if isinstance(resolution, dict):
+        res.update(resolution)
+    elif isinstance(resolution, (list, tuple)) and len(resolution) >= 3:
+        # Standard convention in this notebook: [Z, Y, X]
+        res['Z'], res['Y'], res['X'] = resolution[0], resolution[1], resolution[2]
+
+    # Map coordinates to resolutions:
+    # If 3D, coords are [Z, Y, X]
+    # If 2D, coords are [Y, X]
+    scaled_diffs_sq = []
+
+    if ndim == 3:
+        # Scale Z
+        scaled_diffs_sq.append(np.diff(coords[0] * res['Z'])**2)
+        # Scale Y
+        scaled_diffs_sq.append(np.diff(coords[1] * res['Y'])**2)
+        # Scale X
+        scaled_diffs_sq.append(np.diff(coords[2] * res['X'])**2)
+    else:
+        # Scale Y
+        scaled_diffs_sq.append(np.diff(coords[0] * res['Y'])**2)
+        # Scale X
+        scaled_diffs_sq.append(np.diff(coords[1] * res['X'])**2)
+
+    # Euclidean distance: sqrt(sum of squared differences)
+    segment_lengths = np.sqrt(sum(scaled_diffs_sq))
+
+    return np.sum(segment_lengths)

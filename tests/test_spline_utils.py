@@ -9,7 +9,8 @@ from eigenp_utils.spline_utils import (
     calculate_vector_difference,
     calculate_tangent_vectors,
     project_onto_plane,
-    normalize_vectors
+    normalize_vectors,
+    calculate_spline_length
 )
 
 def test_generate_random_3d_coordinates():
@@ -146,3 +147,37 @@ def test_normalize_vectors():
     normalized = normalize_vectors(vectors)
     assert np.allclose(normalized[0], [0.6, 0.8])
     assert np.allclose(normalized[1], [1.0, 0.0])
+
+def test_calculate_spline_length():
+    # 2D case, straight line from (0,0) to (3,4), length should be 5
+    coords_2d = [np.array([0, 3]), np.array([0, 4])] # [Y, X]
+    length_2d = calculate_spline_length(coords_2d)
+    assert np.isclose(length_2d, 5.0)
+
+    # 3D case, straight line from (0,0,0) to (2,3,6), length should be 7
+    coords_3d = [np.array([0, 2]), np.array([0, 3]), np.array([0, 6])] # [Z, Y, X]
+    length_3d = calculate_spline_length(coords_3d)
+    assert np.isclose(length_3d, 7.0)
+
+    # Test custom resolution as list [Z, Y, X] for 3D
+    resolution_list = [2.0, 1.0, 0.5] # Z, Y, X
+    # After scaling:
+    # Z diff: (2-0)*2.0 = 4.0
+    # Y diff: (3-0)*1.0 = 3.0
+    # X diff: (6-0)*0.5 = 3.0
+    # Length = sqrt(4^2 + 3^2 + 3^2) = sqrt(16 + 9 + 9) = sqrt(34)
+    length_3d_res_list = calculate_spline_length(coords_3d, resolution=resolution_list)
+    assert np.isclose(length_3d_res_list, np.sqrt(34))
+
+    # Test custom resolution as dict for 2D
+    resolution_dict = {'Y': 2.0, 'X': 0.5}
+    # After scaling:
+    # Y diff: (3-0)*2.0 = 6.0
+    # X diff: (4-0)*0.5 = 2.0
+    # Length = sqrt(6^2 + 2^2) = sqrt(36 + 4) = sqrt(40)
+    length_2d_res_dict = calculate_spline_length(coords_2d, resolution=resolution_dict)
+    assert np.isclose(length_2d_res_dict, np.sqrt(40))
+
+    # Test exception for 1D coordinates
+    with pytest.raises(ValueError, match="coords must be a list of 2 or 3 arrays \\(\\[Z\\], Y, X\\)"):
+        calculate_spline_length([np.array([0, 1])])
