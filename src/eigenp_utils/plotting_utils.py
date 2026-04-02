@@ -50,29 +50,17 @@ def set_plotting_style():
 
 
 # --- Initialization: Create labels_cmap ---
-# Get the original tab20 colors
-tab20 = plt.get_cmap('tab20')
-original_colors = tab20.colors  # This retrieves the distinct colors used in tab20
+from .labels_cmap_data import LABELS_CMAP_COLORS
 
-# Interpolate to create more colors
-num_new_colors = 254  # One less because we'll add black
-new_colors = np.linspace(0, 1, num_new_colors)
+# Start with a transparent black at index 0
+final_colors = [(0, 0, 0, 0)]
 
-# Using a linear interpolation to blend between existing colors
-# Note: original code used list comprehension with tab20(x), but tab20 is discrete.
-# LinearSegmentedColormap.from_list handles interpolation if we just give it colors.
-# But the user provided specific logic:
-interpolated_colors = [tab20(x) for x in new_colors]
-
-# Randomly mix the colors and add black as the first color
-# Set the seed locally to avoid affecting global numpy state
-rng = np.random.RandomState(42)
-
-rng.shuffle(interpolated_colors)
-final_colors = [(0, 0, 0, 0)] + interpolated_colors  # Transparent black at the zero index
+# Add the 255 pre-calculated Glasbey-style maximally distant colors
+for r, g, b in LABELS_CMAP_COLORS:
+    final_colors.append((r, g, b, 1.0))
 
 # Create the new colormap
-labels_cmap = LinearSegmentedColormap.from_list("labels_cmap", final_colors)
+labels_cmap = LinearSegmentedColormap.from_list("labels_cmap", final_colors, N=256)
 
 # Print a hint for users who might need the background to be black
 print("Hint: labels_cmap background is transparent by default. To set it to black, run:")
