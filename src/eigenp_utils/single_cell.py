@@ -3991,8 +3991,11 @@ def kknn_ingest(
 
                 if current_barycenter == "distance":
                     # Inverse distance weighting
-                    # Add small epsilon to avoid division by zero
-                    weights = 1.0 / (dist + 1e-8)
+                    # Using the median distance of the neighborhood as a bandwidth makes the weighting
+                    # scale-invariant without letting the self-node (dist=0) completely dominate the vote with infinite weight.
+                    epsilon = 1e-6
+                    median_dist = np.median(dist[dist > 0]) if np.any(dist > 0) else 0.0
+                    weights = 1.0 / (dist + median_dist + epsilon)
                     weights /= np.sum(weights)
                     query_coords[i] = np.average(coords, axis=0, weights=weights)
                 elif current_barycenter == "lle":
@@ -4028,14 +4031,18 @@ def kknn_ingest(
                             weights = np.ones(len(idx)) / len(idx)
                     except np.linalg.LinAlgError:
                         # Fallback to inverse distance if singular
-                        weights = 1.0 / (dist + 1e-8)
+                        epsilon = 1e-6
+                        median_dist = np.median(dist[dist > 0]) if np.any(dist > 0) else 0.0
+                        weights = 1.0 / (dist + median_dist + epsilon)
                         weights /= np.sum(weights)
 
                     query_coords[i] = np.average(coords, axis=0, weights=weights)
                 elif current_barycenter == "wasserstein":
                     # Placeholder for optimal transport barycenter
                     warnings.warn("Wasserstein barycenter not yet fully implemented. Falling back to distance-weighted.")
-                    weights = 1.0 / (dist + 1e-8)
+                    epsilon = 1e-6
+                    median_dist = np.median(dist[dist > 0]) if np.any(dist > 0) else 0.0
+                    weights = 1.0 / (dist + median_dist + epsilon)
                     weights /= np.sum(weights)
                     query_coords[i] = np.average(coords, axis=0, weights=weights)
                 else:
@@ -4062,7 +4069,11 @@ def kknn_ingest(
                 labels_i = ref_labels[idx]
 
                 # Inverse distance weighting for votes
-                weights = 1.0 / (dist + 1e-8)
+                # Using the median distance of the neighborhood as a bandwidth makes the weighting
+                # scale-invariant without letting the self-node (dist=0) completely dominate the vote with infinite weight.
+                epsilon = 1e-6
+                median_dist = np.median(dist[dist > 0]) if np.any(dist > 0) else 0.0
+                weights = 1.0 / (dist + median_dist + epsilon)
                 weights /= np.sum(weights)
 
                 # Tally weighted votes
@@ -4253,8 +4264,8 @@ def find_correlated_features(
         res_dict["spearman"] = np.clip(r_spear, -1.0, 1.0)
 
     if "wasserstein" in metrics:
-        from scipy.stats import wasserstein_distance
         w_dist = np.empty(n_features, dtype=float)
+        target_z_sorted = np.sort(target_z)
 
         if sp.issparse(M):
             M_csc = M.tocsc()
@@ -4263,12 +4274,12 @@ def find_correlated_features(
                 col = M_csc[:, j].toarray().ravel()
                 # Z-score using precomputed exact stats
                 col_z = (col - feature_means[j]) / feature_stds[j]
-                w_dist[j] = wasserstein_distance(col_z, target_z)
+                w_dist[j] = np.mean(np.abs(np.sort(col_z) - target_z_sorted))
         else:
             M_dense = np.asarray(M)
             for j in range(n_features):
                 col_z = (M_dense[:, j] - feature_means[j]) / feature_stds[j]
-                w_dist[j] = wasserstein_distance(col_z, target_z)
+                w_dist[j] = np.mean(np.abs(np.sort(col_z) - target_z_sorted))
 
         res_dict["wasserstein"] = w_dist
 
