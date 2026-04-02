@@ -741,7 +741,9 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
     for c in range(C):
         arr = intensities[:, c].astype(float)
-        norm = (arr - vmin[c]) / max(1e-9, vmax[c] - vmin[c])
+        vmin_c = np.nanmin(arr) if vmin[c] is None else vmin[c]
+        vmax_c = np.nanmax(arr) if vmax[c] is None else vmax[c]
+        norm = (arr - vmin_c) / max(1e-9, vmax_c - vmin_c)
         norm = np.clip(norm, 0, 1)
         if gammas[c] != 1:
             norm = norm**gammas[c]
