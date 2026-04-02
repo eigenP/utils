@@ -9,16 +9,16 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
 from eigenp_utils.tnia_plotting_anywidgets import (
-    show_xyz_slice,
-    show_xyz_max_slabs,
+    show_zyx_slice,
+    show_zyx_max_slabs,
     create_multichannel_rgb,
 )
 from matplotlib.colors import to_rgb
 
 
-def test_show_xyz_slice_returns_correct_slices():
+def test_show_zyx_slice_returns_correct_slices():
     arr = np.arange(4 * 3 * 2).reshape(4, 3, 2)
-    fig = show_xyz_slice(arr, x=1, y=1, z=2, use_plt=False)
+    fig = show_zyx_slice(arr, x=1, y=1, z=2, use_plt=False)
     assert isinstance(fig, Figure)
     xy_expected = arr[2, :, :]
     xz_expected = arr[:, 1, :]
@@ -31,9 +31,9 @@ def test_show_xyz_slice_returns_correct_slices():
     assert np.array_equal(xz_img, xz_expected)
 
 
-def test_show_xyz_max_slabs_projection():
+def test_show_zyx_max_slabs_projection():
     arr = np.arange(4 * 3 * 2).reshape(4, 3, 2)
-    fig = show_xyz_max_slabs(arr, x=[0, 1], y=[0, 2], z=[1, 4])
+    fig = show_zyx_max_slabs(arr, x=[0, 1], y=[0, 2], z=[1, 4])
     xy_expected = np.max(arr[1:4, :, :], axis=0)
     xz_expected = np.max(arr[:, 0:2, :], axis=1)
     zy_expected = np.flip(np.rot90(np.max(arr[:, :, 0:1], axis=2), 1), 0)
@@ -64,7 +64,7 @@ def test_deprecated_tnia_plotting_3d_warning():
         assert "deprecated" in str(w[-1].message)
 
     # verify re-export works
-    assert hasattr(tnia3d, "show_xyz")
+    assert hasattr(tnia3d, "show_zyx")
 
 
 def test_create_multichannel_rgb_basic():
@@ -83,25 +83,25 @@ def test_create_multichannel_rgb_basic():
     assert np.allclose(xz_rgb, expected_xz)
     assert np.allclose(zy_rgb, expected_zy)
 
-def test_show_xyz_max_scatter_interactive_colormap():
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_scatter_interactive
+def test_show_zyx_max_scatter_interactive_colormap():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
     X = np.random.rand(10) * 10
     Y = np.random.rand(10) * 10
     Z = np.random.rand(10) * 10
     channels = np.random.rand(10)
 
     # Should not throw exception for invalid RGBA string, and _render should not throw NameError
-    w1 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
     w1._render() # Trigger render directly
 
-    w2 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
     w2._render() # Trigger render directly
 
     channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
+    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
     w3._render() # Trigger render directly
 
-    w4 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
     w4._render() # Trigger render directly
 
     assert w1 is not None

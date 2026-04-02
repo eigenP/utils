@@ -2,11 +2,11 @@ import numpy as np
 import pytest
 import matplotlib
 matplotlib.use("Agg")
-from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive, TNIASliceWidget
+from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, TNIASliceWidget
 
 def test_single_channel_instantiation():
     im = np.zeros((10, 20, 30))
-    w = show_xyz_max_slice_interactive(im)
+    w = show_zyx_max_slice_interactive(im)
     assert isinstance(w, TNIASliceWidget)
     assert w.num_channels == 1
     assert len(w.channel_names) == 1
@@ -15,7 +15,7 @@ def test_single_channel_instantiation():
 
 def test_multi_channel_instantiation():
     im = [np.zeros((10, 20, 30)) for _ in range(3)]
-    w = show_xyz_max_slice_interactive(im)
+    w = show_zyx_max_slice_interactive(im)
     assert w.num_channels == 3
     assert len(w.channel_names) == 3
     assert w.channel_names == ["Channel 0", "Channel 1", "Channel 2"]
@@ -25,7 +25,7 @@ def test_multi_channel_instantiation():
 def test_channel_visibility_update():
     # Use different values to ensure visual difference
     im = [np.zeros((10, 10, 10)), np.ones((10, 10, 10)) * 255]
-    w = show_xyz_max_slice_interactive(im)
+    w = show_zyx_max_slice_interactive(im)
 
     initial_data = w.image_data
     assert initial_data
@@ -45,16 +45,16 @@ def test_channel_visibility_update():
 
 def test_default_colors_resolution():
     im = [np.zeros((10, 10, 10)) for _ in range(2)]
-    w = show_xyz_max_slice_interactive(im, colors=None)
+    w = show_zyx_max_slice_interactive(im, colors=None)
     assert w.colors_resolved == ['magenta', 'cyan'] # Defaults
 
-    w2 = show_xyz_max_slice_interactive(im, colors=['red', 'blue'])
+    w2 = show_zyx_max_slice_interactive(im, colors=['red', 'blue'])
     assert w2.colors_resolved == ['red', 'blue']
 
-def test_show_xyz_max_slice_interactive_point_annotator_args():
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive_point_annotator, TNIAAnnotatorWidget
+def test_show_zyx_max_slice_interactive_point_annotator_args():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, TNIAAnnotatorWidget
     im = [np.zeros((10, 10, 10)) for _ in range(2)]
-    w = show_xyz_max_slice_interactive_point_annotator(
+    w = show_zyx_max_slice_interactive_point_annotator(
         im,
         sxy=2,
         sz=3,
@@ -80,44 +80,44 @@ def test_point_size_scaling():
     assert w2.point_size == 50
     assert w1.point_size < w2.point_size
 
-def test_show_xyz_max_scatter_interactive_colormap():
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_scatter_interactive
+def test_show_zyx_max_scatter_interactive_colormap():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
     X = np.random.rand(10) * 10
     Y = np.random.rand(10) * 10
     Z = np.random.rand(10) * 10
     channels = np.random.rand(10)
 
     # Should not throw exception for invalid RGBA string
-    w1 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
-    w2 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
 
     channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
-    w4 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
+    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
 
     assert w1 is not None
     assert w2 is not None
     assert w3 is not None
     assert w4 is not None
 
-def test_show_xyz_max_scatter_interactive_signature():
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_scatter_interactive
+def test_show_zyx_max_scatter_interactive_signature():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
     X = np.random.rand(10) * 10
     Y = np.random.rand(10) * 10
     Z = np.random.rand(10) * 10
     channels = np.random.rand(10)
 
     # Test with tuple
-    w1 = show_xyz_max_scatter_interactive((Z, Y, X), channels=channels, render='points')
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, render='points')
     assert w1 is not None
 
     # Test with list
-    w2 = show_xyz_max_scatter_interactive([Z, Y, X], channels=channels, render='points')
+    w2 = show_zyx_max_scatter_interactive([Z, Y, X], channels=channels, render='points')
     assert w2 is not None
 
     # Test with (N, 3) array
     points = np.stack([Z, Y, X], axis=1)
-    w3 = show_xyz_max_scatter_interactive(points, channels=channels, render='points')
+    w3 = show_zyx_max_scatter_interactive(points, channels=channels, render='points')
     assert w3 is not None
 
     # Verify that the parsed data inside is correct
@@ -128,4 +128,4 @@ def test_show_xyz_max_scatter_interactive_signature():
     # Test invalid shape
     with pytest.raises(ValueError, match="points must be an array of shape .* representing \\(Z, Y, X\\) or a tuple/list of 3 arrays \\(Z, Y, X\\)."):
         invalid_points = np.stack([Z, Y], axis=1)
-        show_xyz_max_scatter_interactive(invalid_points, channels=channels)
+        show_zyx_max_scatter_interactive(invalid_points, channels=channels)

@@ -24,11 +24,11 @@ from .spline_utils import (
     normalize_vectors
 )
 from .tnia_plotting_anywidgets import (
-    show_xyz_slice,
-    show_xyz_max,
-    show_xyz_projection,
-    show_xyz,
-    show_xyz_max_slabs,
+    show_zyx_slice,
+    show_zyx_max,
+    show_zyx_projection,
+    show_zyx,
+    show_zyx_max_slabs,
     create_multichannel_rgb,
 )
 from .maxproj_registration import (
@@ -58,11 +58,11 @@ __all__ = [
     "calculate_tangent_vectors",
     "project_onto_plane",
     "normalize_vectors",
-    "show_xyz_slice",
-    "show_xyz_max",
-    "show_xyz_projection",
-    "show_xyz",
-    "show_xyz_max_slabs",
+    "show_zyx_slice",
+    "show_zyx_max",
+    "show_zyx_projection",
+    "show_zyx",
+    "show_zyx_max_slabs",
     "create_multichannel_rgb",
     "zero_shift_multi_dimensional",
     "estimate_drift",
