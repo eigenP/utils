@@ -129,3 +129,27 @@ def test_show_zyx_max_scatter_interactive_signature():
     with pytest.raises(ValueError, match="points must be an array of shape .* representing \\(Z, Y, X\\) or a tuple/list of 3 arrays \\(Z, Y, X\\)."):
         invalid_points = np.stack([Z, Y], axis=1)
         show_zyx_max_scatter_interactive(invalid_points, channels=channels)
+
+def test_colormap_list_multi_channel():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+    im = [np.zeros((10, 20, 30)) for _ in range(3)]
+    # This should not raise any TypeError about unhashable lists
+    w = show_zyx_max_slice_interactive(im, colormap=['red', 'blue', 'green'])
+    assert w is not None
+    assert w.colors_resolved == ['red', 'blue', 'green']
+
+def test_colormap_list_scatter_multi_channel():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
+    X = np.random.rand(10) * 10
+    Y = np.random.rand(10) * 10
+    Z = np.random.rand(10) * 10
+    channels_multi = [np.random.rand(10), np.random.rand(10)]
+    w = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='points')
+    assert w is not None
+
+def test_deprecation_warning_colors():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+    im = np.zeros((10, 20, 30))
+    with pytest.warns(DeprecationWarning, match="The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead."):
+        w = show_zyx_max_slice_interactive(im, colors=['red'])
+        assert w is not None
