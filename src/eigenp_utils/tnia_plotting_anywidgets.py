@@ -253,8 +253,8 @@ def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
     # ax2.set_title('xz')
 
     # Remove in-between axes ticks
-    for ax in [ax0,ax1,ax2, ax3]:
-        if subplot_bg is not None:
+    for i, ax in enumerate([ax0,ax1,ax2, ax3]):
+        if i < 3 and subplot_bg is not None:
             ax.set_facecolor(subplot_bg)
         else:
             ax.patch.set_visible(False)
@@ -1779,7 +1779,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
             axXY, axZY = axs[0,0], axs[0,1]
             axXZ, axBar = axs[1,0], axs[1,1]
             for ax in (axXY, axZY, axXZ, axBar):
-                if self.subplot_bg is not None:
+                if ax is not axBar and self.subplot_bg is not None:
                     ax.set_facecolor(self.subplot_bg)
                 else:
                     ax.patch.set_visible(False)
