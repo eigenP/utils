@@ -29,7 +29,6 @@
 
 
 ### Core Utilities
-* **Task Scheduling**: Generate interactive, Gantt-style timeline schedules for linked events using Plotly (`task_calendar_scheduler.py`).
 * **Spline Utilities**: Calculate tangent vectors and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
 * **I/O Utilities**: Functions to streamline file and data reading.
