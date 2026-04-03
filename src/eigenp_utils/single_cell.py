@@ -4253,8 +4253,13 @@ def find_correlated_features(
         res_dict["spearman"] = np.clip(r_spear, -1.0, 1.0)
 
     if "wasserstein" in metrics:
-        from scipy.stats import wasserstein_distance
         w_dist = np.empty(n_features, dtype=float)
+
+        # matth: The 1D Wasserstein distance between equal-sized empirical distributions
+        # has an exact closed-form solution: the L1 distance of their order statistics.
+        # By pre-sorting the target distribution, we reduce the inner loop complexity
+        # and eliminate the overhead of scipy's numerical integration entirely.
+        target_z_sorted = np.sort(target_z)
 
         if sp.issparse(M):
             M_csc = M.tocsc()
@@ -4263,12 +4268,12 @@ def find_correlated_features(
                 col = M_csc[:, j].toarray().ravel()
                 # Z-score using precomputed exact stats
                 col_z = (col - feature_means[j]) / feature_stds[j]
-                w_dist[j] = wasserstein_distance(col_z, target_z)
+                w_dist[j] = np.mean(np.abs(np.sort(col_z) - target_z_sorted))
         else:
             M_dense = np.asarray(M)
             for j in range(n_features):
                 col_z = (M_dense[:, j] - feature_means[j]) / feature_stds[j]
-                w_dist[j] = wasserstein_distance(col_z, target_z)
+                w_dist[j] = np.mean(np.abs(np.sort(col_z) - target_z_sorted))
 
         res_dict["wasserstein"] = w_dist
 
