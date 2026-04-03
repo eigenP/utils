@@ -10,6 +10,7 @@
 # ///
 
 import pathlib
+import warnings
 import anywidget
 import traitlets
 import matplotlib
@@ -102,6 +103,10 @@ def show_zyx_max(image_to_show, sxy=None, sz=None,figsize=(10,10), colormap=None
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
 
     return show_zyx_projection(image_to_show, sxy, sz, figsize, np.max, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
@@ -118,6 +123,10 @@ def show_zyx_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projec
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
     projection_y = projector(image_to_show, axis=1)
     projection_x = np.flip(np.rot90(projector(image_to_show, axis=2), 1), 0)
     projection_z = projector(image_to_show, axis=0)
@@ -140,6 +149,10 @@ def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
     Returns:
         [type]: [description]
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
     both_given = sxy is not None and sz is not None
     if sxy is None:
         sxy = 1
@@ -149,13 +162,17 @@ def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
     if isinstance(xy,list):
         MULTI_CHANNEL = True
         has_colormap = False
-        if colors is not None:
-            has_colormap = any(is_colormap(c) for c in colors)
+        if colormap is not None:
+            has_colormap = any(is_colormap(c) for c in colormap)
+        else:
+            has_colormap = False
 
         if has_colormap:
-            xy, xz, zy = create_multichannel_rgb_cmap(xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity)
+            xy, xz, zy = create_multichannel_rgb_cmap(xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity)
         else:
-            xy, xz, zy = create_multichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colors = colors, opacity = opacity)
+            xy, xz, zy = create_multichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity)
+
+        colormap = None
 
         # Set those back to default bcs they are dealt with in the RGB function
         vmin, vmax, gamma = None, None, 1
@@ -167,25 +184,22 @@ def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
         if isinstance(vmin, list): vmin = vmin[0]
         if isinstance(vmax, list): vmax = vmax[0]
 
-        # In single channel, if `colors` is provided but not `colormap`,
-        # check if `colors` resolves to a colormap or use it as a solid color colormap
-        if colormap is None and colors is not None:
-            c = colors[0] if isinstance(colors, list) else colors
+        # If colormap is provided as a list with one item, unpack it
+        if isinstance(colormap, list) and len(colormap) == 1:
+            colormap = colormap[0]
+
+        if colormap is not None:
+            c = colormap
             if isinstance(c, str):
                 try:
-                    # Check if it's a colormap
                     plt.get_cmap(c)
-                    colormap = c
-                    colors = None
                 except ValueError:
-                    # Resolve color string to final hex/RGB if possible
                     resolved = resolve_color(c)
                     colormap = black_to(resolved)
-                    colors = None
             else:
                 resolved = resolve_color(c)
                 colormap = black_to(resolved)
-                colors = None
+
 
     if use_plt:
         fig=plt.figure(figsize=figsize, constrained_layout=False)
@@ -315,6 +329,10 @@ def show_zyx_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=None,
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
     ### Coerce into integers for slices
     x_ = [int(i) for i in x]
     y_ = [int(i) for i in y]
@@ -342,6 +360,10 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=N
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
 
     if isinstance(image_to_show, list):
         images_to_show_list = image_to_show
@@ -424,7 +446,7 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=N
 
 def create_multichannel_rgb(
     xy_list, xz_list, zy_list,
-    vmin=None, vmax=None, gamma=1, colors=None, opacity=None,
+    vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None,
     blend='add',        # 'add' | 'screen' | 'max'
     soft_clip=True,     # only used for blend='add'
     eps=1e-12,
@@ -450,6 +472,10 @@ def create_multichannel_rgb(
     soft_clip : bool
         For 'add' mode, compress values >1 instead of hard clipping.
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
 
     assert isinstance(xy_list, list) and isinstance(xz_list, list) and isinstance(zy_list, list)
     n = len(xy_list)
@@ -468,9 +494,9 @@ def create_multichannel_rgb(
     gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
     opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
 
-    if colors is None:
-        colors = ['magenta', 'cyan', 'yellow', 'green'][:n]
-    color_map = [np.asarray(to_rgb(resolve_color(c)), dtype=np.float32) for c in colors]
+    if colormap is None:
+        colormap = ['magenta', 'cyan', 'yellow', 'green'][:n]
+    color_map = [np.asarray(to_rgb(resolve_color(c)), dtype=np.float32) for c in colormap]
 
     # Determine per-channel vmin/vmax if not provided
     # vmin/vmax can be None, or a list containing floats and/or Nones
@@ -492,9 +518,9 @@ def create_multichannel_rgb(
 
         if vmaxs[i] is None:
             # max over 2D slices instead of concatenating
-            m_xy = float(np.max(xy_list[i]))
-            m_xz = float(np.max(xz_list[i]))
-            m_zy = float(np.max(zy_list[i]))
+            m_xy = float(np.percentile(xy_list[i], 99.5))
+            m_xz = float(np.percentile(xz_list[i], 99.5))
+            m_zy = float(np.percentile(zy_list[i], 99.5))
             vmaxs[i] = float(max(m_xy, m_xz, m_zy))
         else:
             vmaxs[i] = float(vmaxs[i])
@@ -582,7 +608,7 @@ def create_multichannel_rgb(
 
 def create_multichannel_rgb_cmap(
     xy_list, xz_list, zy_list,
-    vmin=None, vmax=None, gamma=1, colors=None, opacity=None,
+    vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None,
     blend='max',        # 'add' | 'screen' | 'max'
     soft_clip=True,     # only used for blend='add'
     eps=1e-12,
@@ -590,6 +616,10 @@ def create_multichannel_rgb_cmap(
     """
     Compose multi-channel XY/XZ/ZY into RGB with per-channel normalization using full colormaps.
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
     assert isinstance(xy_list, list) and isinstance(xz_list, list) and isinstance(zy_list, list)
     n = len(xy_list)
     assert len(xz_list) == n and len(zy_list) == n, "xy/xz/zy must have same number of channels"
@@ -607,11 +637,11 @@ def create_multichannel_rgb_cmap(
     gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
     opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
 
-    if colors is None:
-        colors = ['magenta', 'cyan', 'yellow', 'green'][:n]
+    if colormap is None:
+        colormap = ['magenta', 'cyan', 'yellow', 'green'][:n]
 
     cmap_list = []
-    for c in colors:
+    for c in colormap:
         if is_colormap(c):
             cmap_list.append(plt.get_cmap(c))
         else:
@@ -635,9 +665,9 @@ def create_multichannel_rgb_cmap(
             vmins[i] = float(vmins[i])
 
         if vmaxs[i] is None:
-            m_xy = float(np.max(xy_list[i]))
-            m_xz = float(np.max(xz_list[i]))
-            m_zy = float(np.max(zy_list[i]))
+            m_xy = float(np.percentile(xy_list[i], 99.5))
+            m_xz = float(np.percentile(xz_list[i], 99.5))
+            m_zy = float(np.percentile(zy_list[i], 99.5))
             vmaxs[i] = float(max(m_xy, m_xz, m_zy))
         else:
             vmaxs[i] = float(vmaxs[i])
@@ -742,7 +772,7 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     for c in range(C):
         arr = intensities[:, c].astype(float)
         vmin_c = np.nanmin(arr) if vmin[c] is None else vmin[c]
-        vmax_c = np.nanmax(arr) if vmax[c] is None else vmax[c]
+        vmax_c = np.nanpercentile(arr, 99.5) if vmax[c] is None else vmax[c]
         norm = (arr - vmin_c) / max(1e-9, vmax_c - vmin_c)
         norm = np.clip(norm, 0, 1)
         if gammas[c] != 1:
@@ -984,6 +1014,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, sxy=None, sz=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
                  show_crosshair=True, sync_on_hover=False, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None, opacity=None):
+        if colors is not None:
+            warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+            if colormap is None:
+                colormap = colors
 
         # Handle 2D images gracefully by adding a Z dimension of 1
         if isinstance(im, list):
@@ -1028,24 +1062,24 @@ class TNIASliceWidget(TNIAWidgetBase):
             self.channel_dtypes = [img.dtype.name for img in im]
 
             # Resolve default colors to ensure stability when toggling
-            if colors is None:
+            if colormap is None:
                  defaults = ['magenta', 'cyan', 'yellow', 'green', 'red', 'lime', 'blue', 'orange']
                  # Extend if needed
                  while len(defaults) < self.num_channels:
                      defaults += defaults
                  self.colors_resolved = defaults[:self.num_channels]
             else:
-                 self.colors_resolved = list(colors)
+                 self.colors_resolved = list(colormap)
         else:
             self.num_channels = 1
             self.channel_names = ["Channel 0"]
             self.channel_dtypes = [im.dtype.name]
-            if colors is None:
+            if colormap is None:
                 self.colors_resolved = ['magenta']
-            elif isinstance(colors, (list, tuple)):
-                self.colors_resolved = list(colors)
+            elif isinstance(colormap, (list, tuple)):
+                self.colors_resolved = list(colormap)
             else:
-                self.colors_resolved = [colors]
+                self.colors_resolved = [colormap]
 
         # Use resolve_color for channel_colors (which is passed to JS)
         self.channel_colors = [resolve_color(c) for c in self.colors_resolved]
@@ -1135,6 +1169,11 @@ class TNIASliceWidget(TNIAWidgetBase):
         else:
             vmin_val = None if self.vmin_list[0] == "" else float(self.vmin_list[0])
             vmax_val = None if self.vmax_list[0] == "" else float(self.vmax_list[0])
+
+            # Auto-calculate 99.5 percentile if vmax is not explicitly set
+            if vmax_val is None:
+                vmax_val = float(np.percentile(self.im_orig, 99.5))
+
             gamma_val = float(self.gamma_list[0])
             opacity_val = float(self.opacity_list[0])
 
@@ -1158,8 +1197,8 @@ class TNIASliceWidget(TNIAWidgetBase):
         # show_zyx_max_slabs returns a Figure
         fig = show_zyx_max_slabs(
             im_curr, x_lims, y_lims, z_lims,
-            sxy=pass_sxy, sz=pass_sz, figsize=self.figsize, colormap=self.colormap,
-            vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, colors=colors_curr, opacity=opacity_curr
+            sxy=pass_sxy, sz=pass_sz, figsize=self.figsize, colormap=colors_curr,
+            vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, opacity=opacity_curr
         )
 
         # Crosshairs logic (copied from original interactive wrapper)
@@ -1201,20 +1240,24 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     # Data
     points = traitlets.List().tag(sync=True) # List of [z, y, x] lists
 
-    def __init__(self, im, colors=None, opacity=None, point_size_scale=0.01, *args, **kwargs):
+    def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, *args, **kwargs):
+        if colors is not None:
+            warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+            if colormap is None:
+                colormap = colors
         # Normalize input to list
         if not isinstance(im, list):
             im_list = [im]
         else:
             im_list = list(im)
 
-        # Ensure colors is a list
-        if colors is None:
+        # Ensure colormap is a list
+        if colormap is None:
             colors_list = ['magenta', 'cyan', 'yellow', 'green', 'blue', 'orange']
-        elif isinstance(colors, str):
-            colors_list = [colors]
+        elif isinstance(colormap, str):
+            colors_list = [colormap]
         else:
-            colors_list = list(colors)
+            colors_list = list(colormap)
 
         while len(colors_list) < len(im_list):
             colors_list.extend(['magenta', 'cyan', 'yellow', 'green', 'blue', 'orange'])
@@ -1249,8 +1292,24 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         colors_list.append('red')
         opacity_list.append(1.0)
 
+        # Ensure vmax is padded correctly for the annotation channel
+        vmax = kwargs.get('vmax', None)
+        if vmax is None:
+            vmax_list = [None] * (len(im_list) - 1) + [255.0]
+            kwargs['vmax'] = vmax_list
+        elif isinstance(vmax, (list, tuple)):
+            vmax_list = list(vmax)
+            while len(vmax_list) < len(im_list) - 1:
+                vmax_list.append(None)
+            vmax_list = vmax_list[:len(im_list) - 1]
+            vmax_list.append(255.0)
+            kwargs['vmax'] = vmax_list
+        else:
+            vmax_list = [vmax] * (len(im_list) - 1) + [255.0]
+            kwargs['vmax'] = vmax_list
+
         # Initialize superclass
-        super().__init__(im_list, colors=colors_list, opacity=opacity_list, *args, **kwargs)
+        super().__init__(im_list, colormap=colors_list, opacity=opacity_list, *args, **kwargs)
 
         # Override the last channel name
         self.channel_names = self.channel_names[:-1] + ['Annotations']
@@ -1407,8 +1466,12 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=None, sz=None, render='points', bins=512,
-                 point_size=4, alpha=0.6, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
+                 point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
                  show_crosshair=True, sync_on_hover=False, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
+        if colors is not None:
+            warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+            if colormap is None:
+                colormap = colors
 
         self.X_arr = np.asarray(X_arr)
         self.Y_arr = np.asarray(Y_arr)
@@ -1500,18 +1563,18 @@ class TNIAScatterWidget(TNIAWidgetBase):
         else:
             self.C = self.cont_multi.shape[1]
 
-        if self.colors is None:
+        if colormap is None:
             default_cols = ['magenta', 'cyan', 'yellow', 'green', 'red', 'lime', 'blue', 'orange']
             while len(default_cols) < self.C:
                  default_cols += default_cols
             self.colors_use = default_cols[:max(1, self.C)]
         else:
-            if isinstance(self.colors, str):
-                self.colors_use = [self.colors]
-            elif isinstance(self.colors, (list, tuple)):
-                self.colors_use = list(self.colors)
+            if isinstance(colormap, str):
+                self.colors_use = [colormap]
+            elif isinstance(colormap, (list, tuple)):
+                self.colors_use = list(colormap)
             else:
-                self.colors_use = [self.colors]
+                self.colors_use = [colormap]
 
         if self.mode == 'ids' and len(self.colors_use) == 1 and is_colormap(self.colors_use[0]):
             cmap = plt.get_cmap(self.colors_use[0])
@@ -1661,12 +1724,12 @@ class TNIAScatterWidget(TNIAWidgetBase):
             if has_colormap:
                 xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb_cmap(
                     xy_list, xz_list, zy_list,
-                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colors=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
+                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colormap=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
                 )
             else:
                 xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb(
                     xy_list, xz_list, zy_list,
-                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colors=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
+                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colormap=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
                 )
 
             pass_sxy = self.sxy if self._sxy_given else None
@@ -1722,7 +1785,10 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     cmap = plt.get_cmap(c_use)
                 else:
                     cmap = black_to(resolve_color(c_use))
-                norm = matplotlib.colors.Normalize(vmin=np.nanmin(vals), vmax=np.nanmax(vals))
+
+                vmin_c = np.nanmin(vals) if vmin_resolved[0] is None else vmin_resolved[0]
+                vmax_c = np.nanpercentile(vals, 99.5) if vmax_resolved[0] is None else vmax_resolved[0]
+                norm = matplotlib.colors.Normalize(vmin=vmin_c, vmax=vmax_c)
 
                 if mZ_all.any():
                     axXY.scatter(self.X_arr[mZ_all]*self.sxy, self.Y_arr[mZ_all]*self.sxy, c=vals[mZ_all], cmap=cmap, norm=norm,
@@ -1937,7 +2003,7 @@ def show_zyx_max_scatter_interactive(
     render=None,
     bins=512,
     point_size=4, alpha=0.6,
-    colors=None, opacity=None,
+    colormap=None, colors=None, opacity=None,
     gamma=1, vmin=None, vmax=None,
     figsize=None, figsize_scale=1.0,
     show_crosshair=True, sync_on_hover=False,
