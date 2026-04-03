@@ -502,7 +502,11 @@ def create_multichannel_rgb(
     opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
 
     if colormap is None:
-        colormap = ['magenta', 'cyan', 'yellow', 'green'][:n]
+        if n == 1:
+            colormap = ['white']
+        else:
+            defaults = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
+            colormap = [defaults[i % len(defaults)] for i in range(n)]
     color_map = [np.asarray(to_rgb(resolve_color(c)), dtype=np.float32) for c in colormap]
 
     # Determine per-channel vmin/vmax if not provided
@@ -645,7 +649,11 @@ def create_multichannel_rgb_cmap(
     opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
 
     if colormap is None:
-        colormap = ['magenta', 'cyan', 'yellow', 'green'][:n]
+        if n == 1:
+            colormap = ['white']
+        else:
+            defaults = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
+            colormap = [defaults[i % len(defaults)] for i in range(n)]
 
     cmap_list = []
     for c in colormap:
@@ -1070,7 +1078,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 
             # Resolve default colors to ensure stability when toggling
             if colormap is None:
-                 defaults = ['magenta', 'cyan', 'yellow', 'green', 'red', 'lime', 'blue', 'orange']
+                 defaults = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
                  # Extend if needed
                  while len(defaults) < self.num_channels:
                      defaults += defaults
@@ -1082,7 +1090,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             self.channel_names = ["Channel 0"]
             self.channel_dtypes = [im.dtype.name]
             if colormap is None:
-                self.colors_resolved = ['magenta']
+                self.colors_resolved = ['white']
             elif isinstance(colormap, (list, tuple)):
                 self.colors_resolved = list(colormap)
             else:
@@ -1260,14 +1268,20 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
         # Ensure colormap is a list
         if colormap is None:
-            colors_list = ['magenta', 'cyan', 'yellow', 'green', 'blue', 'orange']
+            if len(im_list) == 1:
+                colors_list = ['white']
+            else:
+                colors_list = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
         elif isinstance(colormap, str):
             colors_list = [colormap]
         else:
             colors_list = list(colormap)
 
         while len(colors_list) < len(im_list):
-            colors_list.extend(['magenta', 'cyan', 'yellow', 'green', 'blue', 'orange'])
+            if len(im_list) == 1:
+                colors_list.extend(['white'])
+            else:
+                colors_list.extend(['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue'])
 
         colors_list = colors_list[:len(im_list)]
 
@@ -1572,7 +1586,10 @@ class TNIAScatterWidget(TNIAWidgetBase):
             self.C = self.cont_multi.shape[1]
 
         if colormap is None:
-            default_cols = ['magenta', 'cyan', 'yellow', 'green', 'red', 'lime', 'blue', 'orange']
+            if self.C == 1:
+                default_cols = ['white']
+            else:
+                default_cols = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
             while len(default_cols) < self.C:
                  default_cols += default_cols
             self.colors_use = default_cols[:max(1, self.C)]

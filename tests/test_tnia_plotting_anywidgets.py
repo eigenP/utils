@@ -46,7 +46,7 @@ def test_channel_visibility_update():
 def test_default_colors_resolution():
     im = [np.zeros((10, 10, 10)) for _ in range(2)]
     w = show_zyx_max_slice_interactive(im, colors=None)
-    assert w.colors_resolved == ['magenta', 'cyan'] # Defaults
+    assert w.colors_resolved == ['white', 'lime'] # Defaults
 
     w2 = show_zyx_max_slice_interactive(im, colors=['red', 'blue'])
     assert w2.colors_resolved == ['red', 'blue']
