@@ -134,7 +134,7 @@ def show_zyx_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projec
     return show_zyx(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, colors = None, opacity = None):
+def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, colors = None, opacity = None, subplot_bg=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -253,12 +253,19 @@ def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
     # ax2.set_title('xz')
 
     # Remove in-between axes ticks
-    for ax in [ax0,ax1,ax2, ax3]:
-        ax.axis('off')
+    for i, ax in enumerate([ax0,ax1,ax2, ax3]):
+        if i < 3 and subplot_bg is not None:
+            ax.set_facecolor(subplot_bg)
+        else:
+            ax.patch.set_visible(False)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
     # ax0.xaxis.set_ticklabels([])
     # ax1.yaxis.set_ticklabels([])
 
-    fig.patch.set_alpha(0.01) # set transparent bgnd
+    fig.patch.set_alpha(0.0) # set transparent bgnd
 
     # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
@@ -1467,7 +1474,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=None, sz=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=False, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
+                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
         if colors is not None:
             warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
             if colormap is None:
@@ -1506,6 +1513,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.xmax = xmax
         self.ymax = ymax
         self.zmax = zmax
+        self.subplot_bg = subplot_bg
 
         # Precompute Density helpers
         def _resolve_bins(B):
@@ -1738,13 +1746,12 @@ class TNIAScatterWidget(TNIAWidgetBase):
             fig = show_zyx(
                 xy_rgb, xz_rgb, zy_rgb,
                 sxy=pass_sxy, sz=pass_sz, figsize=self.figsize, colormap=None,
-                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=opacity_resolved
+                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=opacity_resolved, subplot_bg=self.subplot_bg
             )
 
-            fig.patch.set_alpha(1.0)
-            fig.patch.set_facecolor("black")
-            for ax in fig.axes:
-                ax.set_facecolor("black")
+            fig.patch.set_alpha(0.0) # transparent figure bg
+            fig.patch.set_facecolor("none")
+            # Subplot facecolor is handled by show_zyx if subplot_bg is passed
 
             # Crosshairs
             if self.show_crosshair:
@@ -1767,12 +1774,19 @@ class TNIAScatterWidget(TNIAWidgetBase):
             fig, axs = plt.subplots(
                 2, 2, figsize=self.figsize, constrained_layout=False,
                 gridspec_kw=dict(width_ratios=width_ratios, height_ratios=height_ratios),
-                facecolor='black'
+                facecolor='none'
             )
             axXY, axZY = axs[0,0], axs[0,1]
             axXZ, axBar = axs[1,0], axs[1,1]
             for ax in (axXY, axZY, axXZ, axBar):
-                ax.set_facecolor('black'); ax.axis('off')
+                if ax is not axBar and self.subplot_bg is not None:
+                    ax.set_facecolor(self.subplot_bg)
+                else:
+                    ax.patch.set_visible(False)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
 
             mZ_all = (self.Z_arr >= z_lims[0]) & (self.Z_arr <= z_lims[1])
             mY_all = (self.Y_arr >= y_lims[0]) & (self.Y_arr <= y_lims[1])
@@ -2007,6 +2021,7 @@ def show_zyx_max_scatter_interactive(
     gamma=1, vmin=None, vmax=None,
     figsize=None, figsize_scale=1.0,
     show_crosshair=True, sync_on_hover=False,
+    subplot_bg='black',
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
@@ -2085,6 +2100,7 @@ def show_zyx_max_scatter_interactive(
         channels=channels, sxy=sxy, sz=sz, render=render, bins=bins,
         point_size=point_size, alpha=alpha, colors=colors, opacity=opacity,
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
+        subplot_bg=subplot_bg,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
 
