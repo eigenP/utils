@@ -3247,7 +3247,7 @@ def plot_volcano_adata(
     rank_genes_key: str,
     group: str,
     pval_cutoff: float = 0.05,
-    logfc_cutoff: float = 1.0,
+    logfc_cutoff: Union[float, Tuple[float, float]] = 1.0,
     label_top_n: int = 20,
     plot_positive_only: bool = False,
     figsize: tuple = (6, 5),
@@ -3264,7 +3264,8 @@ def plot_volcano_adata(
         rank_genes_key (str): The key in `adata.uns` where the rank_genes_groups results are stored.
         group (str): The name of the group to plot from the rank_genes_groups results.
         pval_cutoff (float, optional): The adjusted p-value cutoff for significance. Defaults to 0.05.
-        logfc_cutoff (float, optional): The log2 fold change cutoff for significance. Defaults to 1.0.
+        logfc_cutoff (Union[float, Tuple[float, float]], optional): The log2 fold change cutoff for significance.
+                                     Can be a single value (applied as -val and +val) or a tuple (min_val, max_val). Defaults to 1.0.
         label_top_n (int, optional): The number of top genes to label based on p-value AND log-fold change.
                                      The final number of labels can be up to 2 * label_top_n. Defaults to 20.
         plot_positive_only (bool, optional): If True, highlights and labels only genes with positive
@@ -3299,6 +3300,13 @@ def plot_volcano_adata(
                 f"Got {len(group)} groups: {group}"
             )
 
+    if isinstance(logfc_cutoff, (tuple, list)):
+        if len(logfc_cutoff) != 2:
+            raise ValueError("logfc_cutoff must be a single value or a tuple of length 2")
+        logfc_min, logfc_max = logfc_cutoff
+    else:
+        logfc_min, logfc_max = -logfc_cutoff, logfc_cutoff
+
     # --- 1. Data Extraction ---
     try:
         comparison_uns = adata.uns[rank_genes_key]
@@ -3326,9 +3334,9 @@ def plot_volcano_adata(
 
     # --- 4. Highlight Significant Genes ---
     if plot_positive_only:
-        significant_idx = (pvals_adj < pval_cutoff) & (logfoldchanges > logfc_cutoff)
+        significant_idx = (pvals_adj < pval_cutoff) & (logfoldchanges > logfc_max)
     else:
-        significant_idx = (pvals_adj < pval_cutoff) & (np.abs(logfoldchanges) > logfc_cutoff)
+        significant_idx = (pvals_adj < pval_cutoff) & ((logfoldchanges < logfc_min) | (logfoldchanges > logfc_max))
 
     # Scatter plot for significant genes
     ax.scatter(
@@ -3341,9 +3349,9 @@ def plot_volcano_adata(
 
     # --- 5. Add Threshold Lines ---
     ax.axhline(-np.log10(pval_cutoff), color='black', linestyle='--', linewidth=0.8)
-    ax.axvline(logfc_cutoff, color='black', linestyle='--', linewidth=0.8)
+    ax.axvline(logfc_max, color='black', linestyle='--', linewidth=0.8)
     if not plot_positive_only:
-        ax.axvline(-logfc_cutoff, color='black', linestyle='--', linewidth=0.8)
+        ax.axvline(logfc_min, color='black', linestyle='--', linewidth=0.8)
 
     # --- 6. Annotate Top Genes ---
     # Get significant genes' data
