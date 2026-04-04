@@ -1,0 +1,60 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>AnyWidget Test</title>
+    </head>
+    <body>
+        <div id="widget-container"></div>
+        <script type="module">
+            import widget from './src/eigenp_utils/tnia_plotting_anywidgets.js';
+
+            const container = document.getElementById('widget-container');
+
+            const mockListeners = {};
+
+            // Mock model
+            const model = {
+                attributes: {
+                    x_t: 1, y_t: 1, z_t: 1,
+                    x_s: 5, y_s: 5, z_s: 5,
+                    min_thickness: 1,
+                    x_thick_max: 10, y_thick_max: 10, z_thick_max: 10,
+                    x_min_pos: 0, x_max_pos: 10,
+                    y_min_pos: 0, y_max_pos: 10,
+                    z_min_pos: 0, z_max_pos: 10,
+                    sxy: 1, sz: 1,
+                    save_filename: "test.svg",
+                    save_trigger: 0,
+                    channel_names: ["Channel 0", "Channel 1"],
+                    channel_dtypes: ["uint8", "uint16"],
+                    channel_colors: ["red", "green"],
+                    vmin_list: [0, 100],
+                    vmax_list: [255, 65000],
+                    gamma_list: [1.0, 1.2],
+                    opacity_list: [1.0, 0.5],
+                    histograms_data: [
+                        {counts: [10, 20, 50, 100, 50, 20, 10], bin_edges: [0, 42, 85, 127, 170, 212, 255]},
+                        {counts: [5, 15, 30, 40, 30, 15, 5], bin_edges: [0, 10000, 20000, 30000, 40000, 50000, 60000, 70000]}
+                    ],
+                    warning_msg: "",
+                    show_crosshair: true
+                },
+                get(key) { return this.attributes[key]; },
+                set(key, val) {
+                    this.attributes[key] = val;
+                    if (mockListeners["change:"+key]) {
+                        mockListeners["change:"+key].forEach(cb => cb());
+                    }
+                },
+                on(event, callback) {
+                    if (!mockListeners[event]) mockListeners[event] = [];
+                    mockListeners[event].push(callback);
+                },
+                save_changes() { }
+            };
+
+            widget.render({ model: model, el: container });
+        </script>
+    </body>
+    </html>
