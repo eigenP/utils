@@ -3946,6 +3946,10 @@ def kknn_ingest(
         adata_ref.obs['kknn_k'] = np.nan
 
         # 2. Map .obsm (Embeddings)
+        if barycenter == "lle" and obsm_keys:
+            from scipy.linalg import cholesky, solve_triangular
+            from scipy.optimize import nnls
+
         for key in obsm_keys:
             print(f"Mapping obsm: '{key}'...")
             ref_coords = adata_ref.obsm[key]
@@ -4015,19 +4019,21 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve exactly for non-negative weights: minimize w^T G w subject to w >= 0
+                    # This is equivalent to min ||U w - b||_2^2 where G = U^T U and U^T b = 1
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
+                        U = cholesky(G_reg, lower=False)
+                        b = solve_triangular(U, np.ones(len(idx)), trans='T', lower=False)
+                        w, _ = nnls(U, b)
+
                         w_sum = np.sum(w)
                         if w_sum > 0:
                             weights = w / w_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except (np.linalg.LinAlgError, ValueError):
+                        # Fallback to inverse distance if singular or non-positive definite
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
