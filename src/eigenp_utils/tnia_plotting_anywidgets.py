@@ -529,14 +529,9 @@ def create_multichannel_rgb(
 
         if vmaxs[i] is None:
             # max over 2D slices instead of concatenating
-            if np.issubdtype(xy_list[i].dtype, np.integer) or xy_list[i].dtype == bool:
-                m_xy = float(np.max(xy_list[i]))
-                m_xz = float(np.max(xz_list[i]))
-                m_zy = float(np.max(zy_list[i]))
-            else:
-                m_xy = float(np.percentile(xy_list[i], 99.9))
-                m_xz = float(np.percentile(xz_list[i], 99.9))
-                m_zy = float(np.percentile(zy_list[i], 99.9))
+            m_xy = float(np.max(xy_list[i]))
+            m_xz = float(np.max(xz_list[i]))
+            m_zy = float(np.max(zy_list[i]))
             vmaxs[i] = float(max(m_xy, m_xz, m_zy))
         else:
             vmaxs[i] = float(vmaxs[i])
@@ -685,14 +680,9 @@ def create_multichannel_rgb_cmap(
             vmins[i] = float(vmins[i])
 
         if vmaxs[i] is None:
-            if np.issubdtype(xy_list[i].dtype, np.integer) or xy_list[i].dtype == bool:
-                m_xy = float(np.max(xy_list[i]))
-                m_xz = float(np.max(xz_list[i]))
-                m_zy = float(np.max(zy_list[i]))
-            else:
-                m_xy = float(np.percentile(xy_list[i], 99.9))
-                m_xz = float(np.percentile(xz_list[i], 99.9))
-                m_zy = float(np.percentile(zy_list[i], 99.9))
+            m_xy = float(np.max(xy_list[i]))
+            m_xz = float(np.max(xz_list[i]))
+            m_zy = float(np.max(zy_list[i]))
             vmaxs[i] = float(max(m_xy, m_xz, m_zy))
         else:
             vmaxs[i] = float(vmaxs[i])
@@ -797,13 +787,7 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     for c in range(C):
         arr = intensities[:, c].astype(float)
         vmin_c = np.nanmin(arr) if vmin[c] is None else vmin[c]
-        if vmax[c] is None:
-            if np.issubdtype(intensities[:, c].dtype, np.integer) or intensities[:, c].dtype == bool:
-                vmax_c = np.nanmax(arr)
-            else:
-                vmax_c = np.nanpercentile(arr, 99.9)
-        else:
-            vmax_c = vmax[c]
+        vmax_c = np.nanmax(arr) if vmax[c] is None else vmax[c]
         norm = (arr - vmin_c) / max(1e-9, vmax_c - vmin_c)
         norm = np.clip(norm, 0, 1)
         if gammas[c] != 1:
@@ -1220,12 +1204,9 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmin_val = None if self.vmin_list[0] == "" else float(self.vmin_list[0])
             vmax_val = None if self.vmax_list[0] == "" else float(self.vmax_list[0])
 
-            # Auto-calculate 99.5 percentile if vmax is not explicitly set
+            # Auto-calculate max if vmax is not explicitly set
             if vmax_val is None:
-                if np.issubdtype(self.im_orig.dtype, np.integer) or self.im_orig.dtype == bool:
-                    vmax_val = float(np.max(self.im_orig))
-                else:
-                    vmax_val = float(np.percentile(self.im_orig, 99.9))
+                vmax_val = float(np.max(self.im_orig))
 
             gamma_val = float(self.gamma_list[0])
             opacity_val = float(self.opacity_list[0])
@@ -1355,10 +1336,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         vmax = kwargs.get('vmax', None)
 
         def resolve_vmax(img):
-            if np.issubdtype(img.dtype, np.integer) or img.dtype == bool:
-                return float(np.max(img))
-            else:
-                return float(np.percentile(img, 99.9))
+            return float(np.max(img))
 
         if vmax is None:
             vmax_list = [resolve_vmax(im_list[i]) for i in range(len(im_list) - 1)] + [255.0]
@@ -1887,13 +1865,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     cmap = black_to(resolve_color(c_use))
 
                 vmin_c = np.nanmin(vals) if vmin_resolved[0] is None else vmin_resolved[0]
-                if vmax_resolved[0] is None:
-                    if np.issubdtype(vals.dtype, np.integer) or vals.dtype == bool:
-                        vmax_c = np.nanmax(vals)
-                    else:
-                        vmax_c = np.nanpercentile(vals, 99.9)
-                else:
-                    vmax_c = vmax_resolved[0]
+                vmax_c = np.nanmax(vals) if vmax_resolved[0] is None else vmax_resolved[0]
                 norm = matplotlib.colors.Normalize(vmin=vmin_c, vmax=vmax_c)
 
                 if mZ_all.any():
