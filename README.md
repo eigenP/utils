@@ -13,6 +13,7 @@
 ### Plotting & Visualization
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_xyz` for dynamic multichannel viewers), interactive point cloud visualization (`IsoScatterWidget`), and 3D point annotation (`TNIAAnnotatorWidget`).
 * **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker`, and SVGs embedded with metadata via `savefig_svg`.
+* **Task Scheduling**: Includes `task_calendar_scheduler` for generating Gantt-style timeline schedules for linked events using Plotly.
 
 ### Single-Cell Analysis
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
@@ -23,6 +24,9 @@
 * **Feature Correlation**: Find highly correlated features with respect to targets, optionally utilizing graph-based diffusion to smooth over the cell-cell graph (`find_correlated_features`).
 * **Spatial Autocorrelation**: Fast Moran's I implementation (`morans_i_all_fast`) that correctly handles general (non-row-standardized) spatial weights.
 * **Dimensionality Reduction**: `tl_pacmap` for PaCMAP embeddings supporting versatile initialization strategies (e.g., PAGA, PCA, random).
+* **Adaptive Manifold Learning (kkNN)**: Includes `kknn_ingest` for reference mapping/data integration and `kknn_classifier` for smoothing/label transfer, both of which adaptively scale neighbors based on local manifold curvature.
+* **Feature Selection & Correlation**: Integrates `run_triku` for feature selection, `find_correlated_features` (with graph-based smoothing/diffusion), and `find_expression_archetypes` for gene module identification.
+* **Clustering Hierarchy**: Supports tracking clustering across resolutions via `multiscale_coarsening` and `plot_clustering_tree`.
 
 ### Statistical Utilities
 * **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci`, `summary_stats`, `remove_outliers`, and `add_stat_annotations` for annotating plots with significance markers.
@@ -32,6 +36,7 @@
 * **Spline Utilities**: Calculate tangent vectors and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
 * **I/O Utilities**: Functions to streamline file and data reading.
+* **Spline & Geometry Tools**: Includes `spline_utils` for N-dimensional parametric spline fitting (`fit_cubic_spline`), vector difference/overlap calculations, and volumetric rasterization (`create_nd_image_from_spline`).
 
 ## Installation
 
