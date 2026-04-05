@@ -1124,13 +1124,31 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.channel_colors = [resolve_color(c) for c in self.colors_resolved]
 
         # Set traitlets lists for interactive parameters
-        # Use "" to represent 'auto' for empty inputs in JS (maps to None for matplotlib)
-        def _resolve_vmin_vmax(val, n):
+        def _resolve_vmin(val, n):
             lst = _to_list(val, n, None)
-            return ["" if x is None else x for x in lst]
+            res = []
+            for x in lst:
+                res.append(0.0 if x is None else float(x))
+            return res
 
-        self.vmin_list = _resolve_vmin_vmax(vmin, self.num_channels)
-        self.vmax_list = _resolve_vmin_vmax(vmax, self.num_channels)
+        def _resolve_vmax(val, n, im_orig):
+            lst = _to_list(val, n, None)
+            res = []
+            for i, x in enumerate(lst):
+                if x is not None:
+                    res.append(float(x))
+                else:
+                    if isinstance(im_orig, list):
+                        m = float(np.nanmax(im_orig[i]))
+                    else:
+                        m = float(np.nanmax(im_orig))
+                    if np.isnan(m):
+                        m = 1.0
+                    res.append(m)
+            return res
+
+        self.vmin_list = _resolve_vmin(vmin, self.num_channels)
+        self.vmax_list = _resolve_vmax(vmax, self.num_channels, self.im_orig)
         self.gamma_list = _to_list(gamma, self.num_channels, 1.0)
         self.opacity_list = _to_list(opacity, self.num_channels, 1.0)
 
@@ -1350,7 +1368,10 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         vmax = kwargs.get('vmax', None)
 
         def resolve_vmax(img):
-            return float(np.max(img))
+            m = float(np.nanmax(img))
+            if np.isnan(m):
+                m = 1.0
+            return m
 
         if vmax is None:
             vmax_list = [resolve_vmax(im_list[i]) for i in range(len(im_list) - 1)] + [255.0]
@@ -1660,12 +1681,34 @@ class TNIAScatterWidget(TNIAWidgetBase):
             else:
                 return [val] * n
 
-        def _resolve_vmin_vmax(val, n):
+        def _resolve_vmin(val, n):
             lst = _to_list(val, n, None)
-            return ["" if x is None else x for x in lst]
+            res = []
+            for x in lst:
+                res.append(0.0 if x is None else float(x))
+            return res
 
-        self.vmin_list = _resolve_vmin_vmax(vmin, self.C)
-        self.vmax_list = _resolve_vmin_vmax(vmax, self.C)
+        def _resolve_vmax(val, n, mode, cont_single, cont_multi):
+            lst = _to_list(val, n, None)
+            res = []
+            for i, x in enumerate(lst):
+                if x is not None:
+                    res.append(float(x))
+                else:
+                    if mode == 'cont_single':
+                        m = float(np.nanmax(cont_single))
+                    elif mode == 'cont_multi':
+                        m = float(np.nanmax(cont_multi[:, i]))
+                    else:
+                        m = 1.0
+
+                    if np.isnan(m):
+                        m = 1.0
+                    res.append(m)
+            return res
+
+        self.vmin_list = _resolve_vmin(vmin, self.C)
+        self.vmax_list = _resolve_vmax(vmax, self.C, self.mode, self.cont_single, self.cont_multi)
         self.gamma_list = _to_list(gamma, self.C, 1.0)
         self.opacity_list = _to_list(opacity, self.C, 1.0)
 
