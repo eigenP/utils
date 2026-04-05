@@ -4023,11 +4023,20 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve strictly Non-Negative Least Squares (NNLS)
+                    # For G_reg * w = 1 with w >= 0, we can reformulate using Cholesky.
+                    # This replaces the mathematically flawed heuristic of solving
+                    # the unconstrained system and clipping `np.maximum(w, 0)`, which
+                    # destroys the optimality of the projection under collinearity.
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
+                        from scipy.optimize import nnls
+                        L = np.linalg.cholesky(G_reg)
+                        # G_reg = L * L^T -> L * L^T * w = 1
+                        # Let y = L^T * w, then L * y = 1.
+                        # We solve NNLS: min ||L^T w - L^-1 1||^2 subject to w >= 0
+                        y = np.linalg.solve(L, np.ones(len(idx)))
+                        w, _ = nnls(L.T, y)
+
                         w_sum = np.sum(w)
                         if w_sum > 0:
                             weights = w / w_sum
@@ -4261,8 +4270,12 @@ def find_correlated_features(
         res_dict["spearman"] = np.clip(r_spear, -1.0, 1.0)
 
     if "wasserstein" in metrics:
-        from scipy.stats import wasserstein_distance
         w_dist = np.empty(n_features, dtype=float)
+
+        # matth: Use exact closed-form 1D Wasserstein distance for empirical
+        # distributions of equal size. This avoids integration overhead and
+        # allows us to sort the target variable once outside the loop.
+        target_z_sorted = np.sort(target_z)
 
         if sp.issparse(M):
             M_csc = M.tocsc()
@@ -4271,12 +4284,12 @@ def find_correlated_features(
                 col = M_csc[:, j].toarray().ravel()
                 # Z-score using precomputed exact stats
                 col_z = (col - feature_means[j]) / feature_stds[j]
-                w_dist[j] = wasserstein_distance(col_z, target_z)
+                w_dist[j] = np.mean(np.abs(np.sort(col_z) - target_z_sorted))
         else:
             M_dense = np.asarray(M)
             for j in range(n_features):
                 col_z = (M_dense[:, j] - feature_means[j]) / feature_stds[j]
-                w_dist[j] = wasserstein_distance(col_z, target_z)
+                w_dist[j] = np.mean(np.abs(np.sort(col_z) - target_z_sorted))
 
         res_dict["wasserstein"] = w_dist
 
