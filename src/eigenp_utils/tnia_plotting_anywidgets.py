@@ -529,9 +529,9 @@ def create_multichannel_rgb(
 
         if vmaxs[i] is None:
             # max over 2D slices instead of concatenating
-            m_xy = float(np.percentile(xy_list[i], 99.5))
-            m_xz = float(np.percentile(xz_list[i], 99.5))
-            m_zy = float(np.percentile(zy_list[i], 99.5))
+            m_xy = float(np.max(xy_list[i]))
+            m_xz = float(np.max(xz_list[i]))
+            m_zy = float(np.max(zy_list[i]))
             vmaxs[i] = float(max(m_xy, m_xz, m_zy))
         else:
             vmaxs[i] = float(vmaxs[i])
@@ -680,9 +680,9 @@ def create_multichannel_rgb_cmap(
             vmins[i] = float(vmins[i])
 
         if vmaxs[i] is None:
-            m_xy = float(np.percentile(xy_list[i], 99.5))
-            m_xz = float(np.percentile(xz_list[i], 99.5))
-            m_zy = float(np.percentile(zy_list[i], 99.5))
+            m_xy = float(np.max(xy_list[i]))
+            m_xz = float(np.max(xz_list[i]))
+            m_zy = float(np.max(zy_list[i]))
             vmaxs[i] = float(max(m_xy, m_xz, m_zy))
         else:
             vmaxs[i] = float(vmaxs[i])
@@ -787,7 +787,7 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     for c in range(C):
         arr = intensities[:, c].astype(float)
         vmin_c = np.nanmin(arr) if vmin[c] is None else vmin[c]
-        vmax_c = np.nanpercentile(arr, 99.5) if vmax[c] is None else vmax[c]
+        vmax_c = np.nanmax(arr) if vmax[c] is None else vmax[c]
         norm = (arr - vmin_c) / max(1e-9, vmax_c - vmin_c)
         norm = np.clip(norm, 0, 1)
         if gammas[c] != 1:
@@ -813,6 +813,29 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
 
 
+
+def compute_histogram(arr, bins=128):
+    if arr.size == 0:
+        return {'counts': [], 'bin_edges': []}
+    arr_clean = arr[~np.isnan(arr)] if np.issubdtype(arr.dtype, np.floating) else arr
+    if arr_clean.size == 0:
+        return {'counts': [], 'bin_edges': []}
+
+    # Determine absolute range based on dtype
+    range_val = None
+    if arr.dtype == np.uint8:
+        range_val = (0, 255)
+    elif arr.dtype == np.uint16:
+        range_val = (0, 65535)
+    elif arr.dtype == bool:
+        range_val = (0, 1)
+
+    if range_val is not None:
+        counts, bin_edges = np.histogram(arr_clean, bins=bins, range=range_val)
+    else:
+        counts, bin_edges = np.histogram(arr_clean, bins=bins)
+
+    return {'counts': counts.tolist(), 'bin_edges': bin_edges.tolist()}
 
 class TNIAWidgetBase(anywidget.AnyWidget):
     # _esm = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.js"
@@ -860,6 +883,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     vmax_list = traitlets.List(traitlets.Any()).tag(sync=True)
     gamma_list = traitlets.List(traitlets.Float()).tag(sync=True)
     opacity_list = traitlets.List(traitlets.Float()).tag(sync=True)
+    histograms_data = traitlets.List(traitlets.Dict()).tag(sync=True)
 
     # UI Toggles
     show_crosshair = traitlets.Bool(True).tag(sync=True)
@@ -1119,6 +1143,15 @@ class TNIASliceWidget(TNIAWidgetBase):
         if y_s is not None: self.y_s = int(y_s)
         if z_s is not None: self.z_s = int(z_s)
 
+        # Compute histograms
+        hists = []
+        if isinstance(im, list):
+            for img in im:
+                hists.append(compute_histogram(img))
+        else:
+            hists.append(compute_histogram(im))
+        self.histograms_data = hists
+
         # Initialize observers and render
         self._init_observers()
 
@@ -1185,9 +1218,9 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmin_val = None if self.vmin_list[0] == "" else float(self.vmin_list[0])
             vmax_val = None if self.vmax_list[0] == "" else float(self.vmax_list[0])
 
-            # Auto-calculate 99.5 percentile if vmax is not explicitly set
+            # Auto-calculate max if vmax is not explicitly set
             if vmax_val is None:
-                vmax_val = float(np.percentile(self.im_orig, 99.5))
+                vmax_val = float(np.max(self.im_orig))
 
             gamma_val = float(self.gamma_list[0])
             opacity_val = float(self.opacity_list[0])
@@ -1315,14 +1348,21 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
         # Ensure vmax is padded correctly for the annotation channel
         vmax = kwargs.get('vmax', None)
+
+        def resolve_vmax(img):
+            return float(np.max(img))
+
         if vmax is None:
-            vmax_list = [None] * (len(im_list) - 1) + [255.0]
+            vmax_list = [resolve_vmax(im_list[i]) for i in range(len(im_list) - 1)] + [255.0]
             kwargs['vmax'] = vmax_list
         elif isinstance(vmax, (list, tuple)):
             vmax_list = list(vmax)
             while len(vmax_list) < len(im_list) - 1:
                 vmax_list.append(None)
             vmax_list = vmax_list[:len(im_list) - 1]
+            for i in range(len(vmax_list)):
+                if vmax_list[i] is None:
+                    vmax_list[i] = resolve_vmax(im_list[i])
             vmax_list.append(255.0)
             kwargs['vmax'] = vmax_list
         else:
@@ -1648,6 +1688,27 @@ class TNIAScatterWidget(TNIAWidgetBase):
         if z_s is None: self.z_s = int((self.zmax - self.zmin)/2)
         else: self.z_s = int(z_s)
 
+        # Compute histograms
+        hists = []
+        if self.mode == 'single' or self.mode == 'ids' or self.mode == 'idx_lists':
+            # For scatter with a single set of points and uniform color, the distribution is just counts (not really intensities).
+            # We don't have multiple intensity channels here. We'll leave it empty.
+            # If ids, we just have 1 channel (the IDs).
+            if self.mode == 'ids':
+                hists.append(compute_histogram(self.ch_ids))
+            else:
+                hists.append({'counts': [], 'bin_edges': []}) # No intensities to map
+        elif self.mode == 'cont_single':
+            hists.append(compute_histogram(self.cont_single))
+        elif self.mode == 'cont_multi':
+            for c in range(self.C):
+                hists.append(compute_histogram(self.cont_multi[:, c]))
+
+        # pad to C
+        while len(hists) < self.C:
+            hists.append({'counts': [], 'bin_edges': []})
+        self.histograms_data = hists
+
         # Initialize observers and render
         self._init_observers()
 
@@ -1818,7 +1879,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     cmap = black_to(resolve_color(c_use))
 
                 vmin_c = np.nanmin(vals) if vmin_resolved[0] is None else vmin_resolved[0]
-                vmax_c = np.nanpercentile(vals, 99.5) if vmax_resolved[0] is None else vmax_resolved[0]
+                vmax_c = np.nanmax(vals) if vmax_resolved[0] is None else vmax_resolved[0]
                 norm = matplotlib.colors.Normalize(vmin=vmin_c, vmax=vmax_c)
 
                 if mZ_all.any():
