@@ -51,3 +51,26 @@ def test_raincloud_plot_mismatch_warning(capsys):
     # Check for warning print
     captured = capsys.readouterr()
     assert "Warning: x_label list length (1) does not match number of groups (2)" in captured.out
+
+def test_raincloud_plot_with_kwargs():
+    import pandas as pd
+    data = pd.DataFrame({
+        'group': ['A', 'A', 'B', 'B'],
+        'value': [1.0, 2.0, 3.0, 4.0]
+    })
+
+    # Just checking it runs without exceptions to catch regressions
+    res = raincloud_plot(
+        data=data,
+        x='group',
+        y='value',
+        size_scatter=10,
+        size_median=50,
+        alpha_scatter=0.2,
+        alpha_violin=0.3,
+        linewidth_scatter=1,
+        linewidth_boxplot=2,
+        offset_scatter=0.1
+    )
+    assert res is not None
+    assert 'axes' in res
