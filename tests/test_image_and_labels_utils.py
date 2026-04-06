@@ -3,8 +3,47 @@ import pytest
 from eigenp_utils.image_and_labels_utils import (
     windowed_slice_projection,
     optimized_entire_labels_touching_mask,
-    sample_intensity_around_points_optimized
+    sample_intensity_around_points_optimized,
+    voronoi_otsu_labeling
 )
+
+def test_voronoi_otsu_labeling():
+    # Test 2D without spacing
+    img_2d = np.zeros((20, 20), dtype=float)
+    # create two distinct Gaussian spots
+    for center, scale in [((5, 5), 3), ((15, 15), 3)]:
+        y, x = np.ogrid[-center[0]:20-center[0], -center[1]:20-center[1]]
+        img_2d += np.exp(-(x**2 + y**2) / (2 * scale**2)) * 10
+
+    # We add some background noise so Otsu thresholding finds something besides straight zeros
+    img_2d += np.random.rand(20, 20) * 0.1
+
+    labels_2d = voronoi_otsu_labeling(img_2d, spot_sigma=1, outline_sigma=1)
+
+    assert labels_2d.shape == (20, 20)
+    # Check that there are at least 2 distinct labeled regions
+    assert len(np.unique(labels_2d[labels_2d > 0])) >= 2
+    # Verify the centers belong to labeled spots
+    assert labels_2d[5, 5] > 0
+    assert labels_2d[15, 15] > 0
+
+    # Test 3D with spacing
+    img_3d = np.zeros((10, 20, 20), dtype=float)
+    for center, scale in [((5, 5, 5), 2), ((5, 15, 15), 2)]:
+        z, y, x = np.ogrid[-center[0]:10-center[0], -center[1]:20-center[1], -center[2]:20-center[2]]
+        img_3d += np.exp(-(x**2 + y**2 + z**2) / (2 * scale**2)) * 10
+
+    img_3d += np.random.rand(10, 20, 20) * 0.1
+
+    spacing = {'Z': 2.0, 'Y': 0.5, 'X': 0.5}
+    # Pass a tuple to spot_sigma
+    labels_3d = voronoi_otsu_labeling(img_3d, spot_sigma=(2, 1, 1), outline_sigma=1, spacing=spacing)
+
+    assert labels_3d.shape == (10, 20, 20)
+    assert len(np.unique(labels_3d[labels_3d > 0])) >= 2
+    assert labels_3d[5, 5, 5] > 0
+    assert labels_3d[5, 15, 15] > 0
+
 
 def test_windowed_slice_projection_max():
     img = np.zeros((5, 10, 10))

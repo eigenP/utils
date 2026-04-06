@@ -2,6 +2,64 @@ import warnings
 import numpy as np
 from skimage.segmentation import expand_labels
 from scipy.ndimage import uniform_filter
+from skimage import filters, feature, segmentation
+import scipy.ndimage as ndi
+
+
+def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None):
+    """
+    Segment spots using a marker-based watershed algorithm (Voronoi-Otsu-Labeling).
+
+    Parameters:
+    - image: Input image array (2D or 3D, (Z)YX order).
+    - spot_sigma: Sigma for the Gaussian blur used to detect local maxima (spots). Can be scalar or tuple.
+    - outline_sigma: Sigma for the Gaussian blur used to create the watershed outline. Can be scalar or tuple.
+    - spacing: Optional dict mapping dimension to pixel size, e.g., {'Z': 1.0, 'Y': 0.5, 'X': 0.5}.
+
+    Returns:
+    - labels: Segmented labeled mask.
+    """
+    dim_keys = ['Z', 'Y', 'X'] if image.ndim == 3 else ['Y', 'X']
+
+    # Convert sigmas into tuples per axis, scaling by pixel size if provided
+    def _process_sigma(sigma_val):
+        if not isinstance(sigma_val, (list, tuple)):
+            sigma_val = [sigma_val] * image.ndim
+
+        if spacing is not None:
+            sigma_val = [s / spacing.get(dim, 1.0) for s, dim in zip(sigma_val, dim_keys)]
+
+        return tuple(sigma_val)
+
+    spot_sigma_tuple = _process_sigma(spot_sigma)
+    outline_sigma_tuple = _process_sigma(outline_sigma)
+
+    # Step 1: Apply Gaussian blur for spot detection directly into a new variable
+    blurred_spot = filters.gaussian(image, sigma=spot_sigma_tuple)
+
+    # Step 2: Detect local maxima (spots)
+    # TODO: consider scaling min_distance based on pixel sizes
+    local_maxi = feature.peak_local_max(blurred_spot, min_distance=3, labels=None)
+
+    # local_maxi contains the coordinates of the peaks
+    peaks = np.zeros_like(blurred_spot, dtype=bool)
+    if len(local_maxi) > 0:
+        peaks[tuple(local_maxi.T)] = True  # Transpose and index to set True at peak locations
+
+    # Step 3: Reuse blurred_spot for outline blurring to save memory
+    blurred_outline = filters.gaussian(image, sigma=outline_sigma_tuple, out=blurred_spot)
+
+    # Step 4: Perform Otsu thresholding directly
+    thresh = filters.threshold_otsu(blurred_outline)
+    binary_mask = blurred_outline > thresh  # In-place comparison, no need for extra space
+
+    # Step 5: Label the markers (local maxima)
+    markers, _ = ndi.label(peaks, output=np.int32)  # Use int32 if default int64 is not necessary
+
+    # Step 6: Perform marker-based watershed segmentation
+    labels = segmentation.watershed(-blurred_outline, markers, mask=binary_mask, compactness=0.5)
+
+    return labels
 
 
 def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='max'):
