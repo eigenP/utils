@@ -751,6 +751,10 @@ def plot_marker_genes_dict_on_embedding(
     -------
     List[plt.Axes]
         A list of matplotlib Axes objects containing the plots.
+
+    Notes:
+        Supports passing a list of `score_method`s to compute and dynamically append multiple
+        types of cell type scores (e.g., standard vs. net scores) to the visualized embedding.
     """
 
     # 1. Validate Basis
@@ -2898,6 +2902,12 @@ def annotate_clusters_by_markers(
     Parameters:
     - normalize_scores: Whether to apply robust normalization (median/MAD) to the scores. Default is True.
       Formula: (x - median(x)) / (median(|x - median(x)|) + 1e-8)
+
+    Notes:
+        Calculates the 'Probability of Superiority' (confidence) using a parametric normal approximation
+        ($P(X > Y) = \Phi(\mu_d / \sigma_d)$). This properly accounts for the variance of the score difference
+        ($\sigma_d$), ensuring extreme outliers or correlated variables appropriately inflate the standard
+        deviation and lower assignment confidence, avoiding the overconfidence of simple empirical non-parametric fractions.
     """
     if beta is not None:
         warnings.warn("The `beta` parameter is deprecated and ignored. `annotate_clusters_by_markers` now uses a parameter-free probabilistic confidence score.", DeprecationWarning, stacklevel=2)
@@ -3804,6 +3814,23 @@ def kknn_ingest(
         lle_reg_lambda: Regularization strength for Locally Linear Embedding (`barycenter='lle'`).
                         Decreasing it (e.g., to 1e-4) forces sparser, sharper assignment to nearest neighbors.
         **kwargs: Additional args for compute_kknn_neighbors (e.g., min_neighbors, max_neighbors).
+
+    Notes:
+        - When barycenter='distance', inverse distance weights are calculated using a scale-invariant
+          bandwidth based on the median neighborhood distance plus a small epsilon
+          (`1.0 / (dist + median_dist + 1e-6)`). This properly prevents self-nodes (dist=0) from
+          pathologically dominating the vote with near-infinite self-weights.
+        - Manages temporary PCA projections (`__temp_ingest_...` in `adata_query.obsm`) by wrapping
+          the entire neighbor computation and mapping process in a `try...finally` block, ensuring the
+          temporary representation is available for `barycenter` calculations and safely deleted afterwards.
+        - Supports two refined embedding projection methods: `barycenter="transform"` maps query data natively
+          via an embedding model's `.transform()` method (passed via an `embedding_models` dict), and
+          `barycenter="lle"` uses an exact Non-Negative Least Squares (NNLS) solver with Cholesky decomposition
+          to compute Regularized Locally Linear Embedding weights, rigorously enforcing non-negativity constraints.
+        - Aligns reference and query datasets for `anndata.concat(..., join='outer')` by duplicating the
+          reference's `.obs` and `.obsm` keys with a `_kknn` suffix, and setting ground-truth reference
+          tracking metadata (like `kknn_k` and `mapping_confidence`) to `NaN`. This ensures keys align
+          perfectly when preserving non-overlapping metadata via outer join.
     """
     if isinstance(obs_keys, str):
         obs_keys = [obs_keys]
