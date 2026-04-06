@@ -292,7 +292,7 @@ export default {
 
         // Add Histogram Canvas
         const histCanvas = document.createElement("canvas");
-        histCanvas.width = 120;
+        histCanvas.width = 160;
         histCanvas.height = 30;
         histCanvas.style.marginLeft = "auto";
         histCanvas.style.border = "1px solid #ccc";
