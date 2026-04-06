@@ -815,6 +815,12 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
 
 def compute_histogram(arr, bins=128):
+    """
+    Computes a 1D histogram for array values.
+
+    To enhance the visibility of sparse/heavy-tailed intensity distributions in interactive
+    widgets, the returned bin counts are transformed into log frequencies (using log1p).
+    """
     if arr.size == 0:
         return {'counts': [], 'bin_edges': []}
     arr_clean = arr[~np.isnan(arr)] if np.issubdtype(arr.dtype, np.floating) else arr
@@ -834,6 +840,9 @@ def compute_histogram(arr, bins=128):
         counts, bin_edges = np.histogram(arr_clean, bins=bins, range=range_val)
     else:
         counts, bin_edges = np.histogram(arr_clean, bins=bins)
+
+    # Use log frequencies to enhance visibility of tails in widgets
+    counts = np.log1p(counts)
 
     return {'counts': counts.tolist(), 'bin_edges': bin_edges.tolist()}
 
