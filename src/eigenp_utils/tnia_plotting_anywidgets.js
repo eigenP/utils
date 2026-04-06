@@ -340,7 +340,7 @@ export default {
           if (isNaN(vmax)) vmax = maxData;
           if (vmax <= vmin) vmax = vmin + 1e-9;
 
-          ctx.strokeStyle = color;
+          ctx.strokeStyle = "#000000";
           ctx.lineWidth = 2;
           ctx.beginPath();
 
