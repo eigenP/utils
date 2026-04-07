@@ -773,6 +773,17 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
         Values per point per channel.
     base_colors : list of str or rgb tuples
         Colors per channel.
+
+    Notes:
+        - Multi-channel visualization widgets support rendering with colormaps by distinguishing strings
+          via `is_colormap()`. When active, intensities map directly using `cmap(norm)[:, :3]` rather
+          than failing through `matplotlib.colors.to_rgb()`.
+        - The `colors` parameter in top-level functions is deprecated in favor of `colormap`. To support
+          multi-channel arrays, `colormap` accepts a list of colormaps. To prevent `TypeError: unhashable type: 'list'`
+          from Matplotlib's `imshow`, functions explicitly unset `colormap` after mapping channels into a pre-rendered RGB array.
+        - The default colormap for interactive plotters (slice, scatter, annotator) when no colormap is provided
+          is `['white']` for single-channel data, and cycles through `['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']`
+          for multi-channel data.
     """
     import numpy as np
     from matplotlib.colors import to_rgb
@@ -2031,6 +2042,14 @@ def show_zyx_max_slice_interactive(
     Interactive 3D slice viewer using AnyWidget.
 
     Inspired by show_zyx_max_slice_interactive in tnia_plotting_3d.py (ipywidgets version).
+
+    Notes:
+        - When `vmax` is not explicitly provided, it defaults to the 99.9th percentile for float arrays,
+          and `np.max` for all integer and boolean arrays to prevent clipping. `vmin` defaults to 0 or
+          its current minimum behavior.
+        - Interactive widgets compute a 128-bin histogram per channel in the Python backend (excluding NaNs for floats)
+          and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
+          underneath the channel controls, overlaid with a curve reflecting the current `vmin`, `vmax`, and `gamma` settings.
     """
     if isinstance(im, list):
         if im[0].ndim == 2:
@@ -2155,6 +2174,19 @@ def show_zyx_max_scatter_interactive(
     x_s=None, y_s=None, z_s=None,
     x_t=None, y_t=None, z_t=None,
 ):
+    """
+    Shows interactive sliders for XY, XZ, and YZ projection of 3D point coordinates.
+
+    Notes:
+        - When hiding axes to maintain custom subplot backgrounds (e.g. `subplot_bg`), the code
+          manually hides ticks and spines instead of using `ax.axis('off')`, as `ax.axis('off')`
+          inadvertently disables the background patch in matplotlib.
+        - When `vmax` is not explicitly provided, it defaults to the 99.9th percentile for float arrays,
+          and `np.max` for all integer and boolean arrays to prevent clipping. `vmin` defaults to 0 or
+          its current minimum behavior.
+        - The function dynamically determines its rendering mode: if `render=None`, it defaults to
+          `'points'` for point counts under 10,000, and `'density'` for larger datasets to optimize interactive performance.
+    """
     if isinstance(points, (tuple, list)) and len(points) == 3:
         # points is a tuple or list of 3 arrays: (Z, Y, X)
         Z, Y, X = points[0], points[1], points[2]

@@ -131,6 +131,10 @@ def _(Calendar, events_to_dataframe):
         """
         Plots the calendar events, attempting to use resource names as colors.
         Falls back to standard coloring if resource names are not valid colors.
+
+        Notes:
+            Generates Gantt-style timeline schedules for linked events using Plotly.
+            It is compatible with Marimo notebooks.
         """
         df = events_to_dataframe(calendar.events)
 
