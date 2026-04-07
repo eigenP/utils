@@ -4201,19 +4201,30 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
-                        w_sum = np.sum(w)
+                        import scipy.linalg
+                        import scipy.optimize
+
+                        # matth: Exact Non-Negative LLE via Cholesky NNLS Dual
+                        # The constrained problem min(w^T G w) s.t. sum(w)=1, w>=0 is equivalent
+                        # to the LCP: y >= 0, G y >= 1, y^T(G y - 1) = 0.
+                        # We solve this exact LCP by mapping it to NNLS ||A y - b||^2
+                        # using the Cholesky decomposition of G_reg = L L^T.
+
+                        L = scipy.linalg.cholesky(G_reg, lower=True)
+                        b = scipy.linalg.solve_triangular(L, np.ones(len(idx)), lower=True)
+                        A = L.T
+
+                        y, _ = scipy.optimize.nnls(A, b)
+
+                        w_sum = np.sum(y)
                         if w_sum > 0:
-                            weights = w / w_sum
+                            weights = y / w_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except (np.linalg.LinAlgError, RuntimeError, ValueError):
+                        # Fallback to inverse distance if singular or NNLS fails
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
