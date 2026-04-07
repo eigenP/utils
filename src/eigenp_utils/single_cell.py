@@ -2242,6 +2242,157 @@ def tl_pacmap(
     print(f"PaCMAP embedding finished. Result stored in `adata.obsm['{key_added}']`.")
     
     
+# ------------------------- Lineage -------------------------
+
+def calculate_lineage_coupling(adata, label_key='cell_type', clone_key='CloneID', n_permutations=1000):
+    """
+    Calculates lineage coupling statistics via permutation testing.
+    Returns matrices for Observed counts, Z-scores, and P-values.
+    """
+
+    # 1. Prepare Data
+    # Create a binary matrix: Clones (rows) x Cell Types (columns)
+    # Value is 1 if the clone exists in that cell type, 0 otherwise.
+    df = adata.obs[[label_key, clone_key]].dropna()
+
+    # Efficient way to create the binary matrix
+    # Group by clone and get unique labels, then get dummies
+    # Pivot: Index=Clone_ID, Columns=Cell_Type, Values=1 (if present)
+    binary_matrix = pd.crosstab(df[clone_key], df[label_key]).clip(upper=1)
+
+    # 2. Calculate Observed Intersections
+    # Matrix Multiplication: (Types x Clones) @ (Clones x Types) = (Types x Types)
+    # The result [i, j] is the number of clones shared between Type i and Type j
+    observed_counts = binary_matrix.T @ binary_matrix
+
+    # 3. Permutation Test
+    null_matrices = []
+
+    # We shuffle the labels array to break the link between clone and cell type
+    # Convert to standard numpy array to avoid categorical shuffling warnings
+    # Use astype(str) or astype(object) before extracting array to avoid read-only or categorical warnings
+    labels_array = np.array(df[label_key].astype(str))
+
+    print(f"Running {n_permutations} permutations...")
+    for _ in range(n_permutations):
+        # Shuffle labels in place
+        np.random.shuffle(labels_array)
+
+        # Reconstruct the binary matrix with shuffled labels
+        # Note: We rely on the original index (clone_key) structure
+        shuffled_df = pd.DataFrame({
+            clone_key: df[clone_key].values,
+            label_key: labels_array
+        })
+
+        shuffled_binary = pd.crosstab(shuffled_df[clone_key], shuffled_df[label_key]).clip(upper=1)
+
+        # Ensure columns match observed (in case shuffling drops a rare type entirely)
+        shuffled_binary = shuffled_binary.reindex(columns=binary_matrix.columns, fill_value=0)
+
+        # Calculate null intersection
+        null_matrices.append((shuffled_binary.T @ shuffled_binary).values)
+
+    null_matrices = np.array(null_matrices) # Shape: (n_perms, n_types, n_types)
+
+    # 4. Calculate Statistics
+    null_mean = null_matrices.mean(axis=0)
+    null_std = null_matrices.std(axis=0)
+
+    # Avoid division by zero
+    null_std[null_std == 0] = 1.0
+
+    z_scores = (observed_counts.values - null_mean) / null_std
+    z_scores = pd.DataFrame(z_scores, index=observed_counts.index, columns=observed_counts.columns)
+
+    # Calculate empirical P-values
+    # (Count how many nulls were >= observed) / n_permutations
+    # Note: This is a one-sided test for enrichment.
+    # For two-sided, you'd check both tails. The image implies enrichment focus.
+    p_values = (null_matrices >= observed_counts.values).sum(axis=0) / n_permutations
+    p_values = pd.DataFrame(p_values, index=observed_counts.index, columns=observed_counts.columns)
+
+    return observed_counts, z_scores, p_values
+
+
+def plot_coupling_heatmap(observed, z_scores, p_values, title="Lineage Coupling"):
+    """
+    Plots the lower-triangular clustermap matching the provided image style.
+    """
+    import seaborn as sns
+    from matplotlib.patches import Rectangle
+    from matplotlib.lines import Line2D
+
+    # 1. Setup Mask for Upper Triangle
+    mask = np.triu(np.ones_like(z_scores, dtype=bool), k=1)
+
+    # 2. Setup Figure
+    plt.figure(figsize=(10, 8))
+
+    # 3. Plot Heatmap (Z-scores)
+    # Using 'vlag' or 'RdBu_r' to match the Blue-White-Red scheme
+    # vmin/vmax set to -10/10 to match the scale in your image
+    ax = sns.heatmap(
+        z_scores,
+        mask=mask,
+        cmap="RdBu_r",
+        center=0,
+        vmin=-5, vmax=5,
+        square=True,
+        cbar_kws={"label": "Z-score", "shrink": 0.5},
+        linewidths=1,
+        linecolor='white' # Optional grid lines
+    )
+
+    # 4. Overlay Numbers (Observed Counts)
+    # We iterate manually to place text only where unmasked
+    for i in range(observed.shape[0]):
+        for j in range(observed.shape[1]):
+            if i >= j: # Lower triangle including diagonal
+                count = observed.iloc[i, j]
+                # Choose text color based on background intensity (simple heuristic)
+                z_val = z_scores.iloc[i, j]
+                text_color = "white" if abs(z_val) > 5 else "black"
+
+                ax.text(j + 0.5, i + 0.5, f"{int(count)}",
+                        ha="center", va="center", color=text_color, fontsize=12)
+
+    # 5. Add Significance Borders
+    # Loop again to add rectangles
+    # Note: Rectangle(xy, width, height). xy is (col_idx, row_idx) -> (j, i)
+    # Adjustment: The border needs to be inset slightly to look like the image
+    for i in range(observed.shape[0]):
+        for j in range(observed.shape[1]):
+            if i >= j:
+                p_val = p_values.iloc[i, j]
+
+                if p_val <= 0.001:
+                    # Black Border (High Significance)
+                    rect = Rectangle((j + 0.05, i + 0.05), 0.9, 0.9,
+                                     fill=False, edgecolor='black', lw=2.5)
+                    ax.add_patch(rect)
+                elif p_val <= 0.01:
+                    # Orange Border (Medium Significance)
+                    rect = Rectangle((j + 0.05, i + 0.05), 0.9, 0.9,
+                                     fill=False, edgecolor='orange', lw=2.5)
+                    ax.add_patch(rect)
+
+    # 6. Formatting
+    plt.title(title)
+    plt.xticks(rotation=45, ha="right")
+    plt.yticks(rotation=0)
+
+    # Custom Legend for P-values
+    legend_elements = [
+        Line2D([0], [0], color='orange', lw=2.5, label='p ≤ 0.01'),
+        Line2D([0], [0], color='black', lw=2.5, label='p ≤ 0.001')
+    ]
+    # Add legend outside the plot
+    plt.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.2, 1))
+
+    return plt.gcf()
+
+
 # ------------------------- Multiscale Coarsening -------------------------
 
 def multiscale_coarsening(
