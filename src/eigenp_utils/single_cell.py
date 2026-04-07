@@ -635,14 +635,18 @@ def plot_clustering_tree(adata, cluster_keys, title="Clustering Resolution Tree"
 def import_obs_to_adata_from_csv(
     path: str,
     adata: sc.AnnData,
+    obs_key: str,
+    color_key: Optional[str] = None,
     index_col: int | str = 0,
+    index_name: str = "Cell_ID",
     sep: Optional[str] = None,
     engine: str = "python",
     overwrite_existing: bool = False,
     to_category: bool = True,
 ) -> None:
     """
-    Import a CSV/TSV file and join it to adata.obs, matching on index/barcode.
+    Import a specific observation column from a CSV/TSV file and join it to adata.obs, matching on index/barcode.
+    Optionally extracts colors if available and populates adata.uns.
 
     Parameters
     ----------
@@ -650,14 +654,20 @@ def import_obs_to_adata_from_csv(
         Path to the CSV file.
     adata
         AnnData object to modify in-place.
+    obs_key
+        The observation key (column name) to extract from the CSV.
+    color_key
+        The key indicating the column that stores colors. If None, defaults to `{obs_key}_colors`.
     index_col
         Column in the CSV to use as the index (barcode). Default is 0.
+    index_name
+        The name to apply to the adata.obs index (e.g. "Cell_ID"). Default is "Cell_ID".
     sep
         Separator used in the file. If None, it is inferred (e.g. comma or tab).
     engine
         Parser engine to use. Default "python".
     overwrite_existing
-        If True, columns in the CSV that already exist in adata.obs will be overwritten.
+        If True, the column in the CSV will overwrite if it already exists in adata.obs.
         If False, existing columns will be preserved and new columns will have a suffix if they clash.
     to_category
         If True, convert object-type columns in the imported data to categorical.
@@ -665,11 +675,16 @@ def import_obs_to_adata_from_csv(
     # Read the table (auto-detects comma vs tab)
     df = pd.read_csv(path, index_col=index_col, sep=sep, engine=engine)
 
-    print(df.head())
-
     # Tidy up index and columns
     df.index = df.index.astype(str).str.strip()
     df.columns = df.columns.str.strip()
+
+    if obs_key not in df.columns:
+        raise ValueError(f"Observation key '{obs_key}' not found in CSV.")
+
+    # Check for colors
+    if color_key is None:
+        color_key = f"{obs_key}_colors"
 
     # Drop duplicates in the CSV index to ensure unique mapping
     if df.index.duplicated().any():
@@ -677,37 +692,61 @@ def import_obs_to_adata_from_csv(
         warnings.warn(f"Dropping {n_dupes} duplicate barcodes from CSV.")
         df = df.loc[~df.index.duplicated(keep="first")]
 
-    # Identify overlapping columns
-    overlapping_cols = [col for col in df.columns if col in adata.obs.columns]
+    # Extract only the specified obs column to join
+    df_join = df[[obs_key]].copy()
 
+    # Identify overlapping columns
+    overlapping_cols = [obs_key] if obs_key in adata.obs.columns else []
+
+    target_col = obs_key
     if overwrite_existing:
         if overlapping_cols:
-            print(f"Overwriting columns in adata.obs: {overlapping_cols}")
+            print(f"Overwriting column in adata.obs: {obs_key}")
             adata.obs = adata.obs.drop(columns=overlapping_cols)
 
-        # Join (left join to adata to preserve adata shape)
-        adata.obs = adata.obs.join(df, how="left")
+        # Join
+        adata.obs = adata.obs.join(df_join, how="left")
     else:
         # If not overwriting, append suffix to new data if overlap
         suffix = "_imported"
         if overlapping_cols:
-            print(f"Columns {overlapping_cols} exist. Appending '{suffix}' suffix to new data.")
-            adata.obs = adata.obs.join(df, how="left", rsuffix=suffix)
+            print(f"Column {obs_key} exists. Appending '{suffix}' suffix to new data.")
+            adata.obs = adata.obs.join(df_join, how="left", rsuffix=suffix)
+            target_col = f"{obs_key}{suffix}"
         else:
-            adata.obs = adata.obs.join(df, how="left")
+            adata.obs = adata.obs.join(df_join, how="left")
 
     # Optional: make columns categorical to save memory
     if to_category:
-        # Check columns we expect to have added
-        for col in df.columns:
-            target_col = col
-            if not overwrite_existing and col in overlapping_cols:
-                target_col = f"{col}_imported"
+        if target_col in adata.obs:
+            # Convert object columns to categorical
+            if pd.api.types.is_object_dtype(adata.obs[target_col]) or pd.api.types.is_string_dtype(adata.obs[target_col]):
+                 adata.obs[target_col] = adata.obs[target_col].astype("category")
 
-            if target_col in adata.obs:
-                # Convert object columns to categorical
-                if pd.api.types.is_object_dtype(adata.obs[target_col]):
-                     adata.obs[target_col] = adata.obs[target_col].astype("category")
+    # Set index name
+    adata.obs.index.name = index_name
+
+    # Check if colors are available in the CSV to import
+    if color_key in df.columns:
+        if hasattr(adata.obs[target_col], "cat"):
+            # Create a dictionary mapping the categories to their colors
+            cat_to_color = df.drop_duplicates(subset=[obs_key]).set_index(obs_key)[color_key].to_dict()
+            categories = adata.obs[target_col].cat.categories
+
+            colors_list = []
+            for cat in categories:
+                # Fill missing colors with grey if not found
+                color = cat_to_color.get(cat, "#808080")
+                colors_list.append(color)
+
+            # Store the list of colors in adata.uns
+            target_color_key = f"{target_col}_colors"
+            adata.uns[target_color_key] = colors_list
+            print(f"Imported colors for '{target_col}' into adata.uns['{target_color_key}'].")
+        else:
+            warnings.warn(f"'{target_col}' is not categorical. Colors from '{color_key}' not imported.")
+    else:
+        warnings.warn(f"Color key '{color_key}' not found in CSV. Colors not imported.")
 
     # Quick sanity check
     n_common = adata.obs_names.isin(df.index).sum()
@@ -3198,49 +3237,52 @@ def barplot_cluster_uncertainty(cluster_df: pd.DataFrame, top_k: int = 25) -> Tu
     return fig, ax
 
 
-def export_cell_type_annotations(
+def export_obs_from_adata_to_csv(
     adata: sc.AnnData,
-    annotation_key: str,
+    obs_key: str,
     output_path: Optional[str] = None,
-    color_key: Optional[str] = None
+    color_key: Optional[str] = None,
+    index_name: str = "Cell_ID"
 ) -> None:
     """
-    Export cell type annotations to CSV.
+    Export a single adata.obs column (e.g. cell type annotations) to CSV, optionally including its colors.
     """
     from pathlib import Path
 
     # 1. Define your column names
     if color_key is None:
-        color_key = annotation_key + '_colors'
+        color_key = f"{obs_key}_colors"
 
-    # 2. Create a temporary dataframe with the cell type
-    # We explicitly copy the index to a column to ensure the Barcode is preserved
-    if annotation_key not in adata.obs:
-         raise ValueError(f"Annotation key '{annotation_key}' not found in adata.obs")
+    if obs_key not in adata.obs:
+         raise ValueError(f"Observation key '{obs_key}' not found in adata.obs")
 
-    df_export = adata.obs[[annotation_key]].copy()
+    # 2. Create a temporary dataframe
+    df_export = adata.obs[[obs_key]].copy()
 
     # 3. Map the colors from adata.uns to the individual cells
     # (Scanpy stores colors in .uns in the same order as the categories)
     if color_key in adata.uns:
         # Create a dictionary: { 'T-cell': '#1f77b4', 'B-cell': '#ff7f0e', ... }
-        categories = adata.obs[annotation_key].cat.categories
-        colors = adata.uns[color_key]
-        if len(categories) == len(colors):
-            category_map = dict(zip(categories, colors))
-            # Map this to a new column in the dataframe
-            df_export[color_key] = df_export[annotation_key].map(category_map)
+        if hasattr(adata.obs[obs_key], "cat"):
+            categories = adata.obs[obs_key].cat.categories
+            colors = adata.uns[color_key]
+            if len(categories) == len(colors):
+                category_map = dict(zip(categories, colors))
+                # Map this to a new column in the dataframe
+                df_export[color_key] = df_export[obs_key].map(category_map)
+            else:
+                warnings.warn(f"Number of colors in '{color_key}' does not match categories in '{obs_key}'. Colors not exported.")
         else:
-            print(f"Warning: Number of colors in '{color_key}' does not match categories in '{annotation_key}'. Colors not exported.")
+            warnings.warn(f"'{obs_key}' is not categorical. Colors not exported.")
     else:
-        print(f"Warning: '{color_key}' not found in adata.uns. Colors not exported.")
+        warnings.warn(f"'{color_key}' not found in adata.uns. Colors not exported.")
 
-    # 4. Rename the index to 'Cell_ID' for clarity
-    df_export.index.name = 'Cell_ID'
+    # 4. Rename the index for clarity
+    df_export.index.name = index_name
 
     # 5. Export to CSV
     if output_path is None:
-        out_file = Path('cell_type_export.csv')
+        out_file = Path(f'{obs_key}_export.csv')
     else:
         out_file = Path(output_path)
         if not out_file.suffix.lower() == '.csv':
