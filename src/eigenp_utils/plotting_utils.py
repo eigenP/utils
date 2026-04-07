@@ -213,7 +213,14 @@ def raincloud_plot(data,
                    orientation='vertical',
                    palette=None,
                    figsize=(4, 4),
-                   x=None, y=None, hue=None, dodge=None):
+                   x=None, y=None, hue=None, dodge=None,
+                   size_scatter=40,
+                   size_median=90,
+                   alpha_scatter=0.50,
+                   alpha_violin=0.8,
+                   linewidth_scatter=0.5,
+                   linewidth_boxplot=5,
+                   offset_scatter=0.20):
     """
     Creates a raincloud plot (half-violin + boxplot + jittered scatter).
 
@@ -517,7 +524,7 @@ def raincloud_plot(data,
         for pc in parts["bodies"]:
             pc.set_facecolor(col)
             pc.set_edgecolor(col)
-            pc.set_alpha(0.8)
+            pc.set_alpha(alpha_violin)
 
             # Clipping to half
             # get_paths()[0].vertices is (N, 2) array of (x, y)
@@ -537,7 +544,7 @@ def raincloud_plot(data,
         # Scale jitter and offset by width ratio relative to 0.8 (default)
         scale_factor = width / 0.8
         jitter_vals = rng.normal(loc=0, scale=0.04 * scale_factor, size=len(vals))
-        offset = 0.20 * scale_factor
+        offset = offset_scatter * scale_factor
 
         if vert:
             x_scatter = pos + offset + jitter_vals
@@ -546,18 +553,18 @@ def raincloud_plot(data,
             x_scatter = vals
             y_scatter = pos - offset + jitter_vals
 
-        ax.scatter(x_scatter, y_scatter, color=col, alpha=0.50,
-                   edgecolor="black", linewidth=0.5, s=40)
+        ax.scatter(x_scatter, y_scatter, color=col, alpha=alpha_scatter,
+                   edgecolor="black", linewidth=linewidth_scatter, s=size_scatter)
 
         # C. Boxplot Elements (Median + IQR)
         q1, med, q3 = np.percentile(vals, [25, 50, 75])
 
         if vert:
-            ax.vlines(pos, q1, q3, color="k", linewidth=5, zorder=2)
-            ax.scatter(pos, med, color="white", edgecolor="k", linewidth=2, s=90, zorder=3)
+            ax.vlines(pos, q1, q3, color="k", linewidth=linewidth_boxplot, zorder=2)
+            ax.scatter(pos, med, color="white", edgecolor="k", linewidth=2, s=size_median, zorder=3)
         else:
-            ax.hlines(pos, q1, q3, color="k", linewidth=5, zorder=2)
-            ax.scatter(med, pos, color="white", edgecolor="k", linewidth=2, s=90, zorder=3)
+            ax.hlines(pos, q1, q3, color="k", linewidth=linewidth_boxplot, zorder=2)
+            ax.scatter(med, pos, color="white", edgecolor="k", linewidth=2, s=size_median, zorder=3)
 
     # --- 5. Cosmetics ---
     if vert:
