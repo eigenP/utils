@@ -11,7 +11,8 @@ from sklearn.neighbors import NearestNeighbors
 import anndata
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
-from scipy.linalg import svd
+from scipy.linalg import svd, cholesky, solve_triangular
+from scipy.optimize import nnls
 from scipy.stats import norm
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
@@ -4673,19 +4674,22 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve exact Non-Negative Least Squares (NNLS)
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
+                        # Find w to minimize ||Gw - 1|| subject to w >= 0
+                        # Equivalent to minimizing ||L^T w - L^{-1} 1||^2 where G = L L^T
+                        L = cholesky(G_reg, lower=True)
+                        b = solve_triangular(L, np.ones(len(idx)), lower=True)
+                        w, _ = nnls(L.T, b)
+
                         w_sum = np.sum(w)
                         if w_sum > 0:
                             weights = w / w_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except (np.linalg.LinAlgError, ValueError, RuntimeError):
+                        # Fallback to inverse distance if singular or NNLS fails
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
