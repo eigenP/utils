@@ -2147,7 +2147,7 @@ def tl_pacmap(
     use_rep: str = "X_pca",
     random_state: int = 42,
     init: Optional[Union[str, np.ndarray]] = None,
-    save_model: bool = True,
+    save_model: bool = False,
     **kwargs,
 ) -> None:
     """
@@ -2345,6 +2345,11 @@ def tl_pacmap(
             adata.uns["pacmap_arrays"]["pca_solution"] = np.asarray(embedder.pca_solution)
 
         print("PaCMAP model parameters saved in `adata.uns`.")
+    else:
+        warnings.warn(
+            "The PaCMAP model was not saved. If you plan to project new data later using `.transform()`, "
+            "set `save_model=True` to persist the model state inside `adata.uns`."
+        )
 
     
 # ------------------------- Lineage -------------------------
