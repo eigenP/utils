@@ -4673,19 +4673,28 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve G * w = 1 using exact NNLS dual formulation
+                    # matth: Locally Linear Embedding (LLE) weights can be negative (extrapolation).
+                    # If we enforce non-negativity (interpolation) for downstream probability
+                    # mass tasks, simply clipping negative weights to zero destroys the optimality
+                    # of the solution. We must formulate this as a constrained Non-Negative Least
+                    # Squares (NNLS) problem.
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
+                        import scipy.linalg as sla
+                        from scipy.optimize import nnls
+                        # min_w (1/2 w^T G w - w^T 1) s.t. w >= 0
+                        # Decompose G = L @ L.T, equivalent to min_w ||L^T w - L^-1 1||^2 s.t. w >= 0
+                        L = sla.cholesky(G_reg, lower=True)
+                        b = sla.solve_triangular(L, np.ones(len(idx)), lower=True)
+                        w, _ = nnls(L.T, b)
                         w_sum = np.sum(w)
                         if w_sum > 0:
                             weights = w / w_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except Exception:
+                        # Fallback to inverse distance if singular or NNLS fails
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
