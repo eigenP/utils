@@ -4673,19 +4673,28 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # matth: Solve exactly using Non-Negative Least Squares (NNLS)
+                    # The objective is to minimize w^T G_reg w subject to w >= 0 and sum(w) = 1.
+                    # By solving min_y y^T G_reg y - 2 y^T 1 subject to y >= 0, we can recover
+                    # the optimal weights via w = y / sum(y). Since G_reg is symmetric positive-definite,
+                    # we use Cholesky decomposition L L^T = G_reg to rewrite this as an NNLS problem:
+                    # min_y || L^T y - L^{-1} 1 ||^2
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
-                        w_sum = np.sum(w)
-                        if w_sum > 0:
-                            weights = w / w_sum
+                        import scipy.linalg
+                        import scipy.optimize
+
+                        L = scipy.linalg.cholesky(G_reg, lower=True)
+                        b = scipy.linalg.solve_triangular(L, np.ones(len(idx)), lower=True)
+                        y, _ = scipy.optimize.nnls(L.T, b)
+
+                        y_sum = np.sum(y)
+                        if y_sum > 0:
+                            weights = y / y_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except (np.linalg.LinAlgError, scipy.linalg.LinAlgError, ValueError):
+                        # Fallback to inverse distance if singular or NNLS fails
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
