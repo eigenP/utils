@@ -4673,19 +4673,27 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve exact non-negative least squares: minimize w^T G_reg w subject to w >= 0, sum(w) = 1
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
+                        from scipy.optimize import nnls
+
+                        # Cholesky decomposition: G_reg = R^T R where R is upper triangular
+                        R = np.linalg.cholesky(G_reg).T
+
+                        # We want to solve R^T y = 1
+                        y = np.linalg.solve(R.T, np.ones(len(idx)))
+
+                        # Solve NNLS: minimize ||R w - y||_2 subject to w >= 0
+                        w, _ = nnls(R, y)
+
                         w_sum = np.sum(w)
                         if w_sum > 0:
                             weights = w / w_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except (np.linalg.LinAlgError, ImportError):
+                        # Fallback to inverse distance if singular or scipy not available
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
