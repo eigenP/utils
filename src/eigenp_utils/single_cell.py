@@ -13,6 +13,8 @@ import scipy.sparse as sp
 from scipy.cluster import hierarchy
 from scipy.linalg import svd
 from scipy.stats import norm
+from scipy.optimize import nnls
+import scipy.linalg as spla
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
 import matplotlib.colors as mcolors
@@ -4673,18 +4675,20 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve min_w w^T G w subject to sum(w)=1, w >= 0.
+                    # Using NNLS dual formulation: Let C^T C = G. b = C^{-T} 1.
+                    # NNLS solves min_v ||Cv - b||^2, and w = v / sum(v).
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
-                        w_sum = np.sum(w)
-                        if w_sum > 0:
-                            weights = w / w_sum
+                        C = spla.cholesky(G_reg, lower=False)
+                        b_exact = spla.solve_triangular(C, np.ones(len(idx)), trans='T', lower=False)
+                        v, _ = nnls(C, b_exact)
+                        v_sum = np.sum(v)
+                        if v_sum > 0:
+                            weights = v / v_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
+                    except (np.linalg.LinAlgError, ValueError):
                         # Fallback to inverse distance if singular
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
