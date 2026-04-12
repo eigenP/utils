@@ -872,8 +872,6 @@ def compute_histogram(arr, bins=128, max_samples=1_000_000):
     return {'counts': counts.tolist(), 'bin_edges': bin_edges.tolist()}
 
 class TNIAWidgetBase(anywidget.AnyWidget):
-    # _esm = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.js"
-    # _css = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.css"
     _esm = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.js").read_text()
     _css = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.css").read_text()
 
