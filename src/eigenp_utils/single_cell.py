@@ -4673,19 +4673,22 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve min ||Gw - 1||_2^2 subject to w >= 0 using NNLS on Cholesky factors
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
+                        from scipy.linalg import cholesky, solve_triangular
+                        from scipy.optimize import nnls
+
+                        C = cholesky(G_reg, lower=False)
+                        d = solve_triangular(C, np.ones(len(idx)), trans=1, lower=False)
+                        w, _ = nnls(C, d)
                         w_sum = np.sum(w)
                         if w_sum > 0:
                             weights = w / w_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except Exception:
+                        # Fallback to inverse distance if singular or other error
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
