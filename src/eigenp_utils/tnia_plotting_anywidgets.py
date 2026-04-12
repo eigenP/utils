@@ -860,8 +860,8 @@ def compute_histogram(arr, bins=128):
 class TNIAWidgetBase(anywidget.AnyWidget):
     # _esm = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.js"
     # _css = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.css"
-    _esm = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.js")
-    _css = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.css")
+    _esm = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.js").read_text()
+    _css = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.css").read_text()
 
 
     # Data traits
@@ -2267,7 +2267,7 @@ def show_zyx_max_scatter_interactive(
     )
 
 class IsoScatterWidget(anywidget.AnyWidget):
-    _esm = ir.files("eigenp_utils").joinpath("iso_scatter.js")
+    _esm = ir.files("eigenp_utils").joinpath("iso_scatter.js").read_text()
 
     image_data = traitlets.Unicode().tag(sync=True)
     elev = traitlets.Float(30).tag(sync=True)
