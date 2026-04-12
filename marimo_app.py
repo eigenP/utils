@@ -17,13 +17,13 @@
             download_file(url_to_fetch, "./cells3d.tif")
             from skimage.io import imread
             im = imread("./cells3d.tif")  # (Z, C, Y, X)
-            membrane = im[:, 0, :, :]
-            nuclei = im[:, 1, :, :]
-    
+        membrane = im[:, 0, :, :]
+        nuclei = im[:, 1, :, :]
+
         widget = show_xyz_max_slice_interactive(
-                [membrane, nuclei],
-                colors=['magma', 'viridis']
-            )
+            [membrane, nuclei],
+            colors=['magma', 'viridis']
+        )
         return widget,
 
     if __name__ == "__main__":
