@@ -112,14 +112,14 @@ def _():
     from skimage.io import imread
     from eigenp_utils.io import download_file
     from eigenp_utils.clahe_equalize_adapthist import _my_clahe_
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
     return (
         _my_clahe_,
         download_file,
         imread,
         np,
         plt,
-        show_xyz_max_slice_interactive,
+        show_zyx_max_slice_interactive,
     )
 
 
@@ -141,10 +141,10 @@ def _(imread):
 
 
 @app.cell
-def _(cells, show_xyz_max_slice_interactive):
+def _(cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
-    show_xyz_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
     return membrane, nuclei
 
 
