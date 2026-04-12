@@ -11,6 +11,16 @@
 
 import pathlib
 import warnings
+
+def _parse_zyx_tuple_or_dict(val, default_val=None):
+    if val is None:
+        return (default_val, default_val, default_val)
+    if isinstance(val, dict):
+        return (val.get('Z', default_val), val.get('Y', default_val), val.get('X', default_val))
+    if isinstance(val, (list, tuple)) and len(val) == 3:
+        return val
+    raise ValueError(f"Expected dict with 'Z','Y','X' keys or a 3-element tuple/list, got {val}")
+
 import anywidget
 import traitlets
 import matplotlib
@@ -888,7 +898,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     y_t = traitlets.Int(1).tag(sync=True)
     z_t = traitlets.Int(1).tag(sync=True)
 
-    sxy = traitlets.Float(1.0).tag(sync=True)
+    sx = traitlets.Float(1.0).tag(sync=True)
+    sy = traitlets.Float(1.0).tag(sync=True)
     sz = traitlets.Float(1.0).tag(sync=True)
 
     # Bounds for sliders (computed)
@@ -1083,8 +1094,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 plt.close(fig)
 
 class TNIASliceWidget(TNIAWidgetBase):
-    def __init__(self, im, sxy=None, sz=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
-                 show_crosshair=True, sync_on_hover=False, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None, opacity=None):
+    def __init__(self, im, pixel_sizes=None, sxy=None, sz=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
+                 show_crosshair=True, sync_on_hover=False, slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, opacity=None):
         if colors is not None:
             warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
             if colormap is None:
@@ -1097,11 +1108,42 @@ class TNIASliceWidget(TNIAWidgetBase):
         elif im.ndim == 2:
             im = im[np.newaxis, ...]
 
+        # Handle Deprecations internally in Widget
+        if sxy is not None or sz is not None:
+            warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+            if pixel_sizes is None:
+                _sxy = sxy if sxy is not None else 1.0
+                _sz = sz if sz is not None else 1.0
+                pixel_sizes = (_sz, _sxy, _sxy)
+        pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+
+        if any(x is not None for x in [x_s, y_s, z_s]):
+            warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+            if slabs_position is None:
+                slabs_position = (z_s, y_s, x_s)
+
+        if any(x is not None for x in [x_t, y_t, z_t]):
+            warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+            if slabs_thickness is None:
+                slabs_thickness = (z_t, y_t, x_t)
+
+        z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+        z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+
         # Determine dimensions
         im_shape = (im[0].shape if isinstance(im, list) else im.shape)
         Z, Y, X = im_shape
 
         super().__init__(X, Y, Z, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover)
+
+        # Override Base Trait defaults with physical scaling properly
+        self.sx = px
+        self.sy = py
+        self.sz = pz
+        self.X_arr_phys = X * px
+        self.Y_arr_phys = Y * py
+        self.Z_arr_phys = Z * pz
+
 
         self.im_orig = im
 
@@ -1289,7 +1331,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             opacity_curr = opacity_val
 
         # Pass None if not originally given to trigger scale bar logic
-        pass_sxy = self.sxy if self._sxy_given else None
+        pass_sxy = getattr(self, 'sx', getattr(self, 'sxy', None)) if getattr(self, '_sxy_given', False) else None
         pass_sz = self.sz if self._sz_given else None
 
         # show_zyx_max_slabs returns a Figure
@@ -1579,9 +1621,9 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         self._render_wrapper(change)
 
 class TNIAScatterWidget(TNIAWidgetBase):
-    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=None, sz=None, render='points', bins=512,
+    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, sxy=None, sz=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
+                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, **kwargs):
         if colors is not None:
             warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
             if colormap is None:
@@ -1893,7 +1935,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colormap=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
                 )
 
-            pass_sxy = self.sxy if self._sxy_given else None
+            pass_sxy = getattr(self, 'sx', getattr(self, 'sxy', None)) if getattr(self, '_sxy_given', False) else None
             pass_sz = self.sz if self._sz_given else None
 
             fig = show_zyx(
@@ -2041,14 +2083,14 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
 def show_zyx_max_slice_interactive(
     im,
-    sxy=None, sz=None,
+    pixel_sizes=None, sxy=None, sz=None,
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
     show_crosshair=True, sync_on_hover=False,
     colors=None, opacity=None,
-    x_s=None, y_s=None, z_s=None,
-    x_t=None, y_t=None, z_t=None,
+    slabs_position=None, x_s=None, y_s=None, z_s=None,
+    slabs_thickness=None, x_t=None, y_t=None, z_t=None,
 ):
     """
     Interactive 3D slice viewer using AnyWidget.
@@ -2063,6 +2105,28 @@ def show_zyx_max_slice_interactive(
           and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
           underneath the channel controls, overlaid with a curve reflecting the current `vmin`, `vmax`, and `gamma` settings.
     """
+    if sxy is not None or sz is not None:
+        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        if pixel_sizes is None:
+            _sxy = sxy if sxy is not None else 1.0
+            _sz = sz if sz is not None else 1.0
+            pixel_sizes = (_sz, _sxy, _sxy)
+
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+
+    if any(x is not None for x in [x_s, y_s, z_s]):
+        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_position is None:
+            slabs_position = (z_s, y_s, x_s)
+
+    if any(x is not None for x in [x_t, y_t, z_t]):
+        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_thickness is None:
+            slabs_thickness = (z_t, y_t, x_t)
+
+    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+
     if isinstance(im, list):
         if im[0].ndim == 2:
             im = [img[np.newaxis, ...] for img in im]
@@ -2102,23 +2166,31 @@ def show_zyx_max_slice_interactive(
         z_t = max(1, Z // 2)
         z_s = Z // 2
 
-    return TNIASliceWidget(
+    w = TNIASliceWidget(
         im, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
         vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
+    w.sx = px; w.sy = py; w.sz = pz; w._sxy_given = True
+    if x_t is not None: w.x_t = x_t
+    if y_t is not None: w.y_t = y_t
+    if z_t is not None: w.z_t = z_t
+    if x_s is not None: w.x_s = x_s
+    if y_s is not None: w.y_s = y_s
+    if z_s is not None: w.z_s = z_s
+    return w
 
 def show_zyx_max_slice_interactive_point_annotator(
     im,
-    sxy=None, sz=None,
+    pixel_sizes=None, sxy=None, sz=None,
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
-    show_crosshair=True,
+    show_crosshair=True, sync_on_hover=False,
     colors=None, opacity=None,
     point_size_scale=0.01,
-    x_s=None, y_s=None, z_s=None,
-    x_t=None, y_t=None, z_t=None,
+    slabs_position=None, x_s=None, y_s=None, z_s=None,
+    slabs_thickness=None, x_t=None, y_t=None, z_t=None,
 ):
     """
     Interactive 3D slice viewer with point annotation using AnyWidget.
@@ -2127,6 +2199,28 @@ def show_zyx_max_slice_interactive_point_annotator(
     - Left-click on any projection to add or delete points.
     Returns a widget instance `w`. The list of annotated points is accessible via `w.points`.
     """
+    if sxy is not None or sz is not None:
+        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        if pixel_sizes is None:
+            _sxy = sxy if sxy is not None else 1.0
+            _sz = sz if sz is not None else 1.0
+            pixel_sizes = (_sz, _sxy, _sxy)
+
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+
+    if any(x is not None for x in [x_s, y_s, z_s]):
+        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_position is None:
+            slabs_position = (z_s, y_s, x_s)
+
+    if any(x is not None for x in [x_t, y_t, z_t]):
+        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_thickness is None:
+            slabs_thickness = (z_t, y_t, x_t)
+
+    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+
     if isinstance(im, list):
         if im[0].ndim == 2:
             im = [img[np.newaxis, ...] for img in im]
@@ -2164,17 +2258,25 @@ def show_zyx_max_slice_interactive_point_annotator(
         z_t = max(1, Z // 2)
         z_s = Z // 2
 
-    return TNIAAnnotatorWidget(
+    w = TNIAAnnotatorWidget(
         im, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
-        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity, show_crosshair=show_crosshair,
+        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         point_size_scale=point_size_scale,
         x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
     )
+    w.sx = px; w.sy = py; w.sz = pz; w._sxy_given = True
+    if x_t is not None: w.x_t = x_t
+    if y_t is not None: w.y_t = y_t
+    if z_t is not None: w.z_t = z_t
+    if x_s is not None: w.x_s = x_s
+    if y_s is not None: w.y_s = y_s
+    if z_s is not None: w.z_s = z_s
+    return w
 
 def show_zyx_max_scatter_interactive(
     points,
     channels=None,
-    sxy=None, sz=None,
+    pixel_sizes=None, sxy=None, sz=None,
     render=None,
     bins=512,
     point_size=4, alpha=0.6,
@@ -2183,8 +2285,8 @@ def show_zyx_max_scatter_interactive(
     figsize=None, figsize_scale=1.0,
     show_crosshair=True, sync_on_hover=False,
     subplot_bg='black',
-    x_s=None, y_s=None, z_s=None,
-    x_t=None, y_t=None, z_t=None,
+    slabs_position=None, x_s=None, y_s=None, z_s=None,
+    slabs_thickness=None, x_t=None, y_t=None, z_t=None,
 ):
     """
     Shows interactive sliders for XY, XZ, and YZ projection of 3D point coordinates.
@@ -2199,6 +2301,28 @@ def show_zyx_max_scatter_interactive(
         - The function dynamically determines its rendering mode: if `render=None`, it defaults to
           `'points'` for point counts under 10,000, and `'density'` for larger datasets to optimize interactive performance.
     """
+    if sxy is not None or sz is not None:
+        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        if pixel_sizes is None:
+            _sxy = sxy if sxy is not None else 1.0
+            _sz = sz if sz is not None else 1.0
+            pixel_sizes = (_sz, _sxy, _sxy)
+
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+
+    if any(x is not None for x in [x_s, y_s, z_s]):
+        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_position is None:
+            slabs_position = (z_s, y_s, x_s)
+
+    if any(x is not None for x in [x_t, y_t, z_t]):
+        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_thickness is None:
+            slabs_thickness = (z_t, y_t, x_t)
+
+    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+
     if isinstance(points, (tuple, list)) and len(points) == 3:
         # points is a tuple or list of 3 arrays: (Z, Y, X)
         Z, Y, X = points[0], points[1], points[2]
@@ -2269,14 +2393,32 @@ def show_zyx_max_scatter_interactive(
     if y_s is not None: y_s = int(y_s - ymin)
     if z_s is not None: z_s = int(z_s - zmin)
 
-    return TNIAScatterWidget(
+    w = TNIAScatterWidget(
         X, Y, Z,
-        channels=channels, sxy=sxy, sz=sz, render=render, bins=bins,
-        point_size=point_size, alpha=alpha, colors=colors, opacity=opacity,
+        channels=channels, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, render=render, bins=bins,
+        point_size=point_size, alpha=alpha, colormap=colormap, colors=colors, opacity=opacity,
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         subplot_bg=subplot_bg,
-        x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
+        slabs_position=slabs_position, x_s=x_s, y_s=y_s, z_s=z_s, slabs_thickness=slabs_thickness, x_t=x_t, y_t=y_t, z_t=z_t
     )
+    w.sx = px; w.sy = py; w.sz = pz; w._sxy_given = True
+    w.X_arr_phys = w.X_arr * px
+    w.Y_arr_phys = w.Y_arr * py
+    w.Z_arr_phys = w.Z_arr * pz
+    w.x_min_phys = xmin * px
+    w.x_max_phys = xmax * px
+    w.y_min_phys = ymin * py
+    w.y_max_phys = ymax * py
+    w.z_min_phys = zmin * pz
+    w.z_max_phys = zmax * pz
+
+    if x_t is not None: w.x_t = x_t
+    if y_t is not None: w.y_t = y_t
+    if z_t is not None: w.z_t = z_t
+    if x_s is not None: w.x_s = x_s
+    if y_s is not None: w.y_s = y_s
+    if z_s is not None: w.z_s = z_s
+    return w
 
 class IsoScatterWidget(anywidget.AnyWidget):
     _esm = ir.files("eigenp_utils").joinpath("iso_scatter.js").read_text()

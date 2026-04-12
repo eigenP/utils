@@ -153,3 +153,53 @@ def test_deprecation_warning_colors():
     with pytest.warns(DeprecationWarning, match="The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead."):
         w = show_zyx_max_slice_interactive(im, colors=['red'])
         assert w is not None
+
+from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, show_zyx_max_scatter_interactive
+import warnings
+
+@pytest.mark.parametrize("factory_fn", [
+    show_zyx_max_slice_interactive,
+    show_zyx_max_slice_interactive_point_annotator,
+])
+def test_interactive_kwargs_images(factory_fn):
+    im = np.zeros((10, 20, 30))
+    w = factory_fn(im,
+                   show_crosshair=False,
+                   sync_on_hover=True,
+                   slabs_thickness=(2, 3, 4),
+                   slabs_position=(5, 10, 15),
+                   pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 0.5})
+
+    assert w.show_crosshair is False
+    assert w.sync_on_hover is True
+    assert w.z_t == 2 and w.y_t == 3 and w.x_t == 4
+    assert w.z_s == 5 and w.y_s == 10 and w.x_s == 15
+    assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
+
+def test_interactive_kwargs_scatter():
+    X, Y, Z = np.random.rand(10), np.random.rand(10), np.random.rand(10)
+    w = show_zyx_max_scatter_interactive((X, Y, Z),
+                   show_crosshair=False,
+                   sync_on_hover=True,
+                   slabs_thickness=(2, 3, 4),
+                   slabs_position=(5, 10, 15),
+                   pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 0.5})
+
+    assert w.show_crosshair is False
+    assert w.sync_on_hover is True
+    assert w.z_t == 2 and w.y_t == 3 and w.x_t == 4
+    assert w.z_s == 5 and w.y_s == 10 and w.x_s == 15
+    assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
+
+@pytest.mark.parametrize("factory_fn", [
+    show_zyx_max_slice_interactive,
+    show_zyx_max_slice_interactive_point_annotator,
+])
+def test_deprecation_warnings_interactive(factory_fn):
+    im = np.zeros((10, 20, 30))
+    with pytest.warns(DeprecationWarning, match="The 'sxy' and 'sz' parameters are deprecated"):
+        factory_fn(im, sxy=0.5, sz=2.0)
+    with pytest.warns(DeprecationWarning, match="The 'x_s', 'y_s', 'z_s' parameters are deprecated"):
+        factory_fn(im, x_s=5, y_s=10, z_s=5)
+    with pytest.warns(DeprecationWarning, match="The 'x_t', 'y_t', 'z_t' parameters are deprecated"):
+        factory_fn(im, x_t=2, y_t=3, z_t=4)
