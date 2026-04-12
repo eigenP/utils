@@ -825,16 +825,26 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
 
 
-def compute_histogram(arr, bins=128):
+def compute_histogram(arr, bins=128, max_samples=1_000_000):
     """
     Computes a 1D histogram for array values.
 
     To enhance the visibility of sparse/heavy-tailed intensity distributions in interactive
     widgets, the returned bin counts are transformed into log frequencies (using log1p).
+    If the array size exceeds `max_samples`, it subsamples the array to improve performance
+    without noticeably degrading the visual overlay.
     """
     if arr.size == 0:
         return {'counts': [], 'bin_edges': []}
-    arr_clean = arr[~np.isnan(arr)] if np.issubdtype(arr.dtype, np.floating) else arr
+
+    stride = 1
+    if arr.size > max_samples:
+        stride = max(1, arr.size // max_samples)
+        arr_to_use = arr.ravel()[::stride]
+    else:
+        arr_to_use = arr
+
+    arr_clean = arr_to_use[~np.isnan(arr_to_use)] if np.issubdtype(arr_to_use.dtype, np.floating) else arr_to_use
     if arr_clean.size == 0:
         return {'counts': [], 'bin_edges': []}
 
@@ -851,6 +861,10 @@ def compute_histogram(arr, bins=128):
         counts, bin_edges = np.histogram(arr_clean, bins=bins, range=range_val)
     else:
         counts, bin_edges = np.histogram(arr_clean, bins=bins)
+
+    if stride > 1:
+        # Scale back up to match original magnitude
+        counts = counts * stride
 
     # Use log frequencies to enhance visibility of tails in widgets
     counts = np.log1p(counts)
