@@ -119,7 +119,7 @@ def _():
         estimate_drift_2D,
         apply_drift_correction_2D
     )
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
     return (
         apply_drift_correction_2D,
         download_file,
@@ -128,7 +128,7 @@ def _():
         np,
         plt,
         shift,
-        show_xyz_max_slice_interactive,
+        show_zyx_max_slice_interactive,
     )
 
 
@@ -173,16 +173,16 @@ def _(imread, np, shift):
 
 
 @app.cell
-def _(cells, show_xyz_max_slice_interactive):
+def _(cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
-    show_xyz_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
     return membrane, nuclei
 
 
 @app.cell
-def _(drifted_stack, show_xyz_max_slice_interactive):
-    show_xyz_max_slice_interactive(drifted_stack)
+def _(drifted_stack, show_zyx_max_slice_interactive):
+    show_zyx_max_slice_interactive(drifted_stack)
     return
 
 
@@ -199,8 +199,8 @@ def _(drift_table, mo):
 
 
 @app.cell
-def _(corrected_stack, show_xyz_max_slice_interactive):
-    show_xyz_max_slice_interactive(corrected_stack)
+def _(corrected_stack, show_zyx_max_slice_interactive):
+    show_zyx_max_slice_interactive(corrected_stack)
     return
 
 

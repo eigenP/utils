@@ -120,7 +120,7 @@ def _():
         adjust_brightness_per_slice,
         normalize_image
     )
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
     return (
         adjust_brightness_per_slice,
         contrast_stretching,
@@ -129,7 +129,7 @@ def _():
         normalize_image,
         np,
         plt,
-        show_xyz_max_slice_interactive,
+        show_zyx_max_slice_interactive,
     )
 
 
@@ -153,10 +153,10 @@ def _(imread, np):
 
 
 @app.cell
-def _(cells, show_xyz_max_slice_interactive):
+def _(cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
-    show_xyz_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
     return membrane, nuclei
 
 
@@ -178,8 +178,8 @@ def _(contrast_stretching, decayed_stack, p_max, p_min):
 
 
 @app.cell
-def _(decayed_stack, show_xyz_max_slice_interactive):
-    show_xyz_max_slice_interactive(decayed_stack)
+def _(decayed_stack, show_zyx_max_slice_interactive):
+    show_zyx_max_slice_interactive(decayed_stack)
     return
 
 
@@ -200,7 +200,7 @@ def _(mo):
     mo.md("## Z-Decay Correction (`adjust_brightness_per_slice`)")
     fit_dropdown = mo.ui.dropdown(
         options={'Linear Ramp': None, 'Exponential Fit': 'exponential', 'Linear Fit': 'linear'},
-        value='exponential',
+        value='Exponential Fit',
         label="Fit Method"
     )
 
@@ -226,8 +226,8 @@ def _(adjust_brightness_per_slice, correction_method, decayed_stack, fit_dropdow
 
 
 @app.cell
-def _(corrected_stack, show_xyz_max_slice_interactive):
-    show_xyz_max_slice_interactive(corrected_stack)
+def _(corrected_stack, show_zyx_max_slice_interactive):
+    show_zyx_max_slice_interactive(corrected_stack)
     return
 
 
