@@ -111,7 +111,28 @@ def _():
     )
 
     # Load the 3D cell data (Z, C, Y, X)
-    cells = cells3d()
+    try:
+        try:
+        try:
+            cells = cells3d()
+        except:
+            from eigenp_utils.io import download_file
+            url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
+            download_file(url_to_fetch, "./cells3d.tif")
+            from skimage.io import imread
+            cells = imread("./cells3d.tif")
+    except:
+        from eigenp_utils.io import download_file
+        url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
+        download_file(url_to_fetch, "./cells3d.tif")
+        from skimage.io import imread
+        cells = imread("./cells3d.tif")
+    except:
+        from eigenp_utils.io import download_file
+        url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
+        download_file(url_to_fetch, "./cells3d.tif")
+        from skimage.io import imread
+        cells = imread("./cells3d.tif")
     print(f"Loaded cells3d with shape: {cells.shape}")
 
     # Extract channels and cast to float to prevent clipping/overflow issues in blending
