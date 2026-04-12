@@ -7,7 +7,19 @@ name = "eigenp-utils"
 version = "0.0.2"
 description = "Utilities for EigenP"
 readme = "README.md"
+authors = [
+  { name = "Panos Oikonomou" }
+]
+license = { file = "LICENSE.md" }
 requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: Free for non-commercial use",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
 dependencies = [
     "matplotlib",
     "anywidget",
@@ -17,6 +29,11 @@ dependencies = [
     "numpy",
     "scipy"
 ]
+
+[project.urls]
+Homepage = "https://github.com/eigenP/utils"
+Issues = "https://github.com/eigenP/utils/issues"
+Repository = "https://github.com/eigenP/utils.git"
 
 [project.optional-dependencies]
 plotting = [
