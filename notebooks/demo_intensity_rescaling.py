@@ -200,7 +200,7 @@ def _(mo):
     mo.md("## Z-Decay Correction (`adjust_brightness_per_slice`)")
     fit_dropdown = mo.ui.dropdown(
         options={'Linear Ramp': None, 'Exponential Fit': 'exponential', 'Linear Fit': 'linear'},
-        value='exponential',
+        value='Exponential Fit',
         label="Fit Method"
     )
 
