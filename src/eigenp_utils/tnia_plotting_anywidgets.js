@@ -90,6 +90,11 @@ export default {
         // Inverse scale to get integer index
         let newIndex = Math.round(parseFloat(numberInput.value) / scale);
 
+        if (isNaN(newIndex)) {
+            update();
+            return;
+        }
+
         // Clamp
         if (newIndex < min) newIndex = min;
         if (newIndex > max) newIndex = max;
