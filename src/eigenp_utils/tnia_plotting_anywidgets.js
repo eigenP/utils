@@ -335,7 +335,7 @@ export default {
         const histCanvas = document.createElement("canvas");
         histCanvas.width = 160;
         histCanvas.height = 30;
-        histCanvas.style.marginLeft = "auto";
+        histCanvas.style.marginLeft = "10px";
         histCanvas.style.border = "1px solid #ccc";
         histCanvas.style.borderRadius = "2px";
         histCanvas.style.backgroundColor = "#fff";
