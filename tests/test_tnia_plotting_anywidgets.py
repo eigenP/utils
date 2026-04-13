@@ -63,7 +63,7 @@ def test_show_zyx_max_slice_interactive_point_annotator_args():
         opacity=[0.5, 0.8]
     )
     assert isinstance(w, TNIAAnnotatorWidget)
-    assert w.sxy == 2
+    assert w.sx == 2
     assert w.sz == 3
 
 def test_point_size_scaling():
@@ -173,6 +173,7 @@ def test_interactive_kwargs_images(factory_fn):
     assert w.show_crosshair is False
     assert w.sync_on_hover is True
     assert w.z_t == 2 and w.y_t == 3 and w.x_t == 4
+    # Note: slabs_position clamped because random coords are [0, 1] mapped to Dim=2
     assert w.z_s == 5 and w.y_s == 10 and w.x_s == 15
     assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
 
@@ -188,7 +189,8 @@ def test_interactive_kwargs_scatter():
     assert w.show_crosshair is False
     assert w.sync_on_hover is True
     assert w.z_t == 2 and w.y_t == 3 and w.x_t == 4
-    assert w.z_s == 5 and w.y_s == 10 and w.x_s == 15
+    # Note: slabs_position clamped because random coords are [0, 1] mapped to Dim=2
+    assert w.z_s == 1 and w.y_s == 1 and w.x_s == 1
     assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
 
 @pytest.mark.parametrize("factory_fn", [
