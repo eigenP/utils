@@ -48,6 +48,9 @@ def test_labels_cmap():
     # Check that we can import it and it's not None
     assert labels_cmap is not None
 
+    # Check it's registered globally
+    assert plt.get_cmap("labels_cmap") is not None
+
 
 def test_labels_cmap_diversity():
     # Verify that the colormap colors are perceptually diverse

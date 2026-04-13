@@ -52,15 +52,25 @@ def set_plotting_style():
 # --- Initialization: Create labels_cmap ---
 from .labels_cmap_data import LABELS_CMAP_COLORS
 
+# Generate 255 alpha values linearly spaced from 0.8 to 1.0
+alphas = np.linspace(0.8, 1.0, 255)
+
 # Start with a transparent black at index 0
 final_colors = [(0, 0, 0, 0)]
 
 # Add the 255 pre-calculated Glasbey-style maximally distant colors
-for r, g, b in LABELS_CMAP_COLORS:
-    final_colors.append((r, g, b, 1.0))
+for i, (r, g, b) in enumerate(LABELS_CMAP_COLORS):
+    # i goes from 0 to 254
+    final_colors.append((r, g, b, alphas[i]))
 
 # Create the new colormap
 labels_cmap = LinearSegmentedColormap.from_list("labels_cmap", final_colors, N=256)
+
+try:
+    mpl_colormaps.register(labels_cmap, name="labels_cmap", force=True)
+except AttributeError:
+    # Fallback for older Matplotlib versions
+    plt.register_cmap(name="labels_cmap", cmap=labels_cmap)
 
 # Print a hint for users who might need the background to be black
 print("Hint: labels_cmap background is transparent by default. To set it to black, run:")
