@@ -80,7 +80,7 @@ def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
 
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_slice(image_to_show, x, y, z, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
+def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
@@ -99,10 +99,10 @@ def show_zyx_slice(image_to_show, x, y, z, sxy=None, sz=None,figsize=(10,10), co
     slice_xz = image_to_show[:,y,:]
     slice_xy = image_to_show[z,:,:]
 
-    return show_zyx(slice_xy, slice_xz, slice_zy, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, use_plt = use_plt, opacity = opacity)
+    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_max(image_to_show, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_max(image_to_show, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ plots max xy, xz, and zy projections of a 3D image
 
     Args:
@@ -141,7 +141,7 @@ def show_zyx_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projec
     projection_x = np.flip(np.rot90(projector(image_to_show, axis=2), 1), 0)
     projection_z = projector(image_to_show, axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
 def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None):
