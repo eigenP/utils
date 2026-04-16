@@ -5,18 +5,21 @@
 ## Features
 
 ### Image Analysis
+* **Labeling & Masking**: Generation of cell labels via Otsu thresholding and Voronoi watershed (`voronoi_otsu_labeling`), plus robust masking tools (`image_and_labels_utils.py`).
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
 * **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`.
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
 * **Intensity Rescaling**: Tools for contrast enhancement, including CLAHE.
 
 ### Plotting & Visualization
-* **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_xyz` for dynamic multichannel viewers), interactive point cloud visualization (`IsoScatterWidget`), and 3D point annotation (`TNIAAnnotatorWidget`).
+* **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers), interactive point cloud visualization (`IsoScatterWidget`), and 3D point annotation (`TNIAAnnotatorWidget`).
+* **Colormaps**: Provides a global perceptually diverse Glasbey palette (`labels_cmap`) for clear categorical visualization.
 * **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker`, and SVGs embedded with metadata via `savefig_svg`.
 
 ### Single-Cell Analysis
+* **Lineage Coupling**: Quantify and plot lineage relationships between clustered populations (`calculate_lineage_coupling`).
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
-* **Dataset Integration (kkNN)**: Adaptive curvature-based k-nearest neighbors mapping (`kknn_ingest`) to dynamically project metadata and embeddings across references based on local manifold geometry.
+* **Dataset Integration (kkNN)**: Adaptive curvature-based k-nearest neighbors mapping (`kknn_ingest`) to dynamically project metadata and embeddings across references based on local manifold geometry, utilizing an exact Non-Negative Least Squares (NNLS) dual formulation.
 * **Label Classification & Smoothing**: Distance-weighted majority voting or averaging (`kknn_classifier`) to smooth categorical or continuous cell metadata using the kkNN backbone.
 * **Gene Archetypes**: Cluster genes by expression patterns to find dominant archetypes using hierarchical Ward clustering and SVD (`find_expression_archetypes`).
 * **Multiscale Clustering**: Run multi-resolution Leiden clustering and track lineage hierarchies across scales (`multiscale_coarsening`, `plot_clustering_tree`).
@@ -29,7 +32,8 @@
 
 
 ### Core Utilities
-* **Spline Utilities**: Calculate tangent vectors and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
+* **Task Scheduling**: Generate Gantt-style timeline schedules for linked events via a Marimo and Plotly-based calendar scheduler (`task_calendar_scheduler.py`).
+* **Spline Utilities**: Calculate tangent vectors, project points onto planes, compute arc lengths (`calculate_spline_length`), and rasterize ND images from arbitrary splines and discrete curves (`spline_utils.py`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
 * **I/O Utilities**: Functions to streamline file and data reading.
 
@@ -82,6 +86,16 @@ uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
 ```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+
+
+### Pyodide / WASM Compatibility
+
+The package provides pure-Python wheels which can be directly installed in WebAssembly environments like Pyodide and Marimo using `micropip`:
+
+```python
+import micropip
+await micropip.install("eigenp-utils")
+```
 
 ## License
 
