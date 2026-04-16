@@ -4673,19 +4673,32 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve exactly via Non-Negative Least Squares (NNLS)
+                    # We minimize w^T G_reg w subject to sum(w)=1, w>=0
+                    # The KKT conditions for this constrained optimization problem
+                    # can be solved elegantly using the Cholesky decomposition of G_reg.
+                    # Since G_reg is positive definite, we factorize G_reg = L @ L^T.
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
-                        w_sum = np.sum(w)
+                        from scipy.optimize import nnls
+                        from scipy.linalg import cholesky, solve_triangular
+
+                        L = cholesky(G_reg, lower=True)
+                        # We want to solve for w such that it behaves like G_reg * w ~ 1 under NNLS
+                        # Let L @ b = 1
+                        b = solve_triangular(L, np.ones(len(idx)), lower=True)
+                        # Solve NNLS: minimize || L^T w - b ||^2 subject to w >= 0
+                        # || L^T w - b ||^2 = w^T L L^T w - 2 b^T L^T w + b^T b
+                        #                   = w^T G_reg w - 2 1^T w + const
+                        w_nnls, _ = nnls(L.T, b)
+
+                        w_sum = np.sum(w_nnls)
                         if w_sum > 0:
-                            weights = w / w_sum
+                            weights = w_nnls / w_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
-                        # Fallback to inverse distance if singular
+                    except Exception as e:
+                        # Fallback to inverse distance if singular or NNLS fails
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
 
