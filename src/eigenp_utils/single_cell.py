@@ -4600,6 +4600,61 @@ def kknn_ingest(
         # Reference cells are not mapped, so we set their kknn_k to NaN
         adata_ref.obs["kknn_k"] = np.nan
 
+        # 1.5 Precompute cell weights based on barycenter strategy
+        cell_weights = []
+        if barycenter == "lle" or (barycenter == "transform" and not obsm_keys):
+            # Only do scipy imports if needed
+            from scipy.linalg import cholesky, solve_triangular
+            from scipy.optimize import nnls
+
+        for i in range(N_query):
+            idx = pruned_indices[i]
+            dist = pruned_distances[i]
+
+            if barycenter == "distance" or barycenter == "transform":
+                # Inverse distance weighting (default for transform if needed later, and distance)
+                weights = 1.0 / (dist + 1e-8)
+                weights /= np.sum(weights)
+            elif barycenter == "lle":
+                x_q = adata_query.obsm[query_use_rep][i]
+                X_neigh = adata_ref.obsm[use_rep][idx]
+
+                Z = X_neigh - x_q
+                G = Z @ Z.T
+
+                trace = np.trace(G)
+                if trace > 0:
+                    reg = lle_reg_lambda * trace / len(idx)
+                else:
+                    reg = lle_reg_lambda
+                G_reg = G + reg * np.eye(len(idx))
+
+                try:
+                    L = cholesky(G_reg, lower=True)
+                    b = solve_triangular(L, np.ones(len(idx)), lower=True)
+                    w, _ = nnls(L.T, b)
+                    w_sum = np.sum(w)
+                    if w_sum > 0:
+                        weights = w / w_sum
+                    else:
+                        weights = np.ones(len(idx)) / len(idx)
+                except (np.linalg.LinAlgError, ValueError):
+                    weights = 1.0 / (dist + 1e-8)
+                    weights /= np.sum(weights)
+            elif barycenter == "wasserstein":
+                if i == 0:
+                    warnings.warn(
+                        "Wasserstein barycenter not yet fully implemented. Falling back to distance-weighted."
+                    )
+                weights = 1.0 / (dist + 1e-8)
+                weights /= np.sum(weights)
+            else:
+                # Unweighted fallback
+                weights = np.ones(len(idx)) / len(idx)
+
+            cell_weights.append(weights)
+
+
         # 2. Map .obsm (Embeddings)
         for key in obsm_keys:
             print(f"Mapping obsm: '{key}'...")
@@ -4627,88 +4682,25 @@ def kknn_ingest(
                         query_coords = model.transform(X_q)
 
                     adata_query.obsm[f"{key}_kknn"] = query_coords
-
-                    # Duplicate the reference embedding to line up correctly with the mapped query embedding
                     adata_ref.obsm[f"{key}_kknn"] = ref_coords
                     continue
                 else:
                     warnings.warn(
-                        f"barycenter='transform' requested but '{key}' not found in embedding_models. Falling back to 'distance'."
+                        f"barycenter='transform' requested but '{key}' not found in embedding_models. Falling back to distance weights."
                     )
-                    current_barycenter = "distance"
-            else:
-                current_barycenter = barycenter
 
             query_coords = np.zeros((N_query, emb_dim))
 
             for i in range(N_query):
                 idx = pruned_indices[i]
-                dist = pruned_distances[i]
-
+                weights = cell_weights[i]
                 coords = ref_coords[idx]
 
-                if current_barycenter == "distance":
-                    # Inverse distance weighting
-                    # Add small epsilon to avoid division by zero
-                    weights = 1.0 / (dist + 1e-8)
-                    weights /= np.sum(weights)
-                    query_coords[i] = np.average(coords, axis=0, weights=weights)
-                elif current_barycenter == "lle":
-                    # Regularized Locally Linear Embedding weights
-                    # Find optimal non-negative weights to reconstruct query cell from neighbors
-                    x_q = adata_query.obsm[query_use_rep][i]
-                    X_neigh = adata_ref.obsm[use_rep][idx]
-
-                    # Center neighbors around query point
-                    Z = X_neigh - x_q
-
-                    # Compute Gram matrix
-                    G = Z @ Z.T
-
-                    # Regularize Gram matrix
-                    trace = np.trace(G)
-                    if trace > 0:
-                        reg = lle_reg_lambda * trace / len(idx)
-                    else:
-                        reg = lle_reg_lambda
-                    G_reg = G + reg * np.eye(len(idx))
-
-                    # Solve G * w = 1 subject to w >= 0
-                    # matth: The exact Non-Negative Least Squares (NNLS) dual formulation via
-                    # Cholesky decomposition correctly enforces non-negativity and sum-to-one
-                    # constraints, replacing the mathematically unsound heuristic of clipping
-                    # unconstrained weights.
-                    try:
-                        from scipy.linalg import cholesky, solve_triangular
-                        from scipy.optimize import nnls
-
-                        L = cholesky(G_reg, lower=True)
-                        b = solve_triangular(L, np.ones(len(idx)), lower=True)
-                        w, _ = nnls(L.T, b)
-                        w_sum = np.sum(w)
-
-                        if w_sum > 0:
-                            weights = w / w_sum
-                        else:
-                            # Fallback to uniform if all weights became zero
-                            weights = np.ones(len(idx)) / len(idx)
-                    except (np.linalg.LinAlgError, ValueError):
-                        # Fallback to inverse distance if Cholesky fails (not positive definite)
-                        weights = 1.0 / (dist + 1e-8)
-                        weights /= np.sum(weights)
-
-                    query_coords[i] = np.average(coords, axis=0, weights=weights)
-                elif current_barycenter == "wasserstein":
-                    # Placeholder for optimal transport barycenter
-                    warnings.warn(
-                        "Wasserstein barycenter not yet fully implemented. Falling back to distance-weighted."
-                    )
-                    weights = 1.0 / (dist + 1e-8)
-                    weights /= np.sum(weights)
-                    query_coords[i] = np.average(coords, axis=0, weights=weights)
-                else:
+                if barycenter not in ["distance", "lle", "wasserstein", "transform"]:
                     # Unweighted mean fallback
                     query_coords[i] = np.mean(coords, axis=0)
+                else:
+                    query_coords[i] = np.average(coords, axis=0, weights=weights)
 
             adata_query.obsm[f"{key}_kknn"] = query_coords
 
@@ -4725,13 +4717,9 @@ def kknn_ingest(
 
             for i in range(N_query):
                 idx = pruned_indices[i]
-                dist = pruned_distances[i]
+                weights = cell_weights[i]
 
                 labels_i = ref_labels[idx]
-
-                # Inverse distance weighting for votes
-                weights = 1.0 / (dist + 1e-8)
-                weights /= np.sum(weights)
 
                 # Tally weighted votes
                 vote_tally = {}
