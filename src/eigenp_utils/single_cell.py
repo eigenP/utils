@@ -11,6 +11,8 @@ from sklearn.neighbors import NearestNeighbors
 import anndata
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
+import scipy.linalg
+import scipy.optimize
 from scipy.linalg import svd
 from scipy.stats import norm
 import matplotlib.pyplot as plt
@@ -4673,18 +4675,20 @@ def kknn_ingest(
                         reg = lle_reg_lambda
                     G_reg = G + reg * np.eye(len(idx))
 
-                    # Solve G * w = 1
+                    # Solve G * w = 1 with non-negativity constraint
                     try:
-                        w = np.linalg.solve(G_reg, np.ones(len(idx)))
-                        # Enforce non-negativity constraint
-                        w = np.maximum(w, 0)
+                        # Exact NNLS using Cholesky decomposition of G_reg
+                        L = scipy.linalg.cholesky(G_reg, lower=True)
+                        z = scipy.linalg.solve_triangular(L, np.ones(len(idx)), lower=True)
+                        w, _ = scipy.optimize.nnls(L.T, z)
+
                         w_sum = np.sum(w)
                         if w_sum > 0:
                             weights = w / w_sum
                         else:
                             # Fallback to uniform if all weights became zero
                             weights = np.ones(len(idx)) / len(idx)
-                    except np.linalg.LinAlgError:
+                    except (np.linalg.LinAlgError, scipy.linalg.LinAlgError):
                         # Fallback to inverse distance if singular
                         weights = 1.0 / (dist + 1e-8)
                         weights /= np.sum(weights)
