@@ -1,0 +1,5 @@
+## 2024-05-24 - Exact Non-Negative Least Squares for LLE Barycenter
+
+**Learning:** When computing Locally Linear Embedding (LLE) weights, solving the unconstrained system `G_reg * w = 1` and then heuristically clipping negative weights to zero (`w = np.maximum(w, 0)`) is mathematically unsound. It does not actually solve the constrained optimization problem and can lead to suboptimal or invalid weights, especially when the regularized Gram matrix `G_reg` has a condition number indicating strong collinearity among neighbors. The exact solution to `min_w ||w||_G_reg^2` subject to `w >= 0` and `sum(w) = 1` can be obtained by solving the NNLS problem `min_w ||L^T w - z||^2` where `L` is the Cholesky factor of `G_reg` (`G_reg = L L^T`) and `z` solves `L z = 1`. The weights are then normalized to sum to one.
+
+**Action:** Replace the heuristic clipping with an exact NNLS dual formulation using Cholesky decomposition of the regularized Gram matrix in `src/eigenp_utils/single_cell.py:kknn_ingest` for computing LLE barycenter weights. This ensures mathematical correctness and robustness when projecting points onto the local manifold spanned by their nearest neighbors.
