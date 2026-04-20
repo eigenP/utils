@@ -1,0 +1,3 @@
+## 2025-02-14 - Exact NNLS for LLE Weights
+**Learning:** In Locally Linear Embedding (LLE), solving the unconstrained system G * w = 1 and heuristically clipping negative weights to zero (followed by re-normalization) is mathematically unsound and can distort the local manifold projection. The exact solution with non-negativity constraints requires solving a Non-Negative Least Squares (NNLS) problem.
+**Action:** Use the Cholesky decomposition of the regularized Gram matrix (G = L L^T) to transform the dual problem into a standard NNLS formulation `min || L^T v - L^-1 1 ||^2 s.t. v >= 0`. This yields the optimal LLE reconstruction weights while strictly enforcing non-negativity and sum-to-one constraints.
