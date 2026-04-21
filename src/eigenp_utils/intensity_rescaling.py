@@ -826,7 +826,8 @@ def apply_basic_shading(
     darkfield=None,
     baseline=None,
     baseline_smooth_method=None,
-    baseline_smooth_sigma=2.0
+    baseline_smooth_sigma=2.0,
+    output_dtype=None
 ):
     """
     Applies the basic shading correction to images.
@@ -872,4 +873,13 @@ def apply_basic_shading(
 
         corrected = corrected - b
 
-    return corrected
+    if output_dtype is None:
+        output_dtype = images.dtype
+
+    if np.issubdtype(output_dtype, np.integer):
+        # Clip to valid integer range before casting to prevent wrap-around
+        min_val = np.iinfo(output_dtype).min
+        max_val = np.iinfo(output_dtype).max
+        corrected = np.clip(corrected, min_val, max_val)
+
+    return corrected.astype(output_dtype)

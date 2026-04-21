@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from src.eigenp_utils.intensity_rescaling import fit_basic_shading, apply_basic_shading
+from eigenp_utils.intensity_rescaling import fit_basic_shading, apply_basic_shading
 
 def test_basic_fit_synthetic():
     np.random.seed(42)
@@ -70,3 +70,34 @@ def test_basic_fit_synthetic_3d():
     max_error = np.max(np.abs(flatfield - truth))
     assert max_error < 0.35, f"Max error {max_error} exceeded 0.35 threshold"
     assert flatfield.shape == sizes
+
+def test_apply_basic_shading_dtype():
+    np.random.seed(42)
+    # Test uint8 input
+    images_uint8 = np.random.randint(50, 200, size=(8, 128, 128), dtype=np.uint8)
+    flatfield = np.ones((128, 128)) * 0.5  # brightens image (divides by 0.5 -> mult by 2)
+
+    corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
+
+    # Check dtype is preserved
+    assert corrected_uint8.dtype == np.uint8
+
+    # Check bounds are enforced (since multiplying by 2 would push many values above 255)
+    assert np.max(corrected_uint8) <= 255
+    assert np.min(corrected_uint8) >= 0
+
+    # Verify exact math for a specific element that doesn't overflow
+    images_uint8[0, 0, 0] = 100
+    corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
+    assert corrected_uint8[0, 0, 0] == 200
+
+    # Verify overflow clipping
+    images_uint8[0, 0, 0] = 150
+    corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
+    assert corrected_uint8[0, 0, 0] == 255
+
+    # Test uint16 input
+    images_uint16 = np.random.randint(5000, 40000, size=(8, 128, 128), dtype=np.uint16)
+    corrected_uint16 = apply_basic_shading(images_uint16, flatfield)
+    assert corrected_uint16.dtype == np.uint16
+    assert np.max(corrected_uint16) <= 65535
