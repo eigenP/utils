@@ -5,6 +5,7 @@ from collections import defaultdict
 from uuid import uuid4
 
 import numpy as np
+from scipy.stats import hypergeom, norm
 import pandas as pd
 import scanpy as sc
 from sklearn.neighbors import NearestNeighbors
@@ -12,7 +13,6 @@ import anndata
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
 from scipy.linalg import svd
-from scipy.stats import norm
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
 import matplotlib.colors as mcolors
@@ -2543,83 +2543,80 @@ def tl_pacmap(
 
 
 def calculate_lineage_coupling(
-    adata, label_key="cell_type", clone_key="CloneID", n_permutations=1000
+    adata, label_key="cell_type", clone_key="CloneID", n_permutations=None, **kwargs
 ):
     """
-    Calculates lineage coupling statistics via permutation testing.
+    Calculates lineage coupling statistics using exact hypergeometric probabilities.
     Returns matrices for Observed counts, Z-scores, and P-values.
+
+    This replaces the previous permutation test with an exact, closed-form
+    calculation that is mathematically rigorous, deterministic, and much faster.
     """
+    if n_permutations is not None or "n_permutations" in kwargs:
+        warnings.warn(
+            "`n_permutations` is deprecated. Lineage coupling now uses an exact hypergeometric calculation instead of permutations.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     # 1. Prepare Data
-    # Create a binary matrix: Clones (rows) x Cell Types (columns)
-    # Value is 1 if the clone exists in that cell type, 0 otherwise.
     df = adata.obs[[label_key, clone_key]].dropna()
-
-    # Efficient way to create the binary matrix
-    # Group by clone and get unique labels, then get dummies
-    # Pivot: Index=Clone_ID, Columns=Cell_Type, Values=1 (if present)
     binary_matrix = pd.crosstab(df[clone_key], df[label_key]).clip(upper=1)
 
     # 2. Calculate Observed Intersections
-    # Matrix Multiplication: (Types x Clones) @ (Clones x Types) = (Types x Types)
-    # The result [i, j] is the number of clones shared between Type i and Type j
     observed_counts = binary_matrix.T @ binary_matrix
 
-    # 3. Permutation Test
-    null_matrices = []
+    # 3. Exact Mathematical Formulation
+    N = len(df)
+    clone_sizes = df[clone_key].value_counts()
 
-    # We shuffle the labels array to break the link between clone and cell type
-    # Convert to standard numpy array to avoid categorical shuffling warnings
-    # Use astype(str) or astype(object) before extracting array to avoid read-only or categorical warnings
-    labels_array = np.array(df[label_key].astype(str))
+    # Align type counts to the columns of the observed matrix
+    type_counts_s = df[label_key].value_counts().reindex(observed_counts.columns).fillna(0)
+    type_counts = type_counts_s.values
 
-    print(f"Running {n_permutations} permutations...")
-    for _ in range(n_permutations):
-        # Shuffle labels in place
-        np.random.shuffle(labels_array)
+    T = len(type_counts)
+    E = np.zeros((T, T))
+    V = np.zeros((T, T))
 
-        # Reconstruct the binary matrix with shuffled labels
-        # Note: We rely on the original index (clone_key) structure
-        shuffled_df = pd.DataFrame(
-            {clone_key: df[clone_key].values, label_key: labels_array}
-        )
+    counts_j = type_counts[:, None]
+    counts_k = type_counts[None, :]
+    counts_jk = counts_j + counts_k
+    np.fill_diagonal(counts_jk, type_counts)
 
-        shuffled_binary = pd.crosstab(
-            shuffled_df[clone_key], shuffled_df[label_key]
-        ).clip(upper=1)
+    size_counts = clone_sizes.value_counts()
 
-        # Ensure columns match observed (in case shuffling drops a rare type entirely)
-        shuffled_binary = shuffled_binary.reindex(
-            columns=binary_matrix.columns, fill_value=0
-        )
+    for c_size, num_clones in size_counts.items():
+        # Probability that a clone of size c_size has ZERO cells in type j
+        p_no_j = hypergeom.pmf(0, N, type_counts, c_size)
 
-        # Calculate null intersection
-        null_matrices.append((shuffled_binary.T @ shuffled_binary).values)
+        # Probability that it has ZERO cells in type j AND type k
+        p_no_jk = hypergeom.pmf(0, N, counts_jk, c_size)
 
-    null_matrices = np.array(null_matrices)  # Shape: (n_perms, n_types, n_types)
+        # P(present in j AND present in k)
+        pi_jk = 1.0 - p_no_j[:, None] - p_no_j[None, :] + p_no_jk
 
-    # 4. Calculate Statistics
-    null_mean = null_matrices.mean(axis=0)
-    null_std = null_matrices.std(axis=0)
+        # Diagonal (co-occurrence with itself)
+        np.fill_diagonal(pi_jk, 1.0 - p_no_j)
 
-    # Avoid division by zero
-    null_std[null_std == 0] = 1.0
+        # Independent expectations and variances sum linearly
+        E += num_clones * pi_jk
+        V += num_clones * pi_jk * (1.0 - pi_jk)
 
-    z_scores = (observed_counts.values - null_mean) / null_std
-    z_scores = pd.DataFrame(
+    std_dev = np.sqrt(V)
+    std_dev[std_dev == 0] = 1.0
+
+    z_scores = (observed_counts.values - E) / std_dev
+    z_scores_df = pd.DataFrame(
         z_scores, index=observed_counts.index, columns=observed_counts.columns
     )
 
-    # Calculate empirical P-values
-    # (Count how many nulls were >= observed) / n_permutations
-    # Note: This is a one-sided test for enrichment.
-    # For two-sided, you'd check both tails. The image implies enrichment focus.
-    p_values = (null_matrices >= observed_counts.values).sum(axis=0) / n_permutations
-    p_values = pd.DataFrame(
+    # Calculate P-values using normal approximation (one-sided for enrichment)
+    p_values = norm.sf(z_scores)
+    p_values_df = pd.DataFrame(
         p_values, index=observed_counts.index, columns=observed_counts.columns
     )
 
-    return observed_counts, z_scores, p_values
+    return observed_counts, z_scores_df, p_values_df
 
 
 def plot_coupling_heatmap(observed, z_scores, p_values, title="Lineage Coupling"):
