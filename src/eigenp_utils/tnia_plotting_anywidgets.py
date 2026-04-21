@@ -292,17 +292,16 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
     # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
     # Add scale bar
-    ax3_physical_width_um = zdim * sz
-    _add_scale_bar(ax3, ax3_physical_width_um, both_given, figsize, global_physical_width_um=xdim*sxy if sxy is not None else xdim)
+    ax3_physical_width_um = xdim * sxy if sxy is not None else xdim
+    _add_scale_bar(ax3, ax3_physical_width_um, both_given, figsize)
 
     return fig
 
 
 
-def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize, global_physical_width_um=None):
+def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
     # a small utility to pick the largest “nice” number ≤ target
-    target_width = global_physical_width_um if global_physical_width_um is not None else ax_physical_width_um
-    target = target_width * 0.2
+    target = ax_physical_width_um * 0.2
 
     def nice_length(x):
         # get exponent
@@ -2056,10 +2055,10 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Scale bar (kept opaque)
             fig.patch.set_alpha(1.0)
-            Z_dim = int(np.ceil(self.zmax - self.zmin + 1))
-            ax3_physical_width_um = Z_dim * self.sz
+            X_dim = int(np.ceil(self.xmax - self.xmin + 1))
+            ax3_physical_width_um = X_dim * self.sx if self.sx is not None else X_dim
             both_given = getattr(self, '_pixel_sizes_given', False)
-            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize, global_physical_width_um=(int(np.ceil(self.xmax - self.xmin + 1)))*self.sx if self.sx is not None else (int(np.ceil(self.xmax - self.xmin + 1))))
+            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize)
 
             fig.tight_layout(pad=0.0)
             return fig
