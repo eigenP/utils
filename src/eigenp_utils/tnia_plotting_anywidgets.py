@@ -2059,7 +2059,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
             Z_dim = int(np.ceil(self.zmax - self.zmin + 1))
             ax3_physical_width_um = Z_dim * self.sz
             both_given = getattr(self, '_pixel_sizes_given', False)
-            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize, global_physical_width_um=self.xmax*self.sx if self.sx is not None else self.xmax)
+            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize, global_physical_width_um=(int(np.ceil(self.xmax - self.xmin + 1)))*self.sx if self.sx is not None else (int(np.ceil(self.xmax - self.xmin + 1))))
 
             fig.tight_layout(pad=0.0)
             return fig

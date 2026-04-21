@@ -210,7 +210,9 @@ def test_deprecation_warnings_interactive(factory_fn):
     ((100, 200, 300), (1, 2, 3), '100 µm'),
     ((10, 50, 50), (0.5, 0.5, 0.5), '5 µm'),
     ((1, 5, 5), (10, 10, 10), '10 µm'),
-    ((50, 100, 150), (2, 2, 2), '50 µm')
+    ((50, 100, 150), (2, 2, 2), '50 µm'),
+    ((100, 100, 100), (1, 1, 1), '20 µm'),      # explicitly isotropic
+    ((10, 512, 512), (10, 2, 2), '200 µm')      # user requested anisotropic
 ])
 def test_scale_bar_logic(shape, pixel_sizes, expected_text):
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_scatter_interactive
