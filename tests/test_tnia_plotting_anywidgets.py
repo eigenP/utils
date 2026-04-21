@@ -205,3 +205,74 @@ def test_deprecation_warnings_interactive(factory_fn):
         factory_fn(im, x_s=5, y_s=10, z_s=5)
     with pytest.warns(DeprecationWarning, match="The 'x_t', 'y_t', 'z_t' parameters are deprecated"):
         factory_fn(im, x_t=2, y_t=3, z_t=4)
+
+def test_scale_bar_logic():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_scatter_interactive
+    import numpy as np
+
+    # Test slice interactive
+    im = np.zeros((100, 200, 300))
+    w_slice = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 2, 3), figsize=(5,5))
+    fig_slice = w_slice._render()
+
+    # Extract text from scale bar
+    texts_slice = [txt.get_text() for ax in fig_slice.axes for txt in ax.texts]
+    assert '20 µm' in texts_slice
+
+    # Extract fontsize of the scale bar
+    font_size_unscaled = None
+    for ax in fig_slice.axes:
+        for txt in ax.texts:
+            if '20 µm' in txt.get_text():
+                font_size_unscaled = txt.get_fontsize()
+
+    # Test scatter interactive
+    # Make points such that Z_dim=100, Y_dim=200, X_dim=300
+    points = (np.array([0, 99]), np.array([0, 199]), np.array([0, 299]))
+    w_scatter = show_zyx_max_scatter_interactive(points, pixel_sizes=(1, 2, 3), figsize=(5,5))
+    fig_scatter = w_scatter._render()
+
+    texts_scatter = [txt.get_text() for ax in fig_scatter.axes for txt in ax.texts]
+    assert '20 µm' in texts_scatter
+
+    # Test with figsize_scale to make sure it scales font and lines correctly
+    w_slice_scaled = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 2, 3), figsize=(5,5), figsize_scale=2.0)
+    fig_slice_scaled = w_slice_scaled._render()
+
+    font_size_scaled = None
+    linewidth_scaled = None
+    for ax in fig_slice_scaled.axes:
+        for txt in ax.texts:
+            if '20 µm' in txt.get_text():
+                font_size_scaled = txt.get_fontsize()
+        for collection in ax.collections:
+            if collection.get_linewidth():
+                linewidth_scaled = collection.get_linewidth()[0]
+
+    assert font_size_scaled is not None
+    assert font_size_scaled > font_size_unscaled
+
+def test_scale_bar_logic_regression():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+    import numpy as np
+
+    im = np.zeros((50, 100, 150))
+    w_slice_1 = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1), figsize=(5,5), figsize_scale=1.0)
+    fig_1 = w_slice_1._render()
+
+    w_slice_2 = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1), figsize=(5,5), figsize_scale=2.0)
+    fig_2 = w_slice_2._render()
+
+    texts_1 = [txt.get_text() for ax in fig_1.axes for txt in ax.texts]
+    texts_2 = [txt.get_text() for ax in fig_2.axes for txt in ax.texts]
+
+    # Length logic shouldn't change with figsize
+    assert '10 µm' in texts_1
+    assert '10 µm' in texts_2
+
+    # But styling should scale
+    font_size_1 = next((txt.get_fontsize() for ax in fig_1.axes for txt in ax.texts if '10 µm' in txt.get_text()), None)
+    font_size_2 = next((txt.get_fontsize() for ax in fig_2.axes for txt in ax.texts if '10 µm' in txt.get_text()), None)
+
+    assert font_size_1 is not None and font_size_2 is not None
+    assert font_size_2 > font_size_1
