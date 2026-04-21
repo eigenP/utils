@@ -38,26 +38,26 @@ def generate_trend_stack(shape=(20, 100, 100), decay_func=None, outlier_idx=None
 
     return stack, p99_curve
 
-def test_perfect_restoration_exponential():
+@pytest.mark.parametrize("gamma_fit_func,method,decay_lambda", [
+    ('exponential', 'gain', lambda z: 1.0 * np.exp(-0.1 * z)),
+    ('exponential', 'gamma', lambda z: 1.0 * np.exp(-0.1 * z)),
+    ('linear', 'gain', lambda z: np.clip(1.0 - 0.02 * z, 0.1, 1.0)),
+    ('linear', 'gamma', lambda z: np.clip(1.0 - 0.02 * z, 0.1, 1.0))
+])
+def test_perfect_restoration(gamma_fit_func, method, decay_lambda):
     """
     Testr Verification: Perfect Signal Restoration
 
-    Verifies that a perfectly exponential decay is recovered to flat intensity
-    using the 'gain' method. This validates the Forward/Inverse model relationship:
-    Forward: I(z) = I0 * exp(-kz)
-    Inverse: I_corr(z) = I(z) * gain(z) where gain(z) comes from fitting the exponential.
+    Verifies that a perfectly exponential or linear decay is recovered to flat intensity
+    using the 'gain' or 'gamma' method.
 
     Invariant: The output stack should have constant 99th percentile across all Z slices.
     """
     Z = 20
-    # Decay: I(z) = I0 * exp(-0.1 * z)
-    decay = lambda z: 1.0 * np.exp(-0.1 * z)
-
-    stack, _ = generate_trend_stack(shape=(Z, 50, 50), decay_func=decay)
+    stack, _ = generate_trend_stack(shape=(Z, 50, 50), decay_func=decay_lambda)
 
     # Apply correction
-    # fit 'exponential', method 'gain'
-    corrected = adjust_brightness_per_slice(stack, gamma_fit_func='exponential', method='gain')
+    corrected = adjust_brightness_per_slice(stack, gamma_fit_func=gamma_fit_func, method=method)
 
     # Check 99th percentiles of output
     p99_out = np.array([np.percentile(s, 99) for s in corrected])
@@ -66,13 +66,15 @@ def test_perfect_restoration_exponential():
     mean_p99 = np.mean(p99_out)
     std_p99 = np.std(p99_out)
 
-    # We expect very low variation (coefficient of variation < 1%)
-    # This proves the fit found the correct parameters and the gain application worked.
+    # We expect low variation. For gamma correction on linear scaling,
+    # the relationship is non-linear so P99 might not be as perfectly flat
+    # as scalar multiplication (gain), so we allow slightly more tolerance.
     cv = std_p99 / mean_p99
 
     print(f"Mean P99: {mean_p99:.4f}, Std P99: {std_p99:.4f}, CV: {cv:.4f}")
 
-    assert cv < 0.015, f"Brightness not stabilized! CV={cv:.4f} is too high."
+    tolerance = 0.015 if method == 'gain' else 0.08
+    assert cv < tolerance, f"Brightness not stabilized! CV={cv:.4f} is too high for method={method}."
 
 
 def test_trend_preservation_with_outlier():
