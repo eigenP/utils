@@ -293,15 +293,16 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
 
     # Add scale bar
     ax3_physical_width_um = zdim * sz
-    _add_scale_bar(ax3, ax3_physical_width_um, both_given, figsize)
+    _add_scale_bar(ax3, ax3_physical_width_um, both_given, figsize, global_physical_width_um=xdim*sxy if sxy is not None else xdim)
 
     return fig
 
 
 
-def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
+def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize, global_physical_width_um=None):
     # a small utility to pick the largest “nice” number ≤ target
-    target = ax_physical_width_um * 0.2
+    target_width = global_physical_width_um if global_physical_width_um is not None else ax_physical_width_um
+    target = target_width * 0.2
 
     def nice_length(x):
         # get exponent
@@ -330,14 +331,14 @@ def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
     x1 = 0.5 + bar_frac / 2
     y = 0.5
 
-    ax.hlines(y, x0, x1, transform=ax.transAxes, linewidth=linewidth, color='gray')
+    ax.hlines(y, x0, x1, transform=ax.transAxes, linewidth=linewidth, color='gray', clip_on=False)
 
     if pixel_sizes_given:
         text_label = f"{int(bar_um)} µm" if bar_um >= 1 else f"{bar_um:.2g} µm"
     else:
         text_label = "`pixel_sizes`"
 
-    ax.text(0.5, y - 0.1, text_label, transform=ax.transAxes,
+    ax.text(0.5, y - 0.1, text_label, transform=ax.transAxes, clip_on=False,
             ha='center', va='top', color='gray', fontsize=fontsize_pt)
 
 ### New function
@@ -2058,7 +2059,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
             Z_dim = int(np.ceil(self.zmax - self.zmin + 1))
             ax3_physical_width_um = Z_dim * self.sz
             both_given = getattr(self, '_pixel_sizes_given', False)
-            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize)
+            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize, global_physical_width_um=self.xmax*self.sx if self.sx is not None else self.xmax)
 
             fig.tight_layout(pad=0.0)
             return fig
