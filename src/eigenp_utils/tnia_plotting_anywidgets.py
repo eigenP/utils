@@ -2122,9 +2122,7 @@ def show_zyx_max_slice_interactive(
         im = im[np.newaxis, ...]
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
-    _sxy = sxy if sxy is not None else 1
-    _sz = sz if sz is not None else 1
-    z_xy_ratio = (_sz / _sxy) if _sxy != _sz else 1
+    z_xy_ratio = (pz / px) if px != pz else 1
 
     if figsize is None:
         width_px  = X + Z * z_xy_ratio
@@ -2216,9 +2214,7 @@ def show_zyx_max_slice_interactive_point_annotator(
         im = im[np.newaxis, ...]
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
-    _sxy = sxy if sxy is not None else 1
-    _sz = sz if sz is not None else 1
-    z_xy_ratio = (_sz / _sxy) if _sxy != _sz else 1
+    z_xy_ratio = (pz / px) if px != pz else 1
 
     if figsize is None:
         width_px  = X + Z * z_xy_ratio
@@ -2348,9 +2344,7 @@ def show_zyx_max_scatter_interactive(
     XN = xmax - xmin + 1
     YN = ymax - ymin + 1
     ZN = zmax - zmin + 1
-    _sxy = sxy if sxy is not None else 1
-    _sz = sz if sz is not None else 1
-    z_xy_ratio = (_sz / _sxy) if _sxy != _sz else 1
+    z_xy_ratio = (pz / px) if px != pz else 1
 
     if figsize is None:
         width_px  = XN + ZN * z_xy_ratio
