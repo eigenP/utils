@@ -2,6 +2,9 @@ import numpy as np
 import warnings
 from skimage.exposure import adjust_gamma, rescale_intensity
 from scipy.optimize import curve_fit
+import scipy.ndimage as ndimage
+from scipy.fft import dctn, idctn
+import skimage.transform as transform
 
 def contrast_stretching(image, p_min=0.0, p_max=99.9):
     """
@@ -474,3 +477,270 @@ def test_z_axis_orientation(img, channel=None, return_image=True):
         return img, FLAG
     else:
         return FLAG
+
+
+def _tshrinkage(x, thresh):
+    return np.sign(x) * np.clip(np.abs(x) - thresh, a_min=0, a_max=None)
+
+def _prepare_data_for_basic(images, is_3d=False):
+    """
+    Normalizes input `images` into a numpy array of shape (N, ...)
+    where `...` is the spatial dimensions matching the flatfield.
+    """
+    if isinstance(images, list):
+        images = np.stack(images, axis=0)
+
+    images = np.asarray(images)
+    original_shape = images.shape
+
+    if is_3d:
+        if images.ndim == 3:
+            images = images[np.newaxis, ...]
+        elif images.ndim >= 4:
+            images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+    else:
+        if images.ndim == 2:
+            images = images[np.newaxis, ...]
+        elif images.ndim >= 3:
+            images = images.reshape(-1, images.shape[-2], images.shape[-1])
+
+    return images, original_shape
+
+def _resize_spatial(images, target_spatial_shape):
+    N = images.shape[0]
+    out = np.empty((N,) + target_spatial_shape, dtype=np.float32)
+    for i in range(N):
+        out[i] = transform.resize(
+            images[i], target_spatial_shape,
+            order=1, mode='reflect', anti_aliasing=False, preserve_range=True
+        )
+    return out
+
+def fit_basic_shading(
+    images,
+    is_3d=False,
+    working_size=128,
+    max_reweight_iterations=10,
+    max_iterations=500,
+    optimization_tol=1e-3,
+    reweighting_tol=1e-2,
+    smoothness_flatfield=None,
+    get_darkfield=False,
+    fitting_mode='approximate',
+    epsilon=0.1,
+    rho=1.5,
+    mu_coef=12.5,
+    max_mu_coef=1e7
+):
+    """
+    Fits the BaSiC shading model to a collection of images.
+
+    Args:
+        images: Input images. Can be a 3D array (Z, Y, X), 4D array (T, Z, Y, X),
+                or list of 3D/2D arrays.
+        is_3d (bool): If True, computes a 3D flatfield (Z, Y, X).
+                      If False (default), computes a 2D flatfield (Y, X).
+        working_size (int): Spatial dimension size to downscale to for faster fitting.
+        max_reweight_iterations (int): Maximum number of reweighting iterations.
+        max_iterations (int): Maximum number of ADMM iterations per reweighting loop.
+        optimization_tol (float): Tolerance for ADMM convergence.
+        reweighting_tol (float): Tolerance for reweighting loop convergence.
+        smoothness_flatfield (float): Smoothness regularization weight. If None, it is estimated.
+        get_darkfield (bool): Whether to estimate darkfield.
+        fitting_mode (str): Fitting mode, currently only 'approximate' is supported.
+        epsilon (float): Small value for weight calculation.
+        rho (float): ADMM penalty parameter update factor.
+        mu_coef (float): Initial penalty parameter coefficient.
+        max_mu_coef (float): Maximum penalty parameter coefficient.
+
+    Returns:
+        dict: Containing 'flatfield', 'darkfield', and 'baseline'.
+    """
+    if fitting_mode != 'approximate':
+        # TODO: scaffold LADMAP mode
+        raise NotImplementedError(f"fitting_mode '{fitting_mode}' is not yet implemented. Use 'approximate'.")
+
+    if get_darkfield:
+        # TODO: scaffold darkfield optimization logic
+        warnings.warn("get_darkfield is currently not implemented. Proceeding with flatfield only.")
+        get_darkfield = False
+
+    images, original_shape = _prepare_data_for_basic(images, is_3d)
+
+    s_s = images.shape[0]
+    original_spatial_shape = images.shape[1:]
+
+    target_spatial_shape = tuple([min(d, working_size) if working_size is not None else d for d in original_spatial_shape])
+
+    if target_spatial_shape != original_spatial_shape:
+        Im = _resize_spatial(images, target_spatial_shape)
+    else:
+        Im = images.astype(np.float32)
+
+    s_spatial = Im.shape[1:]
+    Im_flat = Im.reshape(s_s, -1)
+
+    image_norm = np.linalg.norm(Im_flat)
+    if image_norm == 0:
+        image_norm = 1.0
+
+    if smoothness_flatfield is None:
+        meanD = Im.mean(axis=0)
+        mean_meanD = meanD.mean()
+        if mean_meanD == 0:
+            mean_meanD = 1.0
+        meanD = meanD / mean_meanD
+        W_meanD = dctn(meanD, norm='ortho')
+        smoothness_flatfield = np.sum(np.abs(W_meanD)) / 400.0 * 0.5
+
+    _, S_svd, _ = np.linalg.svd(Im_flat, full_matrices=False)
+    spectral_norm = S_svd[0]
+    if spectral_norm == 0:
+        spectral_norm = 1.0
+
+    init_mu = mu_coef / spectral_norm
+    max_mu = init_mu * max_mu_coef
+
+    ent1 = 1.0
+
+    W = np.ones_like(Im_flat)
+
+    last_S = None
+
+    S = np.ones(s_spatial, dtype=np.float32)
+    B = np.ones(s_s, dtype=np.float32)
+
+    for reweight_iter in range(max_reweight_iterations):
+        S_hat = dctn(S, norm='ortho')
+        D_R = np.zeros(s_spatial, dtype=np.float32)
+
+        mean_Im_flat = np.nanmean(Im_flat)
+        if mean_Im_flat == 0:
+            mean_Im_flat = 1.0
+        B = np.nanmean(Im_flat, axis=1) / mean_Im_flat
+
+        I_R_flat = np.zeros_like(Im_flat)
+        I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...]).reshape(s_s, -1)
+
+        Y_flat = np.zeros_like(Im_flat)
+        mu = init_mu
+
+        for k in range(max_iterations):
+            temp_W = (Im_flat - I_R_flat - I_B_flat + Y_flat / mu) / ent1
+            temp_W = np.mean(temp_W, axis=0)
+
+            S_hat = S_hat + dctn(temp_W.reshape(s_spatial), norm="ortho")
+            S_hat = _tshrinkage(S_hat, smoothness_flatfield / (ent1 * mu))
+            S = idctn(S_hat, norm="ortho")
+
+            I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...]).reshape(s_s, -1)
+
+            I_R_flat = I_R_flat + (Im_flat - I_B_flat - I_R_flat + (1 / mu) * Y_flat) / ent1
+            I_R_flat = _tshrinkage(I_R_flat, W / (ent1 * mu))
+
+            R_flat = Im_flat - I_R_flat
+            mean_R_flat = np.mean(R_flat)
+            if mean_R_flat == 0:
+                mean_R_flat = 1.0
+            B = np.mean(R_flat, axis=1) / mean_R_flat
+            B = np.clip(B, 0, None)
+
+            I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...]).reshape(s_s, -1)
+
+            fit_residual_flat = Im_flat - I_B_flat - I_R_flat
+            Y_flat = Y_flat + mu * fit_residual_flat
+            mu = min(mu * rho, max_mu)
+
+            norm_ratio = np.linalg.norm(fit_residual_flat) / image_norm
+            if norm_ratio <= optimization_tol:
+                break
+
+        S = S / np.mean(S)
+
+        XE_norm = I_R_flat / (np.mean(I_B_flat, axis=1, keepdims=True) + 1e-6)
+        W = 1.0 / (np.abs(XE_norm) + epsilon)
+        W = W * W.size / np.sum(W)
+
+        if last_S is not None:
+            mad_flatfield = np.sum(np.abs(S - last_S)) / np.sum(np.abs(last_S))
+            if mad_flatfield <= reweighting_tol:
+                break
+        last_S = S
+
+    if target_spatial_shape != original_spatial_shape:
+        flatfield = transform.resize(S, original_spatial_shape, order=1, mode='reflect', anti_aliasing=False, preserve_range=True)
+    else:
+        flatfield = S
+
+    darkfield = np.zeros(original_spatial_shape, dtype=np.float32)
+    baseline = B * np.mean(S)
+
+    return {
+        'flatfield': flatfield,
+        'darkfield': darkfield,
+        'baseline': baseline
+    }
+
+def apply_basic_shading(
+    images,
+    flatfield,
+    darkfield=None,
+    baseline=None,
+    baseline_smooth_method=None,
+    baseline_smooth_sigma=2.0,
+    output_dtype=None
+):
+    """
+    Applies the basic shading correction to images.
+
+    Args:
+        images: Input images.
+        flatfield: Estimated flatfield.
+        darkfield: Estimated darkfield.
+        baseline: Estimated baseline for timelapse correction.
+        baseline_smooth_method: Method to smooth baseline ('gaussian').
+        baseline_smooth_sigma: Sigma for gaussian smoothing.
+
+    Returns:
+        Corrected images.
+    """
+    images = np.asarray(images)
+
+    if darkfield is None:
+        darkfield = np.zeros_like(flatfield)
+
+    diff_dims = images.ndim - flatfield.ndim
+    if diff_dims < 0:
+        raise ValueError("Images have fewer dimensions than flatfield.")
+
+    expand_tuple = (np.newaxis,) * diff_dims + (...,)
+
+    ff = flatfield[expand_tuple]
+    df = darkfield[expand_tuple]
+
+    ff_safe = np.where(ff == 0, 1e-9, ff)
+    corrected = (images - df) / ff_safe
+
+    if baseline is not None:
+        if baseline_smooth_method == 'gaussian':
+            baseline = ndimage.gaussian_filter1d(baseline, sigma=baseline_smooth_sigma)
+
+        leading_shape = images.shape[:diff_dims]
+        if np.prod(leading_shape) != baseline.size:
+            raise ValueError(f"Baseline size {baseline.size} does not match leading dimensions of images {leading_shape}.")
+
+        b = baseline.reshape(leading_shape)
+        b = b[..., *((np.newaxis,) * flatfield.ndim)]
+
+        corrected = corrected - b
+
+    if output_dtype is None:
+        output_dtype = images.dtype
+
+    if np.issubdtype(output_dtype, np.integer):
+        # Clip to valid integer range before casting to prevent wrap-around
+        min_val = np.iinfo(output_dtype).min
+        max_val = np.iinfo(output_dtype).max
+        corrected = np.clip(corrected, min_val, max_val)
+
+    return corrected.astype(output_dtype)

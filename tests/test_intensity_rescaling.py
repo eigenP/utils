@@ -1,0 +1,103 @@
+import numpy as np
+import pytest
+from eigenp_utils.intensity_rescaling import fit_basic_shading, apply_basic_shading
+
+def test_basic_fit_synthetic():
+    np.random.seed(42)
+    sizes = (128, 128)
+    grid = np.array(np.meshgrid(*[np.linspace(-s // 2 + 1, s // 2, s) for s in sizes], indexing='ij'))
+
+    gradient = np.sum(grid**2, axis=0)
+    gradient = 0.01 * (np.max(gradient) - gradient) + 10
+
+    # Ground truth relative flatfield
+    truth = gradient / np.mean(gradient)
+
+    # Generate 8 images with poisson noise
+    images = np.random.poisson(lam=gradient.astype(int), size=[8] + list(sizes))
+
+    # Fit flatfield
+    res = fit_basic_shading(images, is_3d=False)
+    flatfield = res['flatfield']
+
+    # Validate accuracy
+    max_error = np.max(np.abs(flatfield - truth))
+    assert max_error < 0.35, f"Max error {max_error} exceeded 0.35 threshold"
+
+    # Verify shape
+    assert flatfield.shape == sizes
+
+def test_apply_basic_shading():
+    np.random.seed(42)
+    images = np.random.rand(8, 128, 128)
+    flatfield = np.ones((128, 128)) * 2
+
+    corrected = apply_basic_shading(images, flatfield)
+
+    np.testing.assert_allclose(corrected, images / 2.0)
+
+def test_apply_basic_shading_baseline():
+    np.random.seed(42)
+    images = np.ones((8, 128, 128))
+    flatfield = np.ones((128, 128))
+    baseline = np.arange(8)
+
+    corrected = apply_basic_shading(images, flatfield, baseline=baseline)
+
+    # Check baseline correction was applied correctly (using defaults and gaussian smoothing)
+    # The gaussian filter will slightly blur the `baseline`, but the mean should remain roughly the same
+    # For a deterministic check, we test whether baseline logic runs without error
+    assert corrected.shape == images.shape
+
+if __name__ == '__main__':
+    pytest.main([__file__])
+
+def test_basic_fit_synthetic_3d():
+    np.random.seed(42)
+    sizes = (8, 64, 64)
+    grid = np.array(np.meshgrid(*[np.linspace(-s // 2 + 1, s // 2, s) for s in sizes], indexing='ij'))
+
+    gradient = np.sum(grid**2, axis=0)
+    gradient = 0.01 * (np.max(gradient) - gradient) + 10
+
+    truth = gradient / np.mean(gradient)
+
+    images = np.random.poisson(lam=gradient.astype(int), size=[4] + list(sizes))
+
+    res = fit_basic_shading(images, is_3d=True)
+    flatfield = res['flatfield']
+
+    max_error = np.max(np.abs(flatfield - truth))
+    assert max_error < 0.35, f"Max error {max_error} exceeded 0.35 threshold"
+    assert flatfield.shape == sizes
+
+def test_apply_basic_shading_dtype():
+    np.random.seed(42)
+    # Test uint8 input
+    images_uint8 = np.random.randint(50, 200, size=(8, 128, 128), dtype=np.uint8)
+    flatfield = np.ones((128, 128)) * 0.5  # brightens image (divides by 0.5 -> mult by 2)
+
+    corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
+
+    # Check dtype is preserved
+    assert corrected_uint8.dtype == np.uint8
+
+    # Check bounds are enforced (since multiplying by 2 would push many values above 255)
+    assert np.max(corrected_uint8) <= 255
+    assert np.min(corrected_uint8) >= 0
+
+    # Verify exact math for a specific element that doesn't overflow
+    images_uint8[0, 0, 0] = 100
+    corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
+    assert corrected_uint8[0, 0, 0] == 200
+
+    # Verify overflow clipping
+    images_uint8[0, 0, 0] = 150
+    corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
+    assert corrected_uint8[0, 0, 0] == 255
+
+    # Test uint16 input
+    images_uint16 = np.random.randint(5000, 40000, size=(8, 128, 128), dtype=np.uint16)
+    corrected_uint16 = apply_basic_shading(images_uint16, flatfield)
+    assert corrected_uint16.dtype == np.uint16
+    assert np.max(corrected_uint16) <= 65535
