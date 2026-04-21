@@ -205,3 +205,56 @@ def test_deprecation_warnings_interactive(factory_fn):
         factory_fn(im, x_s=5, y_s=10, z_s=5)
     with pytest.warns(DeprecationWarning, match="The 'x_t', 'y_t', 'z_t' parameters are deprecated"):
         factory_fn(im, x_t=2, y_t=3, z_t=4)
+
+@pytest.mark.parametrize("shape, pixel_sizes, expected_text", [
+    ((100, 200, 300), (1, 2, 3), '20 µm'),
+    ((10, 50, 50), (0.5, 0.5, 0.5), '1 µm'),
+    ((1, 5, 5), (10, 10, 10), '2 µm'),
+    ((50, 100, 150), (2, 2, 2), '20 µm')
+])
+def test_scale_bar_logic(shape, pixel_sizes, expected_text):
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_scatter_interactive
+    import numpy as np
+
+    # Test slice interactive
+    im = np.zeros(shape)
+    w_slice = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes, figsize=(5,5))
+    fig_slice = w_slice._render()
+
+    # Extract text from scale bar
+    texts_slice = [txt.get_text() for ax in fig_slice.axes for txt in ax.texts]
+    assert expected_text in texts_slice
+
+    # Extract fontsize of the scale bar
+    font_size_unscaled = None
+    for ax in fig_slice.axes:
+        for txt in ax.texts:
+            if expected_text in txt.get_text():
+                font_size_unscaled = txt.get_fontsize()
+
+    # Test scatter interactive
+    Z, Y, X = shape
+    # Make points such that Z_dim=Z, Y_dim=Y, X_dim=X
+    points = (np.array([0, Z-1]), np.array([0, Y-1]), np.array([0, X-1]))
+    w_scatter = show_zyx_max_scatter_interactive(points, pixel_sizes=pixel_sizes, figsize=(5,5))
+    fig_scatter = w_scatter._render()
+
+    texts_scatter = [txt.get_text() for ax in fig_scatter.axes for txt in ax.texts]
+    assert expected_text in texts_scatter
+
+    # Test with figsize_scale to make sure it scales font and lines correctly
+    w_slice_scaled = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes, figsize=(5,5), figsize_scale=2.0)
+    fig_slice_scaled = w_slice_scaled._render()
+
+    font_size_scaled = None
+    linewidth_scaled = None
+    for ax in fig_slice_scaled.axes:
+        for txt in ax.texts:
+            if expected_text in txt.get_text():
+                font_size_scaled = txt.get_fontsize()
+        for collection in ax.collections:
+            if collection.get_linewidth():
+                linewidth_scaled = collection.get_linewidth()[0]
+
+    assert font_size_scaled is not None
+    assert font_size_scaled > font_size_unscaled

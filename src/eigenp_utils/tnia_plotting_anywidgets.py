@@ -292,15 +292,23 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
     # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
     # Add scale bar
-    width_um = xdim * sxy
-    target = width_um * 0.2
+    ax3_physical_width_um = zdim * sz
+    _add_scale_bar(ax3, ax3_physical_width_um, both_given, figsize)
 
+    return fig
+
+
+
+def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
     # a small utility to pick the largest “nice” number ≤ target
+    target = ax_physical_width_um * 0.2
+
     def nice_length(x):
         # get exponent
+        if x <= 0: return 1
         exp = np.floor(np.log10(x))
         # candidates: 1, 2, 5 times 10^exp
-        for m in [5,2,1]:
+        for m in [5, 2, 1]:
             val = m * 10**exp
             if val <= x:
                 return val
@@ -308,38 +316,29 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
         return x
 
     bar_um = nice_length(target)
+    # Convert back to fraction of the full width of the current axes
+    bar_frac = bar_um / ax_physical_width_um if ax_physical_width_um > 0 else 0
 
-    # Convert back to pixels
-    bar_pix = bar_um / sxy
-    bar_frac = bar_pix / xdim    # fraction of the full width
-
-    # pick fontsize
+    # pick fontsize and line width to scale with figure size
     fig_h_in = figsize[1] if figsize is not None else 10
     fontsize_pt = max(8, min(24, fig_h_in * 72 * 0.03))
+    linewidth = max(1, fig_h_in * 0.2)
 
     ### Draw
-    # center the bar at (x=0.5), y=0.5 in ax3’s normalized coordinates:
-    x0 = 0.5 - bar_frac/2
-    x1 = 0.5 + bar_frac/2
-    y  = 0.5
+    # center the bar at (x=0.5), y=0.5 in ax's normalized coordinates:
+    x0 = 0.5 - bar_frac / 2
+    x1 = 0.5 + bar_frac / 2
+    y = 0.5
 
-    ax3.hlines(y, x0, x1, transform=ax3.transAxes,
-               linewidth=2, color='gray')
+    ax.hlines(y, x0, x1, transform=ax.transAxes, linewidth=linewidth, color='gray')
 
-    if both_given:
-        text_label = f"{int(bar_um)} µm"
+    if pixel_sizes_given:
+        text_label = f"{int(bar_um)} µm" if bar_um >= 1 else f"{bar_um:.2g} µm"
     else:
         text_label = "`pixel_sizes`"
 
-    ax3.text(0.5, y - 0.1, text_label,
-             transform=ax3.transAxes,
-             ha='center', va='top',
-             color='gray',
-             fontsize=fontsize_pt)
-
-    return fig
-
-
+    ax.text(0.5, y - 0.1, text_label, transform=ax.transAxes,
+            ha='center', va='top', color='gray', fontsize=fontsize_pt)
 
 ### New function
 def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None):
@@ -1646,6 +1645,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.channels = channels
         self._sxy_given = sxy is not None
         self._sz_given = sz is not None
+        self._pixel_sizes_given = pixel_sizes is not None or (sxy is not None and sz is not None)
         pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
         self.sx = px
         self.sy = py
@@ -2055,30 +2055,10 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Scale bar (kept opaque)
             fig.patch.set_alpha(1.0)
-            width_um = (self.xmax - self.xmin + 1) * self.sx
-            target = width_um * 0.2
-            def nice_length(x):
-                exp = np.floor(np.log10(x))
-                for m in [5,2,1]:
-                    val = m * 10**exp
-                    if val <= x: return val
-                return x
-            bar_um = nice_length(target)
-            bar_pix = bar_um / self.sx
-            bar_frac = bar_pix / (self.xmax - self.xmin + 1)
-            fig_h_in = self.figsize[1] if self.figsize else 10
-            fontsize_pt = max(8, min(24, fig_h_in * 72 * 0.03))
-            x0 = 0.5 - bar_frac/2; x1 = 0.5 + bar_frac/2; y = 0.5
-            axBar.hlines(y, x0, x1, transform=axBar.transAxes, linewidth=2, color='gray')
-
+            Z_dim = int(np.ceil(self.zmax - self.zmin + 1))
+            ax3_physical_width_um = Z_dim * self.sz
             both_given = getattr(self, '_pixel_sizes_given', False)
-            if both_given:
-                text_label = f"{int(bar_um)} µm"
-            else:
-                text_label = "`pixel_sizes`"
-
-            axBar.text(0.5, y - 0.1, text_label, transform=axBar.transAxes,
-                       ha='center', va='top', color='gray', fontsize=fontsize_pt)
+            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize)
 
             fig.tight_layout(pad=0.0)
             return fig
@@ -2152,6 +2132,8 @@ def show_zyx_max_slice_interactive(
         divisor = max(width_px / 8, height_px / 8)
         w, h = float(width_px / divisor), float(height_px / divisor)
         figsize = (w * figsize_scale, h * figsize_scale)
+    elif figsize_scale != 1.0:
+        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, n // 64)
     if x_t is None: x_t = _default_t(X)
@@ -2244,6 +2226,8 @@ def show_zyx_max_slice_interactive_point_annotator(
         divisor = max(width_px / 8, height_px / 8)
         w, h = float(width_px / divisor), float(height_px / divisor)
         figsize = (w * figsize_scale, h * figsize_scale)
+    elif figsize_scale != 1.0:
+        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, n // 64)
     if x_t is None: x_t = _default_t(X)
@@ -2374,6 +2358,8 @@ def show_zyx_max_scatter_interactive(
         divisor = max(width_px / 8, height_px / 8)
         w, h = float(width_px / divisor), float(height_px / divisor)
         figsize = (w * figsize_scale, h * figsize_scale)
+    elif figsize_scale != 1.0:
+        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, int(n // 64))
     Xdim = int(np.ceil(XN)); Ydim = int(np.ceil(YN)); Zdim = int(np.ceil(ZN))
