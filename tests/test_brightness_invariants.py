@@ -173,3 +173,19 @@ def test_idempotence():
     # A change of < 0.1% (1e-3) is acceptable and indicates stability.
     assert max_rel_diff < 1e-3, \
         f"Algorithm is not idempotent; second pass changed values by {max_rel_diff*100:.4f}%"
+
+def test_return_diagnostic_dict():
+    import matplotlib.pyplot as plt
+    image = np.random.randint(0, 255, (10, 20, 20), dtype=np.uint8)
+
+    # Test that it returns a dictionary with 'image' and 'figure'
+    result = adjust_brightness_per_slice(image, gamma_fit_func='exponential', return_diagnostic=True)
+
+    assert isinstance(result, dict)
+    assert 'image' in result
+    assert 'figure' in result
+    assert isinstance(result['image'], np.ndarray)
+
+    # Figure should be a matplotlib Figure object
+    from matplotlib.figure import Figure
+    assert isinstance(result['figure'], Figure)

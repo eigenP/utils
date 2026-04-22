@@ -211,10 +211,10 @@ def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLI
         FLIP_Z_AXIS (bool): Whether to flip the Z-axis for manual gamma ramp application.
                             Ignored or handled implicitly if gamma_fit_func is used.
         method (str): Adjustment method. 'gamma' (default) or 'gain' (linear multiplication).
-        return_diagnostic (bool, optional): If True, plots the raw Z-axis intensity vs the fitted correction curve. Defaults to False.
+        return_diagnostic (bool, optional): If True, returns a dictionary containing the adjusted image and the diagnostic figure showing raw Z-axis intensity vs the fitted correction curve. Defaults to False.
 
     Returns:
-        numpy.ndarray: A new 3D image array with adjusted brightness values per slice.
+        numpy.ndarray or dict: A new 3D image array with adjusted brightness values per slice. If return_diagnostic is True, returns `{"image": adjusted_image, "figure": matplotlib.figure.Figure}`.
     """
     # Validate inputs
     if not isinstance(image, np.ndarray) or image.ndim != 3:
@@ -227,6 +227,7 @@ def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLI
 
     # Create an output image array
     adjusted_image = np.empty_like(image)
+    diagnostic_fig = None
 
     # Pre-calculate global max for clipping logic if needed
     is_integer = np.issubdtype(image.dtype, np.integer)
@@ -288,11 +289,13 @@ def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLI
             y_fit_norm = model(x_data, *params)
         except Exception as e:
             print(f"Warning: Curve fit failed: {e}. Returning original image.")
+            if return_diagnostic:
+                return {"image": image, "figure": None}
             return image
 
         if return_diagnostic:
             import matplotlib.pyplot as plt
-            plt.figure(figsize=(8, 5))
+            diagnostic_fig = plt.figure(figsize=(8, 5))
             plt.plot(x_data, y_data_norm, 'o', label='Raw 99th Percentile (Normalized)', alpha=0.7)
             plt.plot(x_data, y_fit_norm, '-', label=f'Fitted Curve ({gamma_fit_func})', linewidth=2)
             plt.xlabel('Z-slice index')
@@ -301,7 +304,7 @@ def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLI
             plt.legend()
             plt.grid(True, linestyle='--', alpha=0.6)
             plt.tight_layout()
-            plt.show()
+            plt.close(diagnostic_fig)
 
         # 4. Calculate correction factors (gamma or gain)
         y_ref_norm = np.max(y_fit_norm)
@@ -364,6 +367,8 @@ def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLI
                     img_slice = np.clip(img_slice, 0, 1.0)
                 adjusted_image[i, :, :] = img_slice.astype(image.dtype)
 
+    if return_diagnostic:
+        return {"image": adjusted_image, "figure": diagnostic_fig}
     return adjusted_image
 
 def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z_AXIS=False):
