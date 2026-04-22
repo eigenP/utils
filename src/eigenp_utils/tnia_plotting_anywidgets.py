@@ -293,14 +293,14 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
 
     # Add scale bar
     ax3_physical_width_um = xdim * sxy if sxy is not None else xdim
-    _add_scale_bar(ax3, ax3_physical_width_um, both_given, figsize)
+    _add_scale_bar(ax0, ax3, ax3_physical_width_um, both_given, figsize)
 
     return fig
 
 
 
-def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
-    # a small utility to pick the largest “nice” number ≤ target
+def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, figsize):
+    # a small utility to pick the largest "nice" number ≤ target
     target = ax_physical_width_um * 0.2
 
     def nice_length(x):
@@ -325,20 +325,21 @@ def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
     linewidth = max(1, fig_h_in * 0.2)
 
     ### Draw
-    # center the bar at (x=0.5), y=0.5 in ax's normalized coordinates:
-    x0 = 0.5 - bar_frac / 2
-    x1 = 0.5 + bar_frac / 2
-    y = 0.5
+    # Put the line at the bottom right of ax_line
+    x1 = 0.95
+    x0 = x1 - bar_frac
+    y_line = 0.05
 
-    ax.hlines(y, x0, x1, transform=ax.transAxes, linewidth=linewidth, color='gray', clip_on=False)
+    ax_line.hlines(y_line, x0, x1, transform=ax_line.transAxes, linewidth=linewidth, color='white', clip_on=False)
 
     if pixel_sizes_given:
         text_label = f"{int(bar_um)} µm" if bar_um >= 1 else f"{bar_um:.2g} µm"
     else:
         text_label = "`pixel_sizes`"
 
-    ax.text(0.5, y - 0.1, text_label, transform=ax.transAxes, clip_on=False,
-            ha='center', va='top', color='gray', fontsize=fontsize_pt)
+    # Put the text centered in ax_text
+    ax_text.text(0.5, 0.5, text_label, transform=ax_text.transAxes, clip_on=False,
+            ha='center', va='center', color='gray', fontsize=fontsize_pt)
 
 ### New function
 def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None):
@@ -2058,7 +2059,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
             X_dim = int(np.ceil(self.xmax - self.xmin + 1))
             ax3_physical_width_um = X_dim * self.sx if self.sx is not None else X_dim
             both_given = getattr(self, '_pixel_sizes_given', False)
-            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize)
+            _add_scale_bar(axXY, axBar, ax3_physical_width_um, both_given, self.figsize)
 
             fig.tight_layout(pad=0.0)
             return fig
