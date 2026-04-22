@@ -175,17 +175,26 @@ def test_idempotence():
         f"Algorithm is not idempotent; second pass changed values by {max_rel_diff*100:.4f}%"
 
 def test_return_diagnostic_dict():
-    import matplotlib.pyplot as plt
     image = np.random.randint(0, 255, (10, 20, 20), dtype=np.uint8)
 
-    # Test that it returns a dictionary with 'image' and 'figure'
+    # Test that it returns a dictionary with 'image' and 'diagnostic_data'
     result = adjust_brightness_per_slice(image, gamma_fit_func='exponential', return_diagnostic=True)
 
     assert isinstance(result, dict)
     assert 'image' in result
-    assert 'figure' in result
+    assert 'diagnostic_data' in result
     assert isinstance(result['image'], np.ndarray)
 
-    # Figure should be a matplotlib Figure object
+    diag_data = result['diagnostic_data']
+    assert isinstance(diag_data, dict)
+    assert 'x_data' in diag_data
+    assert 'y_data_norm' in diag_data
+    assert 'y_fit_norm' in diag_data
+    assert 'gamma_fit_func' in diag_data
+
+    # Test plotting function
+    from eigenp_utils.plotting_utils import brightness_diagnostic_plotter
     from matplotlib.figure import Figure
-    assert isinstance(result['figure'], Figure)
+
+    fig = brightness_diagnostic_plotter(diag_data)
+    assert isinstance(fig, Figure)

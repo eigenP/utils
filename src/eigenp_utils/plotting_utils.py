@@ -949,3 +949,33 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
         **kwargs
     )
     print(f"Saved figure to {filename_str}")
+
+def brightness_diagnostic_plotter(diagnostic_data):
+    """
+    Plots the diagnostic data returned by `adjust_brightness_per_slice` when `return_diagnostic=True`.
+
+    Args:
+        diagnostic_data (dict): The diagnostic data containing `x_data`, `y_data_norm`, `y_fit_norm`, and `gamma_fit_func`.
+
+    Returns:
+        matplotlib.figure.Figure: The diagnostic figure.
+    """
+    if diagnostic_data is None:
+        return None
+
+    x_data = diagnostic_data['x_data']
+    y_data_norm = diagnostic_data['y_data_norm']
+    y_fit_norm = diagnostic_data['y_fit_norm']
+    gamma_fit_func = diagnostic_data['gamma_fit_func']
+
+    fig = plt.figure(figsize=(8, 5))
+    plt.plot(x_data, y_data_norm, 'o', label='Raw 99th Percentile (Normalized)', alpha=0.7)
+    plt.plot(x_data, y_fit_norm, '-', label=f'Fitted Curve ({gamma_fit_func})', linewidth=2)
+    plt.xlabel('Z-slice index')
+    plt.ylabel('Normalized Intensity')
+    plt.title('Z-axis Intensity Decay Fit')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.tight_layout()
+
+    return fig
