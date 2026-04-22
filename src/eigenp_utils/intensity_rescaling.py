@@ -525,6 +525,8 @@ def fit_basic_shading(
     optimization_tol=1e-3,
     reweighting_tol=1e-2,
     smoothness_flatfield=None,
+    smoothness_darkfield=None,
+    sparse_cost_darkfield=None,
     get_darkfield=False,
     fitting_mode='approximate',
     epsilon=0.1,
@@ -546,8 +548,10 @@ def fit_basic_shading(
         optimization_tol (float): Tolerance for ADMM convergence.
         reweighting_tol (float): Tolerance for reweighting loop convergence.
         smoothness_flatfield (float): Smoothness regularization weight. If None, it is estimated.
+        smoothness_darkfield (float): Smoothness regularization weight for darkfield. If None, it is estimated.
+        sparse_cost_darkfield (float): Weight of the darkfield sparse term. If None, it is estimated.
         get_darkfield (bool): Whether to estimate darkfield.
-        fitting_mode (str): Fitting mode, currently only 'approximate' is supported.
+        fitting_mode (str): Fitting mode, 'approximate' or 'ladmap'.
         epsilon (float): Small value for weight calculation.
         rho (float): ADMM penalty parameter update factor.
         mu_coef (float): Initial penalty parameter coefficient.
@@ -556,14 +560,8 @@ def fit_basic_shading(
     Returns:
         dict: Containing 'flatfield', 'darkfield', and 'baseline'.
     """
-    if fitting_mode != 'approximate':
-        # TODO: scaffold LADMAP mode
-        raise NotImplementedError(f"fitting_mode '{fitting_mode}' is not yet implemented. Use 'approximate'.")
-
-    if get_darkfield:
-        # TODO: scaffold darkfield optimization logic
-        warnings.warn("get_darkfield is currently not implemented. Proceeding with flatfield only.")
-        get_darkfield = False
+    if fitting_mode not in ('approximate', 'ladmap'):
+        raise ValueError(f"fitting_mode '{fitting_mode}' is not valid. Use 'approximate' or 'ladmap'.")
 
     images, original_shape = _prepare_data_for_basic(images, is_3d)
 
@@ -593,87 +591,261 @@ def fit_basic_shading(
         W_meanD = dctn(meanD, norm='ortho')
         smoothness_flatfield = np.sum(np.abs(W_meanD)) / 400.0 * 0.5
 
+    if smoothness_darkfield is None:
+        smoothness_darkfield = smoothness_flatfield * 0.1
+
+    if sparse_cost_darkfield is None:
+        sparse_cost_darkfield = smoothness_darkfield * 0.01 * 100 # Default is 0.01 * 100 in original BaSiC
+
     _, S_svd, _ = np.linalg.svd(Im_flat, full_matrices=False)
     spectral_norm = S_svd[0]
     if spectral_norm == 0:
         spectral_norm = 1.0
 
-    init_mu = mu_coef / spectral_norm
+    if fitting_mode == 'approximate':
+        init_mu = mu_coef / spectral_norm
+    else:
+        init_mu = mu_coef / spectral_norm / np.prod(Im_flat.shape)
+
     max_mu = init_mu * max_mu_coef
 
     ent1 = 1.0
+    ent2 = 10.0
+    D_Z_max = np.min(Im_flat)
 
     W = np.ones_like(Im_flat)
+    W_D = np.ones(s_spatial, dtype=np.float32)
 
     last_S = None
+    last_D = None
 
     S = np.ones(s_spatial, dtype=np.float32)
     B = np.ones(s_s, dtype=np.float32)
+    D_R = np.zeros(s_spatial, dtype=np.float32)
+    D_Z = 0.0
 
     for reweight_iter in range(max_reweight_iterations):
         S_hat = dctn(S, norm='ortho')
         D_R = np.zeros(s_spatial, dtype=np.float32)
+        D_Z = 0.0
 
-        mean_Im_flat = np.nanmean(Im_flat)
-        if mean_Im_flat == 0:
-            mean_Im_flat = 1.0
-        B = np.nanmean(Im_flat, axis=1) / mean_Im_flat
+        if fitting_mode == 'approximate':
+            mean_Im_flat = np.nanmean(Im_flat)
+            if mean_Im_flat == 0:
+                mean_Im_flat = 1.0
+            B = np.nanmean(Im_flat, axis=1) / mean_Im_flat
+        else:
+            B = np.ones(s_s, dtype=np.float32)
+            S = np.median(Im, axis=0)
+            S_hat = dctn(S, norm='ortho')
 
         I_R_flat = np.zeros_like(Im_flat)
-        I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...]).reshape(s_s, -1)
+        I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...] + D_Z).reshape(s_s, -1)
 
         Y_flat = np.zeros_like(Im_flat)
         mu = init_mu
 
         for k in range(max_iterations):
-            temp_W = (Im_flat - I_R_flat - I_B_flat + Y_flat / mu) / ent1
-            temp_W = np.mean(temp_W, axis=0)
+            if fitting_mode == 'approximate':
+                temp_W = (Im_flat - I_R_flat - I_B_flat + Y_flat / mu) / ent1
+                temp_W = np.mean(temp_W, axis=0)
 
-            S_hat = S_hat + dctn(temp_W.reshape(s_spatial), norm="ortho")
-            S_hat = _tshrinkage(S_hat, smoothness_flatfield / (ent1 * mu))
-            S = idctn(S_hat, norm="ortho")
+                S_hat = S_hat + dctn(temp_W.reshape(s_spatial), norm="ortho")
+                S_hat = _tshrinkage(S_hat, smoothness_flatfield / (ent1 * mu))
+                S = idctn(S_hat, norm="ortho")
 
-            I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...]).reshape(s_s, -1)
+                I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...] + D_Z).reshape(s_s, -1)
 
-            I_R_flat = I_R_flat + (Im_flat - I_B_flat - I_R_flat + (1 / mu) * Y_flat) / ent1
-            I_R_flat = _tshrinkage(I_R_flat, W / (ent1 * mu))
+                I_R_flat = I_R_flat + (Im_flat - I_B_flat - I_R_flat + (1 / mu) * Y_flat) / ent1
+                I_R_flat = _tshrinkage(I_R_flat, W / (ent1 * mu))
 
-            R_flat = Im_flat - I_R_flat
-            mean_R_flat = np.mean(R_flat)
-            if mean_R_flat == 0:
-                mean_R_flat = 1.0
-            B = np.mean(R_flat, axis=1) / mean_R_flat
-            B = np.clip(B, 0, None)
+                R_flat = Im_flat - I_R_flat
+                mean_R_flat = np.mean(R_flat)
+                if mean_R_flat == 0:
+                    mean_R_flat = 1.0
+                B = np.mean(R_flat, axis=1) / mean_R_flat
+                B = np.clip(B, 0, None)
 
-            I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...]).reshape(s_s, -1)
+                I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...] + D_Z).reshape(s_s, -1)
 
-            fit_residual_flat = Im_flat - I_B_flat - I_R_flat
-            Y_flat = Y_flat + mu * fit_residual_flat
-            mu = min(mu * rho, max_mu)
+                if get_darkfield:
+                    validA1coeff_idx = B < 1
+                    S_flat = S.reshape(-1)
+                    mean_S = np.mean(S)
+                    S_inmask = S_flat >= mean_S
+                    S_outmask = S_flat < mean_S
 
-            norm_ratio = np.linalg.norm(fit_residual_flat) / image_norm
-            if norm_ratio <= optimization_tol:
-                break
+                    R_0 = np.where(S_inmask[np.newaxis, :] & validA1coeff_idx[:, np.newaxis], R_flat, np.nan)
+                    R_1 = np.where(S_outmask[np.newaxis, :] & validA1coeff_idx[:, np.newaxis], R_flat, np.nan)
 
-        S = S / np.mean(S)
+                    mean_R = np.mean(R_flat)
+                    B1_coeff = (np.nanmean(R_0, axis=1) - np.nanmean(R_1, axis=1)) / (mean_R + 1e-6)
 
-        XE_norm = I_R_flat / (np.mean(I_B_flat, axis=1, keepdims=True) + 1e-6)
-        W = 1.0 / (np.abs(XE_norm) + epsilon)
-        W = W * W.size / np.sum(W)
+                    num_valid = np.sum(validA1coeff_idx)
+                    B_nan = np.where(validA1coeff_idx, B, np.nan)
+
+                    temp1 = np.nan_to_num(np.nansum(B_nan**2))
+                    temp2 = np.nan_to_num(np.nansum(B_nan))
+                    temp3 = np.nan_to_num(np.nansum(B1_coeff))
+                    temp4 = np.nan_to_num(np.nansum(B_nan * B1_coeff))
+                    temp5 = temp2 * temp3 - num_valid * temp4
+
+                    if temp5 == 0:
+                        D_Z = 0.0
+                    else:
+                        D_Z = (temp1 * temp3 - temp2 * temp4) / temp5
+                    D_Z = max(D_Z, 0.0)
+                    if mean_S > 1e-9:
+                        D_Z = min(D_Z, D_Z_max / mean_S)
+
+                    Z = D_Z * mean_S - D_Z * S_flat
+
+                    R_nan = np.where(validA1coeff_idx[:, np.newaxis], R_flat, np.nan)
+                    A1_offset = np.nanmean(R_nan, axis=0) - np.nanmean(B_nan) * S_flat
+                    A1_offset = A1_offset.flatten()
+                    A1_offset = A1_offset - np.nanmean(A1_offset)
+
+                    D_R = A1_offset - np.mean(A1_offset) - Z
+                    D_R = dctn(D_R.reshape(s_spatial), norm="ortho")
+                    D_R = _tshrinkage(D_R, smoothness_darkfield / (ent2 * mu))
+                    D_R = idctn(D_R, norm="ortho")
+                    D_R = _tshrinkage(D_R, smoothness_darkfield / (ent2 * mu))
+                    D_R = D_R + Z.reshape(s_spatial)
+
+                fit_residual_flat = Im_flat - I_B_flat - I_R_flat
+                Y_flat = Y_flat + mu * fit_residual_flat
+                mu = min(mu * rho, max_mu)
+
+                norm_ratio = np.linalg.norm(fit_residual_flat) / image_norm
+                if norm_ratio <= optimization_tol:
+                    break
+
+            elif fitting_mode == 'ladmap':
+                I_B = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...] + D_Z)
+                I_B_flat = I_B.reshape(s_s, -1)
+                eta_S = np.sum(B**2) * 1.02 + 0.01
+
+                S_new = S + np.sum(B[(...,) + (np.newaxis,) * S.ndim] * (Im - I_B - I_R_flat.reshape(s_s, *s_spatial) + Y_flat.reshape(s_s, *s_spatial) / mu), axis=0) / eta_S
+                S_new = idctn(_tshrinkage(dctn(S_new, norm="ortho"), smoothness_flatfield / (eta_S * mu)), norm="ortho")
+
+                if np.min(S_new) < 0:
+                    S_new = S_new - np.min(S_new)
+                dS = S_new - S
+                S = S_new
+
+                I_B = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...] + D_Z)
+                I_B_flat = I_B.reshape(s_s, -1)
+
+                I_R_new_flat = _tshrinkage(Im_flat - I_B_flat + Y_flat / mu, W / (mu * s_s))
+                dI_R_flat = I_R_new_flat - I_R_flat
+                I_R_flat = I_R_new_flat
+
+                R_flat = Im_flat - I_R_flat
+                S_sq = np.sum(S**2)
+                if S_sq < 1e-9:
+                    S_sq = 1e-9
+
+                R_spatial = R_flat.reshape(s_s, *s_spatial)
+                Y_spatial = Y_flat.reshape(s_s, *s_spatial)
+
+                B_new = np.sum(S[np.newaxis, ...] * (R_spatial + Y_spatial / mu), axis=tuple(range(1, Im.ndim))) / S_sq
+                B_new = np.clip(B_new, 0, None)
+
+                mean_B = np.mean(B_new)
+                if mean_B > 0:
+                    B_new = B_new / mean_B
+                    S = S * mean_B
+
+                dB = B_new - B
+                B = B_new
+
+                BS = S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim]
+
+                if get_darkfield:
+                    D_Z_new = np.mean(Im - BS - D_R[np.newaxis, ...] - I_R_flat.reshape(s_s, *s_spatial) + Y_spatial / 2.0 / mu)
+                    D_Z_new = np.clip(D_Z_new, 0, D_Z_max)
+                    dD_Z = D_Z_new - D_Z
+                    D_Z = D_Z_new
+
+                    eta_D = s_s * 1.02
+                    D_R_new = D_R + 1.0 / eta_D * np.sum(Im - BS - D_R[np.newaxis, ...] - D_Z - I_R_flat.reshape(s_s, *s_spatial) + Y_spatial / mu, axis=0)
+                    D_R_new = idctn(_tshrinkage(dctn(D_R_new), smoothness_darkfield / eta_D / mu))
+                    D_R_new = _tshrinkage(D_R_new, sparse_cost_darkfield * W_D / eta_D / mu)
+                    dD_R = D_R_new - D_R
+                    D_R = D_R_new
+
+                I_B = BS + D_R[np.newaxis, ...] + D_Z
+                I_B_flat = I_B.reshape(s_s, -1)
+
+                fit_residual_flat = R_flat - I_B_flat
+                Y_flat = Y_flat + mu * fit_residual_flat
+
+                value_diff = max([
+                    np.linalg.norm(dS.ravel()) * np.sqrt(eta_S),
+                    np.linalg.norm(dI_R_flat.ravel()) * 1.0,
+                    np.linalg.norm(dB.ravel())
+                ])
+
+                if get_darkfield:
+                    value_diff = max([
+                        value_diff,
+                        np.linalg.norm(dD_R.ravel()) * np.sqrt(eta_D),
+                        dD_Z**2
+                    ])
+
+                norm_ratio = value_diff / image_norm
+                mu = min(mu * rho, max_mu)
+
+                if norm_ratio <= optimization_tol:
+                    break
+
+        D_R = D_R + D_Z * S
+        I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...]).reshape(s_s, -1)
+
+        S = np.mean(I_B_flat.reshape(s_s, *s_spatial), axis=0) - D_R
+        mean_S = np.mean(S)
+        if mean_S > 1e-9:
+            S = S / mean_S
+
+        if fitting_mode == 'approximate':
+            XE_norm = I_R_flat / (np.mean(I_B_flat, axis=1, keepdims=True) + 1e-6)
+            W = 1.0 / (np.abs(XE_norm) + epsilon)
+            W = W * W.size / np.sum(W)
+
+            W_D = np.ones_like(D_R)
+        else:
+            Ws = np.ones_like(I_R_flat) / (np.abs(I_R_flat / (I_B_flat + epsilon)) + epsilon)
+            W = Ws / np.mean(Ws)
+
+            Ws_D = np.ones_like(D_R) / (np.abs(D_R) + epsilon)
+            W_D = Ws_D / np.mean(Ws_D)
 
         if last_S is not None:
-            mad_flatfield = np.sum(np.abs(S - last_S)) / np.sum(np.abs(last_S))
-            if mad_flatfield <= reweighting_tol:
+            sum_last_S = np.sum(np.abs(last_S))
+            if sum_last_S < 1e-9:
+                sum_last_S = 1e-9
+            mad_flatfield = np.sum(np.abs(S - last_S)) / sum_last_S
+
+            temp_diff = np.sum(np.abs(S - last_S))
+            if temp_diff < 1e-7:
+                mad_darkfield = 0
+            else:
+                mad_darkfield = temp_diff / max(np.sum(np.abs(last_S)), 1e-6)
+
+            reweight_score = max(mad_flatfield, mad_darkfield)
+            if reweight_score <= reweighting_tol:
                 break
         last_S = S
+        last_D = D_R
 
     if target_spatial_shape != original_spatial_shape:
         flatfield = transform.resize(S, original_spatial_shape, order=1, mode='reflect', anti_aliasing=False, preserve_range=True)
+        darkfield = transform.resize(D_R, original_spatial_shape, order=1, mode='reflect', anti_aliasing=False, preserve_range=True)
     else:
         flatfield = S
+        darkfield = D_R
 
-    darkfield = np.zeros(original_spatial_shape, dtype=np.float32)
-    baseline = B * np.mean(S)
+    baseline = B * mean_S
 
     return {
         'flatfield': flatfield,

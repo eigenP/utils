@@ -101,3 +101,64 @@ def test_apply_basic_shading_dtype():
     corrected_uint16 = apply_basic_shading(images_uint16, flatfield)
     assert corrected_uint16.dtype == np.uint16
     assert np.max(corrected_uint16) <= 65535
+
+def test_basic_fit_synthetic_darkfield():
+    np.random.seed(42)
+    sizes = (64, 64)
+    grid = np.array(np.meshgrid(*[np.linspace(-s // 2 + 1, s // 2, s) for s in sizes], indexing='ij'))
+
+    gradient = np.sum(grid**2, axis=0)
+    gradient = 0.01 * (np.max(gradient) - gradient) + 10
+    truth_flatfield = gradient / np.mean(gradient)
+
+    truth_darkfield = np.ones(sizes) * 5.0
+
+    # Generate 8 images with poisson noise + darkfield
+    images = np.random.poisson(lam=(gradient + truth_darkfield).astype(int), size=[8] + list(sizes))
+
+    # Test approximate with darkfield
+    res = fit_basic_shading(images, is_3d=False, get_darkfield=True, fitting_mode='approximate')
+    flatfield = res['flatfield']
+    darkfield = res['darkfield']
+
+    assert darkfield.shape == sizes
+    max_error_ff = np.max(np.abs(flatfield - truth_flatfield))
+    assert max_error_ff < 1.5, f"Max error {max_error_ff} exceeded 1.5 threshold"
+
+def test_basic_fit_synthetic_ladmap():
+    np.random.seed(42)
+    sizes = (64, 64)
+    grid = np.array(np.meshgrid(*[np.linspace(-s // 2 + 1, s // 2, s) for s in sizes], indexing='ij'))
+
+    gradient = np.sum(grid**2, axis=0)
+    gradient = 0.01 * (np.max(gradient) - gradient) + 10
+    truth_flatfield = gradient / np.mean(gradient)
+
+    images = np.random.poisson(lam=(gradient).astype(int), size=[8] + list(sizes))
+
+    # Test ladmap without darkfield
+    res = fit_basic_shading(images, is_3d=False, get_darkfield=False, fitting_mode='ladmap')
+    flatfield = res['flatfield']
+
+    max_error_ff = np.max(np.abs(flatfield - truth_flatfield))
+    assert max_error_ff < 1.5, f"Max error {max_error_ff} exceeded 1.5 threshold"
+
+def test_basic_fit_synthetic_ladmap_darkfield():
+    np.random.seed(42)
+    sizes = (32, 32)
+    grid = np.array(np.meshgrid(*[np.linspace(-s // 2 + 1, s // 2, s) for s in sizes], indexing='ij'))
+
+    gradient = np.sum(grid**2, axis=0)
+    gradient = 0.01 * (np.max(gradient) - gradient) + 10
+    truth_flatfield = gradient / np.mean(gradient)
+
+    truth_darkfield = np.ones(sizes) * 5.0
+    images = np.random.poisson(lam=(gradient + truth_darkfield).astype(int), size=[8] + list(sizes))
+
+    # Test ladmap with darkfield
+    res = fit_basic_shading(images, is_3d=False, get_darkfield=True, fitting_mode='ladmap')
+    flatfield = res['flatfield']
+    darkfield = res['darkfield']
+
+    max_error_ff = np.max(np.abs(flatfield - truth_flatfield))
+    assert max_error_ff < 1.5, f"Max error {max_error_ff} exceeded 1.5 threshold"
