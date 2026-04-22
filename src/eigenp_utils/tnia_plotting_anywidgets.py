@@ -292,7 +292,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
     # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
     # Add scale bar
-    ax3_physical_width_um = zdim * sz
+    ax3_physical_width_um = xdim * sxy if sxy is not None else xdim
     _add_scale_bar(ax3, ax3_physical_width_um, both_given, figsize)
 
     return fig
@@ -330,14 +330,14 @@ def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
     x1 = 0.5 + bar_frac / 2
     y = 0.5
 
-    ax.hlines(y, x0, x1, transform=ax.transAxes, linewidth=linewidth, color='gray')
+    ax.hlines(y, x0, x1, transform=ax.transAxes, linewidth=linewidth, color='gray', clip_on=False)
 
     if pixel_sizes_given:
         text_label = f"{int(bar_um)} µm" if bar_um >= 1 else f"{bar_um:.2g} µm"
     else:
         text_label = "`pixel_sizes`"
 
-    ax.text(0.5, y - 0.1, text_label, transform=ax.transAxes,
+    ax.text(0.5, y - 0.1, text_label, transform=ax.transAxes, clip_on=False,
             ha='center', va='top', color='gray', fontsize=fontsize_pt)
 
 ### New function
@@ -2055,8 +2055,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Scale bar (kept opaque)
             fig.patch.set_alpha(1.0)
-            Z_dim = int(np.ceil(self.zmax - self.zmin + 1))
-            ax3_physical_width_um = Z_dim * self.sz
+            X_dim = int(np.ceil(self.xmax - self.xmin + 1))
+            ax3_physical_width_um = X_dim * self.sx if self.sx is not None else X_dim
             both_given = getattr(self, '_pixel_sizes_given', False)
             _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize)
 
