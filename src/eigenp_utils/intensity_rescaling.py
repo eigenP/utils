@@ -227,7 +227,6 @@ def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLI
 
     # Create an output image array
     adjusted_image = np.empty_like(image)
-    diagnostic_fig = None
 
     # Pre-calculate global max for clipping logic if needed
     is_integer = np.issubdtype(image.dtype, np.integer)
@@ -290,21 +289,16 @@ def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLI
         except Exception as e:
             print(f"Warning: Curve fit failed: {e}. Returning original image.")
             if return_diagnostic:
-                return {"image": image, "figure": None}
+                return {"image": image, "diagnostic_data": None}
             return image
 
         if return_diagnostic:
-            import matplotlib.pyplot as plt
-            diagnostic_fig = plt.figure(figsize=(8, 5))
-            plt.plot(x_data, y_data_norm, 'o', label='Raw 99th Percentile (Normalized)', alpha=0.7)
-            plt.plot(x_data, y_fit_norm, '-', label=f'Fitted Curve ({gamma_fit_func})', linewidth=2)
-            plt.xlabel('Z-slice index')
-            plt.ylabel('Normalized Intensity')
-            plt.title('Z-axis Intensity Decay Fit')
-            plt.legend()
-            plt.grid(True, linestyle='--', alpha=0.6)
-            plt.tight_layout()
-            plt.close(diagnostic_fig)
+            diagnostic_data = {
+                "x_data": x_data,
+                "y_data_norm": y_data_norm,
+                "y_fit_norm": y_fit_norm,
+                "gamma_fit_func": gamma_fit_func
+            }
 
         # 4. Calculate correction factors (gamma or gain)
         y_ref_norm = np.max(y_fit_norm)
@@ -368,7 +362,7 @@ def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLI
                 adjusted_image[i, :, :] = img_slice.astype(image.dtype)
 
     if return_diagnostic:
-        return {"image": adjusted_image, "figure": diagnostic_fig}
+        return {"image": adjusted_image, "diagnostic_data": diagnostic_data if gamma_fit_func is not None else None}
     return adjusted_image
 
 def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z_AXIS=False):
