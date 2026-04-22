@@ -106,18 +106,26 @@ def _():
     import numpy as np
     from skimage.data import cells3d
     from eigenp_utils.tnia_plotting_anywidgets import (
-        show_xyz_max_slice_interactive,
-        show_xyz_max_slice_interactive_point_annotator
+        show_zyx_max_slice_interactive,
+        show_zyx_max_slice_interactive_point_annotator
     )
 
     # Load the 3D cell data (Z, C, Y, X)
-    cells = cells3d()
+    try:
+        cells = cells3d()
+    except:
+        from eigenp_utils.io import download_file
+        url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
+        download_file(url_to_fetch, "./cells3d.tif")
+        from skimage.io import imread
+        cells = imread("./cells3d.tif")
+
     print(f"Loaded cells3d with shape: {cells.shape}")
 
     # Extract channels and cast to float to prevent clipping/overflow issues in blending
     nuclei = cells[:, 1, :, :].astype(float)
     membrane = cells[:, 0, :, :].astype(float)
-    return cells, membrane, nuclei, np, show_xyz_max_slice_interactive, show_xyz_max_slice_interactive_point_annotator
+    return cells, membrane, nuclei, np, show_zyx_max_slice_interactive, show_zyx_max_slice_interactive_point_annotator
 
 @app.cell
 def _(mo):
@@ -131,9 +139,9 @@ def _(mo):
     return
 
 @app.cell
-def _(membrane, nuclei, show_xyz_max_slice_interactive):
+def _(membrane, nuclei, show_zyx_max_slice_interactive):
     # Standard Viewer
-    viewer = show_xyz_max_slice_interactive(
+    viewer = show_zyx_max_slice_interactive(
         [nuclei, membrane],
         colors=['viridis', 'magma'],
         x_t=3,
@@ -160,9 +168,9 @@ def _(mo):
     return
 
 @app.cell
-def _(membrane, nuclei, show_xyz_max_slice_interactive_point_annotator):
+def _(membrane, nuclei, show_zyx_max_slice_interactive_point_annotator):
     # Annotator Viewer
-    annotator = show_xyz_max_slice_interactive_point_annotator(
+    annotator = show_zyx_max_slice_interactive_point_annotator(
         [nuclei, membrane],
         colors=['green', 'magenta'],
         x_t=5,

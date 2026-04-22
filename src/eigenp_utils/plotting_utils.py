@@ -62,6 +62,12 @@ for r, g, b in LABELS_CMAP_COLORS:
 # Create the new colormap
 labels_cmap = LinearSegmentedColormap.from_list("labels_cmap", final_colors, N=256)
 
+try:
+    mpl_colormaps.register(labels_cmap, name="labels_cmap", force=True)
+except AttributeError:
+    # Fallback for older Matplotlib versions
+    plt.register_cmap(name="labels_cmap", cmap=labels_cmap)
+
 # Print a hint for users who might need the background to be black
 print("Hint: labels_cmap background is transparent by default. To set it to black, run:")
 print("labels_cmap._init(); labels_cmap._lut[0] = [0, 0, 0, 1]")

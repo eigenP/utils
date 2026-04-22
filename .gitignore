@@ -8,3 +8,5 @@ dist/
 build/
 data/
 *.h5ad
+*.tif
+ignored_tmp/

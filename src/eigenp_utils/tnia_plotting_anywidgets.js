@@ -2,33 +2,49 @@ export default {
   render({ model, el }) {
     // Styles
     el.style.display = "flex";
-    el.style.flexDirection = "column";
+    el.style.flexDirection = "row";
     el.style.gap = "10px";
     el.style.fontFamily = "sans-serif";
 
     // Create Image Container
+
     const imgContainer = document.createElement("div");
+    imgContainer.style.flexShrink = "0"; // Don't shrink below content size
+    imgContainer.style.marginRight = "20px";
+
     const img = document.createElement("img");
     img.style.maxWidth = "100%";
+    img.style.display = "block";
     imgContainer.appendChild(img);
+
 
     function createSlider(label, traitName, minTrait, maxTrait, scaleTrait) {
       const container = document.createElement("div");
       container.style.display = "flex";
-      container.style.alignItems = "center";
-      container.style.gap = "10px";
+      container.style.flexDirection = "column"; // Stack label over slider+input for compactness
+      container.style.alignItems = "flex-start";
+      container.style.gap = "4px";
+      container.style.minWidth = "80px";
+      container.style.flex = "1";
 
       const labelEl = document.createElement("label");
       labelEl.textContent = label;
-      labelEl.style.width = "100px";
+      labelEl.style.fontSize = "12px";
 
-      const input = document.createElement("input");
-      input.type = "range";
-      input.style.flexGrow = "1";
+      const controlRow = document.createElement("div");
+      controlRow.style.display = "flex";
+      controlRow.style.alignItems = "center";
+      controlRow.style.gap = "4px";
+      controlRow.style.width = "100%";
 
-      const valueDisplay = document.createElement("span");
-      valueDisplay.style.width = "60px";
-      valueDisplay.style.textAlign = "right";
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.style.width = "100%";
+
+      const numberInput = document.createElement("input");
+      numberInput.type = "number";
+      numberInput.style.width = "60px";
+      numberInput.style.fontSize = "12px";
 
       function update() {
         const val = model.get(traitName);
@@ -36,19 +52,17 @@ export default {
         const max = model.get(maxTrait);
         const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
 
-        input.min = min;
-        input.max = max;
-        input.value = val;
+        slider.min = min;
+        slider.max = max;
+        slider.value = val;
 
         const displayVal = val * scale;
-        // If scale is 1, show integer. If scale is float, show decimals.
-        // Actually, just always show 2 decimals if scale is present and not 1?
-        // User requested "show corresponding micron values".
-        // Let's use toFixed(2) for consistency if we are scaling.
         if (scale !== 1.0) {
-            valueDisplay.textContent = displayVal.toFixed(2);
+            numberInput.value = parseFloat(displayVal.toFixed(2));
+            numberInput.step = "0.01";
         } else {
-            valueDisplay.textContent = val;
+            numberInput.value = val;
+            numberInput.step = "1";
         }
       }
 
@@ -61,24 +75,51 @@ export default {
         model.on(`change:${scaleTrait}`, update);
       }
 
-      input.addEventListener("input", () => {
-        model.set(traitName, parseInt(input.value));
+      // Sync slider -> model
+      slider.addEventListener("input", () => {
+        model.set(traitName, parseInt(slider.value));
         model.save_changes();
       });
 
+      // Sync number input -> model
+      numberInput.addEventListener("change", () => {
+        const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
+        const min = model.get(minTrait) || 1;
+        const max = model.get(maxTrait);
+
+        // Inverse scale to get integer index
+        let newIndex = Math.round(parseFloat(numberInput.value) / scale);
+
+        if (isNaN(newIndex)) {
+            update();
+            return;
+        }
+
+        // Clamp
+        if (newIndex < min) newIndex = min;
+        if (newIndex > max) newIndex = max;
+
+        model.set(traitName, newIndex);
+        model.save_changes();
+        // Immediately re-update the UI to reflect clamped/rounded value
+        update();
+      });
+
+      controlRow.appendChild(slider);
+      controlRow.appendChild(numberInput);
+
       container.appendChild(labelEl);
-      container.appendChild(input);
-      container.appendChild(valueDisplay);
+      container.appendChild(controlRow);
 
       return container;
     }
 
-    const xThick = createSlider("X Thickness", "x_t", "min_thickness", "x_thick_max", "sxy");
-    const yThick = createSlider("Y Thickness", "y_t", "min_thickness", "y_thick_max", "sxy");
+    const xThick = createSlider("X Thickness", "x_t", "min_thickness", "x_thick_max", "sx");
+    const yThick = createSlider("Y Thickness", "y_t", "min_thickness", "y_thick_max", "sy");
     const zThick = createSlider("Z Thickness", "z_t", "min_thickness", "z_thick_max", "sz");
 
-    const xPos = createSlider("X Position", "x_s", "x_min_pos", "x_max_pos", "sxy");
-    const yPos = createSlider("Y Position", "y_s", "y_min_pos", "y_max_pos", "sxy");
+    const xPos = createSlider("X Position", "x_s", "x_min_pos", "x_max_pos", "sx");
+    const yPos = createSlider("Y Position", "y_s", "y_min_pos", "y_max_pos", "sy");
     const zPos = createSlider("Z Position", "z_s", "z_min_pos", "z_max_pos", "sz");
 
     const saveContainer = document.createElement("div");
@@ -166,42 +207,42 @@ export default {
     el.appendChild(imgContainer);
 
     const controlsDiv = document.createElement("div");
+    controlsDiv.style.flexGrow = "1";
+    controlsDiv.style.minWidth = "300px";
+    controlsDiv.style.display = "flex";
+    controlsDiv.style.flexDirection = "column";
+    controlsDiv.style.gap = "10px";
 
-    // Create Layout Split: Left (Sliders) vs Right (Channels)
-    const splitContainer = document.createElement("div");
-    splitContainer.style.display = "flex";
-    splitContainer.style.gap = "20px";
-    splitContainer.style.marginBottom = "10px";
+    // Thickness Sliders Container
+    const thicknessContainer = document.createElement("div");
+    thicknessContainer.style.display = "flex";
+    thicknessContainer.style.gap = "15px";
+    thicknessContainer.style.flexWrap = "wrap";
+    thicknessContainer.style.alignItems = "center";
+    thicknessContainer.appendChild(xThick);
+    thicknessContainer.appendChild(yThick);
+    thicknessContainer.appendChild(zThick);
 
-    // Left Side: Sliders (60%)
-    const slidersContainer = document.createElement("div");
-    slidersContainer.style.flex = "60%";
-    slidersContainer.style.display = "flex";
-    slidersContainer.style.flexDirection = "column";
-    slidersContainer.style.gap = "10px";
-    slidersContainer.style.paddingRight = "20px";
-    slidersContainer.style.borderRight = "1px solid #ccc";
+    // Position Sliders Container
+    const positionContainer = document.createElement("div");
+    positionContainer.style.display = "flex";
+    positionContainer.style.gap = "15px";
+    positionContainer.style.flexWrap = "wrap";
+    positionContainer.style.alignItems = "center";
+    positionContainer.appendChild(xPos);
+    positionContainer.appendChild(yPos);
+    positionContainer.appendChild(zPos);
 
-    slidersContainer.appendChild(xThick);
-    slidersContainer.appendChild(yThick);
-    slidersContainer.appendChild(zThick);
-    slidersContainer.appendChild(document.createElement("hr"));
-    slidersContainer.appendChild(xPos);
-    slidersContainer.appendChild(yPos);
-    slidersContainer.appendChild(zPos);
 
-    splitContainer.appendChild(slidersContainer);
 
-    // Right Side: Channels (40%)
+    // Channels Container
     const channelsContainer = document.createElement("div");
-    channelsContainer.style.flex = "40%";
     channelsContainer.style.display = "flex";
     channelsContainer.style.flexDirection = "column";
     channelsContainer.style.gap = "10px";
     channelsContainer.style.fontSize = "12px";
     channelsContainer.style.overflowY = "auto";
     channelsContainer.style.maxHeight = "300px";
-    channelsContainer.style.paddingLeft = "10px";
 
     const channelNames = model.get("channel_names");
     const channelDtypes = model.get("channel_dtypes");
@@ -294,7 +335,7 @@ export default {
         const histCanvas = document.createElement("canvas");
         histCanvas.width = 160;
         histCanvas.height = 30;
-        histCanvas.style.marginLeft = "auto";
+        histCanvas.style.marginLeft = "10px";
         histCanvas.style.border = "1px solid #ccc";
         histCanvas.style.borderRadius = "2px";
         histCanvas.style.backgroundColor = "#fff";
@@ -369,10 +410,10 @@ export default {
       });
     }
 
-    splitContainer.appendChild(channelsContainer);
 
-    controlsDiv.appendChild(splitContainer);
-    controlsDiv.appendChild(document.createElement("hr"));
+
+
+
 
     const uiTogglesContainer = document.createElement("div");
     uiTogglesContainer.style.display = "flex";
@@ -607,10 +648,15 @@ export default {
 
 
     uiTogglesContainer.appendChild(warningSpan);
+
+    // Assemble controlsDiv in requested order
     controlsDiv.appendChild(uiTogglesContainer);
+    controlsDiv.appendChild(channelsContainer);
+    controlsDiv.appendChild(thicknessContainer);
+    controlsDiv.appendChild(positionContainer);
+    controlsDiv.appendChild(saveContainer);
 
     el.appendChild(controlsDiv);
-    el.appendChild(saveContainer);
 
     function updateImage() {
       const src = model.get("image_data");

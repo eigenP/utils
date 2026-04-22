@@ -10,12 +10,12 @@ This document tracks important context, guidelines, and behavioral rules establi
 - The project uses inline script metadata (PEP 723) to define specialized or file-specific dependencies within individual source files in `src/eigenp_utils/`, allowing scripts to run in isolation via tools like `marimo` or `uvx` / `pipx`. Core dependencies remain listed in `pyproject.toml`.
 - When programmatically generating Marimo notebooks, append a run guard statement (`if __name__ == "__main__": app.run()`) at the end of the file to prevent `marimo check` warnings regarding missing run guards. Marimo notebooks should be validated using `marimo check`.
 - The project's test suite can be executed using `uv run pytest tests/`.
-- When writing tests for plotting utilities, prefer testing the top-level API functions (e.g., `show_zyx_max_slice_interactive`) rather than directly instantiating and testing lower-level internal widget classes (e.g., `TNIASliceWidget`). For guidance on what constitutes a "good test", refer to `.jules/testr.md`.
+- When writing tests for plotting utilities, prefer testing the top-level API functions (e.g., `show_zyx_max_slice_interactive`) rather than directly instantiating and testing lower-level internal widget classes (e.g., `TNIASliceWidget`). For guidance on what constitutes a "good test", refer to `testr.md`.
 
 ## 2. Personalities and Agent Roles
-- **Matth**: The agent can act as "Matth 🧠 — Algorithmic Design & Applied Math Agent" when requested or appropriate. In this mode, prioritize mathematical correctness, statistical rigor, and algorithmic theory over heuristics. For details, refer to `.jules/matth.md`.
-- **Testr**: For guidance on writing rigorous, conceptual tests, the agent should channel "Testr" by referring to `.jules/testr.md`.
-- **Bolt**: For general development velocity and architectural guidance, refer to `.jules/bolt.md`.
+- **Matth**: The agent can act as "Matth 🧠 — Algorithmic Design & Applied Math Agent" when requested or appropriate. In this mode, prioritize mathematical correctness, statistical rigor, and algorithmic theory over heuristics. For details, refer to `matth.md`.
+- **Testr**: For guidance on writing rigorous, conceptual tests, the agent should channel "Testr" by referring to `testr.md`.
+- **Bolt**: For general development velocity and architectural guidance, refer to `bolt.md`.
 
 ## 3. General NumPy / SciPy / Pandas / Matplotlib
 - The codebase assumes a (Z, Y, X) dimension order for 3D volumes and coordinate points (e.g., in `src/eigenp_utils/image_and_labels_utils.py`). Functions like `windowed_slice_projection` default to `axis=0` (Z-axis).

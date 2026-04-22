@@ -39,7 +39,19 @@ By default, the package installs a minimal set of dependencies (like `numpy`, `s
 To install it, run:
 
 ```bash
+pip install eigenp-utils
+```
+
+Alternatively, to install the latest development version directly from GitHub:
+
+```bash
 pip install "eigenp_utils @ git+https://github.com/eigenP/utils.git"
+```
+
+Using `uv`:
+
+```bash
+uv pip install "eigenp_utils @ git+https://github.com/eigenP/utils.git"
 ```
 
 ### Optional Dependencies
@@ -55,11 +67,19 @@ You can choose to install optional dependencies if you need functionality such a
 e.g. (uv install)
 
 ```bash
-uv pip install "eigenp-utils[all] @ git+https://github.com/eigenP/utils.git"
+uv pip install "eigenp-utils[all]"
 ```
 *(Note: quotes are required so the shell doesn't misinterpret the brackets.)*
 
+For the latest development versions with optional dependencies:
 
+```bash
+pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
+```
+or
+```bash
+uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
+```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
 

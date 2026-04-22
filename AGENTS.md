@@ -1,34 +1,10 @@
-# Repository Guidelines
+# Agent Guidelines Pointer
 
-## Testing
-- Use `pytest` for running tests located in the `tests/` folder.
-- CI runs `pytest` after installing the package with `pip install .`. Ensure tests pass locally using the same command.
+The detailed guidelines for agents, personas, and memory tracking have been moved to the `docs/` directory to help contributors and agents parse and understand them more easily.
 
-## Dependencies
-- Development requirements are listed in `requirements-dev.txt` which installs the package in editable mode and includes `numpy` and `pytest`.
-- **Inline Script Metadata (PEP 723):**
-    - Moving forward, we use inline script metadata to define dependencies for each individual source file in `src/eigenp_utils/`.
-    - Core dependencies (like `numpy`, `scipy`) are still listed in `pyproject.toml`, but specialized or file-specific dependencies should be declared in the file header.
-    - This approach facilitates running scripts in isolation (e.g., via `marimo` or `pipx`) and clarifies the specific requirements of each module.
-    - Format:
-      ```python
-      # /// script
-      # requires-python = ">=3.10"
-      # dependencies = [
-      #     "numpy",
-      #     "pandas",
-      #     "specialized-lib",
-      # ]
-      # ///
-      ```
-    - Start with permissive versioning (e.g., just the package name) unless a specific version is required.
+Please refer to:
+- **`docs/AGENTS.md`** - The primary overview of guidelines, development practices, and agent personas.
+- **`docs/MEMORIES.md`** - The active context, lessons learned, and behavioral rules.
+- **`docs/matth.md`**, **`docs/testr.md`**, **`docs/bolt.md`** - Specialized agent personas and their operating procedures.
 
-## Python Versions
-- The project requires Python 3.10 or later (uses newer syntax like `int | float`).
-- GitHub Actions tests the code on Python 3.10, 3.11, 3.12 and 3.13.
-- Keep the code compatible with these versions.
-
-
-## Contributions
-- Provide tests for new features or bug fixes.
-- No specific linting configuration is provided; follow standard Python style.
+**Important**: Any new rules, learnings, or guidelines should be added directly to the appropriate files in the `docs/` folder (such as `docs/AGENTS.md` or `docs/MEMORIES.md`), **not** this root `AGENTS.md` file.

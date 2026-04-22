@@ -11,6 +11,16 @@
 
 import pathlib
 import warnings
+
+def _parse_zyx_tuple_or_dict(val, default_val=None):
+    if val is None:
+        return (default_val, default_val, default_val)
+    if isinstance(val, dict):
+        return (val.get('Z', default_val), val.get('Y', default_val), val.get('X', default_val))
+    if isinstance(val, (list, tuple)) and len(val) == 3:
+        return val
+    raise ValueError(f"Expected dict with 'Z','Y','X' keys or a 3-element tuple/list, got {val}")
+
 import anywidget
 import traitlets
 import matplotlib
@@ -70,7 +80,7 @@ def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
 
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_slice(image_to_show, x, y, z, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
+def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
@@ -89,10 +99,10 @@ def show_zyx_slice(image_to_show, x, y, z, sxy=None, sz=None,figsize=(10,10), co
     slice_xz = image_to_show[:,y,:]
     slice_xy = image_to_show[z,:,:]
 
-    return show_zyx(slice_xy, slice_xz, slice_zy, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, use_plt = use_plt, opacity = opacity)
+    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_max(image_to_show, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_max(image_to_show, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ plots max xy, xz, and zy projections of a 3D image
 
     Args:
@@ -131,10 +141,10 @@ def show_zyx_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projec
     projection_x = np.flip(np.rot90(projector(image_to_show, axis=2), 1), 0)
     projection_z = projector(image_to_show, axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, colors = None, opacity = None, subplot_bg=None):
+def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -153,11 +163,23 @@ def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
             colormap = colors
-    both_given = sxy is not None and sz is not None
-    if sxy is None:
-        sxy = 1
-    if sz is None:
-        sz = 1
+
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
+
+    if sxy is not None or sz is not None:
+        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        if pixel_sizes is None:
+            _sxy = sxy if sxy is not None else 1.0
+            _sz = sz if sz is not None else 1.0
+            pixel_sizes = (_sz, _sxy, _sxy)
+
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+    both_given = pixel_sizes is not None or (sxy is not None and sz is not None)
+    sxy = px
+    sz = pz
 
     if isinstance(xy,list):
         MULTI_CHANNEL = True
@@ -213,7 +235,7 @@ def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
 
     z_xy_ratio=1
 
-    if sxy!=sz:
+    if sxy!=sz and sxy is not None and sz is not None:
         z_xy_ratio=sz/sxy
 
 
@@ -270,15 +292,23 @@ def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
     # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
     # Add scale bar
-    width_um = xdim * sxy
-    target = width_um * 0.2
+    ax3_physical_width_um = xdim * sxy if sxy is not None else xdim
+    _add_scale_bar(ax3, ax3_physical_width_um, both_given, figsize)
 
+    return fig
+
+
+
+def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
     # a small utility to pick the largest “nice” number ≤ target
+    target = ax_physical_width_um * 0.2
+
     def nice_length(x):
         # get exponent
+        if x <= 0: return 1
         exp = np.floor(np.log10(x))
         # candidates: 1, 2, 5 times 10^exp
-        for m in [5,2,1]:
+        for m in [5, 2, 1]:
             val = m * 10**exp
             if val <= x:
                 return val
@@ -286,41 +316,32 @@ def show_zyx(xy, xz, zy, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin 
         return x
 
     bar_um = nice_length(target)
+    # Convert back to fraction of the full width of the current axes
+    bar_frac = bar_um / ax_physical_width_um if ax_physical_width_um > 0 else 0
 
-    # Convert back to pixels
-    bar_pix = bar_um / sxy
-    bar_frac = bar_pix / xdim    # fraction of the full width
-
-    # pick fontsize
+    # pick fontsize and line width to scale with figure size
     fig_h_in = figsize[1] if figsize is not None else 10
     fontsize_pt = max(8, min(24, fig_h_in * 72 * 0.03))
+    linewidth = max(1, fig_h_in * 0.2)
 
     ### Draw
-    # center the bar at (x=0.5), y=0.5 in ax3’s normalized coordinates:
-    x0 = 0.5 - bar_frac/2
-    x1 = 0.5 + bar_frac/2
-    y  = 0.5
+    # center the bar at (x=0.5), y=0.5 in ax's normalized coordinates:
+    x0 = 0.5 - bar_frac / 2
+    x1 = 0.5 + bar_frac / 2
+    y = 0.5
 
-    ax3.hlines(y, x0, x1, transform=ax3.transAxes,
-               linewidth=2, color='gray')
+    ax.hlines(y, x0, x1, transform=ax.transAxes, linewidth=linewidth, color='gray', clip_on=False)
 
-    if both_given:
-        text_label = f"{int(bar_um)} µm"
+    if pixel_sizes_given:
+        text_label = f"{int(bar_um)} µm" if bar_um >= 1 else f"{bar_um:.2g} µm"
     else:
-        text_label = "`sxy` , `sz`"
+        text_label = "`pixel_sizes`"
 
-    ax3.text(0.5, y - 0.1, text_label,
-             transform=ax3.transAxes,
-             ha='center', va='top',
-             color='gray',
-             fontsize=fontsize_pt)
-
-    return fig
-
-
+    ax.text(0.5, y - 0.1, text_label, transform=ax.transAxes, clip_on=False,
+            ha='center', va='top', color='gray', fontsize=fontsize_pt)
 
 ### New function
-def show_zyx_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -340,6 +361,19 @@ def show_zyx_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=None,
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
             colormap = colors
+
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
+
+    if sxy is not None or sz is not None:
+        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        if pixel_sizes is None:
+            _sxy = sxy if sxy is not None else 1.0
+            _sz = sz if sz is not None else 1.0
+            pixel_sizes = (_sz, _sxy, _sxy)
+
     ### Coerce into integers for slices
     x_ = [int(i) for i in x]
     y_ = [int(i) for i in y]
@@ -349,11 +383,11 @@ def show_zyx_max_slabs(image_to_show, x = [0,1], y = [0,1], z = [0,1], sxy=None,
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy, sz, figsize, np.max, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=sxy, sz=sz, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
 
 
 ### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -388,7 +422,7 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=N
         projection_x = np.flip(np.rot90(projector(image_to_show[:, :, x_slices], axis=2), 1), 0)
         projection_z = projector(image_to_show[z_slices, :, :], axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, sxy, sz, figsize, colormap, vmax = vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
 
 
 
@@ -825,16 +859,26 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
 
 
-def compute_histogram(arr, bins=128):
+def compute_histogram(arr, bins=128, max_samples=1_000_000):
     """
     Computes a 1D histogram for array values.
 
     To enhance the visibility of sparse/heavy-tailed intensity distributions in interactive
     widgets, the returned bin counts are transformed into log frequencies (using log1p).
+    If the array size exceeds `max_samples`, it subsamples the array to improve performance
+    without noticeably degrading the visual overlay.
     """
     if arr.size == 0:
         return {'counts': [], 'bin_edges': []}
-    arr_clean = arr[~np.isnan(arr)] if np.issubdtype(arr.dtype, np.floating) else arr
+
+    stride = 1
+    if arr.size > max_samples:
+        stride = max(1, arr.size // max_samples)
+        arr_to_use = arr.ravel()[::stride]
+    else:
+        arr_to_use = arr
+
+    arr_clean = arr_to_use[~np.isnan(arr_to_use)] if np.issubdtype(arr_to_use.dtype, np.floating) else arr_to_use
     if arr_clean.size == 0:
         return {'counts': [], 'bin_edges': []}
 
@@ -852,16 +896,18 @@ def compute_histogram(arr, bins=128):
     else:
         counts, bin_edges = np.histogram(arr_clean, bins=bins)
 
+    if stride > 1:
+        # Scale back up to match original magnitude
+        counts = counts * stride
+
     # Use log frequencies to enhance visibility of tails in widgets
     counts = np.log1p(counts)
 
     return {'counts': counts.tolist(), 'bin_edges': bin_edges.tolist()}
 
 class TNIAWidgetBase(anywidget.AnyWidget):
-    # _esm = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.js"
-    # _css = pathlib.Path(__file__).parent / "tnia_plotting_anywidgets.css"
-    _esm = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.js")
-    _css = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.css")
+    _esm = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.js").read_text()
+    _css = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.css").read_text()
 
 
     # Data traits
@@ -876,7 +922,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     y_t = traitlets.Int(1).tag(sync=True)
     z_t = traitlets.Int(1).tag(sync=True)
 
-    sxy = traitlets.Float(1.0).tag(sync=True)
+    sx = traitlets.Float(1.0).tag(sync=True)
+    sy = traitlets.Float(1.0).tag(sync=True)
     sz = traitlets.Float(1.0).tag(sync=True)
 
     # Bounds for sliders (computed)
@@ -1071,12 +1118,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 plt.close(fig)
 
 class TNIASliceWidget(TNIAWidgetBase):
-    def __init__(self, im, sxy=None, sz=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None,
-                 show_crosshair=True, sync_on_hover=False, x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None, opacity=None):
-        if colors is not None:
-            warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-            if colormap is None:
-                colormap = colors
+    def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
+                 show_crosshair=True, sync_on_hover=False, slabs_position=None, slabs_thickness=None, opacity=None, **kwargs):
 
         # Handle 2D images gracefully by adding a Z dimension of 1
         if isinstance(im, list):
@@ -1085,22 +1128,32 @@ class TNIASliceWidget(TNIAWidgetBase):
         elif im.ndim == 2:
             im = im[np.newaxis, ...]
 
+        pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+        z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+        z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+
         # Determine dimensions
         im_shape = (im[0].shape if isinstance(im, list) else im.shape)
         Z, Y, X = im_shape
 
         super().__init__(X, Y, Z, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover)
 
+        # Override Base Trait defaults with physical scaling properly
+        self.sx = px
+        self.sy = py
+        self.sz = pz
+        self.X_arr_phys = X * px
+        self.Y_arr_phys = Y * py
+        self.Z_arr_phys = Z * pz
+
+
         self.im_orig = im
 
-        self._sxy_given = sxy is not None
-        self._sz_given = sz is not None
-        self.sxy = sxy if self._sxy_given else 1.0
-        self.sz = sz if self._sz_given else 1.0
+        self._pixel_sizes_given = pixel_sizes is not None
 
         self.figsize = figsize
         self.colormap = colormap
-        self.colors_orig = colors
+        self.colors_orig = colormap
 
         # Helper to ensure args are lists of length num_channels
         def _to_list(val, n, default):
@@ -1276,33 +1329,32 @@ class TNIASliceWidget(TNIAWidgetBase):
             gamma_curr = gamma_val
             opacity_curr = opacity_val
 
-        # Pass None if not originally given to trigger scale bar logic
-        pass_sxy = self.sxy if self._sxy_given else None
-        pass_sz = self.sz if self._sz_given else None
+        # Pass pixel_sizes directly to trigger scale bar logic
+        pass_pixel_sizes = (self.sz, self.sy, self.sx) if getattr(self, '_pixel_sizes_given', False) else None
 
         # show_zyx_max_slabs returns a Figure
         fig = show_zyx_max_slabs(
             im_curr, x_lims, y_lims, z_lims,
-            sxy=pass_sxy, sz=pass_sz, figsize=self.figsize, colormap=colors_curr,
+            pixel_sizes=pass_pixel_sizes, figsize=self.figsize, colormap=colors_curr,
             vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, opacity=opacity_curr
         )
 
         # Crosshairs logic (copied from original interactive wrapper)
         if self.show_crosshair and fig:
             # XY
-            fig.axes[0].axvline(x_lims[0]*self.sxy + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[0].axhline(y_lims[0]*self.sxy + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[0].axvline(x_lims[1]*self.sxy + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[0].axhline(y_lims[1]*self.sxy + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[0].axvline(x_lims[0]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[0].axhline(y_lims[0]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[0].axvline(x_lims[1]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[0].axhline(y_lims[1]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
             # ZY
             fig.axes[1].axvline(z_lims[0]*self.sz + 0.5*self.sz, color='r', ls=':', alpha=0.3)
-            fig.axes[1].axhline(y_lims[0]*self.sxy + 0.5,     color='r', ls=':', alpha=0.3)
+            fig.axes[1].axhline(y_lims[0]*self.sx + 0.5,     color='r', ls=':', alpha=0.3)
             fig.axes[1].axvline(z_lims[1]*self.sz + 0.5*self.sz, color='r', ls=':', alpha=0.3)
-            fig.axes[1].axhline(y_lims[1]*self.sxy + 0.5,     color='r', ls=':', alpha=0.3)
+            fig.axes[1].axhline(y_lims[1]*self.sx + 0.5,     color='r', ls=':', alpha=0.3)
             # XZ
-            fig.axes[2].axvline(x_lims[0]*self.sxy + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[2].axvline(x_lims[0]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
             fig.axes[2].axhline(z_lims[0]*self.sz + 0.5*self.sz, color='r', ls=':', alpha=0.3)
-            fig.axes[2].axvline(x_lims[1]*self.sxy + 0.5, color='r', ls=':', alpha=0.3)
+            fig.axes[2].axvline(x_lims[1]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
             fig.axes[2].axhline(z_lims[1]*self.sz + 0.5*self.sz, color='r', ls=':', alpha=0.3)
 
         return fig
@@ -1551,8 +1603,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         self._annot_img.fill(0)
         Z, Y, X = self.dims
         s = max(1, self.point_size // 2)
-        R = s * min(self.sxy, self.sz)
-        s_xy = max(1, int(np.round(R / self.sxy)))
+        R = s * min(self.sx, self.sz)
+        s_xy = max(1, int(np.round(R / self.sx)))
         s_z = max(1, int(np.round(R / self.sz)))
         for p in self.points:
             pz, py, px = p
@@ -1567,9 +1619,9 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         self._render_wrapper(change)
 
 class TNIAScatterWidget(TNIAWidgetBase):
-    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, sxy=None, sz=None, render='points', bins=512,
+    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, sxy=None, sz=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', x_s=None, y_s=None, z_s=None, x_t=None, y_t=None, z_t=None):
+                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, **kwargs):
         if colors is not None:
             warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
             if colormap is None:
@@ -1593,8 +1645,11 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.channels = channels
         self._sxy_given = sxy is not None
         self._sz_given = sz is not None
-        self.sxy = sxy if self._sxy_given else 1.0
-        self.sz = sz if self._sz_given else 1.0
+        self._pixel_sizes_given = pixel_sizes is not None or (sxy is not None and sz is not None)
+        pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+        self.sx = px
+        self.sy = py
+        self.sz = pz
         self.render = render
         self.bins = bins
         self.point_size = point_size
@@ -1736,20 +1791,23 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.channel_dtypes = ["float"] * self.C
         self.channel_colors = [matplotlib.colors.to_hex(c) for c in self.colors_rgb]
 
+        z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+        z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+
         # Init values
-        if x_t is not None: self.x_t = int(x_t)
-        if y_t is not None: self.y_t = int(y_t)
-        if z_t is not None: self.z_t = int(z_t)
+        if x_t_in is not None: self.x_t = int(x_t_in)
+        if y_t_in is not None: self.y_t = int(y_t_in)
+        if z_t_in is not None: self.z_t = int(z_t_in)
 
         # Center default
-        if x_s is None: self.x_s = int((self.xmax - self.xmin)/2) # relative to 0
-        else: self.x_s = int(x_s)
+        if x_s_in is None: self.x_s = int((self.xmax - self.xmin)/2) # relative to 0
+        else: self.x_s = int(x_s_in)
 
-        if y_s is None: self.y_s = int((self.ymax - self.ymin)/2)
-        else: self.y_s = int(y_s)
+        if y_s_in is None: self.y_s = int((self.ymax - self.ymin)/2)
+        else: self.y_s = int(y_s_in)
 
-        if z_s is None: self.z_s = int((self.zmax - self.zmin)/2)
-        else: self.z_s = int(z_s)
+        if z_s_in is None: self.z_s = int((self.zmax - self.zmin)/2)
+        else: self.z_s = int(z_s_in)
 
         # Compute histograms
         hists = []
@@ -1881,12 +1939,11 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colormap=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
                 )
 
-            pass_sxy = self.sxy if self._sxy_given else None
-            pass_sz = self.sz if self._sz_given else None
+            pass_pixel_sizes = (self.sz, self.sy, self.sx) if getattr(self, '_pixel_sizes_given', False) else None
 
             fig = show_zyx(
                 xy_rgb, xz_rgb, zy_rgb,
-                sxy=pass_sxy, sz=pass_sz, figsize=self.figsize, colormap=None,
+                pixel_sizes=pass_pixel_sizes, figsize=self.figsize, colormap=None,
                 vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=opacity_resolved, subplot_bg=self.subplot_bg
             )
 
@@ -1897,18 +1954,18 @@ class TNIAScatterWidget(TNIAWidgetBase):
             # Crosshairs
             if self.show_crosshair:
                 axXY, axZY, axXZ = fig.axes[0], fig.axes[1], fig.axes[2]
-                axXY.vlines([x_lims[0]*self.sxy + 0.5, (x_lims[1]+1)*self.sxy + 0.5], self.ymin*self.sxy, (self.ymax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
-                axXY.hlines([y_lims[0]*self.sxy + 0.5, (y_lims[1]+1)*self.sxy + 0.5], self.xmin*self.sxy, (self.xmax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
-                axZY.vlines([z_lims[0]*self.sz + 0.5*self.sz, (z_lims[1]+1)*self.sz + 0.5*self.sz], self.ymin*self.sxy, (self.ymax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
-                axZY.hlines([y_lims[0]*self.sxy + 0.5,       (y_lims[1]+1)*self.sxy + 0.5], self.zmin*self.sz, (self.zmax+1)*self.sz, colors='r', linestyles=':', alpha=0.3)
-                axXZ.vlines([x_lims[0]*self.sxy + 0.5, (x_lims[1]+1)*self.sxy + 0.5], self.zmin*self.sz, (self.zmax+1)*self.sz, colors='r', linestyles=':', alpha=0.3)
-                axXZ.hlines([z_lims[0]*self.sz + 0.5*self.sz, (z_lims[1]+1)*self.sz + 0.5*self.sz], self.xmin*self.sxy, (self.xmax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
+                axXY.vlines([x_lims[0]*self.sx + 0.5, (x_lims[1]+1)*self.sx + 0.5], self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
+                axXY.hlines([y_lims[0]*self.sx + 0.5, (y_lims[1]+1)*self.sx + 0.5], self.xmin*self.sx, (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
+                axZY.vlines([z_lims[0]*self.sz + 0.5*self.sz, (z_lims[1]+1)*self.sz + 0.5*self.sz], self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
+                axZY.hlines([y_lims[0]*self.sx + 0.5,       (y_lims[1]+1)*self.sx + 0.5], self.zmin*self.sz, (self.zmax+1)*self.sz, colors='r', linestyles=':', alpha=0.3)
+                axXZ.vlines([x_lims[0]*self.sx + 0.5, (x_lims[1]+1)*self.sx + 0.5], self.zmin*self.sz, (self.zmax+1)*self.sz, colors='r', linestyles=':', alpha=0.3)
+                axXZ.hlines([z_lims[0]*self.sz + 0.5*self.sz, (z_lims[1]+1)*self.sz + 0.5*self.sz], self.xmin*self.sx, (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
 
             return fig
 
         else:
             # Points mode
-            z_xy_ratio = (self.sz / self.sxy) if self.sxy != self.sz else 1
+            z_xy_ratio = (self.sz / self.sx) if self.sx != self.sz else 1
             width_ratios  = [int(self.xmax - self.xmin + 1), int((self.zmax - self.zmin + 1) * z_xy_ratio)]
             height_ratios = [int(self.ymax - self.ymin + 1), int((self.zmax - self.zmin + 1) * z_xy_ratio)]
 
@@ -1946,23 +2003,23 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 norm = matplotlib.colors.Normalize(vmin=vmin_c, vmax=vmax_c)
 
                 if mZ_all.any():
-                    axXY.scatter(self.X_arr[mZ_all]*self.sxy, self.Y_arr[mZ_all]*self.sxy, c=vals[mZ_all], cmap=cmap, norm=norm,
+                    axXY.scatter(self.X_arr[mZ_all]*self.sx, self.Y_arr[mZ_all]*self.sx, c=vals[mZ_all], cmap=cmap, norm=norm,
                                  s=self.point_size, alpha=self.alpha, linewidths=0)
                 if mY_all.any():
-                    axXZ.scatter(self.X_arr[mY_all]*self.sxy, self.Z_arr[mY_all]*self.sz,  c=vals[mY_all], cmap=cmap, norm=norm,
+                    axXZ.scatter(self.X_arr[mY_all]*self.sx, self.Z_arr[mY_all]*self.sz,  c=vals[mY_all], cmap=cmap, norm=norm,
                                  s=self.point_size, alpha=self.alpha, linewidths=0)
                 if mX_all.any():
-                    axZY.scatter(self.Z_arr[mX_all]*self.sz,  self.Y_arr[mX_all]*self.sxy, c=vals[mX_all], cmap=cmap, norm=norm,
+                    axZY.scatter(self.Z_arr[mX_all]*self.sz,  self.Y_arr[mX_all]*self.sx, c=vals[mX_all], cmap=cmap, norm=norm,
                                  s=self.point_size, alpha=self.alpha, linewidths=0)
 
             elif self.mode == 'cont_multi':
                 cols = blend_colors(self.cont_multi, self.colors_use, vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, soft_clip=True)
                 if mZ_all.any():
-                    axXY.scatter(self.X_arr[mZ_all]*self.sxy, self.Y_arr[mZ_all]*self.sxy, c=cols[mZ_all], s=self.point_size, alpha=self.alpha, linewidths=0)
+                    axXY.scatter(self.X_arr[mZ_all]*self.sx, self.Y_arr[mZ_all]*self.sx, c=cols[mZ_all], s=self.point_size, alpha=self.alpha, linewidths=0)
                 if mY_all.any():
-                    axXZ.scatter(self.X_arr[mY_all]*self.sxy, self.Z_arr[mY_all]*self.sz,  c=cols[mY_all], s=self.point_size, alpha=self.alpha, linewidths=0)
+                    axXZ.scatter(self.X_arr[mY_all]*self.sx, self.Z_arr[mY_all]*self.sz,  c=cols[mY_all], s=self.point_size, alpha=self.alpha, linewidths=0)
                 if mX_all.any():
-                    axZY.scatter(self.Z_arr[mX_all]*self.sz,  self.Y_arr[mX_all]*self.sxy, c=cols[mX_all], s=self.point_size, alpha=self.alpha, linewidths=0)
+                    axZY.scatter(self.Z_arr[mX_all]*self.sz,  self.Y_arr[mX_all]*self.sx, c=cols[mX_all], s=self.point_size, alpha=self.alpha, linewidths=0)
 
             else:
                 if self.mode == 'single':
@@ -1979,49 +2036,29 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     mZ = (Zi >= z_lims[0]) & (Zi <= z_lims[1])
                     mY = (Yi >= y_lims[0]) & (Yi <= y_lims[1])
                     mX = (Xi >= x_lims[0]) & (Xi <= x_lims[1])
-                    if mZ.any(): axXY.scatter(Xi[mZ]*self.sxy, Yi[mZ]*self.sxy, s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
-                    if mY.any(): axXZ.scatter(Xi[mY]*self.sxy, Zi[mY]*self.sz,  s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
-                    if mX.any(): axZY.scatter(Zi[mX]*self.sz,  Yi[mX]*self.sxy, s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
+                    if mZ.any(): axXY.scatter(Xi[mZ]*self.sx, Yi[mZ]*self.sx, s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
+                    if mY.any(): axXZ.scatter(Xi[mY]*self.sx, Zi[mY]*self.sz,  s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
+                    if mX.any(): axZY.scatter(Zi[mX]*self.sz,  Yi[mX]*self.sx, s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
 
             # Axis limits
-            axXY.set_xlim([self.xmin*self.sxy, (self.xmax+1)*self.sxy]); axXY.set_ylim([(self.ymax+1)*self.sxy, self.ymin*self.sxy])
-            axXZ.set_xlim([self.xmin*self.sxy, (self.xmax+1)*self.sxy]); axXZ.set_ylim([(self.zmax+1)*self.sz,  self.zmin*self.sz ])
-            axZY.set_xlim([self.zmin*self.sz,  (self.zmax+1)*self.sz ]); axZY.set_ylim([(self.ymax+1)*self.sxy, self.ymin*self.sxy])
+            axXY.set_xlim([self.xmin*self.sx, (self.xmax+1)*self.sx]); axXY.set_ylim([(self.ymax+1)*self.sx, self.ymin*self.sx])
+            axXZ.set_xlim([self.xmin*self.sx, (self.xmax+1)*self.sx]); axXZ.set_ylim([(self.zmax+1)*self.sz,  self.zmin*self.sz ])
+            axZY.set_xlim([self.zmin*self.sz,  (self.zmax+1)*self.sz ]); axZY.set_ylim([(self.ymax+1)*self.sx, self.ymin*self.sx])
 
             if self.show_crosshair:
-                axXY.vlines([x_lims[0]*self.sxy, (x_lims[1]+1)*self.sxy], self.ymin*self.sxy, (self.ymax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
-                axXY.hlines([y_lims[0]*self.sxy, (y_lims[1]+1)*self.sxy], self.xmin*self.sxy, (self.xmax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
-                axZY.vlines([z_lims[0]*self.sz,  (z_lims[1]+1)*self.sz],  self.ymin*self.sxy, (self.ymax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
-                axZY.hlines([y_lims[0]*self.sxy, (y_lims[1]+1)*self.sxy], self.zmin*self.sz,   (self.zmax+1)*self.sz,  colors='r', linestyles=':', alpha=0.3)
-                axXZ.vlines([x_lims[0]*self.sxy, (x_lims[1]+1)*self.sxy], self.zmin*self.sz,   (self.zmax+1)*self.sz,  colors='r', linestyles=':', alpha=0.3)
-                axXZ.hlines([z_lims[0]*self.sz,  (z_lims[1]+1)*self.sz],  self.xmin*self.sxy,  (self.xmax+1)*self.sxy, colors='r', linestyles=':', alpha=0.3)
+                axXY.vlines([x_lims[0]*self.sx, (x_lims[1]+1)*self.sx], self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
+                axXY.hlines([y_lims[0]*self.sx, (y_lims[1]+1)*self.sx], self.xmin*self.sx, (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
+                axZY.vlines([z_lims[0]*self.sz,  (z_lims[1]+1)*self.sz],  self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
+                axZY.hlines([y_lims[0]*self.sx, (y_lims[1]+1)*self.sx], self.zmin*self.sz,   (self.zmax+1)*self.sz,  colors='r', linestyles=':', alpha=0.3)
+                axXZ.vlines([x_lims[0]*self.sx, (x_lims[1]+1)*self.sx], self.zmin*self.sz,   (self.zmax+1)*self.sz,  colors='r', linestyles=':', alpha=0.3)
+                axXZ.hlines([z_lims[0]*self.sz,  (z_lims[1]+1)*self.sz],  self.xmin*self.sx,  (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
 
             # Scale bar (kept opaque)
             fig.patch.set_alpha(1.0)
-            width_um = (self.xmax - self.xmin + 1) * self.sxy
-            target = width_um * 0.2
-            def nice_length(x):
-                exp = np.floor(np.log10(x))
-                for m in [5,2,1]:
-                    val = m * 10**exp
-                    if val <= x: return val
-                return x
-            bar_um = nice_length(target)
-            bar_pix = bar_um / self.sxy
-            bar_frac = bar_pix / (self.xmax - self.xmin + 1)
-            fig_h_in = self.figsize[1] if self.figsize else 10
-            fontsize_pt = max(8, min(24, fig_h_in * 72 * 0.03))
-            x0 = 0.5 - bar_frac/2; x1 = 0.5 + bar_frac/2; y = 0.5
-            axBar.hlines(y, x0, x1, transform=axBar.transAxes, linewidth=2, color='gray')
-
-            both_given = self._sxy_given and self._sz_given
-            if both_given:
-                text_label = f"{int(bar_um)} µm"
-            else:
-                text_label = "`sxy` , `sz`"
-
-            axBar.text(0.5, y - 0.1, text_label, transform=axBar.transAxes,
-                       ha='center', va='top', color='gray', fontsize=fontsize_pt)
+            X_dim = int(np.ceil(self.xmax - self.xmin + 1))
+            ax3_physical_width_um = X_dim * self.sx if self.sx is not None else X_dim
+            both_given = getattr(self, '_pixel_sizes_given', False)
+            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize)
 
             fig.tight_layout(pad=0.0)
             return fig
@@ -2029,14 +2066,14 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
 def show_zyx_max_slice_interactive(
     im,
-    sxy=None, sz=None,
+    pixel_sizes=None, sxy=None, sz=None,
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
     show_crosshair=True, sync_on_hover=False,
     colors=None, opacity=None,
-    x_s=None, y_s=None, z_s=None,
-    x_t=None, y_t=None, z_t=None,
+    slabs_position=None, x_s=None, y_s=None, z_s=None,
+    slabs_thickness=None, x_t=None, y_t=None, z_t=None,
 ):
     """
     Interactive 3D slice viewer using AnyWidget.
@@ -2051,6 +2088,33 @@ def show_zyx_max_slice_interactive(
           and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
           underneath the channel controls, overlaid with a curve reflecting the current `vmin`, `vmax`, and `gamma` settings.
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
+
+    if sxy is not None or sz is not None:
+        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        if pixel_sizes is None:
+            _sxy = sxy if sxy is not None else 1.0
+            _sz = sz if sz is not None else 1.0
+            pixel_sizes = (_sz, _sxy, _sxy)
+
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+
+    if any(x is not None for x in [x_s, y_s, z_s]):
+        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_position is None:
+            slabs_position = (z_s, y_s, x_s)
+
+    if any(x is not None for x in [x_t, y_t, z_t]):
+        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_thickness is None:
+            slabs_thickness = (z_t, y_t, x_t)
+
+    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+
     if isinstance(im, list):
         if im[0].ndim == 2:
             im = [img[np.newaxis, ...] for img in im]
@@ -2058,9 +2122,7 @@ def show_zyx_max_slice_interactive(
         im = im[np.newaxis, ...]
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
-    _sxy = sxy if sxy is not None else 1
-    _sz = sz if sz is not None else 1
-    z_xy_ratio = (_sz / _sxy) if _sxy != _sz else 1
+    z_xy_ratio = (pz / px) if px != pz else 1
 
     if figsize is None:
         width_px  = X + Z * z_xy_ratio
@@ -2068,6 +2130,8 @@ def show_zyx_max_slice_interactive(
         divisor = max(width_px / 8, height_px / 8)
         w, h = float(width_px / divisor), float(height_px / divisor)
         figsize = (w * figsize_scale, h * figsize_scale)
+    elif figsize_scale != 1.0:
+        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, n // 64)
     if x_t is None: x_t = _default_t(X)
@@ -2090,23 +2154,24 @@ def show_zyx_max_slice_interactive(
         z_t = max(1, Z // 2)
         z_s = Z // 2
 
-    return TNIASliceWidget(
-        im, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
-        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
-        x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
+    w = TNIASliceWidget(
+        im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
+        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t)
     )
+    return w
 
 def show_zyx_max_slice_interactive_point_annotator(
     im,
-    sxy=None, sz=None,
+    pixel_sizes=None, sxy=None, sz=None,
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
-    show_crosshair=True,
+    show_crosshair=True, sync_on_hover=False,
     colors=None, opacity=None,
     point_size_scale=0.01,
-    x_s=None, y_s=None, z_s=None,
-    x_t=None, y_t=None, z_t=None,
+    slabs_position=None, x_s=None, y_s=None, z_s=None,
+    slabs_thickness=None, x_t=None, y_t=None, z_t=None,
 ):
     """
     Interactive 3D slice viewer with point annotation using AnyWidget.
@@ -2115,6 +2180,33 @@ def show_zyx_max_slice_interactive_point_annotator(
     - Left-click on any projection to add or delete points.
     Returns a widget instance `w`. The list of annotated points is accessible via `w.points`.
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
+
+    if sxy is not None or sz is not None:
+        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        if pixel_sizes is None:
+            _sxy = sxy if sxy is not None else 1.0
+            _sz = sz if sz is not None else 1.0
+            pixel_sizes = (_sz, _sxy, _sxy)
+
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+
+    if any(x is not None for x in [x_s, y_s, z_s]):
+        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_position is None:
+            slabs_position = (z_s, y_s, x_s)
+
+    if any(x is not None for x in [x_t, y_t, z_t]):
+        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_thickness is None:
+            slabs_thickness = (z_t, y_t, x_t)
+
+    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+
     if isinstance(im, list):
         if im[0].ndim == 2:
             im = [img[np.newaxis, ...] for img in im]
@@ -2122,9 +2214,7 @@ def show_zyx_max_slice_interactive_point_annotator(
         im = im[np.newaxis, ...]
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
-    _sxy = sxy if sxy is not None else 1
-    _sz = sz if sz is not None else 1
-    z_xy_ratio = (_sz / _sxy) if _sxy != _sz else 1
+    z_xy_ratio = (pz / px) if px != pz else 1
 
     if figsize is None:
         width_px  = X + Z * z_xy_ratio
@@ -2132,6 +2222,8 @@ def show_zyx_max_slice_interactive_point_annotator(
         divisor = max(width_px / 8, height_px / 8)
         w, h = float(width_px / divisor), float(height_px / divisor)
         figsize = (w * figsize_scale, h * figsize_scale)
+    elif figsize_scale != 1.0:
+        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, n // 64)
     if x_t is None: x_t = _default_t(X)
@@ -2152,17 +2244,18 @@ def show_zyx_max_slice_interactive_point_annotator(
         z_t = max(1, Z // 2)
         z_s = Z // 2
 
-    return TNIAAnnotatorWidget(
-        im, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap,
-        vmin=vmin, vmax=vmax, gamma=gamma, colors=colors, opacity=opacity, show_crosshair=show_crosshair,
+    w = TNIAAnnotatorWidget(
+        im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
+        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         point_size_scale=point_size_scale,
-        x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t)
     )
+    return w
 
 def show_zyx_max_scatter_interactive(
     points,
     channels=None,
-    sxy=None, sz=None,
+    pixel_sizes=None, sxy=None, sz=None,
     render=None,
     bins=512,
     point_size=4, alpha=0.6,
@@ -2171,8 +2264,8 @@ def show_zyx_max_scatter_interactive(
     figsize=None, figsize_scale=1.0,
     show_crosshair=True, sync_on_hover=False,
     subplot_bg='black',
-    x_s=None, y_s=None, z_s=None,
-    x_t=None, y_t=None, z_t=None,
+    slabs_position=None, x_s=None, y_s=None, z_s=None,
+    slabs_thickness=None, x_t=None, y_t=None, z_t=None,
 ):
     """
     Shows interactive sliders for XY, XZ, and YZ projection of 3D point coordinates.
@@ -2187,6 +2280,33 @@ def show_zyx_max_scatter_interactive(
         - The function dynamically determines its rendering mode: if `render=None`, it defaults to
           `'points'` for point counts under 10,000, and `'density'` for larger datasets to optimize interactive performance.
     """
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
+
+    if sxy is not None or sz is not None:
+        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        if pixel_sizes is None:
+            _sxy = sxy if sxy is not None else 1.0
+            _sz = sz if sz is not None else 1.0
+            pixel_sizes = (_sz, _sxy, _sxy)
+
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+
+    if any(x is not None for x in [x_s, y_s, z_s]):
+        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_position is None:
+            slabs_position = (z_s, y_s, x_s)
+
+    if any(x is not None for x in [x_t, y_t, z_t]):
+        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+        if slabs_thickness is None:
+            slabs_thickness = (z_t, y_t, x_t)
+
+    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+
     if isinstance(points, (tuple, list)) and len(points) == 3:
         # points is a tuple or list of 3 arrays: (Z, Y, X)
         Z, Y, X = points[0], points[1], points[2]
@@ -2224,9 +2344,7 @@ def show_zyx_max_scatter_interactive(
     XN = xmax - xmin + 1
     YN = ymax - ymin + 1
     ZN = zmax - zmin + 1
-    _sxy = sxy if sxy is not None else 1
-    _sz = sz if sz is not None else 1
-    z_xy_ratio = (_sz / _sxy) if _sxy != _sz else 1
+    z_xy_ratio = (pz / px) if px != pz else 1
 
     if figsize is None:
         width_px  = XN + ZN * z_xy_ratio
@@ -2234,6 +2352,8 @@ def show_zyx_max_scatter_interactive(
         divisor = max(width_px / 8, height_px / 8)
         w, h = float(width_px / divisor), float(height_px / divisor)
         figsize = (w * figsize_scale, h * figsize_scale)
+    elif figsize_scale != 1.0:
+        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, int(n // 64))
     Xdim = int(np.ceil(XN)); Ydim = int(np.ceil(YN)); Zdim = int(np.ceil(ZN))
@@ -2257,17 +2377,36 @@ def show_zyx_max_scatter_interactive(
     if y_s is not None: y_s = int(y_s - ymin)
     if z_s is not None: z_s = int(z_s - zmin)
 
-    return TNIAScatterWidget(
+    z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
+    x_s = x_s_in if x_s is None else x_s
+    y_s = y_s_in if y_s is None else y_s
+    z_s = z_s_in if z_s is None else z_s
+    z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
+    x_t = x_t_in if x_t is None else x_t
+    y_t = y_t_in if y_t is None else y_t
+    z_t = z_t_in if z_t is None else z_t
+
+    w = TNIAScatterWidget(
         X, Y, Z,
-        channels=channels, sxy=sxy, sz=sz, render=render, bins=bins,
-        point_size=point_size, alpha=alpha, colors=colors, opacity=opacity,
+        channels=channels, pixel_sizes=pixel_sizes, render=render, bins=bins,
+        point_size=point_size, alpha=alpha, colormap=colormap if colormap is not None else colors, opacity=opacity,
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         subplot_bg=subplot_bg,
-        x_s=x_s, y_s=y_s, z_s=z_s, x_t=x_t, y_t=y_t, z_t=z_t
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t)
     )
+    w.X_arr_phys = w.X_arr * px
+    w.Y_arr_phys = w.Y_arr * py
+    w.Z_arr_phys = w.Z_arr * pz
+    w.x_min_phys = xmin * px
+    w.x_max_phys = xmax * px
+    w.y_min_phys = ymin * py
+    w.y_max_phys = ymax * py
+    w.z_min_phys = zmin * pz
+    w.z_max_phys = zmax * pz
+    return w
 
 class IsoScatterWidget(anywidget.AnyWidget):
-    _esm = ir.files("eigenp_utils").joinpath("iso_scatter.js")
+    _esm = ir.files("eigenp_utils").joinpath("iso_scatter.js").read_text()
 
     image_data = traitlets.Unicode().tag(sync=True)
     elev = traitlets.Float(30).tag(sync=True)
@@ -2299,8 +2438,10 @@ class IsoScatterWidget(anywidget.AnyWidget):
         if len(self.X_orig) == 0:
              self.cx, self.cy, self.cz = 0, 0, 0
              self.max_radius = 1.0
-             self.sxy = sxy
-             self.sz = sz
+             pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+             self.sx = px
+             self.sy = py
+             self.sz = pz
              self.figsize = figsize
              self.point_size = point_size
              self.alpha = alpha
@@ -2321,7 +2462,10 @@ class IsoScatterWidget(anywidget.AnyWidget):
             if self.color is not None:
                  self.color = self.color[idx]
 
-        self.sxy = sxy
+        pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+        self.sx = px
+        self.sy = py
+        self.sz = pz
         self.sz = sz
         self.figsize = figsize
         self.point_size = point_size
@@ -2426,8 +2570,8 @@ class IsoScatterWidget(anywidget.AnyWidget):
 
         # 1. Apply Rotation to Data
         # We need to center the data first to rotate around centroid
-        X_c = (self.X_orig - self.cx) * self.sxy
-        Y_c = (self.Y_orig - self.cy) * self.sxy
+        X_c = (self.X_orig - self.cx) * self.sx
+        Y_c = (self.Y_orig - self.cy) * self.sx
         Z_c = (self.Z_orig - self.cz) * self.sz
 
         # Stack

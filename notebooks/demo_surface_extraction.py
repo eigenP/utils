@@ -113,14 +113,14 @@ def _():
     from skimage.io import imread
     from eigenp_utils.io import download_file
     from eigenp_utils.surface_extraction import extract_surface
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
     return (
         extract_surface,
         download_file,
         imread,
         np,
         plt,
-        show_xyz_max_slice_interactive,
+        show_zyx_max_slice_interactive,
     )
 
 
@@ -142,9 +142,9 @@ def _(imread):
 
 
 @app.cell
-def _(cells, membrane, show_xyz_max_slice_interactive):
+def _(cells, membrane, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
-    show_xyz_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
     return (nuclei,)
 
 
@@ -168,8 +168,8 @@ def _(downscale_slider, extract_surface, roi, sigma_slider):
 
 
 @app.cell
-def _(roi, show_xyz_max_slice_interactive, surface_mask):
-    show_xyz_max_slice_interactive([roi, surface_mask], colors=['gray', 'yellow'])
+def _(roi, show_zyx_max_slice_interactive, surface_mask):
+    show_zyx_max_slice_interactive([roi, surface_mask], colors=['gray', 'yellow'])
     return
 
 
