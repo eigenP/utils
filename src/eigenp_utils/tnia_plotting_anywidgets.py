@@ -254,28 +254,28 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
                            wspace=.01,
                            figure = fig)
 
-    ax0=fig.add_subplot(spec[0])
-    ax1=fig.add_subplot(spec[1])
-    ax2=fig.add_subplot(spec[2])
-    ax3=fig.add_subplot(spec[3])
+    axXY=fig.add_subplot(spec[0])
+    axZY=fig.add_subplot(spec[1])
+    axXZ=fig.add_subplot(spec[2])
+    axBar=fig.add_subplot(spec[3])
 
     if gamma == 1:
-        ax0.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        ax1.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        ax2.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
+        axXY.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axZY.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
     else:
         norm=PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax, clip=True)
-        ax0.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        ax1.imshow(zy, cmap = colormap, norm=norm, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        ax2.imshow(xz, cmap = colormap, norm=norm, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
+        axXY.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axZY.imshow(zy, cmap = colormap, norm=norm, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap = colormap, norm=norm, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
 
     ### Axes and titles
-    # ax0.set_title('xy')
-    # ax1.set_title('zy')
-    # ax2.set_title('xz')
+    # axXY.set_title('xy')
+    # axZY.set_title('zy')
+    # axXZ.set_title('xz')
 
     # Remove in-between axes ticks
-    for i, ax in enumerate([ax0,ax1,ax2, ax3]):
+    for i, ax in enumerate([axXY,axZY,axXZ, axBar]):
         if i < 3 and subplot_bg is not None:
             ax.set_facecolor(subplot_bg)
         else:
@@ -284,16 +284,16 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
         ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
-    # ax0.xaxis.set_ticklabels([])
-    # ax1.yaxis.set_ticklabels([])
+    # axXY.xaxis.set_ticklabels([])
+    # axZY.yaxis.set_ticklabels([])
 
     fig.patch.set_alpha(0.0) # set transparent bgnd
 
     # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
     # Add scale bar
-    ax3_physical_width_um = xdim * sxy if sxy is not None else xdim
-    _add_scale_bar(ax0, ax3, ax3_physical_width_um, both_given, figsize)
+    main_physical_width_um = xdim * sxy if sxy is not None else xdim
+    _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, figsize)
 
     return fig
 
@@ -2057,9 +2057,9 @@ class TNIAScatterWidget(TNIAWidgetBase):
             # Scale bar (kept opaque)
             fig.patch.set_alpha(1.0)
             X_dim = int(np.ceil(self.xmax - self.xmin + 1))
-            ax3_physical_width_um = X_dim * self.sx if self.sx is not None else X_dim
+            main_physical_width_um = X_dim * self.sx if self.sx is not None else X_dim
             both_given = getattr(self, '_pixel_sizes_given', False)
-            _add_scale_bar(axXY, axBar, ax3_physical_width_um, both_given, self.figsize)
+            _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, self.figsize)
 
             fig.tight_layout(pad=0.0)
             return fig
