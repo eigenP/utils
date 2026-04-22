@@ -162,3 +162,62 @@ def test_basic_fit_synthetic_ladmap_darkfield():
 
     max_error_ff = np.max(np.abs(flatfield - truth_flatfield))
     assert max_error_ff < 1.5, f"Max error {max_error_ff} exceeded 1.5 threshold"
+
+def test_ensure_float_and_restore_dtype_decorator():
+    from eigenp_utils.intensity_rescaling import ensure_float_and_restore_dtype
+    import warnings
+
+    @ensure_float_and_restore_dtype
+    def dummy_func_mult(img, factor):
+        # Function receives a float32 implicitly via decorator
+        assert np.issubdtype(img.dtype, np.floating)
+        return img * factor
+
+    @ensure_float_and_restore_dtype
+    def dummy_func_tuple(img):
+        return img * 2.0, "metadata"
+
+    # Test Float
+    img_float = np.array([0.1, 0.5, 0.9], dtype=np.float64)
+    res_float = dummy_func_mult(img_float, 2.0)
+    assert res_float.dtype == np.float64
+    np.testing.assert_allclose(res_float, [0.2, 1.0, 1.8])
+
+    # Test Uint8 normal range
+    img_uint8 = np.array([10, 50, 100], dtype=np.uint8)
+    res_uint8 = dummy_func_mult(img_uint8, 2.0)
+    assert res_uint8.dtype == np.uint8
+    np.testing.assert_equal(res_uint8, [20, 100, 200])
+
+    # Test Uint8 overflow clipping and rounding
+    img_uint8_overflow = np.array([10, 150, 200], dtype=np.uint8)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        res_overflow = dummy_func_mult(img_uint8_overflow, 2.0)
+        assert len(w) == 1
+        assert "Values outside uint8 range were clipped" in str(w[-1].message)
+
+    assert res_overflow.dtype == np.uint8
+    np.testing.assert_equal(res_overflow, [20, 255, 255])
+
+    # Test Uint8 underflow clipping
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        res_underflow = dummy_func_mult(img_uint8_overflow, -1.0)
+        assert len(w) == 1
+        assert "Values outside uint8 range were clipped" in str(w[-1].message)
+    np.testing.assert_equal(res_underflow, [0, 0, 0])
+
+    # Test float16
+    img_float16 = np.array([1.0, 2.0], dtype=np.float16)
+    res_float16 = dummy_func_mult(img_float16, 2.0)
+    assert res_float16.dtype == np.float16
+    np.testing.assert_allclose(res_float16, [2.0, 4.0])
+
+    # Test Tuple return
+    res_tuple = dummy_func_tuple(img_uint8)
+    assert isinstance(res_tuple, tuple)
+    assert len(res_tuple) == 2
+    assert res_tuple[0].dtype == np.uint8
+    np.testing.assert_equal(res_tuple[0], [20, 100, 200])
+    assert res_tuple[1] == "metadata"

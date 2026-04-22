@@ -6,6 +6,63 @@ import scipy.ndimage as ndimage
 from scipy.fft import dctn, idctn
 import skimage.transform as transform
 
+
+def ensure_float_and_restore_dtype(func):
+    """
+    Decorator to safely convert input to float32 for processing,
+    and restore the original data type upon return without forcefully
+    stretching the intensity range.
+    """
+    def wrapper(image, *args, **kwargs):
+        orig_dtype = image.dtype
+        is_integer = np.issubdtype(orig_dtype, np.integer)
+
+        # Determine valid bounds for clipping if original is integer
+        if is_integer:
+            info = np.iinfo(orig_dtype)
+            valid_min, valid_max = info.min, info.max
+
+        # Convert to float32 only if it isn't already a float
+        if not np.issubdtype(orig_dtype, np.floating):
+            image_float = image.astype(np.float32)
+        else:
+            image_float = image
+
+        # Execute the core function
+        result = func(image_float, *args, **kwargs)
+
+        def convert_output(arr):
+            # If the original was float, just cast back to original float precision
+            if not is_integer:
+                return arr.astype(orig_dtype)
+
+            # If original was integer, we must clip to prevent underflow/overflow wrap-around
+            # We do NOT rescale, we only clip out-of-bounds values.
+            if arr.max() > valid_max or arr.min() < valid_min:
+                warnings.warn(f"Values outside {orig_dtype} range were clipped to [{valid_min}, {valid_max}].")
+                arr = np.clip(arr, valid_min, valid_max)
+
+            # Round before casting to integer to avoid truncation errors
+            # (e.g., 254.9 becoming 254 instead of 255)
+            return np.round(arr).astype(orig_dtype)
+
+        # Handle tuple returns (rescale primary output only)
+        if isinstance(result, tuple):
+            primary = convert_output(result[0])
+            return (primary,) + result[1:]
+        elif isinstance(result, dict):
+            # Try to convert primary output if it exists in expected keys
+            if 'image' in result:
+                result['image'] = convert_output(result['image'])
+            elif 'corrected' in result:
+                result['corrected'] = convert_output(result['corrected'])
+            return result
+        else:
+            return convert_output(result)
+
+    return wrapper
+
+@ensure_float_and_restore_dtype
 def contrast_stretching(image, p_min=0.0, p_max=99.9):
     """
     Stretch the intensity range of the image based on percentiles.
@@ -56,14 +113,13 @@ def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=No
     if np.issubdtype(dtype, np.floating):
         return normalized_image.astype(dtype)
     elif np.issubdtype(dtype, np.integer):
-        # Scale to max value of the integer type (e.g., 255 for uint8)
         max_val = np.iinfo(dtype).max
         normalized_image *= max_val
         return normalized_image.astype(dtype)
     else:
-        # Fallback for other types
         return normalized_image.astype(dtype)
 
+@ensure_float_and_restore_dtype
 def adjust_gamma_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_AXIS=False):
     """
     Adjusts the gamma of each slice in a 3D image along the Z-axis.
@@ -195,6 +251,7 @@ def adjust_gamma_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_A
 
     return adjusted_image
 
+@ensure_float_and_restore_dtype
 def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_AXIS=False, method='gamma', return_diagnostic=False):
     """
     Adjusts the brightness of each slice in a 3D image along the Z-axis.
