@@ -254,28 +254,28 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
                            wspace=.01,
                            figure = fig)
 
-    ax0=fig.add_subplot(spec[0])
-    ax1=fig.add_subplot(spec[1])
-    ax2=fig.add_subplot(spec[2])
-    ax3=fig.add_subplot(spec[3])
+    axXY=fig.add_subplot(spec[0])
+    axZY=fig.add_subplot(spec[1])
+    axXZ=fig.add_subplot(spec[2])
+    axBar=fig.add_subplot(spec[3])
 
     if gamma == 1:
-        ax0.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        ax1.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        ax2.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
+        axXY.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axZY.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
     else:
         norm=PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax, clip=True)
-        ax0.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        ax1.imshow(zy, cmap = colormap, norm=norm, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        ax2.imshow(xz, cmap = colormap, norm=norm, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
+        axXY.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axZY.imshow(zy, cmap = colormap, norm=norm, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap = colormap, norm=norm, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
 
     ### Axes and titles
-    # ax0.set_title('xy')
-    # ax1.set_title('zy')
-    # ax2.set_title('xz')
+    # axXY.set_title('xy')
+    # axZY.set_title('zy')
+    # axXZ.set_title('xz')
 
     # Remove in-between axes ticks
-    for i, ax in enumerate([ax0,ax1,ax2, ax3]):
+    for i, ax in enumerate([axXY,axZY,axXZ, axBar]):
         if i < 3 and subplot_bg is not None:
             ax.set_facecolor(subplot_bg)
         else:
@@ -284,23 +284,23 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
         ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
-    # ax0.xaxis.set_ticklabels([])
-    # ax1.yaxis.set_ticklabels([])
+    # axXY.xaxis.set_ticklabels([])
+    # axZY.yaxis.set_ticklabels([])
 
     fig.patch.set_alpha(0.0) # set transparent bgnd
 
     # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
     # Add scale bar
-    ax3_physical_width_um = xdim * sxy if sxy is not None else xdim
-    _add_scale_bar(ax3, ax3_physical_width_um, both_given, figsize)
+    main_physical_width_um = xdim * sxy if sxy is not None else xdim
+    _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, figsize)
 
     return fig
 
 
 
-def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
-    # a small utility to pick the largest “nice” number ≤ target
+def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, figsize):
+    # a small utility to pick the largest "nice" number ≤ target
     target = ax_physical_width_um * 0.2
 
     def nice_length(x):
@@ -325,20 +325,21 @@ def _add_scale_bar(ax, ax_physical_width_um, pixel_sizes_given, figsize):
     linewidth = max(1, fig_h_in * 0.2)
 
     ### Draw
-    # center the bar at (x=0.5), y=0.5 in ax's normalized coordinates:
-    x0 = 0.5 - bar_frac / 2
-    x1 = 0.5 + bar_frac / 2
-    y = 0.5
+    # Put the line at the bottom right of ax_line
+    x1 = 0.95
+    x0 = x1 - bar_frac
+    y_line = 0.05
 
-    ax.hlines(y, x0, x1, transform=ax.transAxes, linewidth=linewidth, color='gray', clip_on=False)
+    ax_line.hlines(y_line, x0, x1, transform=ax_line.transAxes, linewidth=linewidth, color='white', clip_on=False)
 
     if pixel_sizes_given:
         text_label = f"{int(bar_um)} µm" if bar_um >= 1 else f"{bar_um:.2g} µm"
     else:
         text_label = "`pixel_sizes`"
 
-    ax.text(0.5, y - 0.1, text_label, transform=ax.transAxes, clip_on=False,
-            ha='center', va='top', color='gray', fontsize=fontsize_pt)
+    # Put the text centered in ax_text
+    ax_text.text(0.5, 0.5, text_label, transform=ax_text.transAxes, clip_on=False,
+            ha='center', va='center', color='gray', fontsize=fontsize_pt)
 
 ### New function
 def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None):
@@ -2056,9 +2057,9 @@ class TNIAScatterWidget(TNIAWidgetBase):
             # Scale bar (kept opaque)
             fig.patch.set_alpha(1.0)
             X_dim = int(np.ceil(self.xmax - self.xmin + 1))
-            ax3_physical_width_um = X_dim * self.sx if self.sx is not None else X_dim
+            main_physical_width_um = X_dim * self.sx if self.sx is not None else X_dim
             both_given = getattr(self, '_pixel_sizes_given', False)
-            _add_scale_bar(axBar, ax3_physical_width_um, both_given, self.figsize)
+            _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, self.figsize)
 
             fig.tight_layout(pad=0.0)
             return fig
