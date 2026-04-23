@@ -8,7 +8,9 @@
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
 * **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`.
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
+* **Shading Correction (PyBaSiC)**: Pure NumPy implementations of BaSiCPy algorithms for flatfield and darkfield estimation, supporting 'approximate' and 'ladmap' fitting modes (`fit_basic_shading`, `apply_basic_shading`).
 * **Intensity Rescaling**: Tools for contrast enhancement, including CLAHE.
+* **Segmentation**: Marker-based watershed segmentation using `voronoi_otsu_labeling`.
 
 ### Plotting & Visualization
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_xyz` for dynamic multichannel viewers), interactive point cloud visualization (`IsoScatterWidget`), and 3D point annotation (`TNIAAnnotatorWidget`).
@@ -29,7 +31,7 @@
 
 
 ### Core Utilities
-* **Spline Utilities**: Calculate tangent vectors and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
+* **Spline Utilities**: Calculate tangent vectors, calculate discrete arc lengths (`calculate_spline_length`), and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
 * **I/O Utilities**: Functions to streamline file and data reading.
 
@@ -82,6 +84,15 @@ uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
 ```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+
+### WASM/Pyodide Compatibility
+
+`eigenp-utils` is fully compatible with WASM environments like Pyodide and Marimo. It can be installed directly using micropip:
+
+```python
+import micropip
+await micropip.install("eigenp-utils")
+```
 
 ## License
 
