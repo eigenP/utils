@@ -23,6 +23,8 @@
 * **Feature Correlation**: Find highly correlated features with respect to targets, optionally utilizing graph-based diffusion to smooth over the cell-cell graph (`find_correlated_features`).
 * **Spatial Autocorrelation**: Fast Moran's I implementation (`morans_i_all_fast`) that correctly handles general (non-row-standardized) spatial weights.
 * **Dimensionality Reduction**: `tl_pacmap` for PaCMAP embeddings supporting versatile initialization strategies (e.g., PAGA, PCA, random).
+* **Metadata I/O**: Harmonize observation metadata using `import_obs_to_adata_from_csv` and `export_obs_from_adata_to_csv`.
+* **Differential Expression Plots**: Generate visual summaries using `plot_volcano_adata`.
 
 ### Statistical Utilities
 * **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci`, `summary_stats`, `remove_outliers`, and `add_stat_annotations` for annotating plots with significance markers.
@@ -82,6 +84,38 @@ uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
 ```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+
+## Demos & Interactive Notebooks
+
+The `notebooks/` directory contains several interactive [marimo](https://marimo.io) app demos highlighting features of this package:
+* Extended Depth of Focus (EDOF)
+* Registration & Drift Correction
+* Interactive Plotting utilities and Orthogonal Views
+* Single Cell annotations and Archetype Clustering
+
+Many of these scripts utilize [PEP 723](https://peps.python.org/pep-0723/) inline script metadata, enabling them to be run in isolation without manually installing dependencies into your environment:
+
+```bash
+uv run notebooks/demo_extended_depth_of_focus.py
+# or
+marimo edit notebooks/demo_maxproj_registration.py
+```
+
+## Testing and Development
+
+To run the project's test suite or develop locally, it is recommended to create a virtual environment and install the development dependencies:
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e ".[all,dev]"
+```
+
+Run tests using `pytest`:
+
+```bash
+pytest tests/
+```
 
 ## License
 
