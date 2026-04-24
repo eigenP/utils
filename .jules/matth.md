@@ -1,0 +1,3 @@
+## 2024-05-24 - Analytic Replacement for Lineage Coupling
+**Learning:** `calculate_lineage_coupling` computes exact co-occurrence expectations and z-scores analytically using the hypergeometric distribution (`scipy.stats.hypergeom`) and the inclusion-exclusion principle, replacing heuristic permutation testing to eliminate non-deterministic variation and dramatically improve performance.
+**Action:** When calculating statistics over categorical co-occurrences without spatial dependencies, always look for exact analytic formulations (like the hypergeometric or multinomial models) instead of immediately defaulting to slow, noisy permutation/bootstrap methods.

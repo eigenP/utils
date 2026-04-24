@@ -2543,12 +2543,24 @@ def tl_pacmap(
 
 
 def calculate_lineage_coupling(
-    adata, label_key="cell_type", clone_key="CloneID", n_permutations=1000
+    adata, label_key="cell_type", clone_key="CloneID", **kwargs
 ):
     """
-    Calculates lineage coupling statistics via permutation testing.
+    Calculates lineage coupling statistics analytically using the hypergeometric distribution.
     Returns matrices for Observed counts, Z-scores, and P-values.
+
+    Note: The `n_permutations` argument is deprecated as the computation is now exact.
     """
+    from scipy.stats import hypergeom, norm
+    import warnings
+
+    if "n_permutations" in kwargs:
+        warnings.warn(
+            "The 'n_permutations' argument is deprecated. "
+            "calculate_lineage_coupling now computes exact analytic results.",
+            DeprecationWarning,
+            stacklevel=2
+        )
 
     # 1. Prepare Data
     # Create a binary matrix: Clones (rows) x Cell Types (columns)
@@ -2565,58 +2577,58 @@ def calculate_lineage_coupling(
     # The result [i, j] is the number of clones shared between Type i and Type j
     observed_counts = binary_matrix.T @ binary_matrix
 
-    # 3. Permutation Test
-    null_matrices = []
+    # 3. Analytic Formulation
+    M = len(df)
+    type_counts = df[label_key].value_counts()
+    clone_counts = df[clone_key].value_counts().values
 
-    # We shuffle the labels array to break the link between clone and cell type
-    # Convert to standard numpy array to avoid categorical shuffling warnings
-    # Use astype(str) or astype(object) before extracting array to avoid read-only or categorical warnings
-    labels_array = np.array(df[label_key].astype(str))
+    labels = binary_matrix.columns
+    n_types = len(labels)
 
-    print(f"Running {n_permutations} permutations...")
-    for _ in range(n_permutations):
-        # Shuffle labels in place
-        np.random.shuffle(labels_array)
+    expected = np.zeros((n_types, n_types))
+    variance = np.zeros((n_types, n_types))
 
-        # Reconstruct the binary matrix with shuffled labels
-        # Note: We rely on the original index (clone_key) structure
-        shuffled_df = pd.DataFrame(
-            {clone_key: df[clone_key].values, label_key: labels_array}
-        )
+    for i, l_i in enumerate(labels):
+        Ki = type_counts.get(l_i, 0)
+        for j, l_j in enumerate(labels):
+            if j < i:
+                continue
+            Kj = type_counts.get(l_j, 0)
 
-        shuffled_binary = pd.crosstab(
-            shuffled_df[clone_key], shuffled_df[label_key]
-        ).clip(upper=1)
+            exp_sum = 0.0
+            var_sum = 0.0
 
-        # Ensure columns match observed (in case shuffling drops a rare type entirely)
-        shuffled_binary = shuffled_binary.reindex(
-            columns=binary_matrix.columns, fill_value=0
-        )
+            if i == j:
+                p0 = hypergeom.pmf(0, M, Ki, clone_counts)
+                p = 1.0 - p0
+            else:
+                p0_i = hypergeom.pmf(0, M, Ki, clone_counts)
+                p0_j = hypergeom.pmf(0, M, Kj, clone_counts)
+                p0_ij = hypergeom.pmf(0, M, Ki + Kj, clone_counts)
+                p = 1.0 - p0_i - p0_j + p0_ij
 
-        # Calculate null intersection
-        null_matrices.append((shuffled_binary.T @ shuffled_binary).values)
+            exp_sum = np.sum(p)
+            var_sum = np.sum(p * (1.0 - p))
 
-    null_matrices = np.array(null_matrices)  # Shape: (n_perms, n_types, n_types)
+            expected[i, j] = exp_sum
+            variance[i, j] = var_sum
+            if i != j:
+                expected[j, i] = expected[i, j]
+                variance[j, i] = variance[i, j]
 
     # 4. Calculate Statistics
-    null_mean = null_matrices.mean(axis=0)
-    null_std = null_matrices.std(axis=0)
+    std_dev = np.sqrt(variance)
+    std_dev[std_dev == 0] = 1.0
 
-    # Avoid division by zero
-    null_std[null_std == 0] = 1.0
-
-    z_scores = (observed_counts.values - null_mean) / null_std
+    z_scores_vals = (observed_counts.values - expected) / std_dev
     z_scores = pd.DataFrame(
-        z_scores, index=observed_counts.index, columns=observed_counts.columns
+        z_scores_vals, index=observed_counts.index, columns=observed_counts.columns
     )
 
-    # Calculate empirical P-values
-    # (Count how many nulls were >= observed) / n_permutations
-    # Note: This is a one-sided test for enrichment.
-    # For two-sided, you'd check both tails. The image implies enrichment focus.
-    p_values = (null_matrices >= observed_counts.values).sum(axis=0) / n_permutations
+    # Calculate analytical, single-sided P-values for enrichment
+    p_values_vals = norm.sf(z_scores_vals)
     p_values = pd.DataFrame(
-        p_values, index=observed_counts.index, columns=observed_counts.columns
+        p_values_vals, index=observed_counts.index, columns=observed_counts.columns
     )
 
     return observed_counts, z_scores, p_values
