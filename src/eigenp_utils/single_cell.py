@@ -2543,78 +2543,80 @@ def tl_pacmap(
 
 
 def calculate_lineage_coupling(
-    adata, label_key="cell_type", clone_key="CloneID", n_permutations=1000
+    adata, label_key="cell_type", clone_key="CloneID", **kwargs
 ):
     """
-    Calculates lineage coupling statistics via permutation testing.
+    Calculates lineage coupling statistics analytically using the hypergeometric distribution.
     Returns matrices for Observed counts, Z-scores, and P-values.
+
+    The expected co-occurrence of cell types within clones is computed exactly,
+    replacing computationally expensive permutation testing with an exact statistical formulation.
     """
+    import numpy as np
+    import pandas as pd
+    import scipy.stats as stats
+    from scipy.special import gammaln
 
     # 1. Prepare Data
-    # Create a binary matrix: Clones (rows) x Cell Types (columns)
-    # Value is 1 if the clone exists in that cell type, 0 otherwise.
     df = adata.obs[[label_key, clone_key]].dropna()
-
-    # Efficient way to create the binary matrix
-    # Group by clone and get unique labels, then get dummies
-    # Pivot: Index=Clone_ID, Columns=Cell_Type, Values=1 (if present)
     binary_matrix = pd.crosstab(df[clone_key], df[label_key]).clip(upper=1)
-
-    # 2. Calculate Observed Intersections
-    # Matrix Multiplication: (Types x Clones) @ (Clones x Types) = (Types x Types)
-    # The result [i, j] is the number of clones shared between Type i and Type j
     observed_counts = binary_matrix.T @ binary_matrix
 
-    # 3. Permutation Test
-    null_matrices = []
+    # 2. Analytic Formulations
+    S = df.groupby(clone_key).size().values
+    N_total = len(df)
+    cell_types = binary_matrix.columns
+    n_types = len(cell_types)
+    N_k = df.groupby(label_key).size().reindex(cell_types).fillna(0).values
 
-    # We shuffle the labels array to break the link between clone and cell type
-    # Convert to standard numpy array to avoid categorical shuffling warnings
-    # Use astype(str) or astype(object) before extracting array to avoid read-only or categorical warnings
-    labels_array = np.array(df[label_key].astype(str))
+    def log_binom(n, k):
+        return gammaln(n + 1) - gammaln(k + 1) - gammaln(n - k + 1)
 
-    print(f"Running {n_permutations} permutations...")
-    for _ in range(n_permutations):
-        # Shuffle labels in place
-        np.random.shuffle(labels_array)
+    def prob_no_overlap(N, K, S):
+        """
+        Hypergeometric probability of drawing 0 items of a specific type (K total items)
+        in a sample of size S from a population of size N.
+        """
+        mask = (N - K) >= S
+        res = np.zeros_like(S, dtype=float)
+        if np.any(mask):
+            res[mask] = np.exp(log_binom(N - K, S[mask]) - log_binom(N, S[mask]))
+        return res
 
-        # Reconstruct the binary matrix with shuffled labels
-        # Note: We rely on the original index (clone_key) structure
-        shuffled_df = pd.DataFrame(
-            {clone_key: df[clone_key].values, label_key: labels_array}
-        )
+    analytic_mean = np.zeros((n_types, n_types))
+    analytic_var = np.zeros((n_types, n_types))
 
-        shuffled_binary = pd.crosstab(
-            shuffled_df[clone_key], shuffled_df[label_key]
-        ).clip(upper=1)
+    for i in range(n_types):
+        for j in range(n_types):
+            if i == j:
+                p_joint = 1 - prob_no_overlap(N_total, N_k[i], S)
+            else:
+                p_no_i = prob_no_overlap(N_total, N_k[i], S)
+                p_no_j = prob_no_overlap(N_total, N_k[j], S)
+                # Cap max population to avoid log_binom edge cases
+                K_ij = min(N_k[i] + N_k[j], N_total)
+                p_no_ij = prob_no_overlap(N_total, K_ij, S)
 
-        # Ensure columns match observed (in case shuffling drops a rare type entirely)
-        shuffled_binary = shuffled_binary.reindex(
-            columns=binary_matrix.columns, fill_value=0
-        )
+                # Inclusion-exclusion
+                p_joint = 1 - (p_no_i + p_no_j - p_no_ij)
 
-        # Calculate null intersection
-        null_matrices.append((shuffled_binary.T @ shuffled_binary).values)
+            # Sum expected probabilities over all clones
+            analytic_mean[i, j] = p_joint.sum()
+            # Variance for independent clones is sum of variances of Bernoulli variables
+            analytic_var[i, j] = (p_joint * (1 - p_joint)).sum()
 
-    null_matrices = np.array(null_matrices)  # Shape: (n_perms, n_types, n_types)
-
-    # 4. Calculate Statistics
-    null_mean = null_matrices.mean(axis=0)
-    null_std = null_matrices.std(axis=0)
-
+    # 3. Calculate Statistics
     # Avoid division by zero
-    null_std[null_std == 0] = 1.0
+    null_std = np.maximum(np.sqrt(analytic_var), 1e-9)
 
-    z_scores = (observed_counts.values - null_mean) / null_std
+    z_scores = (observed_counts.values - analytic_mean) / null_std
     z_scores = pd.DataFrame(
         z_scores, index=observed_counts.index, columns=observed_counts.columns
     )
 
     # Calculate empirical P-values
-    # (Count how many nulls were >= observed) / n_permutations
-    # Note: This is a one-sided test for enrichment.
-    # For two-sided, you'd check both tails. The image implies enrichment focus.
-    p_values = (null_matrices >= observed_counts.values).sum(axis=0) / n_permutations
+    # We use the normal survival function to compute the one-sided p-value for enrichment
+    p_values = stats.norm.sf((observed_counts.values - analytic_mean) / null_std)
     p_values = pd.DataFrame(
         p_values, index=observed_counts.index, columns=observed_counts.columns
     )
