@@ -4401,7 +4401,13 @@ def kknn_ingest(
         recompute_ref_PCA: If True, recomputes PCA on the reference dataset before projecting the query.
         save_ref_PCA_key: Optional key to save the projected query PCA representation in `adata_query.obsm`.
         lle_reg_lambda: Regularization strength for Locally Linear Embedding (`barycenter='lle'`).
-                        Decreasing it (e.g., to 1e-4) forces sparser, sharper assignment to nearest neighbors.
+                        This controls the trade-off between reconstructing the query point exactly
+                        using its nearest neighbors (low lambda) versus a uniform average of neighbors (high lambda).
+                        - **Low lambda (e.g., 1e-8)**: Enforces sharp, sparse assignments. The algorithm tightly
+                          binds the query cell to the very closest reference cells, making it "snap" aggressively.
+                        - **High lambda (e.g., 1e8)**: Heavily penalizes the weights, forcing them towards a uniform
+                          distribution. This results in the query cell being mapped to the simple average of all
+                          its neighbors, reducing the "snapping" effect and smoothing the projection.
         **kwargs: Additional args for compute_kknn_neighbors (e.g., min_neighbors, max_neighbors).
 
     Notes:
