@@ -2542,81 +2542,94 @@ def tl_pacmap(
 # ------------------------- Lineage -------------------------
 
 
+def _p_miss_log_gamma(n_target, S, M):
+    """
+    Vectorized calculation of P(clone of size S misses all n_target cells)
+    under the hypergeometric distribution using log-gamma functions.
+    """
+    from scipy.special import gammaln
+
+    # Handle cases where missing all cells is mathematically impossible
+    # i.e., drawing more cells than are available in the remaining pool
+    valid = (M - n_target - S) >= 0
+    res = np.zeros_like(S, dtype=float)
+
+    if np.any(valid):
+        S_valid = S[valid]
+        term1 = gammaln(M - n_target + 1)
+        term2 = gammaln(M - S_valid + 1)
+        term3 = gammaln(M + 1)
+        term4 = gammaln(M - n_target - S_valid + 1)
+        res[valid] = np.exp(term1 + term2 - term3 - term4)
+
+    return res
+
+
 def calculate_lineage_coupling(
-    adata, label_key="cell_type", clone_key="CloneID", n_permutations=1000
+    adata, label_key="cell_type", clone_key="CloneID", **kwargs
 ):
     """
-    Calculates lineage coupling statistics via permutation testing.
+    Calculates lineage coupling statistics analytically using the hypergeometric
+    distribution and the inclusion-exclusion principle, eliminating the need
+    for heuristic permutation testing.
+
     Returns matrices for Observed counts, Z-scores, and P-values.
     """
+    import scipy.stats as stats
 
     # 1. Prepare Data
-    # Create a binary matrix: Clones (rows) x Cell Types (columns)
-    # Value is 1 if the clone exists in that cell type, 0 otherwise.
     df = adata.obs[[label_key, clone_key]].dropna()
 
-    # Efficient way to create the binary matrix
-    # Group by clone and get unique labels, then get dummies
-    # Pivot: Index=Clone_ID, Columns=Cell_Type, Values=1 (if present)
+    # Binary presence matrix: Clones (rows) x Cell Types (columns)
     binary_matrix = pd.crosstab(df[clone_key], df[label_key]).clip(upper=1)
 
     # 2. Calculate Observed Intersections
-    # Matrix Multiplication: (Types x Clones) @ (Clones x Types) = (Types x Types)
-    # The result [i, j] is the number of clones shared between Type i and Type j
     observed_counts = binary_matrix.T @ binary_matrix
 
-    # 3. Permutation Test
-    null_matrices = []
+    # 3. Exact Analytic Null Expectations & Variances
+    clone_sizes = df[clone_key].value_counts().values
+    type_counts = df[label_key].value_counts()
+    M = len(df)
 
-    # We shuffle the labels array to break the link between clone and cell type
-    # Convert to standard numpy array to avoid categorical shuffling warnings
-    # Use astype(str) or astype(object) before extracting array to avoid read-only or categorical warnings
-    labels_array = np.array(df[label_key].astype(str))
+    types = observed_counts.columns
+    n_types = len(types)
 
-    print(f"Running {n_permutations} permutations...")
-    for _ in range(n_permutations):
-        # Shuffle labels in place
-        np.random.shuffle(labels_array)
+    exp_matrix = pd.DataFrame(0.0, index=types, columns=types)
+    var_matrix = pd.DataFrame(0.0, index=types, columns=types)
 
-        # Reconstruct the binary matrix with shuffled labels
-        # Note: We rely on the original index (clone_key) structure
-        shuffled_df = pd.DataFrame(
-            {clone_key: df[clone_key].values, label_key: labels_array}
-        )
+    for i, t1 in enumerate(types):
+        for j, t2 in enumerate(types):
+            n1 = type_counts[t1]
+            n2 = type_counts[t2]
 
-        shuffled_binary = pd.crosstab(
-            shuffled_df[clone_key], shuffled_df[label_key]
-        ).clip(upper=1)
+            if i == j:
+                # P(clone contains t1) = 1 - P(clone misses t1)
+                p_c = 1 - _p_miss_log_gamma(n1, clone_sizes, M)
+            else:
+                # Inclusion-exclusion:
+                # P(clone contains t1 AND t2) = 1 - P(misses t1) - P(misses t2) + P(misses t1 AND t2)
+                # Since t1 and t2 are mutually exclusive labels, missing both
+                # means drawing from the pool M - n1 - n2.
+                p_miss_t1 = _p_miss_log_gamma(n1, clone_sizes, M)
+                p_miss_t2 = _p_miss_log_gamma(n2, clone_sizes, M)
+                p_miss_both = _p_miss_log_gamma(n1 + n2, clone_sizes, M)
+                p_c = 1 - p_miss_t1 - p_miss_t2 + p_miss_both
 
-        # Ensure columns match observed (in case shuffling drops a rare type entirely)
-        shuffled_binary = shuffled_binary.reindex(
-            columns=binary_matrix.columns, fill_value=0
-        )
-
-        # Calculate null intersection
-        null_matrices.append((shuffled_binary.T @ shuffled_binary).values)
-
-    null_matrices = np.array(null_matrices)  # Shape: (n_perms, n_types, n_types)
+            exp_matrix.loc[t1, t2] = np.sum(p_c)
+            var_matrix.loc[t1, t2] = np.sum(p_c * (1 - p_c))
 
     # 4. Calculate Statistics
-    null_mean = null_matrices.mean(axis=0)
-    null_std = null_matrices.std(axis=0)
+    std_matrix = np.sqrt(var_matrix.values)
+    std_matrix[std_matrix == 0] = 1.0  # Avoid division by zero
 
-    # Avoid division by zero
-    null_std[null_std == 0] = 1.0
+    z_scores = (observed_counts - exp_matrix) / std_matrix
 
-    z_scores = (observed_counts.values - null_mean) / null_std
-    z_scores = pd.DataFrame(
-        z_scores, index=observed_counts.index, columns=observed_counts.columns
-    )
-
-    # Calculate empirical P-values
-    # (Count how many nulls were >= observed) / n_permutations
-    # Note: This is a one-sided test for enrichment.
-    # For two-sided, you'd check both tails. The image implies enrichment focus.
-    p_values = (null_matrices >= observed_counts.values).sum(axis=0) / n_permutations
+    # Calculate exact p-values using normal approximation to the sum of Bernoullis
+    # (Poisson binomial distribution). We use the survival function (sf) for enrichment.
     p_values = pd.DataFrame(
-        p_values, index=observed_counts.index, columns=observed_counts.columns
+        stats.norm.sf(z_scores.values),
+        index=z_scores.index,
+        columns=z_scores.columns
     )
 
     return observed_counts, z_scores, p_values
