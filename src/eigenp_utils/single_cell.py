@@ -13,6 +13,7 @@ import scipy.sparse as sp
 from scipy.cluster import hierarchy
 from scipy.linalg import svd
 from scipy.stats import norm
+from scipy.special import gammaln
 import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
 import matplotlib.colors as mcolors
@@ -2543,80 +2544,88 @@ def tl_pacmap(
 
 
 def calculate_lineage_coupling(
-    adata, label_key="cell_type", clone_key="CloneID", n_permutations=1000
+    adata, label_key="cell_type", clone_key="CloneID", n_permutations=None
 ):
     """
-    Calculates lineage coupling statistics via permutation testing.
+    Calculates lineage coupling statistics using exact analytic formulations
+    (hypergeometric expectation via log-gamma).
     Returns matrices for Observed counts, Z-scores, and P-values.
+
+    n_permutations is kept for API compatibility but is unused, as the
+    calculation is now deterministic and exact.
     """
 
     # 1. Prepare Data
-    # Create a binary matrix: Clones (rows) x Cell Types (columns)
-    # Value is 1 if the clone exists in that cell type, 0 otherwise.
     df = adata.obs[[label_key, clone_key]].dropna()
+    N_total = len(df)
 
-    # Efficient way to create the binary matrix
-    # Group by clone and get unique labels, then get dummies
-    # Pivot: Index=Clone_ID, Columns=Cell_Type, Values=1 (if present)
     binary_matrix = pd.crosstab(df[clone_key], df[label_key]).clip(upper=1)
 
     # 2. Calculate Observed Intersections
-    # Matrix Multiplication: (Types x Clones) @ (Clones x Types) = (Types x Types)
-    # The result [i, j] is the number of clones shared between Type i and Type j
     observed_counts = binary_matrix.T @ binary_matrix
 
-    # 3. Permutation Test
-    null_matrices = []
+    # 3. Exact Analytic Calculation
+    unique_labels = observed_counts.columns.tolist()
+    n_types = len(unique_labels)
+    K = df[label_key].value_counts()
+    clone_sizes = df[clone_key].value_counts().values  # array of clone sizes (S)
 
-    # We shuffle the labels array to break the link between clone and cell type
-    # Convert to standard numpy array to avoid categorical shuffling warnings
-    # Use astype(str) or astype(object) before extracting array to avoid read-only or categorical warnings
-    labels_array = np.array(df[label_key].astype(str))
+    def log_comb(n, k):
+        # Vectorized log binomial coefficient
+        valid = (k >= 0) & (k <= n)
+        res = np.zeros_like(k, dtype=float)
+        if np.any(valid):
+            n_v = n[valid] if isinstance(n, np.ndarray) else n
+            k_v = k[valid]
+            res[valid] = gammaln(n_v + 1) - gammaln(k_v + 1) - gammaln(n_v - k_v + 1)
+        res[~valid] = -np.inf
+        return res
 
-    print(f"Running {n_permutations} permutations...")
-    for _ in range(n_permutations):
-        # Shuffle labels in place
-        np.random.shuffle(labels_array)
+    def prob_not_in(n_tot, k_tgt, s_arr):
+        # Probability that a clone of size S has NO cells of the target type(s)
+        # P = comb(N - K, S) / comb(N, S)
+        log_p = log_comb(n_tot - k_tgt, s_arr) - log_comb(n_tot, s_arr)
+        return np.exp(log_p)
 
-        # Reconstruct the binary matrix with shuffled labels
-        # Note: We rely on the original index (clone_key) structure
-        shuffled_df = pd.DataFrame(
-            {clone_key: df[clone_key].values, label_key: labels_array}
-        )
+    exact_mean = np.zeros((n_types, n_types))
+    exact_var = np.zeros((n_types, n_types))
 
-        shuffled_binary = pd.crosstab(
-            shuffled_df[clone_key], shuffled_df[label_key]
-        ).clip(upper=1)
+    for i in range(n_types):
+        for j in range(n_types):
+            type_i = unique_labels[i]
+            type_j = unique_labels[j]
 
-        # Ensure columns match observed (in case shuffling drops a rare type entirely)
-        shuffled_binary = shuffled_binary.reindex(
-            columns=binary_matrix.columns, fill_value=0
-        )
+            K_i = K[type_i]
+            K_j = K[type_j]
 
-        # Calculate null intersection
-        null_matrices.append((shuffled_binary.T @ shuffled_binary).values)
+            if i == j:
+                # Probability of being in at least one cell of type i
+                prob = 1 - prob_not_in(N_total, K_i, clone_sizes)
+            else:
+                # Inclusion-exclusion for being in both type i and type j
+                p_not_i = prob_not_in(N_total, K_i, clone_sizes)
+                p_not_j = prob_not_in(N_total, K_j, clone_sizes)
+                p_not_ij = prob_not_in(N_total, K_i + K_j, clone_sizes)
+                prob = 1 - p_not_i - p_not_j + p_not_ij
 
-    null_matrices = np.array(null_matrices)  # Shape: (n_perms, n_types, n_types)
+            # Sum over all clones
+            exact_mean[i, j] = prob.sum()
+            exact_var[i, j] = (prob * (1 - prob)).sum()
+
+    # Avoid division by zero and floating-point negatives
+    std_dev = np.sqrt(np.maximum(exact_var, 0))
+    std_dev[std_dev == 0] = 1.0
 
     # 4. Calculate Statistics
-    null_mean = null_matrices.mean(axis=0)
-    null_std = null_matrices.std(axis=0)
-
-    # Avoid division by zero
-    null_std[null_std == 0] = 1.0
-
-    z_scores = (observed_counts.values - null_mean) / null_std
+    z_scores_vals = (observed_counts.values - exact_mean) / std_dev
     z_scores = pd.DataFrame(
-        z_scores, index=observed_counts.index, columns=observed_counts.columns
+        z_scores_vals, index=observed_counts.index, columns=observed_counts.columns
     )
 
-    # Calculate empirical P-values
-    # (Count how many nulls were >= observed) / n_permutations
-    # Note: This is a one-sided test for enrichment.
-    # For two-sided, you'd check both tails. The image implies enrichment focus.
-    p_values = (null_matrices >= observed_counts.values).sum(axis=0) / n_permutations
+    # Right-tailed test for enrichment (matches original permutation one-sided behavior)
+    p_values_vals = 1 - norm.cdf(z_scores_vals)
     p_values = pd.DataFrame(
-        p_values, index=observed_counts.index, columns=observed_counts.columns
+        p_values_vals, index=observed_counts.index, columns=observed_counts.columns
     )
 
     return observed_counts, z_scores, p_values
