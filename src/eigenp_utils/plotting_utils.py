@@ -221,12 +221,13 @@ def raincloud_plot(data,
                    figsize=(4, 4),
                    x=None, y=None, hue=None, dodge=None,
                    size_scatter=40,
-                   size_median=90,
+                   size_median=150,
                    alpha_scatter=0.50,
                    alpha_violin=0.8,
                    linewidth_scatter=0.5,
-                   linewidth_boxplot=5,
-                   offset_scatter=0.20):
+                   linewidth_boxplot=8,
+                   offset_scatter=0.20,
+                   width_violin=0.5):
     """
     Creates a raincloud plot (half-violin + boxplot + jittered scatter).
 
@@ -364,7 +365,7 @@ def raincloud_plot(data,
              pass
 
         # Build PlotItems
-        total_width = 0.8
+        total_width = width_violin
         n_hues = len(hues)
         if dodge:
             slot_width = total_width / n_hues
@@ -503,7 +504,7 @@ def raincloud_plot(data,
             plot_items.append({
                 'values': vals,
                 'position': float(i),
-                'width': 0.8,
+                'width': width_violin,
                 'color': colors[i],
                 'label': label
             })
@@ -547,8 +548,8 @@ def raincloud_plot(data,
 
         # B. Scatter (Rain)
         rng = np.random.default_rng(0)
-        # Scale jitter and offset by width ratio relative to 0.8 (default)
-        scale_factor = width / 0.8
+        # Scale jitter and offset by width ratio relative to 0.5 (default)
+        scale_factor = width / 0.5
         jitter_vals = rng.normal(loc=0, scale=0.04 * scale_factor, size=len(vals))
         offset = offset_scatter * scale_factor
 
