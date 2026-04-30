@@ -915,7 +915,7 @@ def get_nice_number(value):
     return int(nice_fraction * (10 ** exponent))
 
 
-def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, scatter_raster_threshold=None, **kwargs):
+def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, scatter_raster_threshold=1e3, **kwargs):
     """
     Saves the currently active matplotlib figure as an SVG file.
 
