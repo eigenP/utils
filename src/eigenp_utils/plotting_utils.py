@@ -227,7 +227,8 @@ def raincloud_plot(data,
                    linewidth_scatter=0.5,
                    linewidth_boxplot=8,
                    offset_scatter=0.20,
-                   width_violin=0.5):
+                   width_violin=0.5,
+                   raster_threshold=None):
     """
     Creates a raincloud plot (half-violin + boxplot + jittered scatter).
 
@@ -262,6 +263,10 @@ def raincloud_plot(data,
     dodge : bool, optional
         When hue is nested, whether to draw elements at different positions.
         If None, defaults to True unless hue matches x or y variable.
+    raster_threshold : int, optional
+        If the total number of scatter points across all groups exceeds this threshold,
+        the jittered scatter points will be rasterized. This is useful for keeping SVG
+        file sizes small when there are many points.
 
     Returns
     -------
@@ -511,7 +516,13 @@ def raincloud_plot(data,
             xtick_positions.append(i)
             xtick_labels.append(label)
 
-    # --- 2. Setup Figure/Axes ---
+    # --- 2. Calculate Total Points for Rasterization ---
+    total_points = sum(len(item['values']) for item in plot_items)
+    rasterize_scatter = False
+    if raster_threshold is not None and total_points > raster_threshold:
+        rasterize_scatter = True
+
+    # --- 3. Setup Figure/Axes ---
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -561,7 +572,8 @@ def raincloud_plot(data,
             y_scatter = pos - offset + jitter_vals
 
         ax.scatter(x_scatter, y_scatter, color=col, alpha=alpha_scatter,
-                   edgecolor="black", linewidth=linewidth_scatter, s=size_scatter)
+                   edgecolor="black", linewidth=linewidth_scatter, s=size_scatter,
+                   rasterized=rasterize_scatter)
 
         # C. Boxplot Elements (Median + IQR)
         q1, med, q3 = np.percentile(vals, [25, 50, 75])
@@ -903,7 +915,7 @@ def get_nice_number(value):
     return int(nice_fraction * (10 ** exponent))
 
 
-def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, **kwargs):
+def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, scatter_raster_threshold=None, **kwargs):
     """
     Saves the currently active matplotlib figure as an SVG file.
 
@@ -919,6 +931,10 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
         The resolution in dots per inch for rasterized elements.
     pad_inches : float, default 0.1
         Amount of padding around the figure when bbox_inches is 'tight'.
+    scatter_raster_threshold : int, optional
+        If provided, any scatter plot (PathCollection) in the figure containing
+        this number of points or more will be rasterized before saving. This
+        helps keep SVG file sizes manageable for large datasets.
     **kwargs :
         Additional keyword arguments passed directly to `plt.savefig`.
     """
@@ -932,6 +948,16 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
     metadata.setdefault('Creator', 'eigenp')
     metadata.setdefault('Date', datetime.datetime.now().isoformat())
     metadata.setdefault('Title', title)
+
+    # Rasterize scatter collections if threshold is met
+    if scatter_raster_threshold is not None:
+        from matplotlib.collections import PathCollection
+        for ax in fig.axes:
+            for collection in ax.collections:
+                if isinstance(collection, PathCollection):
+                    # Check the number of offsets (points) in the scatter
+                    if len(collection.get_offsets()) >= scatter_raster_threshold:
+                        collection.set_rasterized(True)
 
     # Make sure we add '.svg' if it's not present
     filename_str = str(filename)
