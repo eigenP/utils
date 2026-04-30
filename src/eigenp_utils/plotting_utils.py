@@ -228,7 +228,7 @@ def raincloud_plot(data,
                    linewidth_boxplot=8,
                    offset_scatter=0.20,
                    width_violin=0.5,
-                   raster_threshold=None):
+                   raster_threshold=1e3):
     """
     Creates a raincloud plot (half-violin + boxplot + jittered scatter).
 
