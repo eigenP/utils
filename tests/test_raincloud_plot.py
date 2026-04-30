@@ -132,3 +132,67 @@ def test_savefig_svg_raster_threshold(tmp_path):
     # Both SVG files should have been created
     assert out_file1.exists()
     assert out_file2.exists()
+
+
+
+def test_savefig_svg_raster_threshold_size(tmp_path):
+    from eigenp_utils.plotting_utils import savefig_svg
+    import pandas as pd
+    from matplotlib.collections import PathCollection
+
+    # --- Original Test Case: State Checks ---
+    fig, ax = plt.subplots()
+    # 100 points
+    ax.scatter(range(100), range(100))
+
+    # Initially not rasterized
+    scatter_col = [c for c in ax.collections if isinstance(c, PathCollection)][0]
+    assert scatter_col.get_rasterized() is False
+
+    # Call savefig_svg with threshold 500 (not met)
+    out_file1 = tmp_path / "test_no_raster.svg"
+    savefig_svg(out_file1, scatter_raster_threshold=500)
+
+    # Should still not be rasterized
+    assert scatter_col.get_rasterized() is False
+
+    # Call savefig_svg with threshold 50 (met)
+    out_file2 = tmp_path / "test_raster.svg"
+    savefig_svg(out_file2, scatter_raster_threshold=50)
+
+    # Should now be rasterized
+    assert scatter_col.get_rasterized() is True
+
+    # Both SVG files should have been created
+    assert out_file1.exists()
+    assert out_file2.exists()
+    
+    plt.close(fig)
+
+    # --- Added Test Case: File Size Verification ---
+    fig_size, ax_size = plt.subplots()
+    
+    # 2e3 points
+    n_points = 2000
+    x = np.random.rand(n_points)
+    y = np.random.rand(n_points)
+    ax_size.scatter(x, y)
+
+    out_file_vector = tmp_path / "test_size_vector.svg"
+    out_file_raster = tmp_path / "test_size_raster.svg"
+
+    # Save with threshold 3e3 (threshold not met -> pure vector representation)
+    savefig_svg(out_file_vector, scatter_raster_threshold=3000, dpi=100)
+    
+    # Save with threshold 1e3 (threshold met -> scatter paths rasterized)
+    savefig_svg(out_file_raster, scatter_raster_threshold=1000, dpi=100)
+
+    # Compare file sizes on disk
+    size_vector = out_file_vector.stat().st_size
+    size_raster = out_file_raster.stat().st_size
+
+    # The rasterized SVG embeds a base64 encoded PNG, avoiding rendering O(N) path objects.
+    # It must yield a strictly smaller file size at this density.
+    assert size_raster < size_vector
+
+    plt.close(fig_size)
