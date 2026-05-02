@@ -2546,78 +2546,118 @@ def calculate_lineage_coupling(
     adata, label_key="cell_type", clone_key="CloneID", n_permutations=1000
 ):
     """
-    Calculates lineage coupling statistics via permutation testing.
-    Returns matrices for Observed counts, Z-scores, and P-values.
+    Calculates lineage coupling statistics analytically using hypergeometric distributions
+    and the inclusion-exclusion principle. This replaces heuristic permutation testing
+    with exact, deterministic expectations and variances using a log-gamma formulation.
+    The `n_permutations` argument is deprecated and ignored.
+    Returns matrices for Observed counts, Z-scores, and P-values (using Normal approx of Z).
     """
+    from scipy.special import gammaln
+    from scipy.stats import norm
+
+    if n_permutations != 1000:
+        import warnings
+        warnings.warn(
+            "The `n_permutations` parameter is deprecated. `calculate_lineage_coupling` now computes exact analytic expectations.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     # 1. Prepare Data
-    # Create a binary matrix: Clones (rows) x Cell Types (columns)
-    # Value is 1 if the clone exists in that cell type, 0 otherwise.
     df = adata.obs[[label_key, clone_key]].dropna()
 
-    # Efficient way to create the binary matrix
-    # Group by clone and get unique labels, then get dummies
+    # Get clone sizes
+    clone_sizes = df[clone_key].value_counts().values
+
+    # Ensure binary matrix is constructed to match categorical layout
     # Pivot: Index=Clone_ID, Columns=Cell_Type, Values=1 (if present)
     binary_matrix = pd.crosstab(df[clone_key], df[label_key]).clip(upper=1)
 
-    # 2. Calculate Observed Intersections
-    # Matrix Multiplication: (Types x Clones) @ (Clones x Types) = (Types x Types)
-    # The result [i, j] is the number of clones shared between Type i and Type j
+    # Calculate Observed Intersections
     observed_counts = binary_matrix.T @ binary_matrix
 
-    # 3. Permutation Test
-    null_matrices = []
+    # Overall statistics
+    C = len(df) # Total cells
+    type_counts = df[label_key].value_counts()
+    # Align n_i vector with the columns of binary_matrix
+    labels = observed_counts.columns.tolist()
+    n_i = np.array([type_counts.get(l, 0) for l in labels])
 
-    # We shuffle the labels array to break the link between clone and cell type
-    # Convert to standard numpy array to avoid categorical shuffling warnings
-    # Use astype(str) or astype(object) before extracting array to avoid read-only or categorical warnings
-    labels_array = np.array(df[label_key].astype(str))
+    num_types = len(labels)
+    num_clones = len(clone_sizes)
 
-    print(f"Running {n_permutations} permutations...")
-    for _ in range(n_permutations):
-        # Shuffle labels in place
-        np.random.shuffle(labels_array)
+    # 2. Analytical Expectations using Log-Gamma
+    # We want to find the probability that a clone of size s lacks cell type i
+    # P(missing i) = binom(C - n_i, s) / binom(C, s)
+    # log P = gammaln(C-n_i+1) + gammaln(C-s+1) - gammaln(C-n_i-s+1) - gammaln(C+1)
 
-        # Reconstruct the binary matrix with shuffled labels
-        # Note: We rely on the original index (clone_key) structure
-        shuffled_df = pd.DataFrame(
-            {clone_key: df[clone_key].values, label_key: labels_array}
-        )
+    # Broadcast arrays safely before masking
+    C_minus_ni = C - n_i[:, None]
+    s_arr = clone_sizes[None, :]
 
-        shuffled_binary = pd.crosstab(
-            shuffled_df[clone_key], shuffled_df[label_key]
-        ).clip(upper=1)
+    C_minus_ni_b, s_arr_b = np.broadcast_arrays(C_minus_ni, s_arr)
 
-        # Ensure columns match observed (in case shuffling drops a rare type entirely)
-        shuffled_binary = shuffled_binary.reindex(
-            columns=binary_matrix.columns, fill_value=0
-        )
+    valid_mask = C_minus_ni_b >= s_arr_b
 
-        # Calculate null intersection
-        null_matrices.append((shuffled_binary.T @ shuffled_binary).values)
+    # P(missing i) matrix: shape (num_types, num_clones)
+    p_miss_i = np.zeros((num_types, num_clones))
+    p_miss_i[valid_mask] = np.exp(
+        gammaln(C_minus_ni_b[valid_mask] + 1) +
+        gammaln(C - s_arr_b[valid_mask] + 1) -
+        gammaln(C_minus_ni_b[valid_mask] - s_arr_b[valid_mask] + 1) -
+        gammaln(C + 1)
+    )
 
-    null_matrices = np.array(null_matrices)  # Shape: (n_perms, n_types, n_types)
+    # Compute P(missing i OR missing j) to find P(has i AND has j)
+    # binom(C - n_i - n_j + n_ij, s) / binom(C, s)
+    # Since cell types are mutually exclusive per cell, n_ij = 0
+    # Thus, P(missing both) = binom(C - n_i - n_j, s) / binom(C, s)
 
-    # 4. Calculate Statistics
-    null_mean = null_matrices.mean(axis=0)
-    null_std = null_matrices.std(axis=0)
+    n_i_j = n_i[:, None] + n_i[None, :] # shape: (num_types, num_types)
+    C_minus_nij = C - n_i_j
 
+    # Broadcast to (num_types, num_types, num_clones)
+    C_minus_nij_b, s_arr_3d_b = np.broadcast_arrays(C_minus_nij[:, :, None], clone_sizes[None, None, :])
+
+    valid_mask_ij = C_minus_nij_b >= s_arr_3d_b
+
+    p_miss_ij = np.zeros((num_types, num_types, num_clones))
+    p_miss_ij[valid_mask_ij] = np.exp(
+        gammaln(C_minus_nij_b[valid_mask_ij] + 1) +
+        gammaln(C - s_arr_3d_b[valid_mask_ij] + 1) -
+        gammaln(C_minus_nij_b[valid_mask_ij] - s_arr_3d_b[valid_mask_ij] + 1) -
+        gammaln(C + 1)
+    )
+
+    # Inclusion-Exclusion:
+    # P(has i AND has j) = 1 - P(miss i) - P(miss j) + P(miss i AND miss j)
+    p_has_i = 1 - p_miss_i
+
+    # P(has i AND has j) for i != j
+    p_has_ij = 1 - p_miss_i[:, None, :] - p_miss_i[None, :, :] + p_miss_ij
+
+    # On diagonal, P(has i AND has i) is just P(has i)
+    for i in range(num_types):
+        p_has_ij[i, i, :] = p_has_i[i, :]
+
+    # Expected counts: sum over clones
+    exp_counts = np.sum(p_has_ij, axis=2)
+
+    # Variance of sum of independent indicator variables: sum(p * (1 - p))
+    var_counts = np.sum(p_has_ij * (1 - p_has_ij), axis=2)
+    var_counts = np.maximum(var_counts, 0) # Clamp negative numerical noise
+
+    std_counts = np.sqrt(var_counts)
     # Avoid division by zero
-    null_std[null_std == 0] = 1.0
+    std_counts[std_counts == 0] = 1.0
 
-    z_scores = (observed_counts.values - null_mean) / null_std
-    z_scores = pd.DataFrame(
-        z_scores, index=observed_counts.index, columns=observed_counts.columns
-    )
+    z_scores_arr = (observed_counts.values - exp_counts) / std_counts
 
-    # Calculate empirical P-values
-    # (Count how many nulls were >= observed) / n_permutations
-    # Note: This is a one-sided test for enrichment.
-    # For two-sided, you'd check both tails. The image implies enrichment focus.
-    p_values = (null_matrices >= observed_counts.values).sum(axis=0) / n_permutations
-    p_values = pd.DataFrame(
-        p_values, index=observed_counts.index, columns=observed_counts.columns
-    )
+    z_scores = pd.DataFrame(z_scores_arr, index=labels, columns=labels)
+
+    # Use normal survival function for one-sided p-values to match exact permutations logic
+    p_values_arr = norm.sf(z_scores_arr)
+    p_values = pd.DataFrame(p_values_arr, index=labels, columns=labels)
 
     return observed_counts, z_scores, p_values
 
