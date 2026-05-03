@@ -32,7 +32,9 @@ def test_calculate_lineage_coupling():
         obs_counts, z_scores, p_vals = calculate_lineage_coupling(
             adata,
             label_key='cell_type',
-            clone_key='CloneID'
+            clone_key='CloneID',
+            method='permutation',
+            n_permutations=10
         )
 
     # Check that no warnings related to shuffling categorical were raised

@@ -2543,88 +2543,143 @@ def tl_pacmap(
 
 
 def calculate_lineage_coupling(
-    adata, label_key="cell_type", clone_key="CloneID"
+    adata, label_key="cell_type", clone_key="CloneID", method="hypergeometric", n_permutations=1000
 ):
     """
-    Calculates lineage coupling statistics using exact analytical expectations.
-    Replaces heuristic permutation testing with a deterministic, fast log-gamma formulation.
-    Returns matrices for Observed counts, Z-scores, and P-values.
-    """
-    import scipy.special
-    from scipy.stats import norm
+    Calculates lineage coupling statistics.
 
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data matrix.
+    label_key : str
+        Key in `adata.obs` representing the cell type or cluster labels.
+    clone_key : str
+        Key in `adata.obs` representing the clonal identities.
+    method : str
+        Method to calculate expectations and p-values. Either 'hypergeometric' (default, analytical, fast)
+        or 'permutation' (stochastic, slow).
+    n_permutations : int
+        Number of permutations to use if method='permutation'.
+
+    Returns
+    -------
+    observed_counts : pd.DataFrame
+        Observed co-occurrence matrix.
+    z_scores : pd.DataFrame
+        Z-scores of co-occurrence.
+    p_values : pd.DataFrame
+        Right-tailed P-values of co-occurrence.
+    """
     # 1. Prepare Data
     df = adata.obs[[label_key, clone_key]].dropna()
-    N = len(df)
-
     binary_matrix = pd.crosstab(df[clone_key], df[label_key]).clip(upper=1)
     observed_counts = binary_matrix.T @ binary_matrix
 
-    # Get exact cell counts per clone and per type
-    cell_counts_per_clone = df[clone_key].value_counts().values
-    cell_counts_per_type = df[label_key].value_counts().loc[binary_matrix.columns].values
+    if method == "permutation":
+        null_matrices = []
+        labels_array = np.array(df[label_key].astype(str))
 
-    n_types = len(cell_counts_per_type)
+        print(f"Running {n_permutations} permutations...")
+        for _ in range(n_permutations):
+            np.random.shuffle(labels_array)
+            shuffled_df = pd.DataFrame(
+                {clone_key: df[clone_key].values, label_key: labels_array}
+            )
+            shuffled_binary = pd.crosstab(
+                shuffled_df[clone_key], shuffled_df[label_key]
+            ).clip(upper=1)
+            shuffled_binary = shuffled_binary.reindex(
+                columns=binary_matrix.columns, fill_value=0
+            )
+            null_matrices.append((shuffled_binary.T @ shuffled_binary).values)
 
-    K_i = cell_counts_per_type[:, None]
-    k_c = cell_counts_per_clone[None, :]
+        null_matrices = np.array(null_matrices)  # Shape: (n_perms, n_types, n_types)
 
-    def prob_zero(K, k_c):
-        """
-        Probability that a clone with k_c cells has 0 cells of a type with K total cells.
-        Computed efficiently via log-gamma formulation of the hypergeometric distribution.
-        """
-        K, k_c = np.broadcast_arrays(K, k_c)
-        valid = (N - K) >= k_c
-        p = np.zeros_like(K, dtype=float)
+        null_mean = null_matrices.mean(axis=0)
+        null_std = null_matrices.std(axis=0)
+        null_std[null_std == 0] = 1.0
 
-        K_val = K[valid]
-        k_c_val = k_c[valid]
+        z_scores_vals = (observed_counts.values - null_mean) / null_std
+        p_values_vals = (null_matrices >= observed_counts.values).sum(axis=0) / n_permutations
 
-        log_p = (scipy.special.gammaln(N - K_val + 1) - scipy.special.gammaln(N - K_val - k_c_val + 1)
-                 - scipy.special.gammaln(N + 1) + scipy.special.gammaln(N - k_c_val + 1))
-        p[valid] = np.exp(log_p)
-        return p
+        z_scores = pd.DataFrame(z_scores_vals, index=observed_counts.index, columns=observed_counts.columns)
+        p_values = pd.DataFrame(p_values_vals, index=observed_counts.index, columns=observed_counts.columns)
 
-    # P_i: Probability that type i is absent from clone c
-    P_i = prob_zero(K_i, k_c)
+        return observed_counts, z_scores, p_values
 
-    # P_ij: Probability that both type i and type j are absent from clone c
-    K_ij = cell_counts_per_type[:, None, None] + cell_counts_per_type[None, :, None]
-    P_ij = prob_zero(K_ij, k_c[None, :, :])
+    elif method == "hypergeometric":
+        import scipy.special
+        from scipy.stats import norm
+        N = len(df)
 
-    # Inclusion-exclusion: Probability that BOTH type i and type j are present in clone c
-    # P(i AND j) = 1 - P(not i) - P(not j) + P(not i AND not j)
-    p_c_ij = 1.0 - P_i[:, None, :] - P_i[None, :, :] + P_ij
+        # Get exact cell counts per clone and per type
+        cell_counts_per_clone = df[clone_key].value_counts().values
+        cell_counts_per_type = df[label_key].value_counts().loc[binary_matrix.columns].values
 
-    # For diagonal elements (i=j), the probability is just 1 - P(not i)
-    diag_idx = np.arange(n_types)
-    p_c_ij[diag_idx, diag_idx, :] = 1.0 - P_i
+        n_types = len(cell_counts_per_type)
 
-    # Analytical Expectations and Variance
-    expected_counts = np.sum(p_c_ij, axis=-1)
+        K_i = cell_counts_per_type[:, None]
+        k_c = cell_counts_per_clone[None, :]
 
-    var_counts = np.sum(p_c_ij * (1.0 - p_c_ij), axis=-1)
-    var_counts = np.maximum(var_counts, 0) # Clamp for numerical stability
+        def prob_zero(K, k_c):
+            """
+            Probability that a clone with k_c cells has 0 cells of a type with K total cells.
+            Computed efficiently via log-gamma formulation of the hypergeometric distribution.
+            """
+            K, k_c = np.broadcast_arrays(K, k_c)
+            valid = (N - K) >= k_c
+            p = np.zeros_like(K, dtype=float)
 
-    std_counts = np.sqrt(var_counts)
-    std_counts[std_counts == 0] = 1.0 # Avoid division by zero
+            K_val = K[valid]
+            k_c_val = k_c[valid]
 
-    # 4. Calculate Statistics
-    z_scores_vals = (observed_counts.values - expected_counts) / std_counts
+            log_p = (scipy.special.gammaln(N - K_val + 1) - scipy.special.gammaln(N - K_val - k_c_val + 1)
+                     - scipy.special.gammaln(N + 1) + scipy.special.gammaln(N - k_c_val + 1))
+            p[valid] = np.exp(log_p)
+            return p
 
-    # Calculate analytical P-values (Right-tailed test for enrichment)
-    p_values_vals = norm.sf(z_scores_vals)
+        # P_i: Probability that type i is absent from clone c
+        P_i = prob_zero(K_i, k_c)
 
-    # Format to DataFrames
-    z_scores = pd.DataFrame(
-        z_scores_vals, index=observed_counts.index, columns=observed_counts.columns
-    )
-    p_values = pd.DataFrame(
-        p_values_vals, index=observed_counts.index, columns=observed_counts.columns
-    )
+        # P_ij: Probability that both type i and type j are absent from clone c
+        K_ij = cell_counts_per_type[:, None, None] + cell_counts_per_type[None, :, None]
+        P_ij = prob_zero(K_ij, k_c[None, :, :])
 
-    return observed_counts, z_scores, p_values
+        # Inclusion-exclusion: Probability that BOTH type i and type j are present in clone c
+        # P(i AND j) = 1 - P(not i) - P(not j) + P(not i AND not j)
+        p_c_ij = 1.0 - P_i[:, None, :] - P_i[None, :, :] + P_ij
+
+        # For diagonal elements (i=j), the probability is just 1 - P(not i)
+        diag_idx = np.arange(n_types)
+        p_c_ij[diag_idx, diag_idx, :] = 1.0 - P_i
+
+        # Analytical Expectations and Variance
+        expected_counts = np.sum(p_c_ij, axis=-1)
+
+        var_counts = np.sum(p_c_ij * (1.0 - p_c_ij), axis=-1)
+        var_counts = np.maximum(var_counts, 0) # Clamp for numerical stability
+
+        std_counts = np.sqrt(var_counts)
+        std_counts[std_counts == 0] = 1.0 # Avoid division by zero
+
+        # 4. Calculate Statistics
+        z_scores_vals = (observed_counts.values - expected_counts) / std_counts
+
+        # Calculate analytical P-values (Right-tailed test for enrichment)
+        p_values_vals = norm.sf(z_scores_vals)
+
+        # Format to DataFrames
+        z_scores = pd.DataFrame(
+            z_scores_vals, index=observed_counts.index, columns=observed_counts.columns
+        )
+        p_values = pd.DataFrame(
+            p_values_vals, index=observed_counts.index, columns=observed_counts.columns
+        )
+
+        return observed_counts, z_scores, p_values
+    else:
+        raise ValueError(f"Unknown method '{method}'. Choose 'hypergeometric' or 'permutation'.")
 
 
 def plot_coupling_heatmap(observed, z_scores, p_values, title="Lineage Coupling"):
