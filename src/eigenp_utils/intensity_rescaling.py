@@ -175,36 +175,32 @@ def adjust_gamma_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_A
 
         y_data_norm = y_data / max_val
 
-        # 3. Fit the model
+        # 3. Fit the model analytically where possible
         if isinstance(gamma_fit_func, str):
             if gamma_fit_func == 'exponential':
-                def model(x, a, b):
-                    return a * np.exp(b * x)
-                # Initial guess: a=start value, b=small decay
-                p0 = [y_data_norm[0], -0.1]
+                # matth: Fit analytically using OLS by linearizing log(y) = log(a) + b*x.
+                # Avoid log(0) by clipping to a small positive number.
+                y_safe = np.clip(y_data_norm, 1e-9, None)
+                log_y = np.log(y_safe)
+                b, log_a = np.polyfit(x_data, log_y, 1)
+                a = np.exp(log_a)
+                y_fit_norm = a * np.exp(b * x_data)
             elif gamma_fit_func == 'linear':
-                def model(x, m, c):
-                    return m * x + c
-                p0 = [-0.01, y_data_norm[0]]
+                # matth: Fit analytically using standard OLS polynomial fit.
+                m, c = np.polyfit(x_data, y_data_norm, 1)
+                y_fit_norm = m * x_data + c
             else:
                 raise ValueError(f"Unknown gamma_fit_func string: {gamma_fit_func}")
         elif callable(gamma_fit_func):
             model = gamma_fit_func
-            p0 = None # Let curve_fit estimate or user should have provided partial?
-                      # curve_fit doesn't take p0 via wrapper easily unless we inspect.
-                      # We'll assume curve_fit can handle it or fail.
+            try:
+                params, _ = curve_fit(model, x_data, y_data_norm, maxfev=10000)
+                y_fit_norm = model(x_data, *params)
+            except Exception as e:
+                print(f"Warning: Curve fit failed: {e}. Returning original image.")
+                return image
         else:
              raise ValueError("gamma_fit_func must be a string or callable")
-
-        try:
-            # For exponential fit on potentially noisy data, we might want to ensure positive inputs if taking logs,
-            # but curve_fit works on raw data.
-            params, _ = curve_fit(model, x_data, y_data_norm, p0=p0, maxfev=10000)
-            y_fit_norm = model(x_data, *params)
-        except Exception as e:
-            # Fallback or re-raise?
-            print(f"Warning: Curve fit failed: {e}. Returning original image.")
-            return image
 
         # 4. Calculate gamma values
         # We want: y_fit_norm[i] ** gamma[i] = y_ref_norm
@@ -321,33 +317,34 @@ def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLI
 
         y_data_norm = y_data / max_val
 
-        # 3. Fit the model
+        # 3. Fit the model analytically where possible
         if isinstance(gamma_fit_func, str):
             if gamma_fit_func == 'exponential':
-                def model(x, a, b):
-                    return a * np.exp(b * x)
-                # Initial guess: a=start value, b=small decay
-                p0 = [y_data_norm[0], -0.1]
+                # matth: Fit analytically using OLS by linearizing log(y) = log(a) + b*x.
+                # Avoid log(0) by clipping to a small positive number.
+                y_safe = np.clip(y_data_norm, 1e-9, None)
+                log_y = np.log(y_safe)
+                b, log_a = np.polyfit(x_data, log_y, 1)
+                a = np.exp(log_a)
+                y_fit_norm = a * np.exp(b * x_data)
             elif gamma_fit_func == 'linear':
-                def model(x, m, c):
-                    return m * x + c
-                p0 = [-0.01, y_data_norm[0]]
+                # matth: Fit analytically using standard OLS polynomial fit.
+                m, c = np.polyfit(x_data, y_data_norm, 1)
+                y_fit_norm = m * x_data + c
             else:
                 raise ValueError(f"Unknown gamma_fit_func string: {gamma_fit_func}")
         elif callable(gamma_fit_func):
             model = gamma_fit_func
-            p0 = None
+            try:
+                params, _ = curve_fit(model, x_data, y_data_norm, maxfev=10000)
+                y_fit_norm = model(x_data, *params)
+            except Exception as e:
+                print(f"Warning: Curve fit failed: {e}. Returning original image.")
+                if return_diagnostic:
+                    return {"image": image, "diagnostic_data": None}
+                return image
         else:
              raise ValueError("gamma_fit_func must be a string or callable")
-
-        try:
-            params, _ = curve_fit(model, x_data, y_data_norm, p0=p0, maxfev=10000)
-            y_fit_norm = model(x_data, *params)
-        except Exception as e:
-            print(f"Warning: Curve fit failed: {e}. Returning original image.")
-            if return_diagnostic:
-                return {"image": image, "diagnostic_data": None}
-            return image
 
         if return_diagnostic:
             diagnostic_data = {
