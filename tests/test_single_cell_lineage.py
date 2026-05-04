@@ -33,6 +33,7 @@ def test_calculate_lineage_coupling():
             adata,
             label_key='cell_type',
             clone_key='CloneID',
+            method='permutation',
             n_permutations=10
         )
 
