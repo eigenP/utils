@@ -2572,12 +2572,25 @@ def calculate_lineage_coupling(
         Right-tailed P-values of co-occurrence.
     """
     # 1. Prepare Data
+    # Create a binary matrix: Clones (rows) x Cell Types (columns)
+    # Value is 1 if the clone exists in that cell type, 0 otherwise.
     df = adata.obs[[label_key, clone_key]].dropna()
+    # Efficient way to create the binary matrix
+    # Group by clone and get unique labels, then get dummies
+    # Pivot: Index=Clone_ID, Columns=Cell_Type, Values=1 (if present)
     binary_matrix = pd.crosstab(df[clone_key], df[label_key]).clip(upper=1)
+    
+    # 2. Calculate Observed Intersections
+    # Matrix Multiplication: (Types x Clones) @ (Clones x Types) = (Types x Types)
+    # The result [i, j] is the number of clones shared between Type i and Type j
     observed_counts = binary_matrix.T @ binary_matrix
 
     if method == "permutation":
         null_matrices = []
+
+        # We shuffle the labels array to break the link between clone and cell type
+        # Convert to standard numpy array to avoid categorical shuffling warnings
+        # Use astype(str) or astype(object) before extracting array to avoid read-only or categorical warnings
         labels_array = np.array(df[label_key].astype(str))
 
         print(f"Running {n_permutations} permutations...")
