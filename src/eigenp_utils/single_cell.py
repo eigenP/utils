@@ -3431,7 +3431,22 @@ def score_celltypes(
     def robust_scale(x):
         med = np.nanmedian(x)
         mad = np.nanmedian(np.abs(x - med))
-        return (x - med) / (mad + 1e-8)
+
+        # 0.6745 is the 75th percentile of the standard normal distribution,
+        # mapping the MAD scaled values to equivalent standard Z-scores
+        if mad > 0:
+            scale = mad / 0.6745
+        else:
+            # Fallback 1: Mean Absolute Deviation from Median
+            # 0.7979 is approx sqrt(2/pi), mapping to standard deviation
+            mean_ad = np.nanmean(np.abs(x - med))
+            if mean_ad > 0:
+                scale = mean_ad / 0.7979
+            else:
+                # Fallback 2: Standard Deviation
+                scale = np.nanstd(x)
+
+        return (x - med) / (scale + 1e-8)
 
     for ct in cell_type_markers_dict.keys():
         pos_h = ct_to_pos_hash[ct]

@@ -278,11 +278,25 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     def _robust_zscore(x):
         median = np.nanmedian(x)
         mad = np.nanmedian(np.abs(x - median))
-        if mad == 0:
-            return np.zeros_like(x)
-        # 0.6745 is the 75th percentile of the standard normal distribution
-        # making the robust z-score comparable in magnitude to the standard z-score
-        return 0.6745 * (x - median) / mad
+
+        # 0.6745 is the 75th percentile of the standard normal distribution,
+        # making the MAD comparable to the standard deviation.
+        if mad > 0:
+            return 0.6745 * (x - median) / mad
+
+        # Fallback 1: Mean Absolute Deviation from the Median
+        # 0.7979 is approx sqrt(2/pi), making the Mean AD comparable to standard deviation
+        mean_ad = np.nanmean(np.abs(x - median))
+        if mean_ad > 0:
+            return 0.7979 * (x - median) / mean_ad
+
+        # Fallback 2: Standard Deviation
+        std = np.nanstd(x)
+        if std > 0:
+            return (x - median) / std
+
+        # If all variation measures are 0, return 0
+        return np.zeros_like(x)
 
     if isinstance(data, pd.DataFrame):
         df_out = data.copy()
