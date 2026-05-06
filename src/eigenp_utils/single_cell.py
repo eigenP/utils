@@ -3431,7 +3431,20 @@ def score_celltypes(
     def robust_scale(x):
         med = np.nanmedian(x)
         mad = np.nanmedian(np.abs(x - med))
-        return (x - med) / (mad + 1e-8)
+
+        if mad > 0:
+            scale = mad / 0.6744897501960817
+        else:
+            mean_ad = np.nanmean(np.abs(x - med))
+            if mean_ad > 0:
+                scale = mean_ad / 0.7978845608028654
+            else:
+                std = np.nanstd(x)
+                if std > 0:
+                    scale = std
+                else:
+                    scale = 1.0  # fallback to avoid division by zero
+        return (x - med) / scale
 
     for ct in cell_type_markers_dict.keys():
         pos_h = ct_to_pos_hash[ct]

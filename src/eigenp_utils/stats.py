@@ -278,11 +278,21 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     def _robust_zscore(x):
         median = np.nanmedian(x)
         mad = np.nanmedian(np.abs(x - median))
-        if mad == 0:
-            return np.zeros_like(x)
-        # 0.6745 is the 75th percentile of the standard normal distribution
-        # making the robust z-score comparable in magnitude to the standard z-score
-        return 0.6745 * (x - median) / mad
+
+        if mad > 0:
+            scale = mad / 0.6744897501960817
+        else:
+            mean_ad = np.nanmean(np.abs(x - median))
+            if mean_ad > 0:
+                scale = mean_ad / 0.7978845608028654
+            else:
+                std = np.nanstd(x)
+                if std > 0:
+                    scale = std
+                else:
+                    return np.zeros_like(x)
+
+        return (x - median) / scale
 
     if isinstance(data, pd.DataFrame):
         df_out = data.copy()
