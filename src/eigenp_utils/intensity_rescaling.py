@@ -130,6 +130,10 @@ def _fit_exponential(x_data, y_data):
     b_guess, log_a_guess = np.polyfit(x_data, np.log(y_safe), 1)
     a_guess = np.exp(log_a_guess)
 
+    # If the data is actually flat or slightly growing due to noise, b_guess might be > 0.
+    # We must clip b_guess to conform to the <= 0 bound before passing to curve_fit.
+    b_guess = min(b_guess, 0.0)
+
     def model(x, a, b):
         return a * np.exp(b * x)
 
