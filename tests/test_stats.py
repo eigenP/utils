@@ -128,3 +128,33 @@ def test_remove_outliers_dataframe():
     assert len(cleaned_all) == 5
     assert 100 not in cleaned_all['A'].values
     assert -100 not in cleaned_all['B'].values
+
+def test_robust_standardize():
+    from eigenp_utils.stats import robust_standardize
+
+    # Normal distribution
+    np.random.seed(42)
+    x1 = np.random.normal(0, 1, 1000)
+    z1 = robust_standardize(x1)
+
+    # Check that std of z1 is close to 1
+    assert np.isclose(np.std(z1), 1.0, atol=0.1)
+    # Check that median is roughly 0
+    assert np.isclose(np.median(z1), 0.0, atol=0.1)
+
+    # Zero inflated distribution (MAD = 0, but variance exists)
+    x2 = np.concatenate([np.zeros(600), np.random.normal(5, 1, 400)])
+    z2 = robust_standardize(x2)
+
+    # Should not produce NaNs or Infs
+    assert not np.isnan(z2).any()
+    assert not np.isinf(z2).any()
+    # It should have successfully standardized
+    assert np.std(z2) > 0.5 and np.std(z2) < 2.0
+
+    # Completely identical distribution (MAD=0, MeanAD=0, STD=0)
+    x3 = np.ones(100)
+    z3 = robust_standardize(x3)
+
+    # Should safely return all zeros
+    assert np.all(z3 == 0)
