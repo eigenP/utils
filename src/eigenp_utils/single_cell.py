@@ -3431,7 +3431,28 @@ def score_celltypes(
     def robust_scale(x):
         med = np.nanmedian(x)
         mad = np.nanmedian(np.abs(x - med))
-        return (x - med) / (mad + 1e-8)
+
+        # Scale factors for standard normal distribution
+        # MAD = sigma * norm.ppf(0.75) ≈ 0.67448975 * sigma
+        # MeanAD = sigma * sqrt(2/pi) ≈ 0.79788456 * sigma
+
+        if mad > 0:
+            dispersion = mad / 0.6744897501960817
+        else:
+            # Fallback to Mean Absolute Deviation
+            mean = np.nanmean(x)
+            mean_ad = np.nanmean(np.abs(x - mean))
+            if mean_ad > 0:
+                dispersion = mean_ad / 0.7978845608028654
+            else:
+                # Fallback to Standard Deviation
+                std = np.nanstd(x)
+                if std > 0:
+                    dispersion = std
+                else:
+                    return np.zeros_like(x) # All values are identical
+
+        return (x - med) / dispersion
 
     for ct in cell_type_markers_dict.keys():
         pos_h = ct_to_pos_hash[ct]
