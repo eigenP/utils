@@ -19,6 +19,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patheffects as m_fx
 import re
 from .plotting_utils import get_nice_number
+from .stats import robust_standardize
 
 # Try importing third-party libraries that might be installed via the inline dependencies
 try:
@@ -3428,11 +3429,6 @@ def score_celltypes(
 
     final_scores = {}
 
-    def robust_scale(x):
-        med = np.nanmedian(x)
-        mad = np.nanmedian(np.abs(x - med))
-        return (x - med) / (mad + 1e-8)
-
     for ct in cell_type_markers_dict.keys():
         pos_h = ct_to_pos_hash[ct]
         if pos_h is None:
@@ -3442,7 +3438,7 @@ def score_celltypes(
         x_pos = raw_pos_scores[pos_h]
 
         if score_method in ("scanpy", "net_scanpy"):
-            z_pos = robust_scale(x_pos)
+            z_pos = robust_standardize(x_pos, axis=None)
         else:
             z_pos = x_pos  # Already 0 to 1 bounded
 
@@ -3452,7 +3448,7 @@ def score_celltypes(
         if is_net_method and neg_h is not None:
             x_neg = raw_neg_scores[neg_h]
             if score_method == "net_scanpy":
-                z_neg = robust_scale(x_neg)
+                z_neg = robust_standardize(x_neg, axis=None)
                 final_scores[ct] = z_pos - z_neg
             else:
                 z_neg = x_neg  # Already 0 to 1 bounded
@@ -3553,10 +3549,8 @@ def annotate_clusters_by_markers(
         # NORMALIZE SCORES (Robust Median/MAD)
         # Bolt optimization: Vectorized across columns instead of Pandas .apply
         arr = S.to_numpy()
-        medians = np.nanmedian(arr, axis=0)
-        mads = np.nanmedian(np.abs(arr - medians), axis=0)
         S = pd.DataFrame(
-            (arr - medians) / (mads + 1e-8), index=S.index, columns=S.columns
+            robust_standardize(arr, axis=0), index=S.index, columns=S.columns
         )
 
     cts = list(S.columns)
@@ -3740,10 +3734,8 @@ def sweep_leiden_and_annotate(
     if normalize_scores and score_method == "scanpy":
         # Bolt optimization: Vectorized across columns instead of Pandas .apply
         arr = S.to_numpy()
-        medians = np.nanmedian(arr, axis=0)
-        mads = np.nanmedian(np.abs(arr - medians), axis=0)
         S = pd.DataFrame(
-            (arr - medians) / (mads + 1e-8), index=S.index, columns=S.columns
+            robust_standardize(arr, axis=0), index=S.index, columns=S.columns
         )
 
     res_list = [float(r) for r in resolutions]
