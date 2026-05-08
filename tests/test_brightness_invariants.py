@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from eigenp_utils.intensity_rescaling import adjust_brightness_per_slice
+from eigenp_utils.intensity_rescaling import correct_z_intensity_decay
 
 def generate_trend_stack(shape=(20, 100, 100), decay_func=None, outlier_idx=None, outlier_factor=0.5, seed=42):
     """
@@ -57,7 +57,7 @@ def test_perfect_restoration(gamma_fit_func, method, decay_lambda):
     stack, _ = generate_trend_stack(shape=(Z, 50, 50), decay_func=decay_lambda)
 
     # Apply correction
-    corrected = adjust_brightness_per_slice(stack, gamma_fit_func=gamma_fit_func, method=method)
+    corrected = correct_z_intensity_decay(stack, fit_model=gamma_fit_func, method=method)
 
     # Check 99th percentiles of output
     p99_out = np.array([np.percentile(s, 99) for s in corrected])
@@ -104,7 +104,7 @@ def test_trend_preservation_with_outlier():
                                     outlier_idx=outlier_z, outlier_factor=factor)
 
     # Apply correction
-    corrected = adjust_brightness_per_slice(stack, gamma_fit_func='exponential', method='gain')
+    corrected = correct_z_intensity_decay(stack, fit_model='exponential', method='gain')
 
     p99_out = np.array([np.percentile(s, 99) for s in corrected])
 
@@ -152,10 +152,10 @@ def test_idempotence():
     stack, _ = generate_trend_stack(shape=(Z, 50, 50), decay_func=decay)
 
     # First pass
-    pass1 = adjust_brightness_per_slice(stack, gamma_fit_func='exponential', method='gain')
+    pass1 = correct_z_intensity_decay(stack, fit_model='exponential', method='gain')
 
     # Second pass
-    pass2 = adjust_brightness_per_slice(pass1, gamma_fit_func='exponential', method='gain')
+    pass2 = correct_z_intensity_decay(pass1, fit_model='exponential', method='gain')
 
     # Check difference
     # Using relative error to be scale-invariant
@@ -178,7 +178,7 @@ def test_return_diagnostic_dict():
     image = np.random.randint(0, 255, (10, 20, 20), dtype=np.uint8)
 
     # Test that it returns a dictionary with 'image' and 'diagnostic_data'
-    result = adjust_brightness_per_slice(image, gamma_fit_func='exponential', return_diagnostic=True)
+    result = correct_z_intensity_decay(image, fit_model='exponential', return_diagnostic=True)
 
     assert isinstance(result, dict)
     assert 'image' in result

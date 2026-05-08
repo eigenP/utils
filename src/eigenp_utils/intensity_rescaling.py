@@ -119,307 +119,165 @@ def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=No
     else:
         return normalized_image.astype(dtype)
 
-@ensure_float_and_restore_dtype
-def adjust_gamma_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_AXIS=False):
-    """
-    Adjusts the gamma of each slice in a 3D image along the Z-axis.
+def _fit_linear(x_data, y_data):
+    """Exact OLS for linear decay (additive noise)."""
+    m, c = np.polyfit(x_data, y_data, 1)
+    return m * x_data + c
 
-    If gamma_fit_func is None, it uses a linear ramp from 1.0 to final_gamma.
-    If gamma_fit_func is provided, it fits the slice intensity decay and calculates
-    gamma values to restore intensity to the reference (max fitted) level.
+def _fit_exponential(x_data, y_data):
+    """OLS-seeded NLLS for exponential decay (additive noise)."""
+    y_safe = np.clip(y_data, 1e-9, None)
+    b_guess, log_a_guess = np.polyfit(x_data, np.log(y_safe), 1)
+    a_guess = np.exp(log_a_guess)
+
+    # If the data is actually flat or slightly growing due to noise, b_guess might be > 0.
+    # We must clip b_guess to conform to the <= 0 bound before passing to curve_fit.
+    b_guess = min(b_guess, 0.0)
+
+    def model(x, a, b):
+        return a * np.exp(b * x)
+
+    # Bound amplitude to positive, decay rate to <= 0
+    params, _ = curve_fit(
+        model,
+        x_data,
+        y_data,
+        p0=[a_guess, b_guess],
+        bounds=([0, -np.inf], [np.inf, 0.0]),
+        maxfev=10000
+    )
+    return model(x_data, *params)
+
+# Registry of supported parametric models
+FIT_MODELS = {
+    'linear': _fit_linear,
+    'exponential': _fit_exponential
+}
+
+@ensure_float_and_restore_dtype
+def adjust_gamma_per_slice(*args, **kwargs):
+    """
+    Deprecated. Use correct_z_intensity_decay with method='gamma' instead.
+    """
+    warnings.warn(
+        "adjust_gamma_per_slice is deprecated. Use correct_z_intensity_decay with method='gamma' instead.",
+        DeprecationWarning, stacklevel=2
+    )
+    # Map old arguments to new
+    if 'gamma_fit_func' in kwargs:
+        kwargs['fit_model'] = kwargs.pop('gamma_fit_func')
+    if 'FLIP_Z_AXIS' in kwargs:
+        kwargs.pop('FLIP_Z_AXIS') # No longer supported directly, user handles manually
+    return correct_z_intensity_decay(*args, method='gamma', **kwargs)
+
+@ensure_float_and_restore_dtype
+def adjust_brightness_per_slice(*args, **kwargs):
+    """
+    Deprecated. Use correct_z_intensity_decay instead.
+    """
+    warnings.warn(
+        "adjust_brightness_per_slice is deprecated. Use correct_z_intensity_decay instead.",
+        DeprecationWarning, stacklevel=2
+    )
+    if 'gamma_fit_func' in kwargs:
+        kwargs['fit_model'] = kwargs.pop('gamma_fit_func')
+    if 'FLIP_Z_AXIS' in kwargs:
+        kwargs.pop('FLIP_Z_AXIS')
+    return correct_z_intensity_decay(*args, **kwargs)
+
+# @ensure_float_and_restore_dtype handled by decorator on adjust_gamma/brightness logic, applying here to unified logic
+@ensure_float_and_restore_dtype
+def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', final_gamma=0.8, return_diagnostic=False):
+    """
+    Corrects Z-axis intensity attenuation using rigorous statistical decay modeling.
 
     Args:
-        image (numpy.ndarray): The 3D image array in Z, Y, X order.
-        final_gamma (float, optional): The gamma value for the last slice (used only if gamma_fit_func is None). Defaults to 0.8.
-        gamma_fit_func (str or callable, optional):
-            Method to fit intensity decay.
-            'exponential' fits y = a * exp(b * x).
-            'linear' fits y = m * x + c.
-            Can also be a callable model function to be passed to curve_fit.
-            If None (default), manual linear ramp is used.
-        FLIP_Z_AXIS (bool): Whether to flip the Z-axis for manual gamma ramp application.
-                            Ignored or handled implicitly if gamma_fit_func is used.
-
-    Returns:
-        numpy.ndarray: A new 3D image array with adjusted gamma values per slice.
+        image (numpy.ndarray): 3D image array (Z, Y, X).
+        method (str): 'gamma' for non-linear correction, 'gain' for linear scaling.
+        fit_model (str or callable, optional): Model to fit intensity decay ('exponential', 'linear', or callable).
+            If None, applies a manual linear ramp ending at final_gamma.
+        final_gamma (float): Target gamma for the last slice (only used if fit_model is None).
+        return_diagnostic (bool): If True, returns dict with transformed image and fitting data.
     """
-    # Validate inputs
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
 
-    # Get the number of slices
     num_slices = image.shape[0]
-
-    # Create an output image array
     adjusted_image = np.empty_like(image)
 
-    if gamma_fit_func is not None:
-        # Automatic gamma finding logic
-
-        # 1. Calculate stats (99th percentile) for each slice
-        x_data = np.arange(num_slices)
-        y_data = np.array([np.percentile(image[i], 99) for i in range(num_slices)])
-
-        # 2. Normalize y_data to [0, 1] based on dtype
-        dtype = image.dtype
-        if np.issubdtype(dtype, np.integer):
-            max_val = np.iinfo(dtype).max
-        elif np.issubdtype(dtype, np.floating):
-            max_val = 1.0 # Assuming standard float images 0-1. Could use max(image) if unnormalized.
-        else:
-            max_val = np.max(image) # Fallback
-
-        # Avoid division by zero
-        if max_val == 0:
-            max_val = 1.0
-
-        y_data_norm = y_data / max_val
-
-        # 3. Fit the model
-        if isinstance(gamma_fit_func, str):
-            if gamma_fit_func == 'exponential':
-                def model(x, a, b):
-                    return a * np.exp(b * x)
-                # Initial guess: a=start value, b=small decay
-                p0 = [y_data_norm[0], -0.1]
-            elif gamma_fit_func == 'linear':
-                def model(x, m, c):
-                    return m * x + c
-                p0 = [-0.01, y_data_norm[0]]
-            else:
-                raise ValueError(f"Unknown gamma_fit_func string: {gamma_fit_func}")
-        elif callable(gamma_fit_func):
-            model = gamma_fit_func
-            p0 = None # Let curve_fit estimate or user should have provided partial?
-                      # curve_fit doesn't take p0 via wrapper easily unless we inspect.
-                      # We'll assume curve_fit can handle it or fail.
-        else:
-             raise ValueError("gamma_fit_func must be a string or callable")
-
-        try:
-            # For exponential fit on potentially noisy data, we might want to ensure positive inputs if taking logs,
-            # but curve_fit works on raw data.
-            params, _ = curve_fit(model, x_data, y_data_norm, p0=p0, maxfev=10000)
-            y_fit_norm = model(x_data, *params)
-        except Exception as e:
-            # Fallback or re-raise?
-            print(f"Warning: Curve fit failed: {e}. Returning original image.")
-            return image
-
-        # 4. Calculate gamma values
-        # We want: y_fit_norm[i] ** gamma[i] = y_ref_norm
-        # y_ref_norm is the "target" intensity (e.g., the max of the fitted curve)
-        y_ref_norm = np.max(y_fit_norm)
-
-        # Avoid mathematical errors
-        y_fit_norm = np.clip(y_fit_norm, 1e-9, 1.0) # Clip low values
-        y_ref_norm = np.clip(y_ref_norm, 1e-9, 1.0)
-
-        # gamma = log(target) / log(current)
-        # Note: log(x) < 0 for x < 1.
-        # If current < target, we expect gamma < 1 (brightening).
-        # Example: current=0.5, target=1.0 -> log(1)=0 -> gamma=0.
-        # Wait, if target=1.0, 0.5^0 = 1. Correct.
-
-        # If y_ref_norm is 1.0 (log is 0), and y_fit_norm < 1.0 (log is neg), gamma is 0.
-        # If y_ref_norm < 1.0, say 0.8. y_fit_norm 0.4.
-        # log(0.8)/log(0.4) = -0.22 / -0.91 = 0.24.
-
-        gamma_values = np.zeros_like(y_fit_norm)
-
-        log_y_fit = np.log(y_fit_norm)
-        log_y_ref = np.log(y_ref_norm)
-
-        # Handle cases where y_fit is 1.0 (log 0)
-        mask_valid = np.abs(log_y_fit) > 1e-9
-        gamma_values[mask_valid] = log_y_ref / log_y_fit[mask_valid]
-        gamma_values[~mask_valid] = 1.0 # If fit is 1.0, gamma 1.0
-
-        # Clip gammas to avoid extreme values
-        gamma_values = np.clip(gamma_values, 0.1, 10.0)
-
-    else:
-        # Manual linear ramp mode
-        gamma_values = np.linspace(1.0, final_gamma, num_slices)
-
-        if FLIP_Z_AXIS:
-            gamma_values = gamma_values[::-1]
-
-    # Apply gamma adjustment slice by slice
-    for i in range(num_slices):
-        adjusted_image[i, :, :] = adjust_gamma(image[i, :, :], gamma=gamma_values[i])
-
-    return adjusted_image
-
-@ensure_float_and_restore_dtype
-def adjust_brightness_per_slice(image, final_gamma=0.8, gamma_fit_func=None, FLIP_Z_AXIS=False, method='gamma', return_diagnostic=False):
-    """
-    Adjusts the brightness of each slice in a 3D image along the Z-axis.
-
-    Args:
-        image (numpy.ndarray): The 3D image array in Z, Y, X order.
-        final_gamma (float, optional): The gamma value for the last slice (used only if gamma_fit_func is None). Defaults to 0.8.
-        gamma_fit_func (str or callable, optional):
-            Method to fit intensity decay.
-            'exponential' fits y = a * exp(b * x).
-            'linear' fits y = m * x + c.
-            Can also be a callable model function to be passed to curve_fit.
-            If None (default), manual linear ramp is used.
-        FLIP_Z_AXIS (bool): Whether to flip the Z-axis for manual gamma ramp application.
-                            Ignored or handled implicitly if gamma_fit_func is used.
-        method (str): Adjustment method. 'gamma' (default) or 'gain' (linear multiplication).
-        return_diagnostic (bool, optional): If True, returns a dictionary containing the adjusted image and the diagnostic figure showing raw Z-axis intensity vs the fitted correction curve. Defaults to False.
-
-    Returns:
-        numpy.ndarray or dict: A new 3D image array with adjusted brightness values per slice. If return_diagnostic is True, returns `{"image": adjusted_image, "figure": matplotlib.figure.Figure}`.
-    """
-    # Validate inputs
-    if not isinstance(image, np.ndarray) or image.ndim != 3:
-        raise ValueError("Image must be a 3D numpy array.")
-
-    print(f"Adjusting brightness using method: {method} (default: gamma)")
-
-    # Get the number of slices
-    num_slices = image.shape[0]
-
-    # Create an output image array
-    adjusted_image = np.empty_like(image)
-
-    # Pre-calculate global max for clipping logic if needed
     is_integer = np.issubdtype(image.dtype, np.integer)
-    max_dtype_val = None
-    if is_integer:
-        max_dtype_val = np.iinfo(image.dtype).max
+    max_dtype_val = np.iinfo(image.dtype).max if is_integer else None
+    should_clip_float = not is_integer and np.max(image) <= 1.0
 
-    # For float images, check range once to decide clipping behavior
-    should_clip_float = False
-    if not is_integer:
-        # If the image is normalized (max <= 1.0), we clip to 1.0 after gain.
-        # If it's arbitrary float, we might not want to clip, or clip to max?
-        # Standard skimage practice: if float and range is [0,1], keep it [0,1].
-        if np.max(image) <= 1.0:
-            should_clip_float = True
+    diagnostic_data = None
 
-    if gamma_fit_func is not None:
-        # Automatic brightness finding logic
-
-        # 1. Calculate stats (99th percentile) for each slice
+    if fit_model is not None:
         x_data = np.arange(num_slices)
+        # Extract 99th percentile to represent signal while rejecting hot pixels
         y_data = np.array([np.percentile(image[i], 99) for i in range(num_slices)])
 
-        # 2. Normalize y_data to [0, 1] based on dtype
-        if is_integer:
-            max_val = max_dtype_val
-        elif np.issubdtype(image.dtype, np.floating):
-            max_val = 1.0 # Assuming standard float images 0-1.
-        else:
-            max_val = np.max(image) # Fallback
-
-        # Avoid division by zero
-        if max_val == 0:
-            max_val = 1.0
-
+        # Normalize target intensities
+        max_val = max_dtype_val if is_integer else (1.0 if should_clip_float else np.max(image))
+        max_val = max_val if max_val != 0 else 1.0
         y_data_norm = y_data / max_val
 
-        # 3. Fit the model
-        if isinstance(gamma_fit_func, str):
-            if gamma_fit_func == 'exponential':
-                def model(x, a, b):
-                    return a * np.exp(b * x)
-                # Initial guess: a=start value, b=small decay
-                p0 = [y_data_norm[0], -0.1]
-            elif gamma_fit_func == 'linear':
-                def model(x, m, c):
-                    return m * x + c
-                p0 = [-0.01, y_data_norm[0]]
-            else:
-                raise ValueError(f"Unknown gamma_fit_func string: {gamma_fit_func}")
-        elif callable(gamma_fit_func):
-            model = gamma_fit_func
-            p0 = None
-        else:
-             raise ValueError("gamma_fit_func must be a string or callable")
-
+        # Dispatch fitting algorithm
         try:
-            params, _ = curve_fit(model, x_data, y_data_norm, p0=p0, maxfev=10000)
-            y_fit_norm = model(x_data, *params)
+            if isinstance(fit_model, str):
+                if fit_model not in FIT_MODELS:
+                    raise ValueError(f"Unknown fit_model: {fit_model}. Available: {list(FIT_MODELS.keys())}")
+                y_fit_norm = FIT_MODELS[fit_model](x_data, y_data_norm)
+            elif callable(fit_model):
+                y_fit_norm = fit_model(x_data, y_data_norm)
+            else:
+                raise ValueError("fit_model must be a string or callable.")
         except Exception as e:
-            print(f"Warning: Curve fit failed: {e}. Returning original image.")
-            if return_diagnostic:
-                return {"image": image, "diagnostic_data": None}
-            return image
+            raise RuntimeError(f"Z-decay fitting failed: {e}. Pipeline aborted to prevent silent data corruption.")
 
         if return_diagnostic:
             diagnostic_data = {
                 "x_data": x_data,
                 "y_data_norm": y_data_norm,
                 "y_fit_norm": y_fit_norm,
-                "gamma_fit_func": gamma_fit_func
+                "gamma_fit_func": fit_model if isinstance(fit_model, str) else "custom_callable"
             }
 
-        # 4. Calculate correction factors (gamma or gain)
-        y_ref_norm = np.max(y_fit_norm)
-
-        # Avoid mathematical errors
+        # Calculate correction factors
         y_fit_norm = np.clip(y_fit_norm, 1e-9, 1.0)
-        y_ref_norm = np.clip(y_ref_norm, 1e-9, 1.0)
+        y_ref_norm = np.clip(np.max(y_fit_norm), 1e-9, 1.0)
 
         if method == 'gamma':
-            # gamma = log(target) / log(current)
-            gamma_values = np.zeros_like(y_fit_norm)
             log_y_fit = np.log(y_fit_norm)
             log_y_ref = np.log(y_ref_norm)
-
-            mask_valid = np.abs(log_y_fit) > 1e-9
-            gamma_values[mask_valid] = log_y_ref / log_y_fit[mask_valid]
-            gamma_values[~mask_valid] = 1.0
-
-            # Clip gammas
-            factors = np.clip(gamma_values, 0.1, 10.0)
-
+            factors = np.where(np.abs(log_y_fit) > 1e-9, log_y_ref / log_y_fit, 1.0)
+            factors = np.clip(factors, 0.1, 10.0)
         elif method == 'gain':
-            # gain = target / current
-            gain_values = y_ref_norm / y_fit_norm
-            # Clip gain to avoid extreme noise amplification (e.g., max 100x gain)
-            factors = np.clip(gain_values, 0.1, 100.0)
-
+            factors = np.clip(y_ref_norm / y_fit_norm, 0.1, 100.0)
         else:
-            raise ValueError(f"Unknown method: {method}")
-
+            raise ValueError(f"Unknown correction method: {method}")
     else:
-        # Manual linear ramp mode
+        # Manual fallback
         factors = np.linspace(1.0, final_gamma, num_slices)
 
-        if FLIP_Z_AXIS:
-            factors = factors[::-1]
-
-    # Apply adjustment slice by slice
-    warned_about_clipping = False
-
+    # Apply correction loop
+    warned = False
     for i in range(num_slices):
         if method == 'gamma':
+            # Assumes adjust_gamma from skimage.exposure or similar is defined elsewhere
             adjusted_image[i, :, :] = adjust_gamma(image[i, :, :], gamma=factors[i])
         elif method == 'gain':
-            # Linear multiplication
-            # Note: image is already typically loaded as is.
-            img_slice = image[i, :, :].astype(np.float32)
-            img_slice = img_slice * factors[i]
-
+            img_slice = image[i, :, :].astype(np.float32) * factors[i]
             if is_integer:
                 img_slice = np.clip(img_slice, 0, max_dtype_val)
-                adjusted_image[i, :, :] = img_slice.astype(image.dtype)
-            else:
-                # Float image clipping
-                if should_clip_float:
-                    if not warned_about_clipping and np.any(img_slice > 1.0):
-                        warnings.warn("Intensity values were clipped to 1.0 during brightness adjustment.")
-                        warned_about_clipping = True
-
-                    img_slice = np.clip(img_slice, 0, 1.0)
-                adjusted_image[i, :, :] = img_slice.astype(image.dtype)
+            elif should_clip_float:
+                if not warned and np.any(img_slice > 1.0):
+                    warnings.warn("Intensity values clipped to 1.0 during gain adjustment.")
+                    warned = True
+                img_slice = np.clip(img_slice, 0, 1.0)
+            adjusted_image[i, :, :] = img_slice.astype(image.dtype)
 
     if return_diagnostic:
-        return {"image": adjusted_image, "diagnostic_data": diagnostic_data if gamma_fit_func is not None else None}
+        return {"image": adjusted_image, "diagnostic_data": diagnostic_data}
     return adjusted_image
 
 def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z_AXIS=False):
