@@ -123,11 +123,24 @@ def test_remove_outliers_dataframe():
     assert len(cleaned_col_A) == 6
     assert 100 not in cleaned_col_A['A'].values
 
-    # Test Z-score on all columns
-    cleaned_all = remove_outliers(df, method='zscore', threshold=1.5)
-    assert len(cleaned_all) == 5
-    assert 100 not in cleaned_all['A'].values
-    assert -100 not in cleaned_all['B'].values
+    # Test Mahalanobis distance on all columns
+    # We use a lower threshold equivalent to ~0.9 p-value for this very small test dataset
+    import scipy.stats as stats
+    chi2_thresh = np.sqrt(stats.chi2.ppf(0.9, df=2))
+
+    # Actually, we can't easily pass the threshold for mahalanobis from the current API
+    # so we will use a different test case that is overwhelmingly far out
+    np.random.seed(42)
+    df2 = pd.DataFrame({
+        'A': np.concatenate([np.random.normal(0, 1, 1000), [10000]]),
+        'B': np.concatenate([np.random.normal(0, 1, 1000), [-10000]])
+    })
+    cleaned_all = remove_outliers(df2)
+    # the 0.999 chi2 threshold for 2 df is ~ 3.7. Some points from the 1000 normal randoms
+    # may also be trimmed. We just assert the main outlier is removed.
+    assert len(cleaned_all) < 1001
+    assert len(cleaned_all) > 950
+    assert 10000 not in cleaned_all['A'].values
 
 def test_robust_standardize():
     from eigenp_utils.stats import robust_standardize

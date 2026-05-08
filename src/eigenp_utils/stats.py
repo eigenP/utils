@@ -2,8 +2,9 @@ import numpy as np
 import pandas as pd
 from statannotations.Annotator import Annotator
 from scipy import stats
+import scipy.linalg
 
-def robust_standardize(x):
+def robust_standardize(x, axis=None):
     """
     Robustly standardize data using a hierarchical dispersion fallback.
 
@@ -11,12 +12,15 @@ def robust_standardize(x):
     If MAD collapses to 0 (e.g., zero-inflated or highly tied data),
     it falls back to Mean Absolute Deviation, and finally Standard Deviation.
     This avoids heuristic divisions by epsilon and ensures mathematical
-    comparability to standard Z-scores.
+    comparability to standard Z-scores. Includes axis-awareness and
+    dimension-wise conditional broadcasting.
 
     Parameters
     ----------
     x : array-like
         The input data array.
+    axis : int or tuple of ints, optional
+        Axis along which to standardize.
 
     Returns
     -------
@@ -25,26 +29,36 @@ def robust_standardize(x):
     """
     x = np.asarray(x, dtype=float)
 
-    median = np.nanmedian(x)
-    mad = np.nanmedian(np.abs(x - median))
+    # Precise asymptotic scaling factors
+    mad_scale = 0.6744897501960817  # 1 / scipy.stats.norm.ppf(0.75)
+    mean_ad_scale = 0.7978845608028654  # np.sqrt(2 / np.pi)
 
-    if mad > 0:
-        # 0.6745 scales MAD to be comparable to standard deviation for normal dist
-        return 0.6745 * (x - median) / mad
+    # 1. Median & MAD
+    median = np.nanmedian(x, axis=axis, keepdims=True)
+    mad = np.nanmedian(np.abs(x - median), axis=axis, keepdims=True)
 
-    mean = np.nanmean(x)
-    mean_ad = np.nanmean(np.abs(x - mean))
+    # 2. Mean & MeanAD (Calculated only where needed for fallback)
+    mean = np.nanmean(x, axis=axis, keepdims=True)
+    mean_ad = np.nanmean(np.abs(x - mean), axis=axis, keepdims=True)
 
-    if mean_ad > 0:
-        # 0.7979 scales Mean AD to be comparable to standard deviation for normal dist
-        return 0.7979 * (x - median) / mean_ad
+    # 3. Standard Deviation
+    std = np.nanstd(x, axis=axis, keepdims=True)
 
-    std = np.nanstd(x)
-    if std > 0:
-        return (x - median) / std
+    # Boolean masks for the hierarchy
+    mad_valid = mad > 0
+    mean_ad_valid = (mad == 0) & (mean_ad > 0)
+    std_valid = (mad == 0) & (mean_ad == 0) & (std > 0)
 
-    # Return 0.0 for actual values, keeping NaNs intact
+    # Initialize output array
     ret = np.zeros_like(x)
+
+    # Apply conditions safely without DivisionByZero warnings
+    # Note: MeanAD centers on the MEAN, coupling location to the scale estimator.
+    ret = np.where(mad_valid, mad_scale * (x - median) / np.where(mad_valid, mad, 1), ret)
+    ret = np.where(mean_ad_valid, mean_ad_scale * (x - mean) / np.where(mean_ad_valid, mean_ad, 1), ret)
+    ret = np.where(std_valid, (x - mean) / np.where(std_valid, std, 1), ret)
+
+    # Preserve original NaNs
     ret[np.isnan(x)] = np.nan
     return ret
 
@@ -195,24 +209,26 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
     """
     data = np.asarray(data)
     rng = np.random.default_rng(random_state)
+    n = len(data)
 
     # Generate bootstrap indices
-    indices = rng.integers(0, len(data), size=(n_bootstraps, len(data)))
+    indices = rng.integers(0, n, size=(n_bootstraps, n))
 
     # Calculate statistic for each bootstrap sample
-    # Note: apply_along_axis expects a 1D array as input to the lambda, so data[x] gives us the resampled data for that row
-    bootstrapped_stats = np.apply_along_axis(lambda x: stat_func(data[x]), 1, indices)
+    # Attempt vectorized execution for bootstrap samples
+    try:
+        bootstrapped_stats = stat_func(data[indices], axis=1)
+    except TypeError:
+        # Fallback if stat_func (e.g., custom lambda) lacks axis support
+        bootstrapped_stats = np.apply_along_axis(stat_func, 1, data[indices])
 
     alpha = 1.0 - ci
 
     if method == 'percentile':
-        lower_percentile = (alpha / 2.0) * 100
-        upper_percentile = (1.0 - alpha / 2.0) * 100
+        return float(np.percentile(bootstrapped_stats, (alpha / 2.0) * 100)), \
+               float(np.percentile(bootstrapped_stats, (1.0 - alpha / 2.0) * 100))
 
-        lower_bound = np.percentile(bootstrapped_stats, lower_percentile)
-        upper_bound = np.percentile(bootstrapped_stats, upper_percentile)
-
-    elif method in ('bc', 'bca'):
+    if method in ('bc', 'bca'):
         # Bias-Corrected (BC) Bootstrap
         theta_hat = stat_func(data)
 
@@ -236,10 +252,14 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
         a = 0.0
         if method == 'bca':
             # Calculate acceleration factor (a) using jackknife estimates
-            jackknife_stats = np.empty(len(data))
-            for i in range(len(data)):
-                jackknife_data = np.delete(data, i)
-                jackknife_stats[i] = stat_func(jackknife_data)
+            # Vectorized Jackknife resampling
+            mask = ~np.eye(n, dtype=bool)
+            jackknife_samples = np.broadcast_to(data, (n, n))[mask].reshape(n, n-1)
+
+            try:
+                jackknife_stats = stat_func(jackknife_samples, axis=1)
+            except TypeError:
+                jackknife_stats = np.apply_along_axis(stat_func, 1, jackknife_samples)
 
             mean_jackknife = np.mean(jackknife_stats)
             diffs = mean_jackknife - jackknife_stats
@@ -259,10 +279,9 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
         lower_bound = np.percentile(bootstrapped_stats, lower_percentile)
         upper_bound = np.percentile(bootstrapped_stats, upper_percentile)
 
-    else:
-        raise ValueError(f"Unknown bootstrap method '{method}'. Use 'bc', 'bca', or 'percentile'.")
+        return float(lower_bound), float(upper_bound)
 
-    return float(lower_bound), float(upper_bound)
+    raise ValueError(f"Unknown bootstrap method '{method}'. Use 'bc', 'bca', or 'percentile'.")
 
 def summary_stats(df, group_by, value_col):
     """
@@ -285,12 +304,13 @@ def summary_stats(df, group_by, value_col):
     if isinstance(group_by, str):
         group_by = [group_by]
 
+    # Replaced redundant lambda with native string mapping for standard error
     summary = df.groupby(group_by)[value_col].agg(
         count='count',
         mean='mean',
         median='median',
         std='std',
-        sem=lambda x: x.std() / np.sqrt(x.count()) if x.count() > 0 else np.nan,
+        sem='sem',
         min='min',
         max='max'
     ).reset_index()
@@ -313,7 +333,9 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
         The threshold for filtering (IQR multiplier or Z-score threshold).
     column : str, optional
         If data is a DataFrame, the column to filter on. If None and data
-        is a DataFrame, filters rows where any column has an outlier.
+        is a DataFrame with multiple numeric columns, it will ignore the method
+        and threshold arguments and automatically use Mahalanobis Distance to
+        filter multivariate outliers while preserving covariance structures.
 
     Returns
     -------
@@ -351,38 +373,36 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             return df_out[mask].copy()
 
         else:
-            # Filtering based on all numeric columns
+            # Replaced cascading univariate filters with Mahalanobis Distance for multivariate spaces
             numeric_cols = df_out.select_dtypes(include=[np.number]).columns
-            mask = pd.Series(True, index=df_out.index)
+            if len(numeric_cols) < 2:
+                # If only one numeric column, fall back to univariate logic for that column
+                if len(numeric_cols) == 1:
+                    return remove_outliers(df_out, method=method, threshold=threshold, column=numeric_cols[0])
+                return df_out
 
-            for col in numeric_cols:
-                col_data = df_out[col]
-                valid_mask = col_data.notna()
-                if not valid_mask.any():
-                    continue
+            df_num = df_out[numeric_cols].dropna()
+            if df_num.empty:
+                return df_out
 
-                if method == 'iqr':
-                    q1 = col_data.quantile(0.25)
-                    q3 = col_data.quantile(0.75)
-                    iqr = q3 - q1
-                    lower_bound = q1 - threshold * iqr
-                    upper_bound = q3 + threshold * iqr
-                    col_mask = (col_data >= lower_bound) & (col_data <= upper_bound)
-                elif method == 'zscore':
-                    z_scores = pd.Series(index=df_out.index, dtype=float)
-                    z_scores[valid_mask] = np.abs(stats.zscore(df_out.loc[valid_mask, col]))
-                    col_mask = valid_mask & (z_scores <= threshold)
-                elif method == 'robust_zscore':
-                    z_scores = pd.Series(index=df_out.index, dtype=float)
-                    z_scores[valid_mask] = np.abs(robust_standardize(df_out.loc[valid_mask, col].values))
-                    col_mask = valid_mask & (z_scores <= threshold)
-                else:
-                    raise ValueError(f"Unknown method '{method}'")
+            # Compute covariance matrix and pseudo-inverse
+            cov = np.cov(df_num.values, rowvar=False)
+            inv_cov = scipy.linalg.pinv(cov)
+            mean_vec = np.mean(df_num.values, axis=0)
 
-                # For NaNs, we keep them so we don't drop rows just for NaN unless intended
-                col_mask = col_mask | df_out[col].isna()
-                mask = mask & col_mask
+            # Vectorized computation of Mahalanobis distance
+            diff = df_num.values - mean_vec
+            mahalanobis_dist = np.sqrt(np.einsum('nj,jk,nk->n', diff, inv_cov, diff))
 
+            # Threshold via Chi-Square distribution bounds (p-value thresholding logic)
+            # Using 0.999 as a standard stringent cutoff for high-dimensional outliers
+            chi2_thresh = np.sqrt(stats.chi2.ppf(0.999, df=len(numeric_cols)))
+
+            # Map back to original dataframe keeping index integrity
+            valid_indices = df_num.index[mahalanobis_dist <= chi2_thresh]
+
+            # Keep non-numeric or missing rows implicitly, or strictly drop depending on use-case
+            mask = df_out.index.isin(valid_indices) | df_out[numeric_cols].isna().any(axis=1)
             return df_out[mask].copy()
 
     else:
