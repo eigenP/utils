@@ -8,11 +8,12 @@
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
 * **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`.
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
-* **Intensity Rescaling**: Tools for contrast enhancement, including CLAHE.
+* **Intensity Rescaling**: Tools for contrast enhancement, including CLAHE (`clahe_equalize_adapthist`), pure-NumPy/SciPy implementations of BaSiCPy shading correction (flatfield/darkfield estimation), and per-slice brightness/gamma invariant adjustments.
 
 ### Plotting & Visualization
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_xyz` for dynamic multichannel viewers), interactive point cloud visualization (`IsoScatterWidget`), and 3D point annotation (`TNIAAnnotatorWidget`).
 * **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker`, and SVGs embedded with metadata via `savefig_svg`.
+* **Interactive Scatter Plots**: `plotly_scatter_3d` and `plotly_scatter_3d_from_adata_obsm` for dynamic, interactive 3D embeddings directly from arrays or AnnData objects.
 
 ### Single-Cell Analysis
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
@@ -31,7 +32,11 @@
 ### Core Utilities
 * **Spline Utilities**: Calculate tangent vectors and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
+* **Task Calendar Scheduler**: Generate interactive, Gantt-style timeline schedules for linked events using Plotly (`task_calendar_scheduler.py`), fully compatible with Marimo notebooks.
 * **I/O Utilities**: Functions to streamline file and data reading.
+
+## Interactive Demos
+The `notebooks/` directory contains numerous interactive `marimo` application demos showcasing the toolkit's capabilities. You can run them using `marimo edit notebooks/demo_name.py`.
 
 ## Installation
 
@@ -82,6 +87,16 @@ uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
 ```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+
+### WASM / Pyodide Compatibility
+
+The package is designed for compatibility with Pyodide and WebAssembly (WASM) environments, such as Marimo in WASM mode. It lazily loads heavy dependencies and can be installed natively inside the browser via `micropip`:
+
+```python
+import micropip
+await micropip.install("eigenp-utils")
+```
+The CI pipeline automatically builds and publishes a pure-Python wheel suitable for these deployments.
 
 ## License
 
