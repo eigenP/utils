@@ -1226,14 +1226,33 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.gamma_list = _to_list(gamma, self.num_channels, 1.0)
         self.opacity_list = _to_list(opacity, self.num_channels, 1.0)
 
-        # Set initial values if provided
-        if x_t is not None: self.x_t = int(x_t)
-        if y_t is not None: self.y_t = int(y_t)
-        if z_t is not None: self.z_t = int(z_t)
+        # Convert physical position/thickness to pixel indices
+        def _default_t(n): return max(1, n // 64)
+        x_t_idx = int(round(x_t / px)) if x_t is not None else _default_t(X)
+        y_t_idx = int(round(y_t / py)) if y_t is not None else _default_t(Y)
+        z_t_idx = int(round(z_t / pz)) if z_t is not None else _default_t(Z)
 
-        if x_s is not None: self.x_s = int(x_s)
-        if y_s is not None: self.y_s = int(y_s)
-        if z_s is not None: self.z_s = int(z_s)
+        x_s_idx = int(round(x_s / px)) if x_s is not None else X // 2
+        y_s_idx = int(round(y_s / py)) if y_s is not None else Y // 2
+        z_s_idx = int(round(z_s / pz)) if z_s is not None else Z // 2
+
+        # Override for max projection if thickness exceeds shape
+        if x_t_idx >= X:
+            x_t_idx = max(1, X // 2)
+            x_s_idx = X // 2
+        if y_t_idx >= Y:
+            y_t_idx = max(1, Y // 2)
+            y_s_idx = Y // 2
+        if z_t_idx >= Z:
+            z_t_idx = max(1, Z // 2)
+            z_s_idx = Z // 2
+
+        self.x_t = x_t_idx
+        self.y_t = y_t_idx
+        self.z_t = z_t_idx
+        self.x_s = x_s_idx
+        self.y_s = y_s_idx
+        self.z_s = z_s_idx
 
         # Compute histograms
         hists = []

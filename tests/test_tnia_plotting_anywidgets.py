@@ -172,9 +172,15 @@ def test_interactive_kwargs_images(factory_fn):
 
     assert w.show_crosshair is False
     assert w.sync_on_hover is True
-    assert w.z_t == 2 and w.y_t == 3 and w.x_t == 4
-    # Note: slabs_position clamped because random coords are [0, 1] mapped to Dim=2
-    assert w.z_s == 5 and w.y_s == 10 and w.x_s == 15
+    # Because pixel_sizes are set to Z=2.0, Y=1.0, X=0.5
+    # slabs_thickness in physical units: (2, 3, 4)
+    # The indices will be calculated as thickness // p => (2/2.0=1, 3/1.0=3, 4/0.5=8)
+    assert w.z_t == 1 and w.y_t == 3 and w.x_t == 8
+
+    # Note: slabs_position in physical units: (5, 10, 15)
+    # The indices will be calculated as pos // p => (5/2.0=2.5->2, 10/1.0=10, 15/0.5=30)
+    # clamped because coords map to dims [10, 20, 30] (max 9, 19, 29)
+    assert w.z_s == 2 and w.y_s == 10 and w.x_s == 29
     assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
 
 def test_interactive_kwargs_scatter():
