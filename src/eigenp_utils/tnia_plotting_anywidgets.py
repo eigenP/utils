@@ -2154,25 +2154,25 @@ def show_zyx_max_slice_interactive(
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, n // 64)
-    if x_t is None: x_t = _default_t(X)
-    if y_t is None: y_t = _default_t(Y)
-    if z_t is None: z_t = _default_t(Z)
+    if x_t is None: x_t = _default_t(X) * px
+    if y_t is None: y_t = _default_t(Y) * py
+    if z_t is None: z_t = _default_t(Z) * pz
 
     # Defaults for s are handled in init (midpoint)
-    if x_s is None: x_s = X // 2
-    if y_s is None: y_s = Y // 2
-    if z_s is None: z_s = Z // 2
+    if x_s is None: x_s = (X // 2) * px
+    if y_s is None: y_s = (Y // 2) * py
+    if z_s is None: z_s = (Z // 2) * pz
 
     # Override for max projection if thickness exceeds shape
-    if x_t >= X:
-        x_t = max(1, X // 2)
-        x_s = X // 2
-    if y_t >= Y:
-        y_t = max(1, Y // 2)
-        y_s = Y // 2
-    if z_t >= Z:
-        z_t = max(1, Z // 2)
-        z_s = Z // 2
+    if x_t >= X * px:
+        x_t = max(1, X // 2) * px
+        x_s = (X // 2) * px
+    if y_t >= Y * py:
+        y_t = max(1, Y // 2) * py
+        y_s = (Y // 2) * py
+    if z_t >= Z * pz:
+        z_t = max(1, Z // 2) * pz
+        z_s = (Z // 2) * pz
 
     w = TNIASliceWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
@@ -2246,23 +2246,23 @@ def show_zyx_max_slice_interactive_point_annotator(
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, n // 64)
-    if x_t is None: x_t = _default_t(X)
-    if y_t is None: y_t = _default_t(Y)
-    if z_t is None: z_t = _default_t(Z)
+    if x_t is None: x_t = _default_t(X) * px
+    if y_t is None: y_t = _default_t(Y) * py
+    if z_t is None: z_t = _default_t(Z) * pz
 
-    if x_s is None: x_s = X // 2
-    if y_s is None: y_s = Y // 2
-    if z_s is None: z_s = Z // 2
+    if x_s is None: x_s = (X // 2) * px
+    if y_s is None: y_s = (Y // 2) * py
+    if z_s is None: z_s = (Z // 2) * pz
 
-    if x_t >= X:
-        x_t = max(1, X // 2)
-        x_s = X // 2
-    if y_t >= Y:
-        y_t = max(1, Y // 2)
-        y_s = Y // 2
-    if z_t >= Z:
-        z_t = max(1, Z // 2)
-        z_s = Z // 2
+    if x_t >= X * px:
+        x_t = max(1, X // 2) * px
+        x_s = (X // 2) * px
+    if y_t >= Y * py:
+        y_t = max(1, Y // 2) * py
+        y_s = (Y // 2) * py
+    if z_t >= Z * pz:
+        z_t = max(1, Z // 2) * pz
+        z_s = (Z // 2) * pz
 
     w = TNIAAnnotatorWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
