@@ -12,13 +12,32 @@
 import pathlib
 import warnings
 
+def _safe_float(v):
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        # Handle zero-dimensional numpy arrays like np.array(1.5)
+        if hasattr(v, 'size') and v.size == 1 and hasattr(v, 'item'):
+            return float(v.item())
+        raise ValueError(f"Could not convert {v} to float")
+
 def _parse_zyx_tuple_or_dict(val, default_val=None):
     if val is None:
         return (default_val, default_val, default_val)
     if isinstance(val, dict):
-        return (val.get('Z', default_val), val.get('Y', default_val), val.get('X', default_val))
-    if isinstance(val, (list, tuple)) and len(val) == 3:
-        return val
+        return (_safe_float(val.get('Z', default_val)),
+                _safe_float(val.get('Y', default_val)),
+                _safe_float(val.get('X', default_val)))
+
+    try:
+        val_list = list(val)
+        if len(val_list) == 3:
+            return (_safe_float(val_list[0]), _safe_float(val_list[1]), _safe_float(val_list[2]))
+    except TypeError:
+        pass
+
     raise ValueError(f"Expected dict with 'Z','Y','X' keys or a 3-element tuple/list, got {val}")
 
 import anywidget
@@ -375,10 +394,14 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
             _sz = sz if sz is not None else 1.0
             pixel_sizes = (_sz, _sxy, _sxy)
 
-    ### Coerce into integers for slices
-    x_ = [int(i) for i in x]
-    y_ = [int(i) for i in y]
-    z_ = [int(i) for i in z]
+    ### Coerce into integers for slices, rounding floats and ensuring non-zero bounds
+    x_ = [int(np.round(float(i))) for i in x]
+    y_ = [int(np.round(float(i))) for i in y]
+    z_ = [int(np.round(float(i))) for i in z]
+
+    if x_[1] <= x_[0]: x_[1] = x_[0] + 1
+    if y_[1] <= y_[0]: y_[1] = y_[0] + 1
+    if z_[1] <= z_[0]: z_[1] = z_[0] + 1
 
     x_slices = slice(*x_)
     y_slices = slice(*y_)
