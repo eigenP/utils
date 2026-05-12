@@ -266,3 +266,48 @@ def test_scale_bar_logic(shape, pixel_sizes, expected_text):
 
     assert font_size_scaled is not None
     assert font_size_scaled > font_size_unscaled
+
+def test_parse_zyx_tuple_or_dict_various_types():
+    from eigenp_utils.tnia_plotting_anywidgets import _parse_zyx_tuple_or_dict
+
+    # 1. Native tuple of floats
+    res = _parse_zyx_tuple_or_dict((1.5, 2.5, 3.5))
+    assert res == (1.5, 2.5, 3.5)
+
+    # 2. Native list of floats
+    res = _parse_zyx_tuple_or_dict([1.5, 2.5, 3.5])
+    assert res == (1.5, 2.5, 3.5)
+
+    # 3. Dict with floats
+    res = _parse_zyx_tuple_or_dict({'Z': 1.5, 'Y': 2.5, 'X': 3.5})
+    assert res == (1.5, 2.5, 3.5)
+
+    # 4. Tuple with np.ndarrays (0-d arrays / scalars)
+    res = _parse_zyx_tuple_or_dict((np.array(1.5), np.array(2.5), np.array(3.5)))
+    assert res == (1.5, 2.5, 3.5)
+    assert isinstance(res[0], float)
+
+    # 5. Dict with np.ndarrays
+    res = _parse_zyx_tuple_or_dict({'Z': np.array(1.5), 'Y': np.array(2.5), 'X': np.array(3.5)})
+    assert res == (1.5, 2.5, 3.5)
+    assert isinstance(res[0], float)
+
+    # 6. Very small/large values
+    res = _parse_zyx_tuple_or_dict([1e-6, 1e6, 0.0])
+    assert res == (1e-6, 1e6, 0.0)
+
+def test_show_zyx_max_slabs_zero_sized_slices():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slabs, show_zyx_max_slice_interactive
+    im = np.random.rand(10, 10, 10)
+
+    # Passing identical float intervals, should be coerced to integer intervals
+    # of size 1 (i.e. x=[0, 1]) without raising a ValueError.
+    fig = show_zyx_max_slabs(im, x=[0.5, 0.5], y=[0.0, 0.0], z=[0, 0])
+    assert fig is not None
+
+    # Additionally test the interactive wrapper passing 0-d np scalars
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(np.array(1.5), np.array(2.5), np.array(3.5)))
+    assert w.sz == 1.5
+    assert w.sy == 2.5
+    assert w.sx == 3.5
+    assert isinstance(w.sz, float)
