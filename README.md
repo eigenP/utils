@@ -8,13 +8,15 @@
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
 * **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`.
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
-* **Intensity Rescaling**: Tools for contrast enhancement, including CLAHE.
+* **Intensity Rescaling**: Tools for contrast enhancement, including CLAHE, and a pure-NumPy/SciPy BaSiCPy implementation for shading correction (`fit_basic_shading`, `adjust_brightness_per_slice`).
 
 ### Plotting & Visualization
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_xyz` for dynamic multichannel viewers), interactive point cloud visualization (`IsoScatterWidget`), and 3D point annotation (`TNIAAnnotatorWidget`).
-* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker`, and SVGs embedded with metadata via `savefig_svg`.
+* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker` (e.g., globally registered `labels_cmap` using transparent-first Glasbey palette), and SVGs embedded with metadata via `savefig_svg`.
+* **Interactive 3D Scatter Utilities**: `plotly_scatter_3d` and `plotly_scatter_3d_from_adata_obsm` for dynamic exploration of embeddings.
 
 ### Single-Cell Analysis
+* **Lineage Coupling**: Analytically compute co-occurrence expectations and z-scores via vectorized log-gamma models (`calculate_lineage_coupling`).
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
 * **Dataset Integration (kkNN)**: Adaptive curvature-based k-nearest neighbors mapping (`kknn_ingest`) to dynamically project metadata and embeddings across references based on local manifold geometry.
 * **Label Classification & Smoothing**: Distance-weighted majority voting or averaging (`kknn_classifier`) to smooth categorical or continuous cell metadata using the kkNN backbone.
@@ -28,10 +30,16 @@
 * **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci`, `summary_stats`, `remove_outliers`, and `add_stat_annotations` for annotating plots with significance markers.
 
 
+### Scheduling & Timeline
+* **Task Calendar Scheduler**: Generate Plotly-based Gantt-style timeline schedules for linked events, compatible with Marimo notebooks (`task_calendar_scheduler.py`).
+
 ### Core Utilities
 * **Spline Utilities**: Calculate tangent vectors and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
 * **I/O Utilities**: Functions to streamline file and data reading.
+
+### WASM / Web Compatibility
+The package is designed for seamless operation in WebAssembly environments like Pyodide and Marimo. It can be installed directly via `micropip` (`micropip.install('eigenp-utils')`), uses lazy-loading for heavy dependencies, and embeds JavaScript/CSS directly into `anywidget` to circumvent static file serving issues.
 
 ## Installation
 
