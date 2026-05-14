@@ -128,3 +128,28 @@ def test_remove_outliers_dataframe():
     assert len(cleaned_all) == 5
     assert 100 not in cleaned_all['A'].values
     assert -100 not in cleaned_all['B'].values
+
+def test_remove_outliers_mahalanobis():
+    np.random.seed(42)
+    # Create 2D multivariate normal data with high correlation
+    mean = [0, 0]
+    cov = [[1, 0.8], [0.8, 1]]
+    data = np.random.multivariate_normal(mean, cov, 100)
+    df = pd.DataFrame(data, columns=['x', 'y'])
+
+    # Add an outlier that is within univariate bounds but violates correlation
+    df.loc[100] = [2, -2]
+
+    # Univariate Z-score should fail to remove this outlier with threshold 3
+    # since both 2 and -2 are within marginal 3 standard deviations
+    filtered_z = remove_outliers(df, method='zscore', threshold=3)
+    assert 100 in filtered_z.index
+
+    # Mahalanobis should correctly identify it as an outlier given the correlation structure
+    filtered_mahal = remove_outliers(df, method='mahalanobis', threshold=0.99)
+    assert 100 not in filtered_mahal.index
+
+    # Test array (1D) Mahalanobis behavior
+    arr = np.array([1, 2, 3, 4, 5, 100])
+    filtered_arr = remove_outliers(arr, method='mahalanobis', threshold=0.90)
+    assert 100 not in filtered_arr

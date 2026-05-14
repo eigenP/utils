@@ -261,14 +261,21 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     data : pd.DataFrame or array-like
         The data to filter.
     method : str, default 'iqr'
-        The method to use ('iqr', 'zscore', or 'robust_zscore').
+        The method to use ('iqr', 'zscore', 'robust_zscore', or 'mahalanobis').
         'robust_zscore' uses Median Absolute Deviation (MAD) which is less susceptible
         to extreme outliers inflating variance compared to 'zscore'.
+        'mahalanobis' detects multivariate outliers using the Mahalanobis distance based
+        on the pseudo-inverse covariance matrix, avoiding the destruction of underlying
+        covariance structures caused by cascading univariate constraints. The threshold
+        for 'mahalanobis' is interpreted as a probability (default 0.99) for the
+        Chi-Square distribution bounds.
     threshold : float, default 1.5
-        The threshold for filtering (IQR multiplier or Z-score threshold).
+        The threshold for filtering (IQR multiplier, Z-score threshold, or probability for Mahalanobis).
+        For 'mahalanobis', a typical value might be 0.95 or 0.99.
     column : str, optional
         If data is a DataFrame, the column to filter on. If None and data
-        is a DataFrame, filters rows where any column has an outlier.
+        is a DataFrame, filters rows where any column has an outlier. For 'mahalanobis',
+        if column is None, it uses all numeric columns.
 
     Returns
     -------
@@ -307,6 +314,23 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                 z_scores = pd.Series(index=df_out.index, dtype=float)
                 z_scores[valid_mask] = np.abs(_robust_zscore(df_out.loc[valid_mask, column].values))
                 mask = valid_mask & (z_scores <= threshold)
+            elif method == 'mahalanobis':
+                valid_mask = df_out[column].notna()
+                valid_data = df_out.loc[valid_mask, column].values
+                if len(valid_data) <= 1:
+                    mask = valid_mask
+                else:
+                    mu = np.mean(valid_data)
+                    var = np.var(valid_data, ddof=1)
+                    d_sq_series = pd.Series(index=df_out.index, dtype=float)
+                    if var == 0:
+                        d_sq_series[valid_mask] = 0.0
+                    else:
+                        d_sq_series[valid_mask] = ((valid_data - mu) ** 2) / var
+
+                    prob_threshold = threshold if threshold < 1.0 else 0.99
+                    chi2_threshold = stats.chi2.ppf(prob_threshold, df=1)
+                    mask = valid_mask & (d_sq_series <= chi2_threshold)
             else:
                 raise ValueError(f"Unknown method '{method}'")
 
@@ -317,6 +341,37 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
         else:
             # Filtering based on all numeric columns
             numeric_cols = df_out.select_dtypes(include=[np.number]).columns
+
+            if method == 'mahalanobis':
+                valid_mask = df_out[numeric_cols].notna().all(axis=1)
+                valid_data = df_out.loc[valid_mask, numeric_cols].values
+
+                if len(valid_data) <= 1:
+                    return df_out.copy()
+
+                k = valid_data.shape[1]
+                mu = np.mean(valid_data, axis=0)
+                cov_mat = np.atleast_2d(np.cov(valid_data, rowvar=False))
+
+                inv_cov = np.linalg.pinv(cov_mat)
+                diff = valid_data - mu
+                d_sq = np.sum((diff @ inv_cov) * diff, axis=1)
+
+                prob_threshold = threshold if threshold < 1.0 else 0.99
+                chi2_threshold = stats.chi2.ppf(prob_threshold, df=k)
+
+                keep_valid = d_sq <= chi2_threshold
+
+                mask = pd.Series(True, index=df_out.index)
+                mask.loc[valid_mask] = keep_valid
+
+                # Keep NaNs if present (consistent with other methods)
+                # valid_mask is True where all numeric columns are notna
+                # so ~valid_mask are the rows with NaNs. We want to keep them.
+                mask = mask | ~valid_mask
+
+                return df_out[mask].copy()
+
             mask = pd.Series(True, index=df_out.index)
 
             for col in numeric_cols:
@@ -372,6 +427,19 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
         elif method == 'robust_zscore':
             z_scores = np.abs(_robust_zscore(valid_values))
             keep_valid = z_scores <= threshold
+        elif method == 'mahalanobis':
+            if len(valid_values) <= 1:
+                keep_valid = np.ones_like(valid_values, dtype=bool)
+            else:
+                mu = np.mean(valid_values)
+                var = np.var(valid_values, ddof=1)
+                if var == 0:
+                    keep_valid = np.ones_like(valid_values, dtype=bool)
+                else:
+                    d_sq = ((valid_values - mu) ** 2) / var
+                    prob_threshold = threshold if threshold < 1.0 else 0.99
+                    chi2_threshold = stats.chi2.ppf(prob_threshold, df=1)
+                    keep_valid = d_sq <= chi2_threshold
         else:
             raise ValueError(f"Unknown method '{method}'")
 
