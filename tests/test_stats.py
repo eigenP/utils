@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers
+from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers, robust_standardize
 from statannotations.Annotator import Annotator
 
 def test_add_stat_annotations():
@@ -128,3 +128,41 @@ def test_remove_outliers_dataframe():
     assert len(cleaned_all) == 5
     assert 100 not in cleaned_all['A'].values
     assert -100 not in cleaned_all['B'].values
+
+def test_robust_standardize():
+    # Simple array testing MAD fallback logic implicitly
+    a = np.array([[1, 1, 1, 1, 1, 1, 2, 3], [1, 2, 3, 4, 5, 6, 7, 8]])
+    res_axis1 = robust_standardize(a, axis=1)
+
+    # Check that ties are handled properly (first row has median 1, mad 0, so it should fallback)
+    assert not np.any(np.isnan(res_axis1))
+
+    res_axis_none = robust_standardize(a, axis=None)
+    assert not np.any(np.isnan(res_axis_none))
+
+    # Check MAD calculation correctly centers on median where possible
+    # For row 2: [1,2,3,4,5,6,7,8], median is 4.5, MAD is 2.0
+    # Expected result: (row2 - 4.5) / (2.0 * 1.4826)
+    np.testing.assert_allclose(res_axis1[1, 0], (1 - 4.5) / (2.0 * 1.482602218505602), rtol=1e-5)
+
+def test_remove_outliers_mahalanobis():
+    # Use a larger dataset so sample covariance isn't entirely bounded by the outlier
+    np.random.seed(42)
+    # Generate 100 bivariate normal points
+    data = np.random.multivariate_normal([0, 0], [[1, 0.8], [0.8, 1]], 100)
+    df = pd.DataFrame(data, columns=['A', 'B'])
+
+    # Inject massive outliers
+    df.loc[100] = [100, 2]
+    df.loc[101] = [2, -100]
+
+    # High threshold (0.99)
+    cleaned_maha_099 = remove_outliers(df, method='mahalanobis', threshold=0.99)
+
+    assert 100 not in cleaned_maha_099['A'].values
+    assert -100 not in cleaned_maha_099['B'].values
+    assert len(cleaned_maha_099) == 100
+
+    # Should raise error if column is provided
+    with pytest.raises(ValueError):
+        remove_outliers(df, method='mahalanobis', threshold=0.99, column='A')

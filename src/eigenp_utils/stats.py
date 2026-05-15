@@ -252,6 +252,73 @@ def summary_stats(df, group_by, value_col):
 
     return summary
 
+def robust_standardize(data, axis=0):
+    """
+    Robustly standardize data by coupling location and scale estimators,
+    with a hierarchical fallback for zero-inflated or highly tied data:
+    1. Median Absolute Deviation (MAD) centered on Median
+    2. Mean Absolute Deviation (MeanAD) centered on Mean
+    3. Standard Deviation (STD) centered on Mean
+
+    Mathematical coupling means that the scale estimator used must match the
+    location estimator (e.g. MeanAD centers on mean, not median).
+
+    Parameters
+    ----------
+    data : array-like
+        The data to standardize.
+    axis : int or None, optional
+        The axis along which to standardize. Default is 0.
+
+    Returns
+    -------
+    np.ndarray
+        The standardized data.
+    """
+    data = np.asarray(data, dtype=float)
+
+    median = np.nanmedian(data, axis=axis, keepdims=True)
+    mad = np.nanmedian(np.abs(data - median), axis=axis, keepdims=True)
+
+    # MAD asymptotic scaling factor for normal distribution: 1 / norm.ppf(0.75) ≈ 1.482602218505602
+    mad_scale = 1.482602218505602
+
+    invalid_mad = (mad == 0) | np.isnan(mad)
+
+    result = np.zeros_like(data)
+
+    valid_mad = ~invalid_mad
+    if np.any(valid_mad):
+        median_valid = np.where(valid_mad, median, 0)
+        mad_valid = np.where(valid_mad, mad, 1) # avoid division by zero
+        result = np.where(valid_mad, (data - median_valid) / (mad_valid * mad_scale), result)
+
+    if np.any(invalid_mad):
+        mean = np.nanmean(data, axis=axis, keepdims=True)
+        meanad = np.nanmean(np.abs(data - mean), axis=axis, keepdims=True)
+
+        # Mean Absolute Deviation scaling factor for normal distribution: sqrt(pi/2) ≈ 1.2533141373155001
+        meanad_scale = np.sqrt(np.pi / 2.0)
+
+        invalid_meanad = invalid_mad & ((meanad == 0) | np.isnan(meanad))
+        valid_meanad = invalid_mad & ~invalid_meanad
+
+        if np.any(valid_meanad):
+            mean_valid = np.where(valid_meanad, mean, 0)
+            meanad_valid = np.where(valid_meanad, meanad, 1)
+            result = np.where(valid_meanad, (data - mean_valid) / (meanad_valid * meanad_scale), result)
+
+        if np.any(invalid_meanad):
+            std = np.nanstd(data, axis=axis, keepdims=True)
+            valid_std = invalid_meanad & (std > 0)
+
+            if np.any(valid_std):
+                mean_valid = np.where(valid_std, mean, 0)
+                std_valid = np.where(valid_std, std, 1)
+                result = np.where(valid_std, (data - mean_valid) / std_valid, result)
+
+    return result
+
 def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     """
     Filter out outliers in a DataFrame or array.
@@ -264,8 +331,11 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
         The method to use ('iqr', 'zscore', or 'robust_zscore').
         'robust_zscore' uses Median Absolute Deviation (MAD) which is less susceptible
         to extreme outliers inflating variance compared to 'zscore'.
+        - 'mahalanobis': Mahalanobis distance using the pseudo-inverse covariance matrix,
+        thresholding based on Chi-Square distribution bounds. Avoids cascading univariate constraints.
     threshold : float, default 1.5
-        The threshold for filtering (IQR multiplier or Z-score threshold).
+        The threshold for filtering (IQR multiplier or Z-score threshold). For 'mahalanobis',
+        this functions as a Chi-Square cumulative probability (e.g., 0.99).
     column : str, optional
         If data is a DataFrame, the column to filter on. If None and data
         is a DataFrame, filters rows where any column has an outlier.
@@ -318,6 +388,46 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             # Filtering based on all numeric columns
             numeric_cols = df_out.select_dtypes(include=[np.number]).columns
             mask = pd.Series(True, index=df_out.index)
+
+            if method == 'mahalanobis':
+                # Bypass and preserve rows with NaNs natively by isolating valid rows
+                df_numeric = df_out[numeric_cols]
+                valid_mask = df_numeric.notna().all(axis=1)
+
+                df_valid = df_numeric[valid_mask]
+
+                if not df_valid.empty:
+                    # Calculate mean and covariance
+                    mean = df_valid.mean(axis=0).values
+                    # Use ddof=1 for sample covariance
+                    cov = np.cov(df_valid.values, rowvar=False)
+
+                    # Handle degenerate 1D covariance or highly singular matrices
+                    if np.isscalar(cov):
+                        cov = np.array([[cov]])
+
+                    # Pseudo-inverse covariance matrix
+                    inv_cov = np.linalg.pinv(cov)
+
+                    # Calculate Mahalanobis distance squared (which follows chi2 distribution)
+                    diff = df_valid.values - mean
+                    # (N x D) @ (D x D) @ (D x N) -> N
+                    # We compute sum(diff * (diff @ inv_cov), axis=1) for efficiency
+                    mahalanobis_sq = np.sum(diff * (diff @ inv_cov), axis=1)
+
+                    # Threshold based on Chi-Square distribution bounds
+                    # Degrees of freedom is number of numeric columns
+                    df_chi2 = len(numeric_cols)
+                    chi2_threshold = stats.chi2.ppf(threshold, df_chi2)
+
+                    # Mask valid rows
+                    valid_outlier_mask = mahalanobis_sq <= chi2_threshold
+
+                    # Assign back to overall mask. Valid rows take the calculation, NaNs remain True (bypassed/preserved)
+                    mask.loc[valid_mask] = valid_outlier_mask
+
+                return df_out[mask].copy()
+
 
             for col in numeric_cols:
                 col_data = df_out[col]
@@ -372,6 +482,27 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
         elif method == 'robust_zscore':
             z_scores = np.abs(_robust_zscore(valid_values))
             keep_valid = z_scores <= threshold
+        elif method == 'mahalanobis':
+            # Needs a 2D array minimum
+            if values.ndim == 1:
+                values_2d = valid_values[:, np.newaxis]
+            else:
+                values_2d = valid_values
+
+            mean = np.mean(values_2d, axis=0)
+            cov = np.cov(values_2d, rowvar=False)
+
+            if np.isscalar(cov):
+                cov = np.array([[cov]])
+
+            inv_cov = np.linalg.pinv(cov)
+            diff = values_2d - mean
+
+            mahalanobis_sq = np.sum(diff * (diff @ inv_cov), axis=1)
+            df_chi2 = values_2d.shape[1] if values.ndim > 1 else 1
+            chi2_threshold = stats.chi2.ppf(threshold, df_chi2)
+
+            keep_valid = mahalanobis_sq <= chi2_threshold
         else:
             raise ValueError(f"Unknown method '{method}'")
 
