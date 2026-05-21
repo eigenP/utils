@@ -261,11 +261,13 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     data : pd.DataFrame or array-like
         The data to filter.
     method : str, default 'iqr'
-        The method to use ('iqr', 'zscore', or 'robust_zscore').
+        The method to use ('iqr', 'zscore', 'robust_zscore', or 'mahalanobis').
         'robust_zscore' uses Median Absolute Deviation (MAD) which is less susceptible
         to extreme outliers inflating variance compared to 'zscore'.
+        'mahalanobis' calculates the Mahalanobis distance using pseudo-inverse covariance,
+        preserving underlying covariance structures.
     threshold : float, default 1.5
-        The threshold for filtering (IQR multiplier or Z-score threshold).
+        The threshold for filtering (IQR multiplier, Z-score threshold, or Chi-Square cumulative probability for 'mahalanobis').
     column : str, optional
         If data is a DataFrame, the column to filter on. If None and data
         is a DataFrame, filters rows where any column has an outlier.
@@ -287,6 +289,9 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     if isinstance(data, pd.DataFrame):
         df_out = data.copy()
 
+        if method == 'mahalanobis' and (threshold > 1.0 or threshold < 0.0):
+            raise ValueError(f"For method 'mahalanobis', threshold must be a cumulative probability between 0 and 1. Got {threshold}.")
+
         if column is not None:
             # Filtering based on a single column
             if method == 'iqr':
@@ -307,6 +312,8 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                 z_scores = pd.Series(index=df_out.index, dtype=float)
                 z_scores[valid_mask] = np.abs(_robust_zscore(df_out.loc[valid_mask, column].values))
                 mask = valid_mask & (z_scores <= threshold)
+            elif method == 'mahalanobis':
+                raise ValueError("Method 'mahalanobis' is not supported for univariate filtering when a column is specified. It requires multivariate data.")
             else:
                 raise ValueError(f"Unknown method '{method}'")
 
@@ -318,6 +325,39 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             # Filtering based on all numeric columns
             numeric_cols = df_out.select_dtypes(include=[np.number]).columns
             mask = pd.Series(True, index=df_out.index)
+
+            if method == 'mahalanobis':
+                if len(numeric_cols) == 0:
+                    return df_out.copy()
+
+                valid_mask = df_out[numeric_cols].notna().all(axis=1)
+                valid_data = df_out.loc[valid_mask, numeric_cols].values
+
+                if len(valid_data) > 0:
+                    mean_vec = np.mean(valid_data, axis=0)
+                    centered_data = valid_data - mean_vec
+                    cov_matrix = np.cov(valid_data, rowvar=False)
+
+                    if cov_matrix.ndim == 0:
+                        cov_matrix = np.array([[cov_matrix]])
+
+                    inv_cov_matrix = np.linalg.pinv(cov_matrix)
+
+                    mahalanobis_sq = np.sum(np.dot(centered_data, inv_cov_matrix) * centered_data, axis=1)
+
+                    df_degrees = len(numeric_cols)
+                    chi2_threshold = stats.chi2.ppf(threshold, df_degrees)
+
+                    keep_valid = mahalanobis_sq <= chi2_threshold
+
+                    mask = pd.Series(False, index=df_out.index)
+                    mask.loc[valid_mask] = keep_valid
+                    # Preserve rows with NaNs as they bypass the multivariate calculation
+                    mask = mask | ~valid_mask
+
+                    return df_out[mask].copy()
+                else:
+                    return df_out.copy()
 
             for col in numeric_cols:
                 col_data = df_out[col]
@@ -347,11 +387,53 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                 col_mask = col_mask | df_out[col].isna()
                 mask = mask & col_mask
 
+
             return df_out[mask].copy()
 
     else:
         # Array-like
+        if method == 'mahalanobis' and (threshold > 1.0 or threshold < 0.0):
+            raise ValueError(f"For method 'mahalanobis', threshold must be a cumulative probability between 0 and 1. Got {threshold}.")
+
         values = np.asarray(data)
+
+        if method == 'mahalanobis':
+            if values.ndim == 1:
+                values_2d = values.reshape(-1, 1)
+            else:
+                values_2d = values
+
+            # Filter out rows with any NaNs for calculation
+            valid_mask = ~np.isnan(values_2d).any(axis=1)
+            valid_values = values_2d[valid_mask]
+
+            if len(valid_values) == 0:
+                return values
+
+            mean_vec = np.mean(valid_values, axis=0)
+            centered_data = valid_values - mean_vec
+
+            # Use ddof=1 for consistency, and explicitly handle 1D edge cases
+            cov_matrix = np.cov(valid_values, rowvar=False)
+            if cov_matrix.ndim == 0:
+                cov_matrix = np.array([[cov_matrix]])
+
+            inv_cov_matrix = np.linalg.pinv(cov_matrix)
+
+            mahalanobis_sq = np.sum(np.dot(centered_data, inv_cov_matrix) * centered_data, axis=1)
+
+            df_degrees = valid_values.shape[1]
+            # When df=1, and looking for extreme outliers in 1D array of 5 items, sample covariance
+            # shrinks making the squared distance bounded.
+            chi2_threshold = stats.chi2.ppf(threshold, df_degrees)
+
+            keep_valid = mahalanobis_sq <= chi2_threshold
+
+            keep_mask = np.zeros(len(values_2d), dtype=bool)
+            keep_mask[valid_mask] = keep_valid
+
+            return values[keep_mask]
+
         # Filter out NaNs for calculation
         valid_mask = ~np.isnan(values)
         valid_values = values[valid_mask]

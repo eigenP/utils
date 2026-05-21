@@ -128,3 +128,45 @@ def test_remove_outliers_dataframe():
     assert len(cleaned_all) == 5
     assert 100 not in cleaned_all['A'].values
     assert -100 not in cleaned_all['B'].values
+
+def test_remove_outliers_mahalanobis():
+    np.random.seed(42)
+    mean = [0, 0]
+    cov = [[1, 0.8], [0.8, 1]]
+    data = np.random.multivariate_normal(mean, cov, 100)
+
+    df = pd.DataFrame(data, columns=['x', 'y'])
+    # Add an outlier that is within the marginal distributions but outside the joint distribution
+    df.loc[100] = [2, -2]
+    # Add a row with NaN
+    df.loc[101] = [np.nan, 2]
+
+    # Mahalanobis on dataframe should remove the outlier and preserve the NaN row
+    df_m = remove_outliers(df, method='mahalanobis', threshold=0.99)
+    assert 100 not in df_m.index
+    assert 101 in df_m.index
+
+    # Edge case: No numeric columns
+    df_str = pd.DataFrame({'a': ['x', 'y', 'z']})
+    df_str_m = remove_outliers(df_str, method='mahalanobis', threshold=0.99)
+    assert len(df_str_m) == 3
+
+    # Array-like operations (2D)
+    arr2d = df.values
+    arr2d_m = remove_outliers(arr2d, method='mahalanobis', threshold=0.99)
+    # The NaN row and the outlier row should be dropped (arrays drop NaNs)
+    assert len(arr2d_m) < len(arr2d)
+
+    # Array-like operations (1D)
+    arr1d = np.append(np.random.normal(0, 1, 100), 100)
+    arr1d_m = remove_outliers(arr1d, method='mahalanobis', threshold=0.99)
+    assert 100 not in arr1d_m
+    assert arr1d_m.ndim == 1
+
+    # Should raise error for univariate column filtering on dataframe
+    with pytest.raises(ValueError, match="Method 'mahalanobis' is not supported for univariate filtering"):
+        remove_outliers(df, method='mahalanobis', threshold=0.99, column='x')
+
+    # Should raise error for bad threshold
+    with pytest.raises(ValueError, match="threshold must be a cumulative probability between 0 and 1"):
+        remove_outliers(df, method='mahalanobis', threshold=1.5)
