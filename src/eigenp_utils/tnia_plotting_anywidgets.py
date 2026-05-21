@@ -163,7 +163,7 @@ def show_zyx_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projec
     return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None):
+def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -242,6 +242,32 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
                 colormap = black_to(resolved)
 
 
+    # Apply rotation if requested
+    from skimage.transform import rotate
+    def _parse_rotation(val):
+        if val is None:
+            return 0.0, 0.0, 0.0
+        if isinstance(val, (int, float)):
+            return float(val), 0.0, 0.0
+        try:
+            val_list = list(val)
+            if len(val_list) == 3:
+                return float(val_list[0]), float(val_list[1]), float(val_list[2])
+        except TypeError:
+            pass
+        raise ValueError(f"rotate_view must be a float or a tuple of 3 floats (Z, Y, X), got {val}")
+
+    rot_z, rot_y, rot_x = _parse_rotation(rotate_view)
+
+    xdim_orig = xy.shape[1]
+
+    if rot_z != 0.0:
+        xy = rotate(xy, rot_z, resize=True, order=3, preserve_range=True)
+    if rot_y != 0.0:
+        xz = rotate(xz, rot_y, resize=True, order=3, preserve_range=True)
+    if rot_x != 0.0:
+        zy = rotate(zy, rot_x, resize=True, order=3, preserve_range=True)
+
     if use_plt:
         fig=plt.figure(figsize=figsize, constrained_layout=False)
     else:
@@ -250,7 +276,9 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
 
     xdim = xy.shape[1]
     ydim = xy.shape[0]
-    zdim = xz.shape[0]
+    zdim_xz = xz.shape[0]
+    zdim_zy = zy.shape[1]
+    zdim = max(zdim_xz, zdim_zy)
 
     z_xy_ratio=1
 
@@ -266,9 +294,22 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
         figH = 10
         hspace_factor = 1.0
 
+    # Determine the extent widths for the grid layout
+    w_zy = zy.shape[1]
+    h_xz = xz.shape[0]
+
+    w_xz = xz.shape[1]
+    h_zy = zy.shape[0]
+
+    # Use max width/height to properly align the grid
+    col1_w = max(xdim, w_xz)
+    col2_w = w_zy * z_xy_ratio
+    row1_h = max(ydim, h_zy)
+    row2_h = h_xz * z_xy_ratio
+
     spec=gridspec.GridSpec(ncols=2, nrows=2,
-                           height_ratios=[ydim,zdim*z_xy_ratio],
-                           width_ratios=[xdim,zdim*z_xy_ratio],
+                           height_ratios=[row1_h, row2_h],
+                           width_ratios=[col1_w, col2_w],
                            hspace=.01 * hspace_factor,
                            wspace=.01,
                            figure = fig)
@@ -280,13 +321,19 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
 
     if gamma == 1:
         axXY.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        axZY.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        axXZ.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
+        axZY.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,w_zy*sz,h_zy*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,w_xz*sxy,h_xz*sz,0], interpolation = 'nearest', alpha=opacity)
     else:
         norm=PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax, clip=True)
         axXY.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        axZY.imshow(zy, cmap = colormap, norm=norm, extent=[0,zdim*sz,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        axXZ.imshow(xz, cmap = colormap, norm=norm, extent=[0,xdim*sxy,zdim*sz,0], interpolation = 'nearest', alpha=opacity)
+        axZY.imshow(zy, cmap = colormap, norm=norm, extent=[0,w_zy*sz,h_zy*sxy,0], interpolation = 'nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap = colormap, norm=norm, extent=[0,w_xz*sxy,h_xz*sz,0], interpolation = 'nearest', alpha=opacity)
+
+    # Set exact limits to prevent axis from expanding to match other row/col unnecessarily
+    # The image might not fill the entire GridSpec cell if the other cell is larger.
+    axXY.set_xlim([0, xdim*sxy]); axXY.set_ylim([ydim*sxy, 0])
+    axZY.set_xlim([0, w_zy*sz]); axZY.set_ylim([h_zy*sxy, 0])
+    axXZ.set_xlim([0, w_xz*sxy]); axXZ.set_ylim([h_xz*sz, 0])
 
     ### Axes and titles
     # axXY.set_title('xy')
@@ -310,7 +357,9 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
 
     # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
 
-    # Add scale bar
+    # Add scale bar (use original dimension so bar scales correctly relative to internal content)
+    # However, since the axis width is the NEW width, the physical width the bar measures against
+    # is the NEW width.
     main_physical_width_um = xdim * sxy if sxy is not None else xdim
     _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, figsize)
 
@@ -361,7 +410,7 @@ def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, fi
             ha='center', va='center', color='gray', fontsize=fontsize_pt)
 
 ### New function
-def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None):
+def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -407,11 +456,11 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=sxy, sz=sz, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=sxy, sz=sz, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view)
 
 
 ### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -446,7 +495,7 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
         projection_x = np.flip(np.rot90(projector(image_to_show[:, :, x_slices], axis=2), 1), 0)
         projection_z = projector(image_to_show[z_slices, :, :], axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view)
 
 
 
@@ -1143,8 +1192,9 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
-                 show_crosshair=True, sync_on_hover=False, slabs_position=None, slabs_thickness=None, opacity=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=False, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, **kwargs):
 
+        self.rotate_view = rotate_view
         # Handle 2D images gracefully by adding a Z dimension of 1
         if isinstance(im, list):
             if im[0].ndim == 2:
@@ -1379,11 +1429,23 @@ class TNIASliceWidget(TNIAWidgetBase):
         fig = show_zyx_max_slabs(
             im_curr, x_lims, y_lims, z_lims,
             pixel_sizes=pass_pixel_sizes, figsize=self.figsize, colormap=colors_curr,
-            vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, opacity=opacity_curr
+            vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, opacity=opacity_curr,
+            rotate_view=self.rotate_view
         )
 
         # Crosshairs logic (copied from original interactive wrapper)
-        if self.show_crosshair and fig:
+        def _parse_rotation(val):
+            if val is None: return 0.0, 0.0, 0.0
+            if isinstance(val, (int, float)): return float(val), 0.0, 0.0
+            try:
+                vl = list(val)
+                if len(vl) == 3: return float(vl[0]), float(vl[1]), float(vl[2])
+            except TypeError: pass
+            return 0.0, 0.0, 0.0
+
+        rot_z, rot_y, rot_x = _parse_rotation(self.rotate_view)
+
+        if self.show_crosshair and fig and rot_z == 0.0 and rot_y == 0.0 and rot_x == 0.0:
             # XY
             fig.axes[0].axvline(x_lims[0]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
             fig.axes[0].axhline(y_lims[0]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
@@ -1664,7 +1726,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, sxy=None, sz=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, **kwargs):
+        self.rotate_view = rotate_view
         if colors is not None:
             warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
             if colormap is None:
@@ -1987,15 +2050,27 @@ class TNIAScatterWidget(TNIAWidgetBase):
             fig = show_zyx(
                 xy_rgb, xz_rgb, zy_rgb,
                 pixel_sizes=pass_pixel_sizes, figsize=self.figsize, colormap=None,
-                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=opacity_resolved, subplot_bg=self.subplot_bg
+                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=opacity_resolved, subplot_bg=self.subplot_bg,
+                rotate_view=self.rotate_view
             )
 
             fig.patch.set_alpha(0.0) # transparent figure bg
             fig.patch.set_facecolor("none")
             # Subplot facecolor is handled by show_zyx if subplot_bg is passed
 
+            def _parse_rotation(val):
+                if val is None: return 0.0, 0.0, 0.0
+                if isinstance(val, (int, float)): return float(val), 0.0, 0.0
+                try:
+                    vl = list(val)
+                    if len(vl) == 3: return float(vl[0]), float(vl[1]), float(vl[2])
+                except TypeError: pass
+                return 0.0, 0.0, 0.0
+
+            rot_z, rot_y, rot_x = _parse_rotation(self.rotate_view)
+
             # Crosshairs
-            if self.show_crosshair:
+            if self.show_crosshair and rot_z == 0.0 and rot_y == 0.0 and rot_x == 0.0:
                 axXY, axZY, axXZ = fig.axes[0], fig.axes[1], fig.axes[2]
                 axXY.vlines([x_lims[0]*self.sx + 0.5, (x_lims[1]+1)*self.sx + 0.5], self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
                 axXY.hlines([y_lims[0]*self.sx + 0.5, (y_lims[1]+1)*self.sx + 0.5], self.xmin*self.sx, (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
@@ -2008,9 +2083,60 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
         else:
             # Points mode
+            def _parse_rotation(val):
+                if val is None: return 0.0, 0.0, 0.0
+                if isinstance(val, (int, float)): return float(val), 0.0, 0.0
+                try:
+                    vl = list(val)
+                    if len(vl) == 3: return float(vl[0]), float(vl[1]), float(vl[2])
+                except TypeError: pass
+                return 0.0, 0.0, 0.0
+
+            rot_z, rot_y, rot_x = _parse_rotation(self.rotate_view)
+
+            def _rotate_points_2d(px, py, angle_deg, cx, cy):
+                if angle_deg == 0: return px, py
+                theta = np.radians(angle_deg)
+                cos_t = np.cos(theta)
+                sin_t = np.sin(theta)
+                rx = cos_t * (px - cx) - sin_t * (py - cy) + cx
+                ry = sin_t * (px - cx) + cos_t * (py - cy) + cy
+                return rx, ry
+
+            cx_data = (self.xmin + self.xmax) / 2.0
+            cy_data = (self.ymin + self.ymax) / 2.0
+            cz_data = (self.zmin + self.zmax) / 2.0
+
+            # Estimate bounds after rotation to adjust axes
+            w_x = (self.xmax - self.xmin + 1)
+            w_y = (self.ymax - self.ymin + 1)
+            w_z = (self.zmax - self.zmin + 1)
+
+            def _rot_bounds(w1, w2, angle):
+                if angle == 0: return w1, w2
+                rad = np.radians(angle)
+                cos_a, sin_a = abs(np.cos(rad)), abs(np.sin(rad))
+                nw1 = w1 * cos_a + w2 * sin_a
+                nw2 = w1 * sin_a + w2 * cos_a
+                return nw1, nw2
+
+            # XY plane rotates by rot_z (X vs Y)
+            w_x_xy, w_y_xy = _rot_bounds(w_x, w_y, rot_z)
+            # XZ plane rotates by rot_y (X vs Z)
+            w_x_xz, w_z_xz = _rot_bounds(w_x, w_z, rot_y)
+            # ZY plane rotates by rot_x (Z vs Y)
+            w_z_zy, w_y_zy = _rot_bounds(w_z, w_y, rot_x)
+
             z_xy_ratio = (self.sz / self.sx) if self.sx != self.sz else 1
-            width_ratios  = [int(self.xmax - self.xmin + 1), int((self.zmax - self.zmin + 1) * z_xy_ratio)]
-            height_ratios = [int(self.ymax - self.ymin + 1), int((self.zmax - self.zmin + 1) * z_xy_ratio)]
+
+            # Grid logic uses max of the possible widths/heights
+            col1_w = int(max(w_x_xy, w_x_xz))
+            col2_w = int(w_z_zy * z_xy_ratio)
+            row1_h = int(max(w_y_xy, w_y_zy))
+            row2_h = int(w_z_xz * z_xy_ratio)
+
+            width_ratios  = [col1_w, col2_w]
+            height_ratios = [row1_h, row2_h]
 
             fig, axs = plt.subplots(
                 2, 2, figsize=self.figsize, constrained_layout=False,
@@ -2046,23 +2172,29 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 norm = matplotlib.colors.Normalize(vmin=vmin_c, vmax=vmax_c)
 
                 if mZ_all.any():
-                    axXY.scatter(self.X_arr[mZ_all]*self.sx, self.Y_arr[mZ_all]*self.sx, c=vals[mZ_all], cmap=cmap, norm=norm,
+                    X_rot, Y_rot = _rotate_points_2d(self.X_arr[mZ_all]*self.sx, self.Y_arr[mZ_all]*self.sx, rot_z, cx_data*self.sx, cy_data*self.sx)
+                    axXY.scatter(X_rot, Y_rot, c=vals[mZ_all], cmap=cmap, norm=norm,
                                  s=self.point_size, alpha=self.alpha, linewidths=0)
                 if mY_all.any():
-                    axXZ.scatter(self.X_arr[mY_all]*self.sx, self.Z_arr[mY_all]*self.sz,  c=vals[mY_all], cmap=cmap, norm=norm,
+                    X_rot, Z_rot = _rotate_points_2d(self.X_arr[mY_all]*self.sx, self.Z_arr[mY_all]*self.sz, rot_y, cx_data*self.sx, cz_data*self.sz)
+                    axXZ.scatter(X_rot, Z_rot,  c=vals[mY_all], cmap=cmap, norm=norm,
                                  s=self.point_size, alpha=self.alpha, linewidths=0)
                 if mX_all.any():
-                    axZY.scatter(self.Z_arr[mX_all]*self.sz,  self.Y_arr[mX_all]*self.sx, c=vals[mX_all], cmap=cmap, norm=norm,
+                    Z_rot, Y_rot = _rotate_points_2d(self.Z_arr[mX_all]*self.sz, self.Y_arr[mX_all]*self.sx, rot_x, cz_data*self.sz, cy_data*self.sx)
+                    axZY.scatter(Z_rot, Y_rot, c=vals[mX_all], cmap=cmap, norm=norm,
                                  s=self.point_size, alpha=self.alpha, linewidths=0)
 
             elif self.mode == 'cont_multi':
                 cols = blend_colors(self.cont_multi, self.colors_use, vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, soft_clip=True)
                 if mZ_all.any():
-                    axXY.scatter(self.X_arr[mZ_all]*self.sx, self.Y_arr[mZ_all]*self.sx, c=cols[mZ_all], s=self.point_size, alpha=self.alpha, linewidths=0)
+                    X_rot, Y_rot = _rotate_points_2d(self.X_arr[mZ_all]*self.sx, self.Y_arr[mZ_all]*self.sx, rot_z, cx_data*self.sx, cy_data*self.sx)
+                    axXY.scatter(X_rot, Y_rot, c=cols[mZ_all], s=self.point_size, alpha=self.alpha, linewidths=0)
                 if mY_all.any():
-                    axXZ.scatter(self.X_arr[mY_all]*self.sx, self.Z_arr[mY_all]*self.sz,  c=cols[mY_all], s=self.point_size, alpha=self.alpha, linewidths=0)
+                    X_rot, Z_rot = _rotate_points_2d(self.X_arr[mY_all]*self.sx, self.Z_arr[mY_all]*self.sz, rot_y, cx_data*self.sx, cz_data*self.sz)
+                    axXZ.scatter(X_rot, Z_rot,  c=cols[mY_all], s=self.point_size, alpha=self.alpha, linewidths=0)
                 if mX_all.any():
-                    axZY.scatter(self.Z_arr[mX_all]*self.sz,  self.Y_arr[mX_all]*self.sx, c=cols[mX_all], s=self.point_size, alpha=self.alpha, linewidths=0)
+                    Z_rot, Y_rot = _rotate_points_2d(self.Z_arr[mX_all]*self.sz, self.Y_arr[mX_all]*self.sx, rot_x, cz_data*self.sz, cy_data*self.sx)
+                    axZY.scatter(Z_rot, Y_rot, c=cols[mX_all], s=self.point_size, alpha=self.alpha, linewidths=0)
 
             else:
                 if self.mode == 'single':
@@ -2079,16 +2211,27 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     mZ = (Zi >= z_lims[0]) & (Zi <= z_lims[1])
                     mY = (Yi >= y_lims[0]) & (Yi <= y_lims[1])
                     mX = (Xi >= x_lims[0]) & (Xi <= x_lims[1])
-                    if mZ.any(): axXY.scatter(Xi[mZ]*self.sx, Yi[mZ]*self.sx, s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
-                    if mY.any(): axXZ.scatter(Xi[mY]*self.sx, Zi[mY]*self.sz,  s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
-                    if mX.any(): axZY.scatter(Zi[mX]*self.sz,  Yi[mX]*self.sx, s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
+                    if mZ.any():
+                        X_rot, Y_rot = _rotate_points_2d(Xi[mZ]*self.sx, Yi[mZ]*self.sx, rot_z, cx_data*self.sx, cy_data*self.sx)
+                        axXY.scatter(X_rot, Y_rot, s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
+                    if mY.any():
+                        X_rot, Z_rot = _rotate_points_2d(Xi[mY]*self.sx, Zi[mY]*self.sz, rot_y, cx_data*self.sx, cz_data*self.sz)
+                        axXZ.scatter(X_rot, Z_rot,  s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
+                    if mX.any():
+                        Z_rot, Y_rot = _rotate_points_2d(Zi[mX]*self.sz, Yi[mX]*self.sx, rot_x, cz_data*self.sz, cy_data*self.sx)
+                        axZY.scatter(Z_rot, Y_rot, s=self.point_size, c=col, alpha=self.alpha, linewidths=0)
 
             # Axis limits
-            axXY.set_xlim([self.xmin*self.sx, (self.xmax+1)*self.sx]); axXY.set_ylim([(self.ymax+1)*self.sx, self.ymin*self.sx])
-            axXZ.set_xlim([self.xmin*self.sx, (self.xmax+1)*self.sx]); axXZ.set_ylim([(self.zmax+1)*self.sz,  self.zmin*self.sz ])
-            axZY.set_xlim([self.zmin*self.sz,  (self.zmax+1)*self.sz ]); axZY.set_ylim([(self.ymax+1)*self.sx, self.ymin*self.sx])
+            axXY.set_xlim([cx_data*self.sx - w_x_xy/2*self.sx, cx_data*self.sx + w_x_xy/2*self.sx])
+            axXY.set_ylim([cy_data*self.sx + w_y_xy/2*self.sx, cy_data*self.sx - w_y_xy/2*self.sx])
 
-            if self.show_crosshair:
+            axXZ.set_xlim([cx_data*self.sx - w_x_xz/2*self.sx, cx_data*self.sx + w_x_xz/2*self.sx])
+            axXZ.set_ylim([cz_data*self.sz + w_z_xz/2*self.sz, cz_data*self.sz - w_z_xz/2*self.sz])
+
+            axZY.set_xlim([cz_data*self.sz - w_z_zy/2*self.sz, cz_data*self.sz + w_z_zy/2*self.sz])
+            axZY.set_ylim([cy_data*self.sx + w_y_zy/2*self.sx, cy_data*self.sx - w_y_zy/2*self.sx])
+
+            if self.show_crosshair and rot_z == 0.0 and rot_y == 0.0 and rot_x == 0.0:
                 axXY.vlines([x_lims[0]*self.sx, (x_lims[1]+1)*self.sx], self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
                 axXY.hlines([y_lims[0]*self.sx, (y_lims[1]+1)*self.sx], self.xmin*self.sx, (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
                 axZY.vlines([z_lims[0]*self.sz,  (z_lims[1]+1)*self.sz],  self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
@@ -2098,8 +2241,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Scale bar (kept opaque)
             fig.patch.set_alpha(1.0)
-            X_dim = int(np.ceil(self.xmax - self.xmin + 1))
-            main_physical_width_um = X_dim * self.sx if self.sx is not None else X_dim
+            X_dim_orig = int(np.ceil(self.xmax - self.xmin + 1))
+            main_physical_width_um = X_dim_orig * self.sx if self.sx is not None else X_dim_orig
             both_given = getattr(self, '_pixel_sizes_given', False)
             _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, self.figsize)
 
@@ -2117,11 +2260,21 @@ def show_zyx_max_slice_interactive(
     colors=None, opacity=None,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
+    rotate_view=None,
 ):
     """
     Interactive 3D slice viewer using AnyWidget.
 
     Inspired by show_zyx_max_slice_interactive in tnia_plotting_3d.py (ipywidgets version).
+
+    Parameters
+    ----------
+    rotate_view : float or tuple of floats, optional
+        Rotates the 2D projected views purely for visualization.
+        If a single float is provided, it rotates the XY projection (in degrees).
+        If a tuple of three floats is provided `(Z, Y, X)`, it rotates the XY, XZ, and ZY projections independently.
+        Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
+        For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
 
     Notes:
         - When `vmax` is not explicitly provided, it defaults to the 99.9th percentile for float arrays,
@@ -2200,7 +2353,7 @@ def show_zyx_max_slice_interactive(
     w = TNIASliceWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t)
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view
     )
     return w
 
@@ -2215,6 +2368,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     point_size_scale=0.01,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
+    rotate_view=None,
 ):
     """
     Interactive 3D slice viewer with point annotation using AnyWidget.
@@ -2222,6 +2376,15 @@ def show_zyx_max_slice_interactive_point_annotator(
     - Point annotation toggle
     - Left-click on any projection to add or delete points.
     Returns a widget instance `w`. The list of annotated points is accessible via `w.points`.
+
+    Parameters
+    ----------
+    rotate_view : float or tuple of floats, optional
+        Rotates the 2D projected views purely for visualization.
+        If a single float is provided, it rotates the XY projection (in degrees).
+        If a tuple of three floats is provided `(Z, Y, X)`, it rotates the XY, XZ, and ZY projections independently.
+        Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
+        For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
     """
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
@@ -2291,7 +2454,7 @@ def show_zyx_max_slice_interactive_point_annotator(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         point_size_scale=point_size_scale,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t)
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view
     )
     return w
 
@@ -2309,9 +2472,19 @@ def show_zyx_max_scatter_interactive(
     subplot_bg='black',
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
+    rotate_view=None,
 ):
     """
     Shows interactive sliders for XY, XZ, and YZ projection of 3D point coordinates.
+
+    Parameters
+    ----------
+    rotate_view : float or tuple of floats, optional
+        Rotates the 2D projected views purely for visualization.
+        If a single float is provided, it rotates the XY projection (in degrees).
+        If a tuple of three floats is provided `(Z, Y, X)`, it rotates the XY, XZ, and ZY projections independently.
+        Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
+        For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
 
     Notes:
         - When hiding axes to maintain custom subplot backgrounds (e.g. `subplot_bg`), the code
@@ -2435,7 +2608,8 @@ def show_zyx_max_scatter_interactive(
         point_size=point_size, alpha=alpha, colormap=colormap if colormap is not None else colors, opacity=opacity,
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         subplot_bg=subplot_bg,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t)
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t),
+        rotate_view=rotate_view
     )
     w.X_arr_phys = w.X_arr * px
     w.Y_arr_phys = w.Y_arr * py
