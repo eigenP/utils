@@ -70,6 +70,70 @@ def add_stat_annotations(
 
 import scipy.special
 
+def robust_standardize(data, axis=0):
+    """
+    Standardize data robustly using a hierarchical dispersion fallback:
+    MAD -> Mean Absolute Deviation -> Standard Deviation.
+
+    Parameters
+    ----------
+    data : array-like
+        The data to standardize.
+    axis : int or tuple of ints, optional
+        Axis along which the standardization is computed. The default is 0.
+        If None, computes over the flattened array.
+
+    Returns
+    -------
+    ndarray
+        The standardized array with the same shape as `data`.
+    """
+    x = np.asarray(data, dtype=float)
+    if axis is None:
+        x_flat = x.ravel()
+        median = np.nanmedian(x_flat, keepdims=True)
+        mad = np.nanmedian(np.abs(x_flat - median), keepdims=True)
+        mean = np.nanmean(x_flat, keepdims=True)
+        meanad = np.nanmean(np.abs(x_flat - mean), keepdims=True)
+        std = np.nanstd(x_flat, keepdims=True)
+    else:
+        median = np.nanmedian(x, axis=axis, keepdims=True)
+        mad = np.nanmedian(np.abs(x - median), axis=axis, keepdims=True)
+        mean = np.nanmean(x, axis=axis, keepdims=True)
+        meanad = np.nanmean(np.abs(x - mean), axis=axis, keepdims=True)
+        std = np.nanstd(x, axis=axis, keepdims=True)
+
+    c_mad = 1.482602218505602
+    c_meanad = np.sqrt(np.pi / 2.0)
+
+    mad_valid = mad > 0
+    meanad_valid = (meanad > 0) & ~mad_valid
+    std_valid = (std > 0) & ~mad_valid & ~meanad_valid
+
+    out = np.zeros_like(x, dtype=float)
+
+    if np.any(mad_valid):
+        mad_valid_b = np.broadcast_to(mad_valid, x.shape)
+        # Avoid division by zero warnings where mask is False
+        mad_safe = np.where(mad_valid_b, mad * c_mad, 1.0)
+        out = np.where(mad_valid_b, (x - np.broadcast_to(median, x.shape)) / mad_safe, out)
+
+    if np.any(meanad_valid):
+        meanad_valid_b = np.broadcast_to(meanad_valid, x.shape)
+        meanad_safe = np.where(meanad_valid_b, meanad * c_meanad, 1.0)
+        out = np.where(meanad_valid_b, (x - np.broadcast_to(mean, x.shape)) / meanad_safe, out)
+
+    if np.any(std_valid):
+        std_valid_b = np.broadcast_to(std_valid, x.shape)
+        std_safe = np.where(std_valid_b, std, 1.0)
+        out = np.where(std_valid_b, (x - np.broadcast_to(mean, x.shape)) / std_safe, out)
+
+    nan_mask = np.isnan(x)
+    if np.any(nan_mask):
+        out = np.where(nan_mask, np.nan, out)
+
+    return out
+
 def cohens_d(group1, group2, correction=True):
     """
     Calculate Cohen's d effect size for two independent samples.
@@ -287,6 +351,44 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     if isinstance(data, pd.DataFrame):
         df_out = data.copy()
 
+        if method == 'mahalanobis':
+            if column is not None:
+                raise ValueError("Mahalanobis distance requires all numeric columns; 'column' parameter must be None.")
+
+            numeric_cols = df_out.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) < 2:
+                raise ValueError("Mahalanobis distance requires at least two numeric columns.")
+
+            if not (0 < threshold < 1):
+                raise ValueError("Threshold for Mahalanobis must be a Chi-Square cumulative probability between 0 and 1.")
+
+            df_numeric = df_out[numeric_cols]
+            # only operate on rows where all numeric cols are valid
+            valid_mask = df_numeric.notna().all(axis=1)
+            valid_data = df_numeric.loc[valid_mask].values
+
+            mask = pd.Series(True, index=df_out.index)
+            if len(valid_data) == 0:
+                return df_out.copy()
+
+            mean = np.mean(valid_data, axis=0)
+            cov = np.cov(valid_data, rowvar=False)
+            inv_cov = np.linalg.pinv(cov)
+
+            diff = valid_data - mean
+            d_sq = np.sum(np.dot(diff, inv_cov) * diff, axis=1)
+
+            df_rank = np.linalg.matrix_rank(cov)
+            if df_rank == 0:
+                chi2_thresh = np.inf
+            else:
+                chi2_thresh = stats.chi2.ppf(threshold, df_rank)
+
+            keep_valid = d_sq <= chi2_thresh
+            mask.loc[valid_mask] = keep_valid
+
+            return df_out[mask].copy()
+
         if column is not None:
             # Filtering based on a single column
             if method == 'iqr':
@@ -352,6 +454,39 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     else:
         # Array-like
         values = np.asarray(data)
+
+        if method == 'mahalanobis':
+            if values.ndim < 2 or values.shape[1] < 2:
+                raise ValueError("Mahalanobis distance requires at least two columns.")
+            if not (0 < threshold < 1):
+                raise ValueError("Threshold for Mahalanobis must be a Chi-Square cumulative probability between 0 and 1.")
+
+            valid_mask = ~np.isnan(values).any(axis=1)
+            valid_values = values[valid_mask]
+
+            if len(valid_values) == 0:
+                return values
+
+            mean = np.mean(valid_values, axis=0)
+            cov = np.cov(valid_values, rowvar=False)
+            inv_cov = np.linalg.pinv(cov)
+
+            diff = valid_values - mean
+            d_sq = np.sum(np.dot(diff, inv_cov) * diff, axis=1)
+
+            df_rank = np.linalg.matrix_rank(cov)
+            if df_rank == 0:
+                chi2_thresh = np.inf
+            else:
+                chi2_thresh = stats.chi2.ppf(threshold, df_rank)
+
+            keep_valid = d_sq <= chi2_thresh
+            # Initialize with True so NaNs are preserved like DataFrame
+            keep_mask = np.ones(values.shape[0], dtype=bool)
+            keep_mask[valid_mask] = keep_valid
+
+            return values[keep_mask]
+
         # Filter out NaNs for calculation
         valid_mask = ~np.isnan(values)
         valid_values = values[valid_mask]

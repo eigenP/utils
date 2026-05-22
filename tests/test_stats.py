@@ -2,8 +2,34 @@ import pytest
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers
+from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers, robust_standardize
 from statannotations.Annotator import Annotator
+
+def test_robust_standardize():
+    # Test MAD standardization
+    d1 = np.array([0, 0, 0, 0, 10])
+    res1 = robust_standardize(d1, axis=None)
+    # The first 4 are 0. The median is 0.
+    # The MAD is 0 (since majority is 0).
+    # Since MAD is 0, it falls back to MeanAD.
+    # Mean is 2, MeanAD is 3.2. Out is (x - 2) / (3.2 * 1.2533)
+    np.testing.assert_array_almost_equal(res1, [-0.49867785, -0.49867785, -0.49867785, -0.49867785, 1.9947114])
+
+    # Test 2D Array
+    d2 = np.array([[0, 1], [0, 2], [0, 3], [10, 4]])
+    res2 = robust_standardize(d2, axis=0)
+    # Col 0: falls back to MeanAD.
+    # Col 1: MAD is non-zero, uses MAD.
+    expected_col0 = [-0.53192304, -0.53192304, -0.53192304, 1.59576912]
+    expected_col1 = [-1.01173463, -0.33724488, 0.33724488, 1.01173463]
+    np.testing.assert_array_almost_equal(res2[:, 0], expected_col0)
+    np.testing.assert_array_almost_equal(res2[:, 1], expected_col1)
+
+    # Test NaNs
+    d3 = np.array([1, 2, np.nan, 4, 5])
+    res3 = robust_standardize(d3)
+    assert np.isnan(res3[2])
+    assert not np.isnan(res3[0])
 
 def test_add_stat_annotations():
     # Setup simple data
@@ -128,3 +154,45 @@ def test_remove_outliers_dataframe():
     assert len(cleaned_all) == 5
     assert 100 not in cleaned_all['A'].values
     assert -100 not in cleaned_all['B'].values
+
+def test_remove_outliers_mahalanobis():
+    np.random.seed(42)
+    # Large dataset N > 50 to avoid sample covariance inflation
+    df = pd.DataFrame({
+        'A': np.random.normal(0, 1, 100),
+        'B': np.random.normal(0, 1, 100)
+    })
+
+    # Inject a distinct multivariate outlier
+    df.loc[99, 'A'] = 10
+    df.loc[99, 'B'] = 10
+
+    cleaned = remove_outliers(df, method='mahalanobis', threshold=0.95)
+    assert 99 not in cleaned.index
+    assert len(cleaned) < 100
+
+    # Array test
+    arr = df.values
+    cleaned_arr = remove_outliers(arr, method='mahalanobis', threshold=0.95)
+    assert len(cleaned_arr) == len(cleaned)
+
+    # Test missing value behavior (NaNs bypassed)
+    df_nan = df.copy()
+    df_nan.loc[0, 'A'] = np.nan
+    cleaned_nan = remove_outliers(df_nan, method='mahalanobis', threshold=0.95)
+    assert 0 in cleaned_nan.index # NaN row preserved
+
+    arr_nan = arr.copy()
+    arr_nan[0, 0] = np.nan
+    cleaned_arr_nan = remove_outliers(arr_nan, method='mahalanobis', threshold=0.95)
+    assert np.isnan(cleaned_arr_nan[0, 0]) # NaN row preserved
+
+    # Test error cases
+    with pytest.raises(ValueError, match="requires all numeric columns"):
+        remove_outliers(df, method='mahalanobis', threshold=0.95, column='A')
+
+    with pytest.raises(ValueError, match="requires at least two"):
+        remove_outliers(df[['A']], method='mahalanobis', threshold=0.95)
+
+    with pytest.raises(ValueError, match="Threshold for Mahalanobis"):
+        remove_outliers(df, method='mahalanobis', threshold=1.5) # Invalid prob
