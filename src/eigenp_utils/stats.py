@@ -261,14 +261,19 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     data : pd.DataFrame or array-like
         The data to filter.
     method : str, default 'iqr'
-        The method to use ('iqr', 'zscore', or 'robust_zscore').
+        The method to use ('iqr', 'zscore', 'robust_zscore', or 'mahalanobis').
         'robust_zscore' uses Median Absolute Deviation (MAD) which is less susceptible
         to extreme outliers inflating variance compared to 'zscore'.
+        'mahalanobis' computes the squared Mahalanobis distance using the pseudo-inverse
+        covariance matrix. It requires at least 2 dimensions and bypasses NaNs.
     threshold : float, default 1.5
         The threshold for filtering (IQR multiplier or Z-score threshold).
+        If method='mahalanobis', this functions as a Chi-Square cumulative probability
+        (e.g., 0.95 or 0.99).
     column : str, optional
         If data is a DataFrame, the column to filter on. If None and data
         is a DataFrame, filters rows where any column has an outlier.
+        Must be None if method='mahalanobis' since Mahalanobis is inherently multivariate.
 
     Returns
     -------
@@ -288,6 +293,8 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
         df_out = data.copy()
 
         if column is not None:
+            if method == 'mahalanobis':
+                raise ValueError("Mahalanobis distance cannot be applied to a single column.")
             # Filtering based on a single column
             if method == 'iqr':
                 q1 = df_out[column].quantile(0.25)
@@ -317,6 +324,38 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
         else:
             # Filtering based on all numeric columns
             numeric_cols = df_out.select_dtypes(include=[np.number]).columns
+
+            if method == 'mahalanobis':
+                if len(numeric_cols) < 2:
+                    raise ValueError("Mahalanobis distance requires at least 2 dimensions.")
+                if not (0 < threshold < 1):
+                    raise ValueError(f"For method='mahalanobis', threshold must be a probability between 0 and 1, got {threshold}.")
+
+                X = df_out[numeric_cols].values
+                valid_row_mask = ~np.isnan(X).any(axis=1)
+
+                bool_mask = np.ones(len(df_out), dtype=bool)
+
+                if valid_row_mask.any():
+                    X_valid = X[valid_row_mask]
+                    n_samples, n_features = X_valid.shape
+
+                    mean = np.mean(X_valid, axis=0)
+                    X_centered = X_valid - mean
+                    cov = np.cov(X_valid, rowvar=False)
+                    inv_cov = np.linalg.pinv(cov)
+
+                    left = np.dot(X_centered, inv_cov)
+                    D_squared = np.sum(left * X_centered, axis=1)
+
+                    chi2_thresh = stats.chi2.ppf(threshold, df=n_features)
+
+                    valid_keep = D_squared <= chi2_thresh
+                    bool_mask[valid_row_mask] = valid_keep
+
+                mask = pd.Series(bool_mask, index=df_out.index)
+                return df_out[mask].copy()
+
             mask = pd.Series(True, index=df_out.index)
 
             for col in numeric_cols:
@@ -352,6 +391,35 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     else:
         # Array-like
         values = np.asarray(data)
+
+        if method == 'mahalanobis':
+            if values.ndim < 2 or values.shape[1] < 2:
+                raise ValueError("Mahalanobis distance requires at least 2 dimensions.")
+            if not (0 < threshold < 1):
+                raise ValueError(f"For method='mahalanobis', threshold must be a probability between 0 and 1, got {threshold}.")
+
+            valid_row_mask = ~np.isnan(values).any(axis=1)
+            keep_mask = np.ones(values.shape[0], dtype=bool)
+
+            if valid_row_mask.any():
+                X_valid = values[valid_row_mask]
+                n_samples, n_features = X_valid.shape
+
+                mean = np.mean(X_valid, axis=0)
+                X_centered = X_valid - mean
+                cov = np.cov(X_valid, rowvar=False)
+                inv_cov = np.linalg.pinv(cov)
+
+                left = np.dot(X_centered, inv_cov)
+                D_squared = np.sum(left * X_centered, axis=1)
+
+                chi2_thresh = stats.chi2.ppf(threshold, df=n_features)
+
+                valid_keep = D_squared <= chi2_thresh
+                keep_mask[valid_row_mask] = valid_keep
+
+            return values[keep_mask]
+
         # Filter out NaNs for calculation
         valid_mask = ~np.isnan(values)
         valid_values = values[valid_mask]

@@ -128,3 +128,60 @@ def test_remove_outliers_dataframe():
     assert len(cleaned_all) == 5
     assert 100 not in cleaned_all['A'].values
     assert -100 not in cleaned_all['B'].values
+
+def test_remove_outliers_mahalanobis_array():
+    np.random.seed(42)
+    # Generate large multivariate normal dataset
+    mean = [0, 0]
+    cov = [[1, 0.8], [0.8, 1]]
+    data = np.random.multivariate_normal(mean, cov, 100)
+
+    # Insert obvious outliers
+    outlier1 = [10, -10]
+    outlier2 = [-10, 10]
+    data_with_outlier = np.vstack((data, outlier1, outlier2))
+
+    # 0.99 Chi-Square probability threshold
+    cleaned = remove_outliers(data_with_outlier, method='mahalanobis', threshold=0.99)
+
+    assert len(cleaned) >= 95
+    assert len(cleaned) <= 101 # Might filter out some natural tail values
+
+    # Check that outliers are filtered
+    for row in cleaned:
+        assert not np.allclose(row, outlier1)
+        assert not np.allclose(row, outlier2)
+
+def test_remove_outliers_mahalanobis_dataframe():
+    np.random.seed(42)
+    mean = [0, 0]
+    cov = [[1, 0.8], [0.8, 1]]
+    data = np.random.multivariate_normal(mean, cov, 100)
+    data_with_outlier = np.vstack((data, [10, -10]))
+
+    df = pd.DataFrame(data_with_outlier, columns=['x', 'y'])
+
+    # Test normal cleaning
+    cleaned = remove_outliers(df, method='mahalanobis', threshold=0.99)
+    assert len(cleaned) >= 95
+    assert 10 not in cleaned['x'].values
+
+    # Test with NaN propagation
+    df.loc[0, 'x'] = np.nan
+    cleaned_nan = remove_outliers(df, method='mahalanobis', threshold=0.99)
+    # The NaN row should be kept
+    assert np.isnan(cleaned_nan.loc[0, 'x'])
+
+def test_remove_outliers_mahalanobis_errors():
+    df = pd.DataFrame({'x': [1, 2, 3], 'y': [4, 5, 6]})
+
+    with pytest.raises(ValueError, match="cannot be applied to a single column"):
+        remove_outliers(df, method='mahalanobis', column='x')
+
+    df_1d = pd.DataFrame({'x': [1, 2, 3]})
+    with pytest.raises(ValueError, match="requires at least 2 dimensions"):
+        remove_outliers(df_1d, method='mahalanobis')
+
+    arr_1d = np.array([1, 2, 3])
+    with pytest.raises(ValueError, match="requires at least 2 dimensions"):
+        remove_outliers(arr_1d, method='mahalanobis')
