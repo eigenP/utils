@@ -8,13 +8,16 @@
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
 * **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`.
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
-* **Intensity Rescaling**: Tools for contrast enhancement, including CLAHE.
+* **Intensity Rescaling**: Tools for contrast enhancement (including CLAHE), exact OLS exponential decay fitting for Z-intensity decay correction (`correct_z_intensity_decay`), and pure-NumPy/SciPy BaSiCPy implementations for flatfield/darkfield shading correction (`fit_basic_shading`).
 
 ### Plotting & Visualization
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_xyz` for dynamic multichannel viewers), interactive point cloud visualization (`IsoScatterWidget`), and 3D point annotation (`TNIAAnnotatorWidget`).
-* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker`, and SVGs embedded with metadata via `savefig_svg`.
+* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker`, and SVGs embedded with metadata via `savefig_svg`. Both `raincloud_plot` and `savefig_svg` support selective threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes. The `labels_cmap` (Glasbey palette) is automatically registered with Matplotlib upon import.
+* **Interactive 3D Scatters**: `plotly_scatter_3d` and `plotly_scatter_3d_from_adata_obsm` for generating interactive 3D scatter plots.
+* **Task Scheduling**: `task_calendar_scheduler` for generating Gantt-style timeline schedules for linked events (Marimo-compatible).
 
 ### Single-Cell Analysis
+* **Lineage Coupling**: Compute exact co-occurrence expectations and z-scores analytically using a vectorized log-gamma formulation of the hypergeometric distribution (`calculate_lineage_coupling`).
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
 * **Dataset Integration (kkNN)**: Adaptive curvature-based k-nearest neighbors mapping (`kknn_ingest`) to dynamically project metadata and embeddings across references based on local manifold geometry.
 * **Label Classification & Smoothing**: Distance-weighted majority voting or averaging (`kknn_classifier`) to smooth categorical or continuous cell metadata using the kkNN backbone.
@@ -25,8 +28,8 @@
 * **Dimensionality Reduction**: `tl_pacmap` for PaCMAP embeddings supporting versatile initialization strategies (e.g., PAGA, PCA, random).
 
 ### Statistical Utilities
-* **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci`, `summary_stats`, `remove_outliers`, and `add_stat_annotations` for annotating plots with significance markers.
-
+* **Robust Standardization**: Dimension-aware data standardization (`robust_standardize`) with hierarchical dispersion fallbacks (MAD -> MeanAD -> SD).
+* **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci`, `summary_stats`, `add_stat_annotations` for annotating plots with significance markers, and `remove_outliers` (which includes Mahalanobis distance-based multivariate outlier detection).
 
 ### Core Utilities
 * **Spline Utilities**: Calculate tangent vectors and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
