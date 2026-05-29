@@ -219,6 +219,70 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
 
     return float(lower_bound), float(upper_bound)
 
+def robust_standardize(data, axis=None):
+    """
+    Robustly standardize data, handling zero-inflated or highly tied distributions.
+
+    Implements a hierarchical dispersion fallback:
+    1. Median Absolute Deviation (MAD) centered on median.
+    2. Mean Absolute Deviation (MeanAD) centered on mean.
+    3. Standard Deviation (STD) centered on mean.
+
+    Parameters
+    ----------
+    data : array-like
+        The data to standardize.
+    axis : int, optional
+        The axis along which to standardize.
+
+    Returns
+    -------
+    array-like
+        The standardized data.
+    """
+    data = np.asarray(data)
+
+    # Calculate median and MAD
+    median = np.nanmedian(data, axis=axis, keepdims=True)
+    mad = np.nanmedian(np.abs(data - median), axis=axis, keepdims=True)
+
+    # Scaling factor for MAD (1 / norm.ppf(0.75))
+    mad_scale = 1.482602218505602
+
+    # Calculate mean and MeanAD
+    mean = np.nanmean(data, axis=axis, keepdims=True)
+    mean_ad = np.nanmean(np.abs(data - mean), axis=axis, keepdims=True)
+
+    # Scaling factor for MeanAD (sqrt(pi/2))
+    mean_ad_scale = 1.2533141373155001
+
+    # Calculate STD
+    std = np.nanstd(data, axis=axis, keepdims=True)
+
+    # Where estimators are valid
+    mad_valid = mad > 0
+    mean_ad_valid = (~mad_valid) & (mean_ad > 0)
+    std_valid = (~mad_valid) & (~mean_ad_valid) & (std > 0)
+
+    if axis is None:
+        if mad_valid:
+            return (data - median) / (mad * mad_scale)
+        elif mean_ad_valid:
+            return (data - mean) / (mean_ad * mean_ad_scale)
+        elif std_valid:
+            return (data - mean) / std
+        else:
+            return np.zeros_like(data, dtype=float)
+    else:
+        # We construct location and scale broadcasted to the shape
+        loc = np.where(mad_valid, median, np.where(mean_ad_valid, mean, np.where(std_valid, mean, 0.0)))
+        scale = np.where(mad_valid, mad * mad_scale, np.where(mean_ad_valid, mean_ad * mean_ad_scale, np.where(std_valid, std, 1.0)))
+        valid = mad_valid | mean_ad_valid | std_valid
+
+        result = np.zeros_like(data, dtype=float)
+        result = np.divide(data - loc, scale, out=result, where=valid)
+        return result
+
 def summary_stats(df, group_by, value_col):
     """
     Generate a clean summary for grouped data in a DataFrame.
@@ -275,15 +339,6 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     pd.DataFrame or array-like
         The filtered data.
     """
-    def _robust_zscore(x):
-        median = np.nanmedian(x)
-        mad = np.nanmedian(np.abs(x - median))
-        if mad == 0:
-            return np.zeros_like(x)
-        # 0.6745 is the 75th percentile of the standard normal distribution
-        # making the robust z-score comparable in magnitude to the standard z-score
-        return 0.6745 * (x - median) / mad
-
     if isinstance(data, pd.DataFrame):
         df_out = data.copy()
 
@@ -305,7 +360,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             elif method == 'robust_zscore':
                 valid_mask = df_out[column].notna()
                 z_scores = pd.Series(index=df_out.index, dtype=float)
-                z_scores[valid_mask] = np.abs(_robust_zscore(df_out.loc[valid_mask, column].values))
+                z_scores[valid_mask] = np.abs(robust_standardize(df_out.loc[valid_mask, column].values))
                 mask = valid_mask & (z_scores <= threshold)
             else:
                 raise ValueError(f"Unknown method '{method}'")
@@ -338,7 +393,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                     col_mask = valid_mask & (z_scores <= threshold)
                 elif method == 'robust_zscore':
                     z_scores = pd.Series(index=df_out.index, dtype=float)
-                    z_scores[valid_mask] = np.abs(_robust_zscore(df_out.loc[valid_mask, col].values))
+                    z_scores[valid_mask] = np.abs(robust_standardize(df_out.loc[valid_mask, col].values))
                     col_mask = valid_mask & (z_scores <= threshold)
                 else:
                     raise ValueError(f"Unknown method '{method}'")
@@ -370,7 +425,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             z_scores = np.abs(stats.zscore(valid_values))
             keep_valid = z_scores <= threshold
         elif method == 'robust_zscore':
-            z_scores = np.abs(_robust_zscore(valid_values))
+            z_scores = np.abs(robust_standardize(valid_values))
             keep_valid = z_scores <= threshold
         else:
             raise ValueError(f"Unknown method '{method}'")

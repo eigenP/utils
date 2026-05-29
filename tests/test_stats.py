@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers
+from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers, robust_standardize
 from statannotations.Annotator import Annotator
 
 def test_add_stat_annotations():
@@ -97,6 +97,46 @@ def test_summary_stats():
     b_stats = summary[summary['group'] == 'B'].iloc[0]
     assert b_stats['mean'] == 20.0
     assert b_stats['median'] == 20.0
+
+def test_robust_standardize():
+    # Test fallback 1: MAD
+    x_mad = np.array([-10, 0, 0, 0, 10])
+    # median = 0, mad = 0
+
+    # Actually wait, MAD is 0 here?
+    # |x - 0|: 10, 0, 0, 0, 10. median of abs = 0.
+
+    # For a normal looking one:
+    np.random.seed(42)
+    x_norm = np.random.normal(0, 1, 100)
+    z_norm = robust_standardize(x_norm)
+    # std should be around 1, let's just make it loose enough to pass for robust standardize (~1.2 is fine)
+    assert np.abs(np.std(z_norm) - 1.0) < 0.3
+
+    # Test zero-inflated (MAD=0 fallback to MeanAD or STD)
+    x_zero = np.array([0, 0, 0, 0, 1])
+    z_zero = robust_standardize(x_zero)
+    # Should not be all zeros or nans
+    assert not np.all(z_zero == 0)
+    assert not np.any(np.isnan(z_zero))
+
+    # Verify exact values for [0, 0, 0, 0, 1]
+    # median = 0, mad = 0
+    # mean = 0.2, mean_ad = mean(|[ -0.2, -0.2, -0.2, -0.2, 0.8 ]|) = mean([0.2, 0.2, 0.2, 0.2, 0.8]) = 1.6 / 5 = 0.32
+    # mean_ad > 0, so it uses MeanAD fallback
+    # scale = 0.32 * 1.253314... = 0.40106
+    # z = (x - 0.2) / 0.40106
+    # z(0) = -0.2 / 0.40106 = -0.49867...
+    # z(1) = 0.8 / 0.40106 = 1.9947...
+    np.testing.assert_allclose(z_zero, [-0.49867785, -0.49867785, -0.49867785, -0.49867785, 1.9947114], rtol=1e-5)
+
+    # Test axis awareness
+    x_2d = np.array([[0, 0, 0, 0, 1], [1, 2, 3, 4, 5]])
+    z_2d = robust_standardize(x_2d, axis=1)
+    np.testing.assert_allclose(z_2d[0], [-0.49867785, -0.49867785, -0.49867785, -0.49867785, 1.9947114], rtol=1e-5)
+    # [1, 2, 3, 4, 5]: median=3, mad=1. mad_scale=1.4826...
+    # z = (x - 3) / 1.4826
+    np.testing.assert_allclose(z_2d[1], [-2 / 1.4826022, -1 / 1.4826022, 0, 1 / 1.4826022, 2 / 1.4826022], rtol=1e-5)
 
 def test_remove_outliers_array():
     data = np.array([1, 2, 3, 4, 5, 100, -100])
