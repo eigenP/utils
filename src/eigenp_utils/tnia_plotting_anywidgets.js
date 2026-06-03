@@ -140,7 +140,8 @@ export default {
     });
 
     const saveBtn = document.createElement("button");
-    saveBtn.textContent = "Save as SVG";
+    saveBtn.textContent = "💾 SVG";
+    saveBtn.title = "Save plot as SVG";
     saveBtn.style.padding = "6px 12px";
     saveBtn.style.backgroundColor = "#e0e0e0";
     saveBtn.style.color = "#333";
