@@ -140,7 +140,8 @@ export default {
     });
 
     const saveBtn = document.createElement("button");
-    saveBtn.textContent = "Save as SVG";
+    saveBtn.textContent = "💾 SVG";
+    saveBtn.title = "Save plot as SVG";
     saveBtn.style.padding = "6px 12px";
     saveBtn.style.backgroundColor = "#e0e0e0";
     saveBtn.style.color = "#333";
@@ -160,9 +161,48 @@ export default {
       model.save_changes();
     });
 
+    const copyParamsBtn = document.createElement("button");
+    copyParamsBtn.innerHTML = "📋"; // copy icon
+    copyParamsBtn.title = "Copy parameters to clipboard";
+    copyParamsBtn.style.padding = "6px 12px";
+    copyParamsBtn.style.backgroundColor = "#e0e0e0";
+    copyParamsBtn.style.color = "#333";
+    copyParamsBtn.style.border = "1px solid #999";
+    copyParamsBtn.style.borderRadius = "4px";
+    copyParamsBtn.style.cursor = "pointer";
+    copyParamsBtn.style.fontSize = "16px";
+    copyParamsBtn.addEventListener("mouseover", () => {
+        copyParamsBtn.style.backgroundColor = "#ccc";
+    });
+    copyParamsBtn.addEventListener("mouseout", () => {
+        copyParamsBtn.style.backgroundColor = "#e0e0e0";
+    });
+    copyParamsBtn.addEventListener("click", () => {
+        let current = model.get("copy_params_trigger") || 0;
+        model.set("copy_params_trigger", current + 1);
+        model.save_changes();
+    });
+
+    // Listen for python returning the copy string
+    model.on("change:copy_params_string", () => {
+        const str = model.get("copy_params_string");
+        if (str && navigator.clipboard) {
+            navigator.clipboard.writeText(str).then(() => {
+                const originalHTML = copyParamsBtn.innerHTML;
+                copyParamsBtn.innerHTML = "✅";
+                setTimeout(() => {
+                    copyParamsBtn.innerHTML = originalHTML;
+                }, 1500);
+            }).catch(err => {
+                console.error("Failed to copy text: ", err);
+            });
+        }
+    });
+
     saveContainer.appendChild(saveLabel);
     saveContainer.appendChild(saveInput);
     saveContainer.appendChild(saveBtn);
+    saveContainer.appendChild(copyParamsBtn);
 
     const hasAnnotation = model.get("annotation_mode") !== undefined;
     if (hasAnnotation) {
