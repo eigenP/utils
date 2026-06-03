@@ -1,0 +1,13 @@
+<html>
+<body>
+    <button id="copyBtn">Copy Params</button>
+    <script>
+        document.getElementById('copyBtn').addEventListener('click', () => {
+            const text = "slabs_position=(1, 2, 3),\nslabs_thickness=(4, 5, 6)";
+            navigator.clipboard.writeText(text).then(() => {
+                console.log("Copied!");
+            });
+        });
+    </script>
+</body>
+</html>

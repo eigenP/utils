@@ -1039,6 +1039,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     save_filename = traitlets.Unicode("filepath_save.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
 
+    # Copy Params UI
+    copy_params_trigger = traitlets.Int(0).tag(sync=True)
+    copy_params_string = traitlets.Unicode("").tag(sync=True)
+
     def __init__(self, X, Y, Z, show_crosshair=True, sync_on_hover=False, **kwargs):
         super().__init__(**kwargs)
         self.show_crosshair = show_crosshair
@@ -1068,6 +1072,9 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
         # Observe save trigger
         self.observe(self._save_svg, names='save_trigger')
+
+        # Observe copy params trigger
+        self.observe(self._copy_params, names='copy_params_trigger')
 
         # Initial bounds update
         self._update_bounds(None)
@@ -1189,6 +1196,42 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 print(f"Error saving file: {e}")
             finally:
                 plt.close(fig)
+
+    def _copy_params(self, change):
+        s = []
+
+        x_s_phys = self.x_s * self.sx
+        y_s_phys = self.y_s * self.sy
+        z_s_phys = self.z_s * self.sz
+        s.append(f"slabs_position=({z_s_phys}, {y_s_phys}, {x_s_phys}),")
+
+        x_t_phys = self.x_t * self.sx
+        y_t_phys = self.y_t * self.sy
+        z_t_phys = self.z_t * self.sz
+        s.append(f"slabs_thickness=({z_t_phys}, {y_t_phys}, {x_t_phys}),")
+
+        # Handle channels
+        if hasattr(self, 'num_channels'):
+            n = self.num_channels
+        else:
+            n = getattr(self, 'C', 1)
+
+        vmin = [None if v == "" else float(v) for v in self.vmin_list][:n]
+        vmax = [None if v == "" else float(v) for v in self.vmax_list][:n]
+        gamma = [float(g) for g in self.gamma_list][:n]
+        opacity = [float(o) for o in self.opacity_list][:n]
+
+        # In case n==1 and it's a list, the user can still copy it as a list,
+        # but single channel functions accept list of length 1 seamlessly.
+        s.append(f"vmin={vmin},")
+        s.append(f"vmax={vmax},")
+        s.append(f"gamma={gamma},")
+        s.append(f"opacity={opacity},")
+
+        if hasattr(self, 'rotate_view') and self.rotate_view is not None:
+            s.append(f"rotate_view={self.rotate_view},")
+
+        self.copy_params_string = "\n".join(s)
 
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
@@ -1445,22 +1488,53 @@ class TNIASliceWidget(TNIAWidgetBase):
 
         rot_z, rot_y, rot_x = _parse_rotation(self.rotate_view)
 
-        if self.show_crosshair and fig and rot_z == 0.0 and rot_y == 0.0 and rot_x == 0.0:
+        if self.show_crosshair and fig:
+            def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_w, orig_h):
+                if angle_deg == 0.0:
+                    return [x0, x1], [y0, y1]
+                rad = np.radians(angle_deg)
+                c, s = np.cos(rad), np.sin(rad)
+                new_w = int(np.ceil(abs(orig_w * c) + abs(orig_h * s)))
+                new_h = int(np.ceil(abs(orig_w * s) + abs(orig_h * c)))
+                cx_orig = (orig_w - 1) / 2.0
+                cy_orig = (orig_h - 1) / 2.0
+                cx_new = (new_w - 1) / 2.0
+                cy_new = (new_h - 1) / 2.0
+                def trans(x, y):
+                    dx = x - cx_orig
+                    dy = y - cy_orig
+                    nx = dx * c + dy * s
+                    ny = -dx * s + dy * c
+                    return cx_new + nx, cy_new + ny
+                rx0, ry0 = trans(x0, y0)
+                rx1, ry1 = trans(x1, y1)
+                return [rx0, rx1], [ry0, ry1]
+
+            def plot_line(ax, px0, py0, px1, py1, angle, orig_w, orig_h):
+                xs, ys = _get_rotated_line(px0, py0, px1, py1, angle, orig_w, orig_h)
+                ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
+
+            w_x = X * self.sx
+            w_y = Y * self.sx
+            w_z = Z * self.sz
+
             # XY
-            fig.axes[0].axvline(x_lims[0]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[0].axhline(y_lims[0]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[0].axvline(x_lims[1]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[0].axhline(y_lims[1]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
+            plot_line(fig.axes[0], x_lims[0]*self.sx + 0.5, 0, x_lims[0]*self.sx + 0.5, w_y, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], 0, y_lims[0]*self.sx + 0.5, w_x, y_lims[0]*self.sx + 0.5, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], x_lims[1]*self.sx + 0.5, 0, x_lims[1]*self.sx + 0.5, w_y, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], 0, y_lims[1]*self.sx + 0.5, w_x, y_lims[1]*self.sx + 0.5, rot_z, w_x, w_y)
+
             # ZY
-            fig.axes[1].axvline(z_lims[0]*self.sz + 0.5*self.sz, color='r', ls=':', alpha=0.3)
-            fig.axes[1].axhline(y_lims[0]*self.sx + 0.5,     color='r', ls=':', alpha=0.3)
-            fig.axes[1].axvline(z_lims[1]*self.sz + 0.5*self.sz, color='r', ls=':', alpha=0.3)
-            fig.axes[1].axhline(y_lims[1]*self.sx + 0.5,     color='r', ls=':', alpha=0.3)
+            plot_line(fig.axes[1], z_lims[0]*self.sz + 0.5*self.sz, 0, z_lims[0]*self.sz + 0.5*self.sz, w_y, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], 0, y_lims[0]*self.sx + 0.5, w_z, y_lims[0]*self.sx + 0.5, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], z_lims[1]*self.sz + 0.5*self.sz, 0, z_lims[1]*self.sz + 0.5*self.sz, w_y, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], 0, y_lims[1]*self.sx + 0.5, w_z, y_lims[1]*self.sx + 0.5, rot_x, w_z, w_y)
+
             # XZ
-            fig.axes[2].axvline(x_lims[0]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[2].axhline(z_lims[0]*self.sz + 0.5*self.sz, color='r', ls=':', alpha=0.3)
-            fig.axes[2].axvline(x_lims[1]*self.sx + 0.5, color='r', ls=':', alpha=0.3)
-            fig.axes[2].axhline(z_lims[1]*self.sz + 0.5*self.sz, color='r', ls=':', alpha=0.3)
+            plot_line(fig.axes[2], x_lims[0]*self.sx + 0.5, 0, x_lims[0]*self.sx + 0.5, w_z, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], 0, z_lims[0]*self.sz + 0.5*self.sz, w_x, z_lims[0]*self.sz + 0.5*self.sz, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], x_lims[1]*self.sx + 0.5, 0, x_lims[1]*self.sx + 0.5, w_z, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], 0, z_lims[1]*self.sz + 0.5*self.sz, w_x, z_lims[1]*self.sz + 0.5*self.sz, rot_y, w_x, w_z)
 
         return fig
 
@@ -2070,14 +2144,63 @@ class TNIAScatterWidget(TNIAWidgetBase):
             rot_z, rot_y, rot_x = _parse_rotation(self.rotate_view)
 
             # Crosshairs
-            if self.show_crosshair and rot_z == 0.0 and rot_y == 0.0 and rot_x == 0.0:
+            if self.show_crosshair:
+                def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_w, orig_h):
+                    if angle_deg == 0.0:
+                        return [x0, x1], [y0, y1]
+                    rad = np.radians(angle_deg)
+                    c, s = np.cos(rad), np.sin(rad)
+                    new_w = int(np.ceil(abs(orig_w * c) + abs(orig_h * s)))
+                    new_h = int(np.ceil(abs(orig_w * s) + abs(orig_h * c)))
+                    cx_orig = (orig_w - 1) / 2.0
+                    cy_orig = (orig_h - 1) / 2.0
+                    cx_new = (new_w - 1) / 2.0
+                    cy_new = (new_h - 1) / 2.0
+                    def trans(x, y):
+                        dx = x - cx_orig
+                        dy = y - cy_orig
+                        nx = dx * c + dy * s
+                        ny = -dx * s + dy * c
+                        return cx_new + nx, cy_new + ny
+                    rx0, ry0 = trans(x0, y0)
+                    rx1, ry1 = trans(x1, y1)
+                    return [rx0, rx1], [ry0, ry1]
+
+                def plot_line(ax, px0, py0, px1, py1, angle, orig_w, orig_h):
+                    xs, ys = _get_rotated_line(px0, py0, px1, py1, angle, orig_w, orig_h)
+                    ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
+
+                w_x = (self.xmax - self.xmin + 1) * self.sx
+                w_y = (self.ymax - self.ymin + 1) * self.sx
+                w_z = (self.zmax - self.zmin + 1) * self.sz
+
                 axXY, axZY, axXZ = fig.axes[0], fig.axes[1], fig.axes[2]
-                axXY.vlines([x_lims[0]*self.sx + 0.5, (x_lims[1]+1)*self.sx + 0.5], self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
-                axXY.hlines([y_lims[0]*self.sx + 0.5, (y_lims[1]+1)*self.sx + 0.5], self.xmin*self.sx, (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
-                axZY.vlines([z_lims[0]*self.sz + 0.5*self.sz, (z_lims[1]+1)*self.sz + 0.5*self.sz], self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
-                axZY.hlines([y_lims[0]*self.sx + 0.5,       (y_lims[1]+1)*self.sx + 0.5], self.zmin*self.sz, (self.zmax+1)*self.sz, colors='r', linestyles=':', alpha=0.3)
-                axXZ.vlines([x_lims[0]*self.sx + 0.5, (x_lims[1]+1)*self.sx + 0.5], self.zmin*self.sz, (self.zmax+1)*self.sz, colors='r', linestyles=':', alpha=0.3)
-                axXZ.hlines([z_lims[0]*self.sz + 0.5*self.sz, (z_lims[1]+1)*self.sz + 0.5*self.sz], self.xmin*self.sx, (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
+
+                # XY
+                x0_adj = (x_lims[0] - self.xmin) * self.sx + 0.5
+                x1_adj = (x_lims[1] - self.xmin + 1) * self.sx + 0.5
+                y0_adj = (y_lims[0] - self.ymin) * self.sx + 0.5
+                y1_adj = (y_lims[1] - self.ymin + 1) * self.sx + 0.5
+
+                plot_line(axXY, x0_adj, 0, x0_adj, w_y, rot_z, w_x, w_y)
+                plot_line(axXY, x1_adj, 0, x1_adj, w_y, rot_z, w_x, w_y)
+                plot_line(axXY, 0, y0_adj, w_x, y0_adj, rot_z, w_x, w_y)
+                plot_line(axXY, 0, y1_adj, w_x, y1_adj, rot_z, w_x, w_y)
+
+                # ZY
+                z0_adj = (z_lims[0] - self.zmin) * self.sz + 0.5 * self.sz
+                z1_adj = (z_lims[1] - self.zmin + 1) * self.sz + 0.5 * self.sz
+
+                plot_line(axZY, z0_adj, 0, z0_adj, w_y, rot_x, w_z, w_y)
+                plot_line(axZY, z1_adj, 0, z1_adj, w_y, rot_x, w_z, w_y)
+                plot_line(axZY, 0, y0_adj, w_z, y0_adj, rot_x, w_z, w_y)
+                plot_line(axZY, 0, y1_adj, w_z, y1_adj, rot_x, w_z, w_y)
+
+                # XZ
+                plot_line(axXZ, x0_adj, 0, x0_adj, w_z, rot_y, w_x, w_z)
+                plot_line(axXZ, x1_adj, 0, x1_adj, w_z, rot_y, w_x, w_z)
+                plot_line(axXZ, 0, z0_adj, w_x, z0_adj, rot_y, w_x, w_z)
+                plot_line(axXZ, 0, z1_adj, w_x, z1_adj, rot_y, w_x, w_z)
 
             return fig
 
@@ -2231,13 +2354,40 @@ class TNIAScatterWidget(TNIAWidgetBase):
             axZY.set_xlim([cz_data*self.sz - w_z_zy/2*self.sz, cz_data*self.sz + w_z_zy/2*self.sz])
             axZY.set_ylim([cy_data*self.sx + w_y_zy/2*self.sx, cy_data*self.sx - w_y_zy/2*self.sx])
 
-            if self.show_crosshair and rot_z == 0.0 and rot_y == 0.0 and rot_x == 0.0:
-                axXY.vlines([x_lims[0]*self.sx, (x_lims[1]+1)*self.sx], self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
-                axXY.hlines([y_lims[0]*self.sx, (y_lims[1]+1)*self.sx], self.xmin*self.sx, (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
-                axZY.vlines([z_lims[0]*self.sz,  (z_lims[1]+1)*self.sz],  self.ymin*self.sx, (self.ymax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
-                axZY.hlines([y_lims[0]*self.sx, (y_lims[1]+1)*self.sx], self.zmin*self.sz,   (self.zmax+1)*self.sz,  colors='r', linestyles=':', alpha=0.3)
-                axXZ.vlines([x_lims[0]*self.sx, (x_lims[1]+1)*self.sx], self.zmin*self.sz,   (self.zmax+1)*self.sz,  colors='r', linestyles=':', alpha=0.3)
-                axXZ.hlines([z_lims[0]*self.sz,  (z_lims[1]+1)*self.sz],  self.xmin*self.sx,  (self.xmax+1)*self.sx, colors='r', linestyles=':', alpha=0.3)
+            if self.show_crosshair:
+                def plot_scatter_line(ax, x0, y0, x1, y1, angle, cx_d, cy_d, s_x, s_y):
+                    if angle == 0:
+                        ax.plot([x0*s_x, x1*s_x], [y0*s_y, y1*s_y], color='r', ls=':', alpha=0.3)
+                        return
+                    theta = np.radians(angle)
+                    cos_t = np.cos(theta)
+                    sin_t = np.sin(theta)
+                    def trans(px, py):
+                        rx = cos_t * (px*s_x - cx_d*s_x) - sin_t * (py*s_y - cy_d*s_y) + cx_d*s_x
+                        ry = sin_t * (px*s_x - cx_d*s_x) + cos_t * (py*s_y - cy_d*s_y) + cy_d*s_y
+                        return rx, ry
+                    rx0, ry0 = trans(x0, y0)
+                    rx1, ry1 = trans(x1, y1)
+                    ax.plot([rx0, rx1], [ry0, ry1], color='r', ls=':', alpha=0.3)
+
+                # XY
+                plot_scatter_line(axXY, x_lims[0], self.ymin, x_lims[0], self.ymax+1, rot_z, cx_data, cy_data, self.sx, self.sx)
+                plot_scatter_line(axXY, x_lims[1]+1, self.ymin, x_lims[1]+1, self.ymax+1, rot_z, cx_data, cy_data, self.sx, self.sx)
+                plot_scatter_line(axXY, self.xmin, y_lims[0], self.xmax+1, y_lims[0], rot_z, cx_data, cy_data, self.sx, self.sx)
+                plot_scatter_line(axXY, self.xmin, y_lims[1]+1, self.xmax+1, y_lims[1]+1, rot_z, cx_data, cy_data, self.sx, self.sx)
+
+                # ZY
+                plot_scatter_line(axZY, z_lims[0], self.ymin, z_lims[0], self.ymax+1, rot_x, cz_data, cy_data, self.sz, self.sx)
+                plot_scatter_line(axZY, z_lims[1]+1, self.ymin, z_lims[1]+1, self.ymax+1, rot_x, cz_data, cy_data, self.sz, self.sx)
+                plot_scatter_line(axZY, self.zmin, y_lims[0], self.zmax+1, y_lims[0], rot_x, cz_data, cy_data, self.sz, self.sx)
+                plot_scatter_line(axZY, self.zmin, y_lims[1]+1, self.zmax+1, y_lims[1]+1, rot_x, cz_data, cy_data, self.sz, self.sx)
+
+                # XZ
+                plot_scatter_line(axXZ, x_lims[0], self.zmin, x_lims[0], self.zmax+1, rot_y, cx_data, cz_data, self.sx, self.sz)
+                plot_scatter_line(axXZ, x_lims[1]+1, self.zmin, x_lims[1]+1, self.zmax+1, rot_y, cx_data, cz_data, self.sx, self.sz)
+                plot_scatter_line(axXZ, self.xmin, z_lims[0], self.xmax+1, z_lims[0], rot_y, cx_data, cz_data, self.sx, self.sz)
+                plot_scatter_line(axXZ, self.xmin, z_lims[1]+1, self.xmax+1, z_lims[1]+1, rot_y, cx_data, cz_data, self.sx, self.sz)
+
 
             # Scale bar (kept opaque)
             fig.patch.set_alpha(1.0)
