@@ -2,6 +2,94 @@ import numpy as np
 import pandas as pd
 from statannotations.Annotator import Annotator
 from scipy import stats
+import warnings
+
+def robust_standardize(x, axis=None):
+    """
+    Robustly standardizes data by centering and scaling, using a hierarchical
+    dispersion fallback (MAD -> MeanAD -> SD) to handle zero-inflated or
+    highly tied distributions where MAD collapses to 0.
+
+    It couples location and scale estimators appropriately:
+    1. Median and Median Absolute Deviation (MAD), scaled by 1.4826
+    2. Mean and Mean Absolute Deviation (MeanAD), scaled by 1.2533
+    3. Mean and Standard Deviation (SD)
+
+    Avoids unprincipled epsilon divisions.
+
+    Parameters
+    ----------
+    x : array-like
+        The data to standardize.
+    axis : int or tuple of ints, optional
+        Axis along which to standardize. If None, computes over the flattened array.
+
+    Returns
+    -------
+    np.ndarray
+        Standardized data of the same shape as x.
+    """
+    x_arr = np.asarray(x, dtype=float)
+    orig_shape = x_arr.shape
+
+    if axis is None:
+        x_arr = x_arr.flatten()
+        axis = 0
+
+    # 1. Median / MAD
+    median = np.nanmedian(x_arr, axis=axis, keepdims=True)
+    mad = np.nanmedian(np.abs(x_arr - median), axis=axis, keepdims=True)
+
+    # Asymptotic scaling factor for normal distribution: 1 / Phi^-1(0.75) ≈ 1.4826022
+    mad_scale = mad * 1.482602218505602
+
+    z = np.zeros_like(x_arr)
+
+    mad_valid = (mad_scale > 0) & ~np.isnan(mad_scale)
+
+    if np.any(mad_valid):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            z_mad = (x_arr - median) / mad_scale
+        z = np.where(mad_valid, z_mad, z)
+
+    # Fallback 1: Mean / MeanAD for cases where MAD == 0
+    fallback1_mask = ~mad_valid & ~np.isnan(mad_scale)
+
+    if np.any(fallback1_mask):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            mean = np.nanmean(x_arr, axis=axis, keepdims=True)
+            mean_ad = np.nanmean(np.abs(x_arr - mean), axis=axis, keepdims=True)
+
+        # Asymptotic scaling factor for normal distribution: sqrt(pi / 2) ≈ 1.2533141
+        mean_ad_scale = mean_ad * 1.2533141373155001
+
+        mean_ad_valid = fallback1_mask & (mean_ad_scale > 0) & ~np.isnan(mean_ad_scale)
+
+        if np.any(mean_ad_valid):
+            with np.errstate(divide='ignore', invalid='ignore'):
+                z_mean_ad = (x_arr - mean) / mean_ad_scale
+            z = np.where(mean_ad_valid, z_mean_ad, z)
+
+        # Fallback 2: Mean / SD
+        fallback2_mask = fallback1_mask & ~mean_ad_valid
+        if np.any(fallback2_mask):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                sd = np.nanstd(x_arr, axis=axis, keepdims=True)
+            sd_valid = fallback2_mask & (sd > 0) & ~np.isnan(sd)
+            if np.any(sd_valid):
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    z_sd = (x_arr - mean) / sd
+                z = np.where(sd_valid, z_sd, z)
+
+    # Restore NaNs
+    z = np.where(np.isnan(x_arr), np.nan, z)
+
+    if orig_shape != z.shape:
+        return z.reshape(orig_shape)
+
+    return z
 
 def add_stat_annotations(
     ax,
@@ -280,15 +368,6 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     pd.DataFrame or array-like
         The filtered data.
     """
-    def _robust_zscore(x):
-        median = np.nanmedian(x)
-        mad = np.nanmedian(np.abs(x - median))
-        if mad == 0:
-            return np.zeros_like(x)
-        # 0.6745 is the 75th percentile of the standard normal distribution
-        # making the robust z-score comparable in magnitude to the standard z-score
-        return 0.6745 * (x - median) / mad
-
     if isinstance(data, pd.DataFrame):
         df_out = data.copy()
 
@@ -312,7 +391,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             elif method == 'robust_zscore':
                 valid_mask = df_out[column].notna()
                 z_scores = pd.Series(index=df_out.index, dtype=float)
-                z_scores[valid_mask] = np.abs(_robust_zscore(df_out.loc[valid_mask, column].values))
+                z_scores[valid_mask] = np.abs(robust_standardize(df_out.loc[valid_mask, column].values))
                 mask = valid_mask & (z_scores <= threshold)
             else:
                 raise ValueError(f"Unknown method '{method}'")
@@ -377,7 +456,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                     col_mask = valid_mask & (z_scores <= threshold)
                 elif method == 'robust_zscore':
                     z_scores = pd.Series(index=df_out.index, dtype=float)
-                    z_scores[valid_mask] = np.abs(_robust_zscore(df_out.loc[valid_mask, col].values))
+                    z_scores[valid_mask] = np.abs(robust_standardize(df_out.loc[valid_mask, col].values))
                     col_mask = valid_mask & (z_scores <= threshold)
                 else:
                     raise ValueError(f"Unknown method '{method}'")
@@ -438,7 +517,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             z_scores = np.abs(stats.zscore(valid_values))
             keep_valid = z_scores <= threshold
         elif method == 'robust_zscore':
-            z_scores = np.abs(_robust_zscore(valid_values))
+            z_scores = np.abs(robust_standardize(valid_values))
             keep_valid = z_scores <= threshold
         else:
             raise ValueError(f"Unknown method '{method}'")
