@@ -73,6 +73,12 @@ def resolve_color(c):
     Attempts to resolve a string to a valid matplotlib color.
     If it is a valid colormap name, it returns the final color (at 1.0) of that colormap.
     """
+    if isinstance(c, mcolors.Colormap):
+        raise TypeError(
+            f"Expected a registered colormap name or color as a string (e.g., 'viridis' or 'red'), "
+            f"but got a Colormap instance: {c}. Please pass the string name of the registered colormap."
+        )
+
     if not isinstance(c, str):
         return c
 
