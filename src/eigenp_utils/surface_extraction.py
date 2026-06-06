@@ -396,7 +396,7 @@ def pad_z_slices(arr,
 
 ### Remove 1 % off the dges of the mask to avoid boundary artifacts
 
-def crop_edges(image, crop_percentage_z,crop_percentage_y, crop_percentage_x):
+def crop_edges(image, crop_percentage_z, crop_percentage_y, crop_percentage_x, in_place=False):
     '''
 
     Crop a percentage of the image from the x and y edges and return a new image with the same dimension
@@ -405,6 +405,7 @@ def crop_edges(image, crop_percentage_z,crop_percentage_y, crop_percentage_x):
     -- image: 3D numpy array to perform the cropping on
     -- crop_percentage_y: float, percentage of the image to crop from the y edges
     -- crop_percentage_x: float, percentage of the image to crop from the x edges
+    -- in_place: bool, if True modifies the image in place setting edges to zero. Defaults to False.
 
     Returns:
     image_cropped = 3D numpy array, should have the same dimension as image
@@ -414,18 +415,27 @@ def crop_edges(image, crop_percentage_z,crop_percentage_y, crop_percentage_x):
     y_cropped = int(image.shape[1] * crop_percentage_y)
     x_cropped = int(image.shape[2] * crop_percentage_x)
 
-    # Initialize the new array of the same shape with zeros, and set the central region to the cropped portion of the original image
-    image_cropped = np.zeros_like(image)
-
     y_slice = slice(y_cropped, -y_cropped) if y_cropped > 0 else slice(None)
     x_slice = slice(x_cropped, -x_cropped) if x_cropped > 0 else slice(None)
 
-    image_cropped[:, y_slice, x_slice] = image[:, y_slice, x_slice]
+    if in_place:
+        image_cropped = image
+        # If we need to crop, we must zero out the edges we are removing
+        if y_cropped > 0:
+            image_cropped[:, :y_cropped, :] = 0
+            image_cropped[:, -y_cropped:, :] = 0
+        if x_cropped > 0:
+            image_cropped[:, :, :x_cropped] = 0
+            image_cropped[:, :, -x_cropped:] = 0
+    else:
+        # Initialize the new array of the same shape with zeros, and set the central region to the cropped portion of the original image
+        image_cropped = np.zeros_like(image)
+        image_cropped[:, y_slice, x_slice] = image[:, y_slice, x_slice]
 
     return image_cropped
 
 
-def expand_surface_z(surface: np.ndarray, thickness: int) -> np.ndarray:
+def expand_surface_z(surface: np.ndarray, thickness: int, in_place: bool = False) -> np.ndarray:
     """
     Fast Z-only expansion using a small Python loop over thickness.
     This is usually faster and more memory-efficient than full vectorization.
@@ -436,7 +446,10 @@ def expand_surface_z(surface: np.ndarray, thickness: int) -> np.ndarray:
     Z, _, _ = surface.shape
     z0, y0, x0 = np.nonzero(surface)
 
-    expanded = surface.copy()
+    if in_place:
+        expanded = surface
+    else:
+        expanded = surface.copy()
 
     for dz in range(1, thickness + 1):
         z = z0 + dz
@@ -449,7 +462,7 @@ def expand_surface_z(surface: np.ndarray, thickness: int) -> np.ndarray:
 
     return expanded
 ### Translate if necessary
-def adjust_mask_location(mask, translation=(0, 0, 0), morph = None, iterations=1):
+def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, in_place=False):
     """
       -- when you roll to the end of the image and set off the boundary, set a warning ✅ and the rolled over value from true to false❌
     ==================================
@@ -460,6 +473,7 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph = None, iterations=1
     -- translation: a tuple of three integers (z, y, x); the translation in each axis (z, y, x)
     -- morph: string; the morphological operation to perform: 'erode' or 'dilate'; default is None.
     -- iterations: int; the number of iterations for the morphological operation; Default is 1.
+    -- in_place: bool; if True, modifies the array in place to save memory. Default is False.
 
     Returns:
     mask_translated: ndarray; the adjusted binary mask
@@ -468,47 +482,48 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph = None, iterations=1
     dz, dy, dx = translation
     Z, Y, X = mask.shape
 
-    # Initialize with zeros to handle "rolled over value from true to false"
-    mask_translated = np.zeros_like(mask)
-
     # 1. Define source (mask) and destination (mask_translated) slices
     # Z-axis
     if dz > 0:
         src_z, dst_z = slice(0, max(0, Z - dz)), slice(dz, Z)
         lost_z = slice(Z - dz, Z)
+        clr_z = slice(0, min(Z, dz))
     elif dz < 0:
         src_z, dst_z = slice(-dz, Z), slice(0, max(0, Z + dz))
         lost_z = slice(0, -dz)
+        clr_z = slice(max(0, Z + dz), Z)
     else:
         src_z, dst_z = slice(None), slice(None)
         lost_z = slice(0, 0)
+        clr_z = slice(0, 0)
 
     # Y-axis
     if dy > 0:
         src_y, dst_y = slice(0, max(0, Y - dy)), slice(dy, Y)
         lost_y = slice(Y - dy, Y)
+        clr_y = slice(0, min(Y, dy))
     elif dy < 0:
         src_y, dst_y = slice(-dy, Y), slice(0, max(0, Y + dy))
         lost_y = slice(0, -dy)
+        clr_y = slice(max(0, Y + dy), Y)
     else:
         src_y, dst_y = slice(None), slice(None)
         lost_y = slice(0, 0)
+        clr_y = slice(0, 0)
 
     # X-axis
     if dx > 0:
         src_x, dst_x = slice(0, max(0, X - dx)), slice(dx, X)
         lost_x = slice(X - dx, X)
+        clr_x = slice(0, min(X, dx))
     elif dx < 0:
         src_x, dst_x = slice(-dx, X), slice(0, max(0, X + dx))
         lost_x = slice(0, -dx)
+        clr_x = slice(max(0, X + dx), X)
     else:
         src_x, dst_x = slice(None), slice(None)
         lost_x = slice(0, 0)
-
-    # 2. Copy valid data
-    # Only copy if the shift is within bounds (otherwise result is all zeros)
-    if (abs(dz) < Z) and (abs(dy) < Y) and (abs(dx) < X):
-        mask_translated[dst_z, dst_y, dst_x] = mask[src_z, src_y, src_x]
+        clr_x = slice(0, 0)
 
     # 3. Check for lost data (Warning)
     # Warn if any part of the mask that contains data is shifted out of the frame
@@ -537,12 +552,84 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph = None, iterations=1
     if lost_data:
         print("Warning: The mask has rolled over the boundaries. Please adjust the value.")
 
+    # 2. Copy valid data
+    if in_place:
+        mask_translated = mask
+        # If translation is out of bounds, clear entirely
+        if (abs(dz) >= Z) or (abs(dy) >= Y) or (abs(dx) >= X):
+            mask_translated.fill(0)
+        elif dz != 0 or dy != 0 or dx != 0:
+            # Shift data. Must carefully handle overlap if moving in-place.
+            # Using copy for the sliced chunk to prevent self-overwriting correctly
+            # depending on direction. To be fully safe without large allocation:
+            shifted_data = mask_translated[src_z, src_y, src_x].copy()
+            # Clear regions that will be vacated
+            if dz != 0: mask_translated[clr_z, :, :] = 0
+            if dy != 0: mask_translated[:, clr_y, :] = 0
+            if dx != 0: mask_translated[:, :, clr_x] = 0
+            # Place shifted data
+            mask_translated[dst_z, dst_y, dst_x] = shifted_data
+    else:
+        mask_translated = np.zeros_like(mask)
+        # Only copy if the shift is within bounds (otherwise result is all zeros)
+        if (abs(dz) < Z) and (abs(dy) < Y) and (abs(dx) < X):
+            mask_translated[dst_z, dst_y, dst_x] = mask[src_z, src_y, src_x]
+
     # Morphological operation
     if morph == 'erode':
-        mask_translated = binary_erosion(mask_translated, iterations=iterations)
+        binary_erosion(mask_translated, iterations=iterations, output=mask_translated)
     elif morph == 'dilate':
-        mask_translated = binary_dilation(mask_translated, iterations=iterations)
+        binary_dilation(mask_translated, iterations=iterations, output=mask_translated)
     elif morph is not None:
         raise ValueError(f"Invalid morphological operation '{morph}'. Options are 'erode' or 'dilate'.")
 
     return mask_translated
+
+# =====================================================================
+# @title Run surface extraction DASK (memory safe) vignette
+# =====================================================================
+#
+# # Calculate overlap depth based on your parameters: ceil(4 * sigma) * downscale_factor
+# # For sigma=4.0 and downscale=4, this is ceil(16) * 4 = 64 pixels
+# overlap_depth = int(np.ceil(8 * 4.0) * 4)
+#
+# # da_image = img_raw.isel(S=0, T=0, C=0).data
+#
+# # 2. Slice and explicitly chunk the Xarray object to convert it to Dask backend
+# # Replace 'Z', 'Y', 'X' with your actual spatial dimension names
+# # Axis 0 (Z/Frame) has 0 overlap; chunking it at 1 optimizes blockwise handling
+#
+# chunked_xr = img_raw.isel(S=0, T=0, C=0).chunk(
+#     {"Z": -1, "Y": 1024, "X": 1024}
+# )
+#
+# # 3. Extract the verified Dask array
+# da_image = chunked_xr.data
+#
+#
+# _BLOCK_SIZE = (2,8,8)
+#
+# output_mask = da_image.map_overlap(
+#     extract_surface,
+#     depth={0: 0, 1: overlap_depth, 2: overlap_depth},
+#     boundary="reflect",
+#     dtype=bool,
+#     chunks=da_image.chunks,
+#     # Kwargs passed directly to your original function
+#     downscale_factor=_BLOCK_SIZE,
+#     gaussian_sigma=4.0,
+#     clahe_clip=0.00,
+#     return_heightmap=False
+# )
+#
+#
+# # This triggers the Dask scheduler, runs the chunks in parallel, and returns a NumPy array
+# mask_numpy = output_mask.compute()
+#
+# print(type(mask_numpy))  # <class 'numpy.ndarray'>
+# print(mask_numpy.shape) # (133, 14309, 1377)
+# print(mask_numpy.dtype) # bool
+#
+#
+# top_surface_cropped = mask_numpy.copy()
+# del mask_numpy, output_mask
