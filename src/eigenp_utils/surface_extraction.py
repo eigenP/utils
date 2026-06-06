@@ -584,52 +584,55 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, 
         raise ValueError(f"Invalid morphological operation '{morph}'. Options are 'erode' or 'dilate'.")
 
     return mask_translated
+def dask_extract_surface():
+    """
+    =====================================================================
+    Run surface extraction DASK (memory safe) vignette
+    =====================================================================
 
-# =====================================================================
-# @title Run surface extraction DASK (memory safe) vignette
-# =====================================================================
-#
-# # Calculate overlap depth based on your parameters: ceil(4 * sigma) * downscale_factor
-# # For sigma=4.0 and downscale=4, this is ceil(16) * 4 = 64 pixels
-# overlap_depth = int(np.ceil(8 * 4.0) * 4)
-#
-# # da_image = img_raw.isel(S=0, T=0, C=0).data
-#
-# # 2. Slice and explicitly chunk the Xarray object to convert it to Dask backend
-# # Replace 'Z', 'Y', 'X' with your actual spatial dimension names
-# # Axis 0 (Z/Frame) has 0 overlap; chunking it at 1 optimizes blockwise handling
-#
-# chunked_xr = img_raw.isel(S=0, T=0, C=0).chunk(
-#     {"Z": -1, "Y": 1024, "X": 1024}
-# )
-#
-# # 3. Extract the verified Dask array
-# da_image = chunked_xr.data
-#
-#
-# _BLOCK_SIZE = (2,8,8)
-#
-# output_mask = da_image.map_overlap(
-#     extract_surface,
-#     depth={0: 0, 1: overlap_depth, 2: overlap_depth},
-#     boundary="reflect",
-#     dtype=bool,
-#     chunks=da_image.chunks,
-#     # Kwargs passed directly to your original function
-#     downscale_factor=_BLOCK_SIZE,
-#     gaussian_sigma=4.0,
-#     clahe_clip=0.00,
-#     return_heightmap=False
-# )
-#
-#
-# # This triggers the Dask scheduler, runs the chunks in parallel, and returns a NumPy array
-# mask_numpy = output_mask.compute()
-#
-# print(type(mask_numpy))  # <class 'numpy.ndarray'>
-# print(mask_numpy.shape) # (133, 14309, 1377)
-# print(mask_numpy.dtype) # bool
-#
-#
-# top_surface_cropped = mask_numpy.copy()
-# del mask_numpy, output_mask
+    # Calculate overlap depth based on your parameters: ceil(4 * sigma) * downscale_factor
+    # For sigma=4.0 and downscale=4, this is ceil(16) * 4 = 64 pixels
+    overlap_depth = int(np.ceil(8 * 4.0) * 4)
+
+    # da_image = img_raw.isel(S=0, T=0, C=0).data
+
+    # 2. Slice and explicitly chunk the Xarray object to convert it to Dask backend
+    # Replace 'Z', 'Y', 'X' with your actual spatial dimension names
+    # Axis 0 (Z/Frame) has 0 overlap; chunking it at 1 optimizes blockwise handling
+
+    chunked_xr = img_raw.isel(S=0, T=0, C=0).chunk(
+        {"Z": -1, "Y": 1024, "X": 1024}
+    )
+
+    # 3. Extract the verified Dask array
+    da_image = chunked_xr.data
+
+
+    _BLOCK_SIZE = (2,8,8)
+
+    output_mask = da_image.map_overlap(
+        extract_surface,
+        depth={0: 0, 1: overlap_depth, 2: overlap_depth},
+        boundary="reflect",
+        dtype=bool,
+        chunks=da_image.chunks,
+        # Kwargs passed directly to your original function
+        downscale_factor=_BLOCK_SIZE,
+        gaussian_sigma=4.0,
+        clahe_clip=0.00,
+        return_heightmap=False
+    )
+
+
+    # This triggers the Dask scheduler, runs the chunks in parallel, and returns a NumPy array
+    mask_numpy = output_mask.compute()
+
+    print(type(mask_numpy))  # <class 'numpy.ndarray'>
+    print(mask_numpy.shape) # (133, 14309, 1377)
+    print(mask_numpy.dtype) # bool
+
+
+    top_surface_cropped = mask_numpy.copy()
+    del mask_numpy, output_mask
+    """
+    pass
