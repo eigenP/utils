@@ -3,7 +3,7 @@ import pytest
 from eigenp_utils.image_and_labels_utils import (
     windowed_slice_projection,
     optimized_entire_labels_touching_mask,
-    sample_intensity_around_points_optimized,
+    sample_intensity_around_points_optimized, sample_intensity_along_surface_normals,
     voronoi_otsu_labeling
 )
 
@@ -119,3 +119,31 @@ def test_sample_intensity_xyz_warning():
     with pytest.warns(UserWarning, match=r"Points appear to be in \(X, Y, Z\) order"):
         res = sample_intensity_around_points_optimized(image_3d, points_xyz, diameter=3)
         assert np.isnan(res[0]) # Since 25 >= 5 (Z-dimension), it will be considered out of bounds
+
+def test_sample_intensity_along_surface_normals():
+    img = np.ones((10, 10, 10))
+    grid = np.zeros((5, 5, 3))
+    grid[:, :, 0] = 5
+    grid[:, :, 1] = np.arange(5).reshape(-1, 1)
+    grid[:, :, 2] = np.arange(5)
+    res = sample_intensity_along_surface_normals(img, grid, thickness=3, num_steps=3, pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 1.0})
+    assert res.shape == (5, 5, 3)
+
+def test_sample_intensity_around_points_optimized_pixel_sizes():
+    img = np.ones((10, 10, 10))
+    points = [[5, 5, 5]]
+    res = sample_intensity_around_points_optimized(img, points, diameter=5.0, pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 1.0})
+    assert np.isclose(res[0], 1.0)
+
+def test_windowed_slice_projection_pixel_sizes():
+    img = np.ones((10, 10, 10))
+    res = windowed_slice_projection(img, window_size=5.0, pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 1.0})
+    assert res.shape == img.shape
+
+def test_optimized_entire_labels_touching_mask_pixel_sizes():
+    labels = np.zeros((10, 10), dtype=int)
+    labels[2:4, 2:4] = 1
+    mask = np.zeros((10, 10), dtype=int)
+    mask[6:8, 6:8] = 1
+    res = optimized_entire_labels_touching_mask(labels, mask, distance=3.0, pixel_sizes={'Y': 1.0, 'X': 1.0})
+    assert res.shape == labels.shape
