@@ -93,6 +93,9 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
     else:
         window_size = int(window_size)
 
+    if window_size < 1:
+        window_size = 1
+
     if window_size % 2 == 0:
         window_size += 1
         print(f'Using window_size: {window_size} (need odd number)')
@@ -146,16 +149,16 @@ def optimized_entire_labels_touching_mask(labels_data, mask, distance=10, pixel_
     # Expand labels
     if pixel_sizes is not None:
         dim_keys = ['Z', 'Y', 'X'] if labels_data.ndim == 3 else ['Y', 'X']
-        spacing = [pixel_sizes.get(dim, 1.0) for dim in dim_keys]
-        # expand_labels spacing only supported in very recent skimage versions
-        # fallback by passing distance scaled by spacing
-        # For simplicity, scaling distance by smallest pixel size to match physical intent conservatively
-        min_spacing = min(spacing)
-        pixel_distance = int(round(distance / min_spacing))
+        spacing = tuple(pixel_sizes.get(dim, 1.0) for dim in dim_keys)
+        try:
+            dilated_labels_data = expand_labels(labels_data, distance=distance, spacing=spacing)
+        except TypeError:
+            raise NotImplementedError(
+                "Anisotropic expansion requires scikit-image >= 0.21.0 for the `spacing` parameter. "
+                "Uniform pixel fallback causes severe structural distortion."
+            )
     else:
-        pixel_distance = int(distance)
-
-    dilated_labels_data = expand_labels(labels_data, distance=pixel_distance)
+        dilated_labels_data = expand_labels(labels_data, distance=int(distance))
 
     # Find all labels that touch the dilated mask
     touching_labels_mask = np.isin(dilated_labels_data, labels_data) & (mask > 0)
@@ -170,7 +173,7 @@ def optimized_entire_labels_touching_mask(labels_data, mask, distance=10, pixel_
     return optimized_entire_touching_labels
 
 
-def sample_intensity_around_points_optimized(image_3d, points_3d, diameter=5, pixel_sizes=None):
+def sample_intensity_around_points(image_3d, points_3d, diameter=5, pixel_sizes=None):
     """
     Sample intensities around given points in a 3D image using an optimized mean filter.
     Assumes `image_3d` and `points_3d` are provided in (Z, Y, X) order.
@@ -205,24 +208,25 @@ def sample_intensity_around_points_optimized(image_3d, points_3d, diameter=5, pi
                 stacklevel=2
             )
 
-    # Compute filter dimensions in pixel units
+    # Compute filter dimensions in pixel units cleanly
     if pixel_sizes is not None:
         dim_keys = ['Z', 'Y', 'X'] if image_3d.ndim == 3 else ['Y', 'X']
-        # Convert physical diameter to pixel diameter for each axis
-        pixel_diameters = [diameter / pixel_sizes.get(dim, 1.0) for dim in dim_keys]
+        spacing = [pixel_sizes.get(dim, 1.0) for dim in dim_keys]
     else:
-        pixel_diameters = [diameter] * image_3d.ndim
+        spacing = [1.0] * image_3d.ndim
 
-    # Ensure each diameter is an integer and odd
     filter_size = []
-    for d in pixel_diameters:
-        radius = int(d) // 2
-        filter_size.append(2 * radius + 1)
+    for s in spacing:
+        # Calculate radius in pixels from physical radius (diameter / 2)
+        physical_radius = diameter / 2.0
+        pixel_radius = int(round(physical_radius / s))
+        # Window size must be odd to center perfectly on the coordinate point
+        filter_size.append(2 * pixel_radius + 1)
 
     filter_size = tuple(filter_size)
 
-    # Apply mean filtering using uniform_filter, which computes the mean over a cube
-    filtered_image = uniform_filter(image_3d, size=filter_size, mode='constant', cval=0.0)
+    # Use 'reflect' or 'nearest' to ensure boundary points are not diluted by zero-padding
+    filtered_image = uniform_filter(image_3d, size=filter_size, mode='reflect')
 
     # Vectorize point sampling:
     # Round points and ensure they are within valid image bounds

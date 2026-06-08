@@ -3,7 +3,7 @@ import pytest
 from eigenp_utils.image_and_labels_utils import (
     voronoi_otsu_labeling,
     windowed_slice_projection,
-    sample_intensity_around_points_optimized
+    sample_intensity_around_points
 )
 from scipy.ndimage import shift
 
@@ -115,7 +115,7 @@ def test_sample_intensity_constant_background():
     np.random.seed(42)
     points = np.random.rand(50, 3) * 14.0 + 3.0
 
-    sampled = sample_intensity_around_points_optimized(img, points, diameter=5)
+    sampled = sample_intensity_around_points(img, points, diameter=5)
 
     assert np.allclose(sampled, np.pi, atol=1e-14), "Sampled values deviate from the constant background"
 
@@ -132,7 +132,7 @@ def test_sample_intensity_linear_scaling():
     # Avoid edge points that include padding zeroes
     points = np.random.rand(10, 3) * 16.0 + 2.0
 
-    sampled_base = np.array(sample_intensity_around_points_optimized(img, points, diameter=3))
-    sampled_scaled = np.array(sample_intensity_around_points_optimized(img * 10.0, points, diameter=3))
+    sampled_base = np.array(sample_intensity_around_points(img, points, diameter=3))
+    sampled_scaled = np.array(sample_intensity_around_points(img * 10.0, points, diameter=3))
 
     assert np.allclose(sampled_scaled, sampled_base * 10.0, atol=1e-12), "Local intensity sampling is not linearly scalable"
