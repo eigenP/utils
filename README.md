@@ -6,7 +6,7 @@
 
 ### Image Analysis
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
-* **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`.
+* **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, precise upscaling via `RegularGridInterpolator`, and memory-optimized in-place mask operations.
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
 * **Intensity Rescaling**: Tools for contrast enhancement (including CLAHE), slice-by-slice brightness adjustment (`adjust_brightness_per_slice`), Z-axis intensity decay correction (`correct_z_intensity_decay`), and pure-NumPy/SciPy BaSiCPy shading correction (`fit_basic_shading`, `apply_basic_shading`).
 * **Segmentation**: Fast 2D/3D spot labeling using `voronoi_otsu_labeling`.
@@ -14,11 +14,13 @@
 ### Plotting & Visualization
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers) with rotatable crosshairs, interactive point cloud visualization (`show_iso_scatter`), and 3D point annotation (`TNIAAnnotatorWidget`). Includes a one-click UI parameter copy feature for reproducibility.
 * **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker`, and threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`.
+* **Interactive 3D Scatter Plots**: Utilities to generate interactive 3D scatter plots using Plotly (`plotly_scatter_3d`), with direct support for AnnData embeddings (`plotly_scatter_3d_from_adata_obsm`).
 
 ### Single-Cell Analysis
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
 * **Dataset Integration (kkNN)**: Adaptive curvature-based k-nearest neighbors mapping (`kknn_ingest`) to dynamically project metadata and embeddings across references based on local manifold geometry.
 * **Label Classification & Smoothing**: Distance-weighted majority voting or averaging (`kknn_classifier`) to smooth categorical or continuous cell metadata using the kkNN backbone.
+* **Lineage Coupling**: Compute exact co-occurrence expectations and z-scores analytically using a vectorized log-gamma formulation of the hypergeometric distribution (`calculate_lineage_coupling`).
 * **Gene Archetypes**: Cluster genes by expression patterns to find dominant archetypes using hierarchical Ward clustering and SVD (`find_expression_archetypes`).
 * **Multiscale Clustering**: Run multi-resolution Leiden clustering and track lineage hierarchies across scales (`multiscale_coarsening`, `plot_clustering_tree`).
 * **Feature Correlation**: Find highly correlated features with respect to targets, optionally utilizing graph-based diffusion to smooth over the cell-cell graph (`find_correlated_features`).
@@ -33,6 +35,7 @@
 ### Core Utilities
 * **Spline Utilities**: Calculate tangent vectors and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
+* **Task Calendar Scheduler**: Generate interactive, Gantt-style timeline schedules for linked events using Plotly, fully compatible with Marimo notebooks (`task_calendar_scheduler.py`).
 * **I/O Utilities**: Functions to streamline file and data reading.
 
 ## Installation
