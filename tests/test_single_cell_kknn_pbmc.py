@@ -83,16 +83,11 @@ def old_compute_kknn_neighbors(
 
 
 def test_compute_kknn_neighbors_pbmc_concordance():
-    # Use the pbmc3k dataset
-    adata = sc.datasets.pbmc3k()
-    sc.pp.filter_cells(adata, min_genes=200)
-    sc.pp.filter_genes(adata, min_cells=3)
-    sc.pp.normalize_total(adata, target_sum=1e4)
-    sc.pp.log1p(adata)
-    sc.pp.highly_variable_genes(adata, min_mean=0.0125, max_mean=3, min_disp=0.5)
-    adata = adata[:, adata.var.highly_variable]
-    sc.pp.scale(adata, max_value=10)
-    sc.tl.pca(adata, svd_solver='arpack')
+    # Use the local pbmc68k_reduced dataset instead of downloading pbmc3k
+    adata = sc.datasets.pbmc68k_reduced()
+
+    # Dataset is already preprocessed (normalized, scaled, PCA computed)
+    # Just need to make sure we have enough cells/genes for the test
 
     # Split into ref and query (70/30)
     rng = np.random.default_rng(42)
