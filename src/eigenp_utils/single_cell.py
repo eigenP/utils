@@ -2366,6 +2366,65 @@ def load_pacmap_model(filepath: str) -> Any:
     print(f"PaCMAP model loaded from {filepath}")
     return model
 
+def get_pacmap_model(adata: sc.AnnData) -> Any:
+    """
+    Reconstructs the PaCMAP model from the parameters stored in `adata.uns`.
+
+    Parameters
+    ----------
+    adata
+        Annotated data matrix containing the saved PaCMAP parameters.
+
+    Returns
+    -------
+    embedder
+        The reconstructed `pacmap.PaCMAP` object, ready to be used for `.transform()`.
+    """
+    import pacmap
+
+    if "pacmap_params" not in adata.uns:
+        raise KeyError("Saved PaCMAP parameters not found in `adata.uns['pacmap_params']`.")
+
+    params = adata.uns["pacmap_params"]
+    # Convert list back to tuple if necessary
+    if "num_iters" in params and isinstance(params["num_iters"], list):
+        params["num_iters"] = tuple(params["num_iters"])
+
+    # Re-initialize PaCMAP instance
+    embedder = pacmap.PaCMAP(**params)
+
+    # Restore arrays
+    if "pacmap_arrays" in adata.uns:
+        for attr, val in adata.uns["pacmap_arrays"].items():
+            # If the scalar bool was saved as a 0-d numpy array, unpack it
+            if attr == "pca_solution" and isinstance(val, np.ndarray) and val.ndim == 0:
+                val = bool(val.item())
+            # For 0-d numpy floats (xmin, xmax) extract the value so type checks pass
+            elif isinstance(val, np.ndarray) and val.ndim == 0:
+                val = val.item()
+            setattr(embedder, attr, val)
+
+    # Reconstruct PCA transformer if it exists
+    if "pacmap_pca" in adata.uns:
+        from sklearn.decomposition import PCA
+        pca_state = adata.uns["pacmap_pca"]
+
+        # Determine n_components from the components matrix
+        if "components_" in pca_state:
+            n_comp = pca_state["components_"].shape[0]
+        else:
+            n_comp = params.get("n_components", 2)
+
+        pca = PCA(n_components=n_comp)
+        for attr, val in pca_state.items():
+            setattr(pca, attr, val)
+        embedder.tsvd_transformer = pca
+
+    # Initialize missing attributes expected by `transform()`
+    if not hasattr(embedder, "tree"):
+        embedder.tree = None
+
+    return embedder
 
 def tl_pacmap(
     adata: sc.AnnData,
@@ -2376,6 +2435,7 @@ def tl_pacmap(
     use_rep: str = "X_pca",
     random_state: int = 42,
     init: Optional[Union[str, np.ndarray]] = None,
+    save_model: bool = False,
     **kwargs,
 ) -> None:
     """
@@ -2406,6 +2466,9 @@ def tl_pacmap(
         - 'random': Random initialization.
         - An `obsm` key (e.g., 'X_pca').
         - A numpy array of initial embedding positions.
+    save_model
+        Whether to save the fitted PaCMAP parameters and state natively in `adata.uns`
+        so the model can be reconstructed without pickling.
     **kwargs
         Additional arguments passed to pacmap.PaCMAP.
 
@@ -2537,6 +2600,54 @@ def tl_pacmap(
 
     adata.obsm[key_added] = X_embedded
     print(f"PaCMAP embedding finished. Result stored in `adata.obsm['{key_added}']`.")
+    
+    # 5. Optionally save the model parameters to reconstruct it without pickling
+    if save_model:
+        # Save simple parameters
+        params = embedder.get_params()
+        state_dict = {}
+        for key, val in params.items():
+            if key in ["pair_FP", "pair_MN", "pair_neighbors"]:
+                continue
+            if key == "num_iters" and isinstance(val, tuple):
+                val = list(val)
+            if type(val) in [int, float, str, bool, list]:
+                state_dict[key] = val
+
+        adata.uns["pacmap_params"] = state_dict
+
+        # Save arrays and state needed for `.transform()`
+        adata.uns["pacmap_arrays"] = {}
+        array_attrs = ["embedding_", "xmin", "xmax", "xmean"]
+        for attr in array_attrs:
+            if hasattr(embedder, attr):
+                adata.uns["pacmap_arrays"][attr] = np.asarray(getattr(embedder, attr))
+
+        # Save PCA transformer state if it exists
+        if hasattr(embedder, "tsvd_transformer") and embedder.tsvd_transformer is not None:
+            pca = embedder.tsvd_transformer
+            pca_state = {}
+            if hasattr(pca, "n_features_in_"):
+                pca_state["n_features_in_"] = pca.n_features_in_
+            if hasattr(pca, "components_"):
+                pca_state["components_"] = pca.components_
+            if hasattr(pca, "mean_"):
+                pca_state["mean_"] = pca.mean_
+            if hasattr(pca, "explained_variance_"):
+                pca_state["explained_variance_"] = pca.explained_variance_
+            adata.uns["pacmap_pca"] = pca_state
+
+        if hasattr(embedder, "pca_solution"):
+            adata.uns["pacmap_arrays"]["pca_solution"] = np.asarray(embedder.pca_solution)
+
+        print("PaCMAP model parameters saved in `adata.uns`.")
+    else:
+        warnings.warn(
+            "The PaCMAP model was not saved. If you plan to project new data later using `.transform()`, "
+            "set `save_model=True` to persist the model state inside `adata.uns`."
+        )
+
+    
 
 
 # ------------------------- Lineage -------------------------
