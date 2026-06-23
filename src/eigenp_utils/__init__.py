@@ -38,12 +38,14 @@ try:
     from .image_and_labels_utils import (
         windowed_slice_projection,
         optimized_entire_labels_touching_mask,
-        sample_intensity_around_points_optimized
+        sample_intensity_around_points,
+        sample_intensity_along_surface_normals
     )
     __all__.extend([
         "windowed_slice_projection",
         "optimized_entire_labels_touching_mask",
-        "sample_intensity_around_points_optimized"
+        "sample_intensity_around_points",
+        "sample_intensity_along_surface_normals"
     ])
 except ImportError:
     pass
