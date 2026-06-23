@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers
+from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers, robust_standardize
 from statannotations.Annotator import Annotator
 
 def test_add_stat_annotations():
@@ -185,3 +185,62 @@ def test_remove_outliers_mahalanobis_errors():
     arr_1d = np.array([1, 2, 3])
     with pytest.raises(ValueError, match="requires at least 2 dimensions"):
         remove_outliers(arr_1d, method='mahalanobis')
+
+def test_robust_standardize_normal():
+    # Verify asymptotic normality scaling on a typical dataset without zeroes
+    np.random.seed(42)
+    # MAD valid path
+    data = np.random.normal(5, 2, 1000)
+    z = robust_standardize(data)
+    # Center should be near 0, standard deviation near 1 due to 1.4826 scale
+    assert np.abs(np.mean(z)) < 0.1
+    assert np.abs(np.std(z) - 1.0) < 0.1
+
+def test_robust_standardize_zero_inflated_mad_collapse():
+    # Verify MeanAD fallback when MAD collapses to 0
+    # Create dataset with >50% ties so median=0 and MAD=0
+    data = np.array([0, 0, 0, 0, 0, 0, 10, -10, 20, -20])
+
+    # Check that MAD is indeed 0
+    assert np.median(np.abs(data - np.median(data))) == 0
+
+    # robust_standardize should fallback to MeanAD (centered on Mean)
+    z = robust_standardize(data)
+
+    # Expected behavior with MeanAD
+    # Mean = 0, MeanAD = np.mean(np.abs(data - 0)) = 60 / 10 = 6
+    # Scale = 6 * 1.2533 = 7.5198
+    # z for 10 should be 10 / 7.5198 = 1.3298
+    np.testing.assert_allclose(z[6], 10 / (6 * 1.2533))
+
+def test_robust_standardize_meanad_collapse():
+    # Verify standard deviation fallback when both MAD and MeanAD collapse to 0
+    # E.g. all values are identical, except for perhaps a tiny floating point difference?
+    # Wait, if all values are identical, then STD is also 0.
+    # The hierarchy: scale = std, but std=0 means scale=1.0 via fallback.
+    data = np.array([5, 5, 5, 5, 5])
+    z = robust_standardize(data)
+
+    # Center is 5, scale falls back to 1.0 since all dispersions are 0
+    np.testing.assert_allclose(z, np.zeros_like(z))
+
+def test_robust_standardize_multi_dimensional():
+    # Verify axis parameter handles multi-dimensional arrays correctly
+    # One dimension has valid MAD, the other has collapsed MAD
+    # arr shape: (2, 5) -> axis=1 means calc along rows
+    arr = np.array([
+        [1, 2, 3, 4, 5],       # Valid MAD (median=3, MAD=1)
+        [0, 0, 0, 0, 100]      # Collapsed MAD, valid MeanAD (mean=20, MeanAD=32)
+    ])
+
+    z = robust_standardize(arr, axis=1)
+
+    assert z.shape == (2, 5)
+
+    # Row 0: Center = 3, Scale = 1 * 1.4826 = 1.4826
+    # Element 4 (val=5) -> (5 - 3) / 1.4826 = 2 / 1.4826
+    np.testing.assert_allclose(z[0, 4], 2 / 1.4826)
+
+    # Row 1: Center = 20, Scale = 32 * 1.2533 = 40.1056
+    # Element 4 (val=100) -> (100 - 20) / 40.1056 = 80 / 40.1056
+    np.testing.assert_allclose(z[1, 4], 80 / (32 * 1.2533))
