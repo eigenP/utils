@@ -3428,11 +3428,6 @@ def score_celltypes(
 
     final_scores = {}
 
-    def robust_scale(x):
-        med = np.nanmedian(x)
-        mad = np.nanmedian(np.abs(x - med))
-        return (x - med) / (mad + 1e-8)
-
     for ct in cell_type_markers_dict.keys():
         pos_h = ct_to_pos_hash[ct]
         if pos_h is None:
@@ -3442,7 +3437,8 @@ def score_celltypes(
         x_pos = raw_pos_scores[pos_h]
 
         if score_method in ("scanpy", "net_scanpy"):
-            z_pos = robust_scale(x_pos)
+            from eigenp_utils.stats import robust_standardize
+            z_pos = robust_standardize(x_pos)
         else:
             z_pos = x_pos  # Already 0 to 1 bounded
 
@@ -3452,7 +3448,8 @@ def score_celltypes(
         if is_net_method and neg_h is not None:
             x_neg = raw_neg_scores[neg_h]
             if score_method == "net_scanpy":
-                z_neg = robust_scale(x_neg)
+                from eigenp_utils.stats import robust_standardize
+                z_neg = robust_standardize(x_neg)
                 final_scores[ct] = z_pos - z_neg
             else:
                 z_neg = x_neg  # Already 0 to 1 bounded
