@@ -185,3 +185,63 @@ def test_remove_outliers_mahalanobis_errors():
     arr_1d = np.array([1, 2, 3])
     with pytest.raises(ValueError, match="requires at least 2 dimensions"):
         remove_outliers(arr_1d, method='mahalanobis')
+
+def test_robust_standardize_normal():
+    from eigenp_utils.stats import robust_standardize
+    x = np.array([1, 2, 3, 4, 5])
+    # median = 3, MAD = 1
+    # scale = 1 * 1.4826 = 1.4826
+    # z = (x - 3) / 1.4826
+    expected = (x - 3) / 1.4826
+    z = robust_standardize(x)
+    np.testing.assert_allclose(z, expected)
+
+def test_robust_standardize_zero_inflated():
+    from eigenp_utils.stats import robust_standardize
+    x = np.array([0, 0, 0, 0, 10])
+    # median = 0, MAD = 0 -> fallback to Mean & MeanAD
+    # mean = 2, MeanAD = 3.2
+    # scale = 3.2 * 1.2533 = 4.01056
+    # z = (x - 2) / 4.01056
+    expected = (x - 2) / 4.01056
+    z = robust_standardize(x)
+    np.testing.assert_allclose(z, expected)
+
+def test_robust_standardize_all_zeros():
+    from eigenp_utils.stats import robust_standardize
+    x = np.array([0, 0, 0, 0, 0])
+    # Mean and MAD and MeanAD and STD are all 0 -> returns all zeros
+    z = robust_standardize(x)
+    np.testing.assert_allclose(z, np.zeros_like(x))
+
+def test_robust_standardize_axis():
+    from eigenp_utils.stats import robust_standardize
+    x = np.array([
+        [1, 2, 3, 4, 5],
+        [0, 0, 0, 0, 10]
+    ])
+    z = robust_standardize(x, axis=1)
+
+    expected_row0 = (x[0] - 3) / 1.4826
+    expected_row1 = (x[1] - 2) / 4.01056
+
+    np.testing.assert_allclose(z[0], expected_row0)
+    np.testing.assert_allclose(z[1], expected_row1)
+
+def test_robust_standardize_nans():
+    from eigenp_utils.stats import robust_standardize
+    x = np.array([1, 2, np.nan, 4, 5])
+    # nanmedian = 3, nanMAD = 1.5
+    # scale = 1.5 * 1.4826 = 2.2239
+    z = robust_standardize(x)
+
+    assert np.isnan(z[2])
+
+    expected = (np.array([1, 2, 4, 5]) - 3) / 2.2239
+    np.testing.assert_allclose(z[~np.isnan(z)], expected)
+
+def test_robust_standardize_scalar():
+    from eigenp_utils.stats import robust_standardize
+    z = robust_standardize(5)
+    assert isinstance(z, float)
+    assert z == 0.0

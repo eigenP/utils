@@ -1,7 +1,68 @@
 import numpy as np
+import warnings
 import pandas as pd
 from statannotations.Annotator import Annotator
 from scipy import stats
+
+def robust_standardize(x, axis=None):
+    """
+    Robustly standardizes an array using a hierarchical dispersion fallback.
+
+    Centers the data and scales it to approximate unit variance using:
+    1. Median and Median Absolute Deviation (MAD), scaled by 1.4826.
+    2. If MAD collapses to 0, falls back to Mean and Mean Absolute Deviation (MeanAD),
+       scaled by 1.2533.
+    3. If MeanAD also collapses, falls back to Standard Deviation.
+
+    If all dispersion metrics are zero (e.g. constant array), the array is zeroed out
+    to avoid unprincipled epsilon divisions.
+
+    Parameters
+    ----------
+    x : array_like
+        The input data.
+    axis : int or tuple of ints, optional
+        Axis or axes along which the standardization is computed. The default is None.
+
+    Returns
+    -------
+    z : ndarray or scalar
+        The standardized data.
+    """
+    x = np.asarray(x, dtype=float)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        med = np.nanmedian(x, axis=axis, keepdims=True)
+        mad = np.nanmedian(np.abs(x - med), axis=axis, keepdims=True)
+
+        mean = np.nanmean(x, axis=axis, keepdims=True)
+        mean_ad = np.nanmean(np.abs(x - mean), axis=axis, keepdims=True)
+
+        std = np.nanstd(x, axis=axis, keepdims=True)
+
+        mad_ok = np.nan_to_num(mad) > 0
+        mean_ad_ok = (~mad_ok) & (np.nan_to_num(mean_ad) > 0)
+
+        loc = np.where(mad_ok, med, mean)
+        scale = np.where(mad_ok, mad * 1.4826,
+                         np.where(mean_ad_ok, mean_ad * 1.2533, std))
+
+        scale_ok = np.nan_to_num(scale) > 0
+        safe_scale = np.where(scale_ok, scale, 1.0)
+
+        z = np.where(scale_ok, (x - loc) / safe_scale, 0.0)
+
+        if x.ndim == 0:
+            return float(z)
+
+        z = np.where(np.isnan(x), np.nan, z)
+
+        # Keepdims expands back to original shape, squeeze if necessary?
+        # Actually `keepdims=True` ensures `loc` and `safe_scale` can broadcast with `x`.
+        # `z` naturally takes the shape of `x`.
+
+    return z
 
 def add_stat_annotations(
     ax,
@@ -281,13 +342,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
         The filtered data.
     """
     def _robust_zscore(x):
-        median = np.nanmedian(x)
-        mad = np.nanmedian(np.abs(x - median))
-        if mad == 0:
-            return np.zeros_like(x)
-        # 0.6745 is the 75th percentile of the standard normal distribution
-        # making the robust z-score comparable in magnitude to the standard z-score
-        return 0.6745 * (x - median) / mad
+        return robust_standardize(x)
 
     if isinstance(data, pd.DataFrame):
         df_out = data.copy()
