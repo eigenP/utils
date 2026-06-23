@@ -2,8 +2,46 @@ import pytest
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers
+from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers, robust_standardize
 from statannotations.Annotator import Annotator
+
+def test_robust_standardize():
+    np.random.seed(42)
+
+    # 1. Test normal case (Median/MAD)
+    data = np.random.normal(5, 2, 100)
+    z = robust_standardize(data)
+    assert np.isclose(np.median(z), 0, atol=0.1)
+    # The scaling makes the MAD approximately 1 / 1.4826, so standard deviation should be close to 1
+    # Note: For small N like 100, the sample standard deviation can vary.
+    assert np.isclose(np.std(z), 1, atol=0.3)
+
+    # 2. Test zero MAD, non-zero MeanAD case
+    # Create an array where >50% values are identical (so median is this value and MAD is 0)
+    data_zero_mad = np.array([10]*60 + [0]*20 + [20]*20)
+    z_zero_mad = robust_standardize(data_zero_mad)
+    assert not np.all(z_zero_mad == 0) # Should not be all zeros
+    assert not np.any(np.isnan(z_zero_mad)) # Should not contain NaNs
+
+    # 3. Test zero MeanAD, non-zero SD case (edge case)
+    # This is mathematically impossible since if MeanAD is 0, SD is also 0,
+    # but we can test the constant array case (zero variance)
+    data_constant = np.array([5]*100)
+    z_constant = robust_standardize(data_constant)
+    assert np.all(z_constant == 0)
+
+    # 4. Test NaN handling
+    data_with_nan = np.array([1, 2, np.nan, 4, 5])
+    z_nan = robust_standardize(data_with_nan)
+    assert np.isnan(z_nan[2])
+    assert not np.any(np.isnan(z_nan[~np.isnan(data_with_nan)]))
+
+    # 5. Test multi-dimensional with axis
+    data_2d = np.column_stack([np.random.normal(0, 1, 100), np.array([5]*100)])
+    z_2d = robust_standardize(data_2d, axis=0)
+    assert z_2d.shape == (100, 2)
+    assert np.isclose(np.std(z_2d[:, 0]), 1, atol=0.2)
+    assert np.all(z_2d[:, 1] == 0)
 
 def test_add_stat_annotations():
     # Setup simple data
