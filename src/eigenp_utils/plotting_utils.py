@@ -17,6 +17,7 @@ import pandas as pd
 import itertools
 import math
 import datetime
+from .stats import remove_outliers
 
 # --- Initialization: Load Font and Style ---
 ROOT_DIR = Path(__file__).parent
@@ -228,7 +229,11 @@ def raincloud_plot(data,
                    linewidth_boxplot=8,
                    offset_scatter=0.20,
                    width_violin=0.5,
-                   raster_threshold=1e3):
+                   raster_threshold=1e3,
+                   outlier_method=None,
+                   outlier_multiplier=3.0,
+                   highlight_mask=None,
+                   highlight_color='lime'):
     """
     Creates a raincloud plot (half-violin + boxplot + jittered scatter).
 
@@ -267,6 +272,17 @@ def raincloud_plot(data,
         If the total number of scatter points across all groups exceeds this threshold,
         the jittered scatter points will be rasterized. This is useful for keeping SVG
         file sizes small when there are many points.
+    outlier_method : str, optional
+        Method to use for identifying outliers to exclude from the violin KDE estimation
+        (e.g., 'mad', 'iqr', 'zscore', 'robust_zscore'). If set, outliers are excluded
+        from the violin plot but still shown in the scatter plot.
+    outlier_multiplier : float, default 3.0
+        The threshold multiplier for the outlier method (e.g., number of MADs or IQRs).
+    highlight_mask : array-like or pd.Series, optional
+        A boolean mask matching the shape/index of the input data. Scatter points where
+        this mask is True will be colored with `highlight_color`.
+    highlight_color : str, default 'lime'
+        The color to use for highlighted scatter points.
 
     Returns
     -------
@@ -415,11 +431,31 @@ def raincloud_plot(data,
                         col = next(itertools.islice(pal_cycle, i_cat, i_cat + 1))
 
                 vals = group_data[val_col].values
+                if highlight_mask is not None:
+                    if isinstance(highlight_mask, pd.Series):
+                        # Extract by index
+                        mask_subset = highlight_mask.loc[group_data.index].values
+                    else:
+                        # Assume array-like of same length as data, we need the indices
+                        if isinstance(data, pd.DataFrame):
+                            # group_data is a sub-dataframe, we can get its integer positions from the original data
+                            # But group_data has the original index if it's from df_clean
+                            # Wait, df_clean dropped NaNs. Let's just index the mask by the original index
+                            try:
+                                mask_series = pd.Series(highlight_mask, index=data.index)
+                                mask_subset = mask_series.loc[group_data.index].values
+                            except Exception:
+                                mask_subset = None
+                        else:
+                            mask_subset = None
+                else:
+                    mask_subset = None
 
                 if len(vals) == 0: continue
 
                 plot_items.append({
                     'values': vals,
+                    'mask': mask_subset,
                     'position': pos,
                     'width': slot_width,
                     'color': col,
@@ -506,8 +542,11 @@ def raincloud_plot(data,
             colors = list(itertools.islice(itertools.cycle(palette), n_groups))
 
         for i, (label, vals) in enumerate(raw_plot_data):
+            # For legacy inputs, we don't try to map the mask cleanly right now unless it's perfectly matched,
+            # which is hard since NaNs are dropped per column.
             plot_items.append({
                 'values': vals,
+                'mask': None,
                 'position': float(i),
                 'width': width_violin,
                 'color': colors[i],
@@ -536,7 +575,16 @@ def raincloud_plot(data,
         width = item['width']
 
         # A. Violin
-        parts = ax.violinplot(vals, positions=[pos], widths=width,
+        # Filter outliers for the KDE estimation if requested
+        if outlier_method is not None:
+            violin_vals = remove_outliers(vals, method=outlier_method, threshold=outlier_multiplier)
+            if len(violin_vals) == 0:
+                # Fallback if everything is filtered (should be rare)
+                violin_vals = vals
+        else:
+            violin_vals = vals
+
+        parts = ax.violinplot(violin_vals, positions=[pos], widths=width,
                               showextrema=False, vert=vert)
 
         for pc in parts["bodies"]:
@@ -571,9 +619,21 @@ def raincloud_plot(data,
             x_scatter = vals
             y_scatter = pos - offset + jitter_vals
 
-        ax.scatter(x_scatter, y_scatter, color=col, alpha=alpha_scatter,
-                   edgecolor="black", linewidth=linewidth_scatter, s=size_scatter,
-                   rasterized=rasterize_scatter)
+        mask = item.get('mask', None)
+        if mask is not None and len(mask) == len(vals):
+            mask = np.asarray(mask, dtype=bool)
+            # Plot non-highlighted points
+            ax.scatter(x_scatter[~mask], y_scatter[~mask], color=col, alpha=alpha_scatter,
+                       edgecolor="black", linewidth=linewidth_scatter, s=size_scatter,
+                       rasterized=rasterize_scatter)
+            # Plot highlighted points on top
+            ax.scatter(x_scatter[mask], y_scatter[mask], color=highlight_color, alpha=alpha_scatter,
+                       edgecolor="black", linewidth=linewidth_scatter, s=size_scatter,
+                       rasterized=rasterize_scatter, zorder=3)
+        else:
+            ax.scatter(x_scatter, y_scatter, color=col, alpha=alpha_scatter,
+                       edgecolor="black", linewidth=linewidth_scatter, s=size_scatter,
+                       rasterized=rasterize_scatter)
 
         # C. Boxplot Elements (Median + IQR)
         q1, med, q3 = np.percentile(vals, [25, 50, 75])
