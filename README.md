@@ -10,10 +10,12 @@
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
 * **Intensity Rescaling**: Tools for contrast enhancement (including CLAHE), slice-by-slice brightness adjustment (`adjust_brightness_per_slice`), Z-axis intensity decay correction (`correct_z_intensity_decay`), and pure-NumPy/SciPy BaSiCPy shading correction (`fit_basic_shading`, `apply_basic_shading`).
 * **Segmentation**: Fast 2D/3D spot labeling using `voronoi_otsu_labeling`.
+* **Anisotropic Pixel Support**: Core spatial processing and morphology functions natively handle physical pixel sizes to accurately support anisotropic microscopy data without structural distortion.
 
 ### Plotting & Visualization
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers) with rotatable crosshairs, interactive point cloud visualization (`show_iso_scatter`), and 3D point annotation (`TNIAAnnotatorWidget`). Includes a one-click UI parameter copy feature for reproducibility.
-* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging). Custom Matplotlib colormap generation via `colormap_maker`, and threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`.
+* **Interactive 3D Scatter Plots**: Utilities for generating interactive 3D scatter plots with Plotly, including native support for AnnData embeddings (`plotly_scatter_3d`, `plotly_scatter_3d_from_adata_obsm`).
+* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), pre-KDE outlier filtering, and data subset highlighting. Custom Matplotlib colormap generation via `colormap_maker`, and threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`.
 
 ### Single-Cell Analysis
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
@@ -34,6 +36,9 @@
 * **Spline Utilities**: Calculate tangent vectors and project points onto planes for arbitrary splines and discrete curves (`spline_utils.py`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
 * **I/O Utilities**: Functions to streamline file and data reading.
+
+### Examples
+* **Notebooks**: The `notebooks/` directory contains Marimo notebooks demonstrating package functionalities, such as using statistical utilities with classic datasets.
 
 ## Installation
 
