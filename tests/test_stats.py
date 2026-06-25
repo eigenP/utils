@@ -2,8 +2,40 @@ import pytest
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers
+from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, summary_stats, remove_outliers, robust_standardize
 from statannotations.Annotator import Annotator
+
+def test_robust_standardize():
+    # Test fallback 1: MAD is 0
+    x = np.array([1, 1, 1, 1, 10])
+    z = robust_standardize(x)
+    # Median is 1, MAD is 0.
+    # Mean is 14/5 = 2.8, MeanAD is mean(|x - 2.8|) = (1.8*4 + 7.2) / 5 = 14.4 / 5 = 2.88
+    # loc = 2.8, scale = 2.88 * 1.2533 ~ 3.6095
+    # z for 10 = (10 - 2.8) / 3.6095 ~ 1.99
+    assert z[-1] > 1.9
+    assert np.all(z[:-1] < 0)
+    assert not np.isnan(z).any()
+
+    # Test fallback 2: all identical values, MeanAD is 0
+    x2 = np.array([5, 5, 5, 5, 5])
+    z2 = robust_standardize(x2)
+    # Should avoid division by zero and return all zeros
+    assert np.allclose(z2, 0)
+
+    # Test multidimensional and axis parameter
+    x3 = np.array([[1, 2, 3], [1, 1, 10], [1, 1, 1]])
+    z3 = robust_standardize(x3, axis=0)
+    assert z3.shape == (3, 3)
+    assert not np.isnan(z3).any()
+
+    # Test standard case where MAD > 0
+    x4 = np.array([1, 2, 3, 4, 5])
+    z4 = robust_standardize(x4)
+    # Median = 3, MAD = 1
+    # loc = 3, scale = 1.4826
+    np.testing.assert_allclose(z4, (x4 - 3) / 1.4826)
+
 
 def test_add_stat_annotations():
     # Setup simple data
