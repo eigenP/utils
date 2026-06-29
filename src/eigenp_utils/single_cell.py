@@ -19,6 +19,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patheffects as m_fx
 import re
 from .plotting_utils import get_nice_number
+from .stats import robust_standardize
 
 # Try importing third-party libraries that might be installed via the inline dependencies
 try:
@@ -3429,9 +3430,7 @@ def score_celltypes(
     final_scores = {}
 
     def robust_scale(x):
-        med = np.nanmedian(x)
-        mad = np.nanmedian(np.abs(x - med))
-        return (x - med) / (mad + 1e-8)
+        return robust_standardize(x)
 
     for ct in cell_type_markers_dict.keys():
         pos_h = ct_to_pos_hash[ct]
@@ -3553,10 +3552,8 @@ def annotate_clusters_by_markers(
         # NORMALIZE SCORES (Robust Median/MAD)
         # Bolt optimization: Vectorized across columns instead of Pandas .apply
         arr = S.to_numpy()
-        medians = np.nanmedian(arr, axis=0)
-        mads = np.nanmedian(np.abs(arr - medians), axis=0)
         S = pd.DataFrame(
-            (arr - medians) / (mads + 1e-8), index=S.index, columns=S.columns
+            robust_standardize(arr, axis=0), index=S.index, columns=S.columns
         )
 
     cts = list(S.columns)
@@ -3740,10 +3737,8 @@ def sweep_leiden_and_annotate(
     if normalize_scores and score_method == "scanpy":
         # Bolt optimization: Vectorized across columns instead of Pandas .apply
         arr = S.to_numpy()
-        medians = np.nanmedian(arr, axis=0)
-        mads = np.nanmedian(np.abs(arr - medians), axis=0)
         S = pd.DataFrame(
-            (arr - medians) / (mads + 1e-8), index=S.index, columns=S.columns
+            robust_standardize(arr, axis=0), index=S.index, columns=S.columns
         )
 
     res_list = [float(r) for r in resolutions]
