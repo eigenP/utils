@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-from statannotations.Annotator import Annotator
 from scipy import stats
 
 def add_stat_annotations(
@@ -54,6 +53,15 @@ def add_stat_annotations(
     (matplotlib.axes.Axes, statannotations.Annotator)
         If return_annotator is True.
     """
+    try:
+        from statannotations.Annotator import Annotator
+    except ImportError:
+        raise ImportError(
+            "The 'statannotations' package is required for add_stat_annotations. "
+            "Please install it using 'pip install statannotations' or "
+            "'pip install eigenp_utils[plotting]'."
+        )
+
     annotator = Annotator(ax, pairs, data=data, x=x, y=y, hue=hue)
     annotator.configure(
         test=test,
