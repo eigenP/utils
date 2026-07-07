@@ -26,7 +26,7 @@ dependencies = [
     "traitlets",
     "pandas",
     "tqdm",
-    "numpy",
+    "numpy<2.0.0",
     "scipy"
 ]
 
@@ -42,7 +42,7 @@ plotting = [
 ]
 single-cell = [
     "pacmap>=0.7.3",
-    "scanpy",
+    "scanpy<1.12.0",
     "esda",
     "libpysal",
     "triku",
