@@ -4,6 +4,8 @@ from skimage.segmentation import expand_labels
 from scipy.ndimage import uniform_filter, map_coordinates
 from skimage import filters, feature, segmentation
 import scipy.ndimage as ndi
+from itertools import product
+from typing import Optional, Tuple, Dict, List, Union
 
 
 def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pixel_sizes=None):
@@ -86,6 +88,9 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
     Returns:
         np.ndarray: An image array with the thick z-slice operation applied.
     """
+    if pixel_sizes is None:
+        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
+
     if pixel_sizes is not None:
         dim_keys = ['Z', 'Y', 'X']
         pixel_size_axis = pixel_sizes.get(dim_keys[axis], 1.0)
@@ -146,6 +151,9 @@ def optimized_entire_labels_touching_mask(labels_data, mask, distance=10, pixel_
     Returns:
         np.ndarray: A filtered label array where only entire labels touching the mask are retained.
     """
+    if pixel_sizes is None:
+        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
+
     # Expand labels
     if pixel_sizes is not None:
         dim_keys = ['Z', 'Y', 'X'] if labels_data.ndim == 3 else ['Y', 'X']
@@ -207,6 +215,9 @@ def sample_intensity_around_points(image_3d, points_3d, diameter=5, pixel_sizes=
                 UserWarning,
                 stacklevel=2
             )
+
+    if pixel_sizes is None:
+        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
 
     # Compute filter dimensions in pixel units cleanly
     if pixel_sizes is not None:
@@ -274,6 +285,9 @@ def sample_intensity_along_surface_normals(image, surface_points_grid, thickness
     sampled_3d : ndarray
         A 3D array of shape (U, V, num_steps) containing the sampled intensities.
     """
+    if pixel_sizes is None:
+        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
+
     # Determine spacing, default to isotropic 1.0 if not provided
     if pixel_sizes is None:
         spacing = np.array([1.0, 1.0, 1.0])
@@ -309,3 +323,182 @@ def sample_intensity_along_surface_normals(image, surface_points_grid, thickness
 
     # 7. Reshape back to (U, V, steps)
     return sampled_flat.reshape(surface_points_grid.shape[0], surface_points_grid.shape[1], num_steps)
+import numpy as np
+from scipy.interpolate import RegularGridInterpolator
+from itertools import product
+from scipy.ndimage import map_coordinates
+
+def _ensure_pixel_size_array(pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None) -> np.ndarray:
+    """Helper to convert dict or list to [Z, Y, X] numpy array."""
+    if pixel_sizes is None:
+        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
+        return np.array([1.0, 1.0, 1.0], dtype=np.float64)
+    if isinstance(pixel_sizes, dict):
+        return np.array([pixel_sizes.get('Z', 1.0), pixel_sizes.get('Y', 1.0), pixel_sizes.get('X', 1.0)], dtype=np.float64)
+    return np.array(pixel_sizes, dtype=np.float64)
+
+def fit_plane_ransac(
+    points_zyx: np.ndarray,
+    pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None,
+    inlier_threshold_um: float = 1.0,
+    max_iters: int = 1000
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Converts pixel points to physical space, then fits a plane using RANSAC.
+
+    Parameters:
+        points_zyx: (N, 3) array of point coordinates in voxel indices.
+        pixel_sizes: Optional dict mapping dimension to pixel size, e.g., {'Z': 1.0, 'Y': 0.5, 'X': 0.5}.
+        inlier_threshold_um: Distance threshold for inliers in physical units (microns).
+    """
+    pixel_size = _ensure_pixel_size_array(pixel_sizes)
+    points_phys = points_zyx * pixel_size
+
+    num_points = points_phys.shape[0]
+    if num_points < 3:
+        raise ValueError("At least 3 points are required.")
+
+    best_inliers = []
+    best_normal_phys = None
+    best_p0_phys = None
+    rng = np.random.default_rng()
+
+    for _ in range(max_iters):
+        idx = rng.choice(num_points, 3, replace=False)
+        p1, p2, p3 = points_phys[idx]
+
+        v1 = p2 - p1
+        v2 = p3 - p1
+        normal = np.cross(v1, v2)
+
+        area = 0.5 * np.linalg.norm(normal)
+        if area < 1e-6:
+            continue
+
+        normal /= np.linalg.norm(normal)
+        distances = np.abs(np.dot(points_phys - p1, normal))
+        inliers = np.where(distances < inlier_threshold_um)[0]
+
+        if len(inliers) > len(best_inliers):
+            best_inliers = inliers
+            best_normal_phys = normal
+            best_p0_phys = p1
+
+    if len(best_inliers) < 3:
+        raise RuntimeError("RANSAC failed to find a valid plane.")
+
+    inlier_points = points_phys[best_inliers]
+    best_p0_phys = np.mean(inlier_points, axis=0)
+    _, _, vv = np.linalg.svd(inlier_points - best_p0_phys)
+    best_normal_phys = vv[2, :]
+
+    if best_normal_phys[0] < 0:
+        best_normal_phys = -best_normal_phys
+
+    return best_p0_phys, best_normal_phys
+
+def generate_plane_basis(normal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Generates an orthonormal basis (u, v) perpendicular to the normal vector."""
+    min_axis = np.argmin(np.abs(normal))
+    ortho_choice = np.zeros(3)
+    ortho_choice[min_axis] = 1.0
+    u = np.cross(normal, ortho_choice)
+    u /= np.linalg.norm(u)
+    v = np.cross(normal, u)
+    return u, v
+
+def sample_volume_plane(
+    volume: np.ndarray,
+    pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None,
+    p0_phys: Optional[np.ndarray] = None,
+    normal_phys: Optional[np.ndarray] = None,
+    u_range_um: Optional[Tuple[float, float]] = None,
+    v_range_um: Optional[Tuple[float, float]] = None,
+    u_res: Optional[int] = None,
+    v_res: Optional[int] = None,
+    method: str = 'linear',
+    num_offsets: int = 0,
+    offset_step_um: float = 1.0
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """
+    Samples an anisotropic 3D (Z, Y, X) volume.
+    """
+    if p0_phys is None or normal_phys is None:
+        raise ValueError("p0_phys and normal_phys must be provided.")
+
+    pixel_size = _ensure_pixel_size_array(pixel_sizes)
+    z_dim, y_dim, x_dim = volume.shape
+    sz, sy, sx = pixel_size
+
+    u_dir, v_dir = generate_plane_basis(normal_phys)
+
+    # 1. Dynamic Extent & Resolution Calculation
+    if None in (u_range_um, v_range_um, u_res, v_res):
+        z_phys_max = (z_dim - 1) * sz
+        y_phys_max = (y_dim - 1) * sy
+        x_phys_max = (x_dim - 1) * sx
+        corners = np.array(list(product([0, z_phys_max], [0, y_phys_max], [0, x_phys_max])))
+        diffs = corners - p0_phys
+        u_projections = np.dot(diffs, u_dir)
+        v_projections = np.dot(diffs, v_dir)
+
+        if u_range_um is None: u_range_um = (np.min(u_projections), np.max(u_projections))
+        if v_range_um is None: v_range_um = (np.min(v_projections), np.max(v_projections))
+        optimal_res = min(sz, sy, sx)
+        if u_res is None: u_res = int(np.ceil((u_range_um[1] - u_range_um[0]) / optimal_res)) + 1
+        if v_res is None: v_res = int(np.ceil((v_range_um[1] - v_range_um[0]) / optimal_res)) + 1
+
+    # 2. Pre-allocate the final output array using the original memory-efficient dtype
+    total_slices = 2 * num_offsets + 1
+    sampled_volume = np.zeros((total_slices, u_res, v_res), dtype=volume.dtype)
+
+    # 3. Generate 2D coordinate matrices in float32 to halve query RAM
+    u_vals = np.linspace(u_range_um[0], u_range_um[1], u_res, dtype=np.float32)
+    v_vals = np.linspace(v_range_um[0], v_range_um[1], v_res, dtype=np.float32)
+    u_grid, v_grid = np.meshgrid(u_vals, v_vals, indexing='ij')
+
+    offsets = np.arange(-num_offsets, num_offsets + 1, dtype=np.float32) * offset_step_um
+
+    # map_coordinates requires an integer order (1 for linear, 3 for cubic)
+    spline_order = 3 if method == 'cubic' else 1
+
+    # 4. Extract slices directly to the pre-allocated array
+    for i, d in enumerate(offsets):
+        # Calculate physical coordinates
+        phys_z = p0_phys[0] + u_grid * u_dir[0] + v_grid * v_dir[0] + d * normal_phys[0]
+        phys_y = p0_phys[1] + u_grid * u_dir[1] + v_grid * v_dir[1] + d * normal_phys[1]
+        phys_x = p0_phys[2] + u_grid * u_dir[2] + v_grid * v_dir[2] + d * normal_phys[2]
+
+        # Convert physical metrics to fractional voxel indices
+        # map_coordinates operates on dimensions: (3, N)
+        coords = np.stack([
+            (phys_z / sz).ravel(),
+            (phys_y / sy).ravel(),
+            (phys_x / sx).ravel()
+        ], axis=0)
+
+        # Sample directly into the assigned matrix slice
+        # The 'output' kwarg forces memory mapping straight to the integer dtype
+        sampled_volume[i] = map_coordinates(
+            volume,
+            coords,
+            order=spline_order,
+            mode='constant',
+            cval=0,
+            output=volume.dtype,
+            prefilter=False # Avoids calculating spline coefficients across the entire input volume for order=3
+        ).reshape(u_res, v_res)
+
+        # Force clear intermediates for massive planes
+        del phys_z, phys_y, phys_x, coords
+
+    if num_offsets == 0:
+        sampled_volume = sampled_volume[0]
+
+    # 5. Calculate new pixel spacings
+    spacing_u = (u_range_um[1] - u_range_um[0]) / max(1, u_res - 1)
+    spacing_v = (v_range_um[1] - v_range_um[0]) / max(1, v_res - 1)
+    spacing_n = offset_step_um if num_offsets > 0 else 0.0
+
+    output_pixel_sizes = {'X': spacing_u, 'Y': spacing_v, 'Z': spacing_n}
+    return sampled_volume, output_pixel_sizes

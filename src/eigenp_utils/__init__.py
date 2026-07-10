@@ -39,13 +39,19 @@ try:
         windowed_slice_projection,
         optimized_entire_labels_touching_mask,
         sample_intensity_around_points,
-        sample_intensity_along_surface_normals
+        sample_intensity_along_surface_normals,
+        fit_plane_ransac,
+        generate_plane_basis,
+        sample_volume_plane
     )
     __all__.extend([
         "windowed_slice_projection",
         "optimized_entire_labels_touching_mask",
         "sample_intensity_around_points",
-        "sample_intensity_along_surface_normals"
+        "sample_intensity_along_surface_normals",
+        "fit_plane_ransac",
+        "generate_plane_basis",
+        "sample_volume_plane"
     ])
 except ImportError:
     pass
