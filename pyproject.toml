@@ -42,7 +42,7 @@ plotting = [
 ]
 single-cell = [
     "pacmap>=0.7.3",
-    "scanpy", "anndata<0.11",
+    "scanpy", "anndata",
     "esda",
     "libpysal",
     "triku",
