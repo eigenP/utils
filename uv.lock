@@ -613,7 +613,7 @@ single-cell = [
 [package.metadata]
 requires-dist = [
     { name = "adjusttext", marker = "extra == 'single-cell'" },
-    { name = "anndata", marker = "extra == 'single-cell'", specifier = "<0.11" },
+    { name = "anndata", marker = "extra == 'single-cell'" },
     { name = "anywidget" },
     { name = "eigenp-utils", extras = ["image-analysis", "plotting", "single-cell"], marker = "extra == 'dev'" },
     { name = "eigenp-utils", extras = ["image-analysis", "plotting", "single-cell", "dev"], marker = "extra == 'all'" },

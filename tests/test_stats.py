@@ -172,6 +172,28 @@ def test_remove_outliers_mahalanobis_dataframe():
     # The NaN row should be kept
     assert np.isnan(cleaned_nan.loc[0, 'x'])
 
+def test_remove_outliers_mahalanobis_small_sample():
+    np.random.seed(42)
+    # Small N=5, d=2 dataset where asymptotic chi-square fails bounds
+    data = np.array([
+        [0.0, 0.0],
+        [1.0, 1.0],
+        [-1.0, -1.0],
+        [0.5, -0.5],
+        [100.0, -100.0]  # Extreme outlier
+    ])
+
+    # Under chi-square (df=2, 0.99) threshold is ~9.21
+    # D^2 max bound for N=5 is (N-1)^2/N = 16/5 = 3.2
+    # So the chi-square threshold is NEVER reached by the outlier!
+    # The Beta threshold handles it properly.
+
+    cleaned = remove_outliers(data, method='mahalanobis', threshold=0.99)
+    assert len(cleaned) < 5
+    # The outlier shouldn't be in the cleaned dataset
+    for row in cleaned:
+        assert not np.allclose(row, [100.0, -100.0])
+
 def test_remove_outliers_mahalanobis_errors():
     df = pd.DataFrame({'x': [1, 2, 3], 'y': [4, 5, 6]})
 
