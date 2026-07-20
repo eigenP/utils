@@ -864,7 +864,10 @@ def import_obs_to_adata_from_csv(
     df.columns = df.columns.str.strip()
 
     if obs_key not in df.columns:
-        raise ValueError(f"Observation key '{obs_key}' not found in CSV.")
+        print("HEAD OF CSV:")
+        print(df.head())
+        print(f"\nAvailable columns in the CSV are: {df.columns.tolist()}")
+        raise ValueError(f"Observation key '{obs_key}' not found in CSV. Available columns: {df.columns.tolist()}")
 
     # Check for colors
     if color_key is None:
