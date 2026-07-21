@@ -26,7 +26,7 @@ style_path = ROOT_DIR / 'scientific.mplstyle'
 
 # Load Style
 
-def set_plotting_style():
+def set_plotting_style(editable_text=True):
     # Load Style
     try:
         if style_path.exists():
@@ -48,6 +48,14 @@ def set_plotting_style():
             print(f"Warning: Font file not found at {font_path}")
     except Exception as e:
         print(f"Warning: Failed to load font from {font_path}: {e}")
+
+    # Set SVG export settings for editable text globally if requested
+    if editable_text:
+        plt.rcParams['svg.fonttype'] = 'none'
+        plt.rcParams['axes.unicode_minus'] = False
+    else:
+        plt.rcParams['svg.fonttype'] = 'path'
+        plt.rcParams['axes.unicode_minus'] = True
 
 
 

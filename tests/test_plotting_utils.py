@@ -97,11 +97,29 @@ def test_savefig_svg_no_suptitle(tmp_path):
 def test_set_plotting_style():
     from eigenp_utils.plotting_utils import set_plotting_style
 
-    # Run the function
-    set_plotting_style()
+    # Backup original rcParams
+    orig_fonttype = plt.rcParams['svg.fonttype']
+    orig_unicode = plt.rcParams['axes.unicode_minus']
 
-    # Check that settings are applied
-    assert plt.rcParams['font.family'] == ['sans-serif']
+    try:
+        # Run the function with default editable_text=True
+        set_plotting_style()
+
+        # Check that settings are applied
+        assert plt.rcParams['font.family'] == ['sans-serif']
+        assert plt.rcParams['svg.fonttype'] == 'none'
+        assert plt.rcParams['axes.unicode_minus'] == False
+
+        # Reset and test with editable_text=False
+        # Our updated set_plotting_style explicitly sets these back to default
+        set_plotting_style(editable_text=False)
+        assert plt.rcParams['svg.fonttype'] == 'path'
+        assert plt.rcParams['axes.unicode_minus'] == True
+
+    finally:
+        # Restore globally to avoid polluting other tests
+        plt.rcParams['svg.fonttype'] = orig_fonttype
+        plt.rcParams['axes.unicode_minus'] = orig_unicode
 
 def test_savefig_svg_editable_text(tmp_path):
     fig, ax = plt.subplots()
