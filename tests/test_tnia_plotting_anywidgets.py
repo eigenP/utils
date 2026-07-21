@@ -311,3 +311,41 @@ def test_show_zyx_max_slabs_zero_sized_slices():
     assert w.sy == 2.5
     assert w.sx == 3.5
     assert isinstance(w.sz, float)
+
+def test_interactive_channel_labels():
+    from eigenp_utils.tnia_plotting_anywidgets import (
+        show_zyx_max_slice_interactive,
+        show_zyx_max_slice_interactive_point_annotator,
+        show_zyx_max_scatter_interactive
+    )
+    import numpy as np
+
+    im = np.zeros((10, 20, 30))
+    labels = ["DAPI", "GFP"]
+
+    w1 = show_zyx_max_slice_interactive(
+        [im, im],
+        channel_labels=labels
+    )
+    assert w1.channel_labels_input == labels
+    assert w1.channel_names == labels
+
+    w2 = show_zyx_max_slice_interactive_point_annotator(
+        [im, im],
+        channel_labels=labels
+    )
+    assert w2.channel_labels_input == labels
+    assert w2.channel_names == labels + ['Annotations']
+
+    X = np.random.rand(10) * 10
+    Y = np.random.rand(10) * 10
+    Z = np.random.rand(10) * 10
+    channels_multi = [np.random.rand(10), np.random.rand(10)]
+
+    w3 = show_zyx_max_scatter_interactive(
+        (Z, Y, X),
+        channels=channels_multi,
+        channel_labels=labels,
+        render='points'
+    )
+    assert w3.channel_labels_input == labels
