@@ -93,3 +93,44 @@ def test_savefig_svg_no_suptitle(tmp_path):
     assert dc_title.text == str(svg_path)
 
     plt.close('all')
+
+def test_set_plotting_style():
+    from eigenp_utils.plotting_utils import set_plotting_style
+
+    # Run the function
+    set_plotting_style()
+
+    # Check that settings are applied
+    assert plt.rcParams['font.family'] == ['sans-serif']
+
+def test_savefig_svg_editable_text(tmp_path):
+    fig, ax = plt.subplots()
+    ax.text(0.5, 0.5, "Test Editable Text")
+
+    # Test default editable_text=True
+    svg_path_true = tmp_path / "editable_true"
+    savefig_svg(svg_path_true) # Should use default True
+
+    # Check that settings weren't permanently changed
+    assert plt.rcParams['svg.fonttype'] != 'none'
+
+    # Read the SVG
+    svg_file_true = str(svg_path_true) + ".svg"
+    with open(svg_file_true, 'r') as f:
+        content_true = f.read()
+
+    # Text elements should be standard <text> in SVG if fonttype='none'
+    assert "<text" in content_true, "Expected <text> elements when editable_text=True"
+
+    # Test editable_text=False
+    svg_path_false = tmp_path / "editable_false"
+    savefig_svg(svg_path_false, editable_text=False)
+
+    svg_file_false = str(svg_path_false) + ".svg"
+    with open(svg_file_false, 'r') as f:
+        content_false = f.read()
+
+    # If fonttype='path' (the default), text is converted to paths, so <text> elements usually won't exist
+    assert "<text" not in content_false, "Did not expect <text> elements when editable_text=False"
+
+    plt.close('all')
