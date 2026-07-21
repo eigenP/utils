@@ -26,7 +26,7 @@ style_path = ROOT_DIR / 'scientific.mplstyle'
 
 # Load Style
 
-def set_plotting_style():
+def set_plotting_style(editable_text=True):
     # Load Style
     try:
         if style_path.exists():
@@ -48,6 +48,15 @@ def set_plotting_style():
             print(f"Warning: Font file not found at {font_path}")
     except Exception as e:
         print(f"Warning: Failed to load font from {font_path}: {e}")
+
+    # Set SVG export settings for editable text globally if requested
+    if editable_text:
+        plt.rcParams['svg.fonttype'] = 'none'
+        plt.rcParams['axes.unicode_minus'] = False
+    else:
+        plt.rcParams['svg.fonttype'] = 'path'
+        plt.rcParams['axes.unicode_minus'] = True
+
 
 
 # --- Initialization: Create labels_cmap ---
@@ -975,7 +984,7 @@ def get_nice_number(value):
     return int(nice_fraction * (10 ** exponent))
 
 
-def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, scatter_raster_threshold=1e3, **kwargs):
+def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, scatter_raster_threshold=1e3, editable_text=True, **kwargs):
     """
     Saves the currently active matplotlib figure as an SVG file.
 
@@ -995,6 +1004,9 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
         If provided, any scatter plot (PathCollection) in the figure containing
         this number of points or more will be rasterized before saving. This
         helps keep SVG file sizes manageable for large datasets.
+    editable_text : bool, default True
+        If True, exports SVGs with editable text by temporarily setting
+        `svg.fonttype` to 'none' and `axes.unicode_minus` to False.
     **kwargs :
         Additional keyword arguments passed directly to `plt.savefig`.
     """
@@ -1024,17 +1036,24 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
     if not filename_str.lower().endswith('.svg'):
         filename_str += '.svg'
 
-    # Call savefig on the current figure
-    fig.savefig(
-        filename_str,
-        format='svg',
-        facecolor=bgnd_color,
-        bbox_inches=bbox_inches,
-        dpi=dpi,
-        pad_inches=pad_inches,
-        metadata=metadata,
-        **kwargs
-    )
+    # Context manager for editable text settings
+    context_rc = {}
+    if editable_text:
+        context_rc['svg.fonttype'] = 'none'
+        context_rc['axes.unicode_minus'] = False
+
+    # Call savefig on the current figure with the context
+    with plt.rc_context(context_rc):
+        fig.savefig(
+            filename_str,
+            format='svg',
+            facecolor=bgnd_color,
+            bbox_inches=bbox_inches,
+            dpi=dpi,
+            pad_inches=pad_inches,
+            metadata=metadata,
+            **kwargs
+        )
     print(f"Saved figure to {filename_str}")
 
 def brightness_diagnostic_plotter(diagnostic_data):
