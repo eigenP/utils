@@ -169,7 +169,7 @@ def show_zyx_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projec
     return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None):
+def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -313,17 +313,63 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
     row1_h = max(ydim, h_zy)
     row2_h = h_xz * z_xy_ratio
 
-    spec=gridspec.GridSpec(ncols=2, nrows=2,
-                           height_ratios=[row1_h, row2_h],
-                           width_ratios=[col1_w, col2_w],
-                           hspace=.01 * hspace_factor,
-                           wspace=.01,
-                           figure = fig)
+    if channel_labels is not None:
+        # Calculate label row height, e.g. 10% of main view height
+        label_row_h = max(row1_h * 0.15, 30)
+        spec=gridspec.GridSpec(ncols=2, nrows=3,
+                               height_ratios=[label_row_h, row1_h, row2_h],
+                               width_ratios=[col1_w, col2_w],
+                               hspace=.01 * hspace_factor,
+                               wspace=.01,
+                               figure = fig)
+        axLabels = fig.add_subplot(spec[0, :])
 
-    axXY=fig.add_subplot(spec[0])
-    axZY=fig.add_subplot(spec[1])
-    axXZ=fig.add_subplot(spec[2])
-    axBar=fig.add_subplot(spec[3])
+        axXY=fig.add_subplot(spec[1, 0])
+        axZY=fig.add_subplot(spec[1, 1])
+        axXZ=fig.add_subplot(spec[2, 0])
+        axBar=fig.add_subplot(spec[2, 1])
+
+        axLabels.set_facecolor('#eeeeee')
+        axLabels.set_xticks([])
+        axLabels.set_yticks([])
+        for spine in axLabels.spines.values():
+            spine.set_visible(False)
+
+        n_labels = len(channel_labels)
+        if n_labels > 0:
+            if isinstance(colormap, (list, tuple)):
+                color_list = [resolve_color(c) for c in colormap]
+                if len(color_list) < n_labels:
+                    color_list = color_list * (n_labels // len(color_list) + 1)
+            else:
+                c = resolve_color(colormap) if colormap is not None else 'black'
+                color_list = [c] * n_labels
+
+            fig_h_in = figsize[1] if figsize is not None else 10
+            fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
+
+            from matplotlib.offsetbox import TextArea, HPacker, AnchoredOffsetbox
+
+            text_areas = []
+            for i, label in enumerate(channel_labels):
+                ta = TextArea(label, textprops=dict(color=color_list[i], fontsize=fontsize_pt, fontweight='bold'))
+                text_areas.append(ta)
+
+            packer = HPacker(children=text_areas, align="center", pad=0, sep=10) # 10 points spacing
+            anchored_box = AnchoredOffsetbox(loc='center', child=packer, pad=0.0, frameon=False, borderpad=0.0)
+            axLabels.add_artist(anchored_box)
+    else:
+        spec=gridspec.GridSpec(ncols=2, nrows=2,
+                               height_ratios=[row1_h, row2_h],
+                               width_ratios=[col1_w, col2_w],
+                               hspace=.01 * hspace_factor,
+                               wspace=.01,
+                               figure = fig)
+
+        axXY=fig.add_subplot(spec[0])
+        axZY=fig.add_subplot(spec[1])
+        axXZ=fig.add_subplot(spec[2])
+        axBar=fig.add_subplot(spec[3])
 
     if gamma == 1:
         axXY.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
@@ -350,8 +396,11 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
     for i, ax in enumerate([axXY,axZY,axXZ, axBar]):
         if i < 3 and subplot_bg is not None:
             ax.set_facecolor(subplot_bg)
-        else:
+        elif ax == axBar:
             ax.patch.set_visible(False)
+        else:
+            # Leave axXY, axZY, axXZ visible in case there is no subplot_bg (will be transparent below anyway, or matplotlib default)
+            pass
         ax.set_xticks([])
         ax.set_yticks([])
         for spine in ax.spines.values():
@@ -416,7 +465,7 @@ def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, fi
             ha='center', va='center', color='gray', fontsize=fontsize_pt)
 
 ### New function
-def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None):
+def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -462,11 +511,11 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=sxy, sz=sz, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=sxy, sz=sz, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels)
 
 
 ### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -501,7 +550,7 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
         projection_x = np.flip(np.rot90(projector(image_to_show[:, :, x_slices], axis=2), 1), 0)
         projection_z = projector(image_to_show[z_slices, :, :], axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels)
 
 
 
@@ -1241,9 +1290,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
-                 show_crosshair=True, sync_on_hover=False, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=False, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, **kwargs):
 
         self.rotate_view = rotate_view
+        self.channel_labels_input = channel_labels
         # Handle 2D images gracefully by adding a Z dimension of 1
         if isinstance(im, list):
             if im[0].ndim == 2:
@@ -1265,6 +1315,7 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.sx = px
         self.sy = py
         self.sz = pz
+        self.channel_labels_input = channel_labels
         self.X_arr_phys = X * px
         self.Y_arr_phys = Y * py
         self.Z_arr_phys = Z * pz
@@ -1293,7 +1344,10 @@ class TNIASliceWidget(TNIAWidgetBase):
         # Initialize Channel info
         if isinstance(im, list):
             self.num_channels = len(im)
-            self.channel_names = [f"Channel {i}" for i in range(self.num_channels)]
+            if channel_labels is not None:
+                self.channel_names = _to_list(channel_labels, self.num_channels, "Channel")
+            else:
+                self.channel_names = [f"Channel {i}" for i in range(self.num_channels)]
             self.channel_dtypes = [img.dtype.name for img in im]
 
             # Resolve default colors to ensure stability when toggling
@@ -1307,7 +1361,10 @@ class TNIASliceWidget(TNIAWidgetBase):
                  self.colors_resolved = list(colormap)
         else:
             self.num_channels = 1
-            self.channel_names = ["Channel 0"]
+            if channel_labels is not None:
+                self.channel_names = _to_list(channel_labels, 1, "Channel")
+            else:
+                self.channel_names = ["Channel 0"]
             self.channel_dtypes = [im.dtype.name]
             if colormap is None:
                 self.colors_resolved = ['white']
@@ -1446,6 +1503,10 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmax_curr = [vmax_resolved[i] for i in visible_indices]
             gamma_curr = [gamma_resolved[i] for i in visible_indices]
             opacity_curr = [opacity_resolved[i] for i in visible_indices]
+            if self.channel_labels_input is not None:
+                channel_labels_curr = [self.channel_names[i] for i in visible_indices]
+            else:
+                channel_labels_curr = None
 
         else:
             vmin_val = None if self.vmin_list[0] == "" else float(self.vmin_list[0])
@@ -1470,6 +1531,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmax_curr = vmax_val
             gamma_curr = gamma_val
             opacity_curr = opacity_val
+            channel_labels_curr = self.channel_names if self.channel_labels_input is not None else None
 
         # Pass pixel_sizes directly to trigger scale bar logic
         pass_pixel_sizes = (self.sz, self.sy, self.sx) if getattr(self, '_pixel_sizes_given', False) else None
@@ -1479,7 +1541,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             im_curr, x_lims, y_lims, z_lims,
             pixel_sizes=pass_pixel_sizes, figsize=self.figsize, colormap=colors_curr,
             vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, opacity=opacity_curr,
-            rotate_view=self.rotate_view
+            rotate_view=self.rotate_view, channel_labels=channel_labels_curr
         )
 
         # Crosshairs logic (copied from original interactive wrapper)
@@ -1806,7 +1868,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, sxy=None, sz=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, **kwargs):
         self.rotate_view = rotate_view
         if colors is not None:
             warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
@@ -1836,6 +1898,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.sx = px
         self.sy = py
         self.sz = pz
+        self.channel_labels_input = channel_labels
         self.render = render
         self.bins = bins
         self.point_size = point_size
@@ -2180,7 +2243,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 w_y = (self.ymax - self.ymin + 1) * self.sx
                 w_z = (self.zmax - self.zmin + 1) * self.sz
 
-                axXY, axZY, axXZ = fig.axes[0], fig.axes[1], fig.axes[2]
+                axXY, axZY, axXZ = fig.axes[-4], fig.axes[-3], fig.axes[-2]
 
                 # XY
                 x0_adj = (x_lims[0] - self.xmin) * self.sx + 0.5
@@ -2839,6 +2902,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         self.sx = px
         self.sy = py
         self.sz = pz
+        self.channel_labels_input = channel_labels
         self.sz = sz
         self.figsize = figsize
         self.point_size = point_size
