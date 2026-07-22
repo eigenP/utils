@@ -314,22 +314,22 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
     row2_h = h_xz * z_xy_ratio
 
     if channel_labels is not None:
-        # Calculate label row height, e.g. 10% of main view height
-        label_row_h = max(row1_h * 0.15, 30)
+        # Calculate label row height, e.g. 5% of total figure height
+        label_row_h = max((row1_h + row2_h) * 0.05, 15)
         spec=gridspec.GridSpec(ncols=2, nrows=3,
                                height_ratios=[label_row_h, row1_h, row2_h],
                                width_ratios=[col1_w, col2_w],
                                hspace=.01 * hspace_factor,
                                wspace=.01,
                                figure = fig)
-        axLabels = fig.add_subplot(spec[0, :])
+        axLabels = fig.add_subplot(spec[0, 0])
 
         axXY=fig.add_subplot(spec[1, 0])
         axZY=fig.add_subplot(spec[1, 1])
         axXZ=fig.add_subplot(spec[2, 0])
         axBar=fig.add_subplot(spec[2, 1])
 
-        axLabels.set_facecolor('#eeeeee')
+        axLabels.set_facecolor((0.6, 0.6, 0.6))
         axLabels.set_xticks([])
         axLabels.set_yticks([])
         for spine in axLabels.spines.values():
