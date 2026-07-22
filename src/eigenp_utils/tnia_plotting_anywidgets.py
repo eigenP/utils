@@ -2479,7 +2479,7 @@ def show_zyx_max_slice_interactive(
     colors=None, opacity=None,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
-    rotate_view=None,
+    rotate_view=None, channel_labels=None,
 ):
     """
     Interactive 3D slice viewer using AnyWidget.
@@ -2572,7 +2572,7 @@ def show_zyx_max_slice_interactive(
     w = TNIASliceWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels
     )
     return w
 
@@ -2587,7 +2587,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     point_size_scale=0.01,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
-    rotate_view=None,
+    rotate_view=None, channel_labels=None,
 ):
     """
     Interactive 3D slice viewer with point annotation using AnyWidget.
@@ -2673,7 +2673,7 @@ def show_zyx_max_slice_interactive_point_annotator(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         point_size_scale=point_size_scale,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels
     )
     return w
 
@@ -2691,7 +2691,7 @@ def show_zyx_max_scatter_interactive(
     subplot_bg='black',
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
-    rotate_view=None,
+    rotate_view=None, channel_labels=None,
 ):
     """
     Shows interactive sliders for XY, XZ, and YZ projection of 3D point coordinates.
@@ -2828,7 +2828,7 @@ def show_zyx_max_scatter_interactive(
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         subplot_bg=subplot_bg,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t),
-        rotate_view=rotate_view
+        rotate_view=rotate_view, channel_labels=channel_labels
     )
     w.X_arr_phys = w.X_arr * px
     w.Y_arr_phys = w.Y_arr * py
