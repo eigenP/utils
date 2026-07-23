@@ -416,9 +416,14 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                     left = np.dot(X_centered, inv_cov)
                     D_squared = np.sum(left * X_centered, axis=1)
 
-                    chi2_thresh = stats.chi2.ppf(threshold, df=n_features)
+                    if n_samples > n_features + 1:
+                        bound = ((n_samples - 1) ** 2) / n_samples
+                        beta_thresh = stats.beta.ppf(threshold, n_features / 2.0, (n_samples - n_features - 1) / 2.0)
+                        thresh = bound * beta_thresh
+                    else:
+                        thresh = stats.chi2.ppf(threshold, df=n_features)
 
-                    valid_keep = D_squared <= chi2_thresh
+                    valid_keep = D_squared <= thresh
                     bool_mask[valid_row_mask] = valid_keep
 
                 mask = pd.Series(bool_mask, index=df_out.index)
@@ -481,9 +486,14 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                 left = np.dot(X_centered, inv_cov)
                 D_squared = np.sum(left * X_centered, axis=1)
 
-                chi2_thresh = stats.chi2.ppf(threshold, df=n_features)
+                if n_samples > n_features + 1:
+                    bound = ((n_samples - 1) ** 2) / n_samples
+                    beta_thresh = stats.beta.ppf(threshold, n_features / 2.0, (n_samples - n_features - 1) / 2.0)
+                    thresh = bound * beta_thresh
+                else:
+                    thresh = stats.chi2.ppf(threshold, df=n_features)
 
-                valid_keep = D_squared <= chi2_thresh
+                valid_keep = D_squared <= thresh
                 keep_mask[valid_row_mask] = valid_keep
 
             return values[keep_mask]
