@@ -56,14 +56,14 @@ def test_show_zyx_max_slice_interactive_point_annotator_args():
     im = [np.zeros((10, 10, 10)) for _ in range(2)]
     w = show_zyx_max_slice_interactive_point_annotator(
         im,
-        sxy=2,
-        sz=3,
+        pixel_sizes=(3, 2, 2),
         point_size_scale=0.05,
         colors=['red', 'blue'],
         opacity=[0.5, 0.8]
     )
     assert isinstance(w, TNIAAnnotatorWidget)
     assert w.sx == 2
+    assert w.sy == 2
     assert w.sz == 3
 
 def test_point_size_scaling():

@@ -105,7 +105,7 @@ def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
 
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
+def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
@@ -113,8 +113,7 @@ def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, sxy=None, sz=None,f
         x (int): x position of slice
         y (int): y position of slice
         z (int): z position of slice
-        sxy (float, optional): xy pixel size of 3D. Defaults to None.
-        sz (float, optional): z pixel size of 3D. Defaults to None.
+        pixel_sizes (tuple or dict, optional): pixel sizes of 3D in physical units. Defaults to None.
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
@@ -124,16 +123,15 @@ def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, sxy=None, sz=None,f
     slice_xz = image_to_show[:,y,:]
     slice_xy = image_to_show[z,:,:]
 
-    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity)
+    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_max(image_to_show, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ plots max xy, xz, and zy projections of a 3D image
 
     Args:
         image_to_show (3d numpy array): image to plot
-        sxy (float, optional): xy pixel size. Defaults to None.
-        sz (float, optional): z pixel size. Defaults to None.
+        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
@@ -143,16 +141,15 @@ def show_zyx_max(image_to_show, pixel_sizes=None, sxy=None, sz=None,figsize=(10,
         if colormap is None:
             colormap = colors
 
-    return show_zyx_projection(image_to_show, sxy, sz, figsize, np.max, colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
 
 
-def show_zyx_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Args:
         image_to_show (3d numpy array): image to plot
-        sxy (float, optional): xy pixel size of 3D. Defaults to None.
-        sz (float, optional): z pixel size of 3D. Defaults to None.
+        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple): size of figure to
         projector: function to project with
         colormap (_type_, optional): _description_. Defaults to None.
@@ -166,18 +163,17 @@ def show_zyx_projection(image_to_show, sxy=None, sz=None,figsize=(10,10), projec
     projection_x = np.flip(np.rot90(projector(image_to_show, axis=2), 1), 0)
     projection_z = projector(image_to_show, axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None):
+def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
         xy (2d numpy array): xy projection
         xz (2d numpy array): xz projection
         zy (2d numpy array): zy projection
-        sxy (float, optional): xy pixel size of 3D. Defaults to None (treats as 1).
-        sz (float, optional): z pixel size of 3D. Defaults to None (treats as 1).
+        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
@@ -194,17 +190,8 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
         if colormap is None:
             colormap = colors
 
-    if sxy is not None or sz is not None:
-        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
-        if pixel_sizes is None:
-            _sxy = sxy if sxy is not None else 1.0
-            _sz = sz if sz is not None else 1.0
-            pixel_sizes = (_sz, _sxy, _sxy)
-
     pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
-    both_given = pixel_sizes is not None or (sxy is not None and sz is not None)
-    sxy = px
-    sz = pz
+    both_given = pixel_sizes is not None
 
     if isinstance(xy,list):
         MULTI_CHANNEL = True
@@ -286,12 +273,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
     zdim_zy = zy.shape[1]
     zdim = max(zdim_xz, zdim_zy)
 
-    z_xy_ratio=1
-
-    if sxy!=sz and sxy is not None and sz is not None:
-        z_xy_ratio=sz/sxy
-
-
     # compute the same-gap factor
     if figsize is not None:
         figW, figH = figsize
@@ -308,10 +289,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
     h_zy = zy.shape[0]
 
     # Use max width/height to properly align the grid
-    col1_w = max(xdim, w_xz)
-    col2_w = w_zy * z_xy_ratio
-    row1_h = max(ydim, h_zy)
-    row2_h = h_xz * z_xy_ratio
+    col1_w = max(xdim * px, w_xz * px)
+    col2_w = w_zy * pz
+    row1_h = max(ydim * py, h_zy * py)
+    row2_h = h_xz * pz
 
     if channel_labels is not None:
         # Calculate label row height, e.g. 5% of total figure height
@@ -372,20 +353,20 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
         axBar=fig.add_subplot(spec[3])
 
     if gamma == 1:
-        axXY.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        axZY.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,w_zy*sz,h_zy*sxy,0], interpolation = 'nearest', alpha=opacity)
-        axXZ.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,w_xz*sxy,h_xz*sz,0], interpolation = 'nearest', alpha=opacity)
+        axXY.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*px,ydim*py,0], interpolation = 'nearest', alpha=opacity)
+        axZY.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,w_zy*pz,h_zy*py,0], interpolation = 'nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,w_xz*px,h_xz*pz,0], interpolation = 'nearest', alpha=opacity)
     else:
         norm=PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax, clip=True)
-        axXY.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*sxy,ydim*sxy,0], interpolation = 'nearest', alpha=opacity)
-        axZY.imshow(zy, cmap = colormap, norm=norm, extent=[0,w_zy*sz,h_zy*sxy,0], interpolation = 'nearest', alpha=opacity)
-        axXZ.imshow(xz, cmap = colormap, norm=norm, extent=[0,w_xz*sxy,h_xz*sz,0], interpolation = 'nearest', alpha=opacity)
+        axXY.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*px,ydim*py,0], interpolation = 'nearest', alpha=opacity)
+        axZY.imshow(zy, cmap = colormap, norm=norm, extent=[0,w_zy*pz,h_zy*py,0], interpolation = 'nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap = colormap, norm=norm, extent=[0,w_xz*px,h_xz*pz,0], interpolation = 'nearest', alpha=opacity)
 
     # Set exact limits to prevent axis from expanding to match other row/col unnecessarily
     # The image might not fill the entire GridSpec cell if the other cell is larger.
-    axXY.set_xlim([0, xdim*sxy]); axXY.set_ylim([ydim*sxy, 0])
-    axZY.set_xlim([0, w_zy*sz]); axZY.set_ylim([h_zy*sxy, 0])
-    axXZ.set_xlim([0, w_xz*sxy]); axXZ.set_ylim([h_xz*sz, 0])
+    axXY.set_xlim([0, xdim*px]); axXY.set_ylim([ydim*py, 0])
+    axZY.set_xlim([0, w_zy*pz]); axZY.set_ylim([h_zy*py, 0])
+    axXZ.set_xlim([0, w_xz*px]); axXZ.set_ylim([h_xz*pz, 0])
 
     ### Axes and titles
     # axXY.set_title('xy')
@@ -415,7 +396,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), c
     # Add scale bar (use original dimension so bar scales correctly relative to internal content)
     # However, since the axis width is the NEW width, the physical width the bar measures against
     # is the NEW width.
-    main_physical_width_um = xdim * sxy if sxy is not None else xdim
+    main_physical_width_um = xdim * px
     _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, figsize)
 
     return fig
@@ -465,7 +446,7 @@ def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, fi
             ha='center', va='center', color='gray', fontsize=fontsize_pt)
 
 ### New function
-def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, sxy=None, sz=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None):
+def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -475,8 +456,7 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
         x: slices for x in format [x_1, x_2] where values are integers, to be passed as slice(x_1, x_2, None)
         y: slices for y in format [y_1, y_2] where values are integers
         z: slices for z in format [z_1, z_2] where values are integers
-        sxy (float, optional): xy pixel size of 3D. Defaults to None.
-        sz (float, optional): z pixel size of 3D. Defaults to None.
+        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
@@ -491,13 +471,6 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
         if colormap is None:
             colormap = colors
 
-    if sxy is not None or sz is not None:
-        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
-        if pixel_sizes is None:
-            _sxy = sxy if sxy is not None else 1.0
-            _sz = sz if sz is not None else 1.0
-            pixel_sizes = (_sz, _sxy, _sxy)
-
     ### Coerce into integers for slices, rounding floats and ensuring non-zero bounds
     x_ = [int(np.round(float(i))) for i in x]
     y_ = [int(np.round(float(i))) for i in y]
@@ -511,19 +484,18 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, sxy=sxy, sz=sz, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels)
 
 
 ### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, sxy=None, sz=None,figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
 
     Args:
         image_to_show (3d numpy array): image to plot
-        sxy (float, optional): xy pixel size of 3D. Defaults to None.
-        sz (float, optional): z pixel size of 3D. Defaults to None.
+        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple): size of figure to
         projector: function to project with
         colormap (_type_, optional): _description_. Defaults to None.
@@ -550,7 +522,7 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
         projection_x = np.flip(np.rot90(projector(image_to_show[:, :, x_slices], axis=2), 1), 0)
         projection_z = projector(image_to_show[z_slices, :, :], axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, sxy=sxy, sz=sz, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels)
 
 
 
@@ -1866,7 +1838,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         self._render_wrapper(change)
 
 class TNIAScatterWidget(TNIAWidgetBase):
-    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, sxy=None, sz=None, render='points', bins=512,
+    def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
                  show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, **kwargs):
         self.rotate_view = rotate_view
@@ -1891,9 +1863,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         super().__init__(X_dim, Y_dim, Z_dim, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover)
 
         self.channels = channels
-        self._sxy_given = sxy is not None
-        self._sz_given = sz is not None
-        self._pixel_sizes_given = pixel_sizes is not None or (sxy is not None and sz is not None)
+        self._pixel_sizes_given = pixel_sizes is not None
         pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
         self.sx = px
         self.sy = py
