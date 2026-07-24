@@ -185,3 +185,25 @@ def test_remove_outliers_mahalanobis_errors():
     arr_1d = np.array([1, 2, 3])
     with pytest.raises(ValueError, match="requires at least 2 dimensions"):
         remove_outliers(arr_1d, method='mahalanobis')
+
+def test_remove_outliers_mahalanobis_small_sample():
+    np.random.seed(42)
+    # Create small dataset where max Mahalanobis distance is strictly bounded
+    # For N=10, max D^2 = (10-1)^2 / 10 = 8.1
+    # Chi-square with 2 df, 0.99 threshold is 9.21
+    # So Chi-square could never filter an outlier in this dataset.
+    X = np.random.randn(10, 2)
+    # Insert extreme outlier
+    X[0, :] = [100, 100]
+
+    df = pd.DataFrame(X, columns=['A', 'B'])
+
+    # 0.99 threshold using exact Beta distribution should be able to filter it
+    cleaned_df = remove_outliers(df, method='mahalanobis', threshold=0.99)
+    assert len(cleaned_df) == 9
+    assert 100 not in cleaned_df['A'].values
+
+    # Same for array
+    cleaned_arr = remove_outliers(X, method='mahalanobis', threshold=0.99)
+    assert len(cleaned_arr) == 9
+    assert 100 not in cleaned_arr[:, 0]
