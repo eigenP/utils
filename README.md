@@ -14,13 +14,14 @@
 * **3D Plane Sampling & Geometry**: Utilities to fit planes using RANSAC (`fit_plane_ransac`), compute orthonormal bases (`generate_plane_basis`), and dynamically extract or sample 2D oriented planes from anisotropic 3D volumes (`sample_volume_plane`).
 
 ### Plotting & Visualization
-* **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers) with rotatable crosshairs, interactive point cloud visualization (`show_iso_scatter`), and 3D point annotation (`TNIAAnnotatorWidget`). Includes a one-click UI parameter copy feature for reproducibility.
+* **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers) natively supporting independent anisotropic pixel dimensions (independent X, Y, Z scaling) with rotatable crosshairs, interactive point cloud visualization (`show_iso_scatter`), and 3D point annotation (`TNIAAnnotatorWidget`). Provides custom labeling via the `channel_labels` parameter, and includes a one-click UI parameter copy feature for reproducibility.
 * **Interactive 3D Scatter Plots**: Utilities for generating interactive 3D scatter plots with Plotly, including native support for AnnData embeddings (`plotly_scatter_3d`, `plotly_scatter_3d_from_adata_obsm`).
-* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), pre-KDE outlier filtering, and data subset highlighting. Custom Matplotlib colormap generation via `colormap_maker`, and threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`.
+* **Publication-Ready Plots**: `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), pre-KDE outlier filtering, and data subset highlighting. Custom Matplotlib colormap generation via `colormap_maker`, and threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`. Includes the `editable_text` parameter in `set_plotting_style` and `savefig_svg` for exporting SVGs with editable text.
 
 ### Single-Cell Analysis
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
 * **Dataset Integration (kkNN)**: Adaptive curvature-based k-nearest neighbors mapping (`kknn_ingest`) to dynamically project metadata and embeddings across references based on local manifold geometry.
+* **Data I/O**: `import_obs_to_adata_from_csv` simplifies metadata ingestion into AnnData objects, providing helpful diagnostic messages for missing observation keys.
 * **Label Classification & Smoothing**: Distance-weighted majority voting or averaging (`kknn_classifier`) to smooth categorical or continuous cell metadata using the kkNN backbone.
 * **Gene Archetypes**: Cluster genes by expression patterns to find dominant archetypes using hierarchical Ward clustering and SVD (`find_expression_archetypes`).
 * **Multiscale Clustering**: Run multi-resolution Leiden clustering and track lineage hierarchies across scales (`multiscale_coarsening`, `plot_clustering_tree`).
@@ -41,6 +42,40 @@
 
 ### Examples
 * **Notebooks**: The `notebooks/` directory contains Marimo notebooks demonstrating package functionalities, such as using statistical utilities with classic datasets.
+
+## Usage Examples
+
+Here is a quick example demonstrating how to configure publication-ready plots with editable text and how to use the statistical utilities:
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+from eigenp_utils import plotting_utils as pu
+from eigenp_utils import stats
+
+# Set a clean plotting style for publications (SVG with editable text enabled)
+pu.set_plotting_style(editable_text=True)
+
+# Generate some data
+data = np.random.normal(loc=0, scale=1, size=100)
+data = np.append(data, [10.0, -10.0]) # Add some outliers
+
+# Calculate robust standard deviation (fallback to MeanAD if MAD collapses)
+std_robust = stats.robust_standardize(data, return_scale=True)[1]
+print(f"Robust Standard Deviation: {std_robust:.2f}")
+
+# Compute a bootstrapped confidence interval (Bias-Corrected and Accelerated)
+ci_lower, ci_upper = stats.bootstrap_ci(data, stat_func=np.mean, method='bca')
+print(f"95% CI for the mean: ({ci_lower:.2f}, {ci_upper:.2f})")
+
+# Plotting and exporting with editable text
+fig, ax = plt.subplots()
+ax.hist(data, bins=20)
+ax.set_title("Histogram of Data")
+
+# Save the figure as an SVG, preserving vector shapes and editable text fonts
+pu.savefig_svg(fig, "histogram", editable_text=True)
+```
 
 ## Installation
 
