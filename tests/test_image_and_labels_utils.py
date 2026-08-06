@@ -1,13 +1,19 @@
+from scipy.ndimage import shift
 import numpy as np
 import pytest
-from eigenp_utils.image_and_labels_utils import (
-    windowed_slice_projection,
-    optimized_entire_labels_touching_mask,
-    sample_intensity_around_points, sample_intensity_along_surface_normals,
-    voronoi_otsu_labeling
-)
+
+from eigenp_utils.image_and_labels_utils import _ensure_pixel_size_array, fit_plane_ransac, generate_plane_basis, sample_volume_plane
+from eigenp_utils.image_and_labels_utils import voronoi_otsu_labeling, windowed_slice_projection, sample_intensity_around_points
+from eigenp_utils.image_and_labels_utils import windowed_slice_projection, optimized_entire_labels_touching_mask, sample_intensity_around_points, sample_intensity_along_surface_normals, voronoi_otsu_labeling
+
+
+
+# =========================================
+# Source: test_image_and_labels_utils.py
+# =========================================
 
 def test_voronoi_otsu_labeling():
+    """Test that voronoi otsu labeling works as expected."""
     # Test 2D without spacing
     img_2d = np.zeros((20, 20), dtype=float)
     # create two distinct Gaussian spots
@@ -46,6 +52,7 @@ def test_voronoi_otsu_labeling():
 
 
 def test_windowed_slice_projection_max():
+    """Test that windowed slice projection max works as expected."""
     img = np.zeros((5, 10, 10))
     img[2, 5, 5] = 10
 
@@ -59,6 +66,7 @@ def test_windowed_slice_projection_max():
     assert thick[4, 5, 5] == 0
 
 def test_windowed_slice_projection_average():
+    """Test that windowed slice projection average works as expected."""
     img = np.ones((5, 10, 10)) * 3
 
     thick = windowed_slice_projection(img, window_size=3, axis=0, operation='average')
@@ -71,6 +79,7 @@ def test_windowed_slice_projection_average():
     assert np.allclose(thick[0, :, :], 2)
 
 def test_optimized_entire_labels_touching_mask():
+    """Test that optimized entire labels touching mask works as expected."""
     labels = np.zeros((20, 20), dtype=int)
     # create two labels
     labels[5:10, 5:10] = 1
@@ -88,6 +97,7 @@ def test_optimized_entire_labels_touching_mask():
     assert np.all(res[15:20, 15:20] == 0)
 
 def test_sample_intensity_around_points():
+    """Test that sample intensity around points works as expected."""
     image_3d = np.ones((10, 10, 10))
     image_3d[5, 5, 5] = 10 # central high intensity point
 
@@ -109,6 +119,7 @@ def test_sample_intensity_around_points():
     assert np.isnan(res[2]) # out of bounds
 
 def test_sample_intensity_xyz_warning():
+    """Test that sample intensity xyz warning works as expected."""
     # Z, Y, X order: 5 slices, 20 rows, 30 columns
     image_3d = np.zeros((5, 20, 30))
 
@@ -122,6 +133,7 @@ def test_sample_intensity_xyz_warning():
         assert np.isnan(res[0]) # Since 25 >= 5 (Z-dimension), it will be considered out of bounds
 
 def test_sample_intensity_along_surface_normals():
+    """Test that sample intensity along surface normals works as expected."""
     img = np.ones((10, 10, 10))
     grid = np.zeros((5, 5, 3))
     grid[:, :, 0] = 5
@@ -131,6 +143,7 @@ def test_sample_intensity_along_surface_normals():
     assert res.shape == (5, 5, 3)
 
 def test_sample_intensity_around_points_pixel_sizes():
+    """Test that sample intensity around points pixel sizes works as expected."""
     img = np.ones((10, 10, 10))
     points = [[5, 5, 5]]
     res = sample_intensity_around_points(img, points, diameter=5.0, pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 1.0})
@@ -217,25 +230,19 @@ def test_sample_intensity_around_points_intensity_conservation():
         assert np.isclose(r, 100.0)
 
 def test_windowed_slice_projection_pixel_sizes():
+    """Test that windowed slice projection pixel sizes works as expected."""
     img = np.ones((10, 10, 10))
     res = windowed_slice_projection(img, window_size=5.0, pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 1.0})
     assert res.shape == img.shape
 
 def test_optimized_entire_labels_touching_mask_pixel_sizes():
+    """Test that optimized entire labels touching mask pixel sizes works as expected."""
     labels = np.zeros((10, 10), dtype=int)
     labels[2:4, 2:4] = 1
     mask = np.zeros((10, 10), dtype=int)
     mask[6:8, 6:8] = 1
     res = optimized_entire_labels_touching_mask(labels, mask, distance=3.0, pixel_sizes={'Y': 1.0, 'X': 1.0})
     assert res.shape == labels.shape
-import numpy as np
-import pytest
-from eigenp_utils.image_and_labels_utils import (
-    voronoi_otsu_labeling,
-    windowed_slice_projection,
-    sample_intensity_around_points
-)
-from scipy.ndimage import shift
 
 def test_voronoi_otsu_translation_invariance():
     """
@@ -366,3 +373,74 @@ def test_sample_intensity_linear_scaling():
     sampled_scaled = np.array(sample_intensity_around_points(img * 10.0, points, diameter=3))
 
     assert np.allclose(sampled_scaled, sampled_base * 10.0, atol=1e-12), "Local intensity sampling is not linearly scalable"
+
+# =========================================
+# Source: test_image_utils_new_funcs.py
+# =========================================
+
+def test_ensure_pixel_size_array():
+    """Test that ensure pixel size array works as expected."""
+    # Test None
+    with pytest.warns(UserWarning):
+        res = _ensure_pixel_size_array(None)
+    assert np.allclose(res, [1.0, 1.0, 1.0])
+
+    # Test dict
+    res = _ensure_pixel_size_array({'Z': 2.0, 'Y': 1.5, 'X': 0.5})
+    assert np.allclose(res, [2.0, 1.5, 0.5])
+
+    # Test missing keys in dict fallback to 1.0
+    res = _ensure_pixel_size_array({'Z': 2.0, 'X': 0.5})
+    assert np.allclose(res, [2.0, 1.0, 0.5])
+
+    # Test list
+    res = _ensure_pixel_size_array([2.0, 1.5, 0.5])
+    assert np.allclose(res, [2.0, 1.5, 0.5])
+
+def test_generate_plane_basis():
+    """Test that generate plane basis works as expected."""
+    normal = np.array([1.0, 0.0, 0.0])
+    u, v = generate_plane_basis(normal)
+    # Check orthogonality
+    assert np.isclose(np.dot(u, normal), 0.0)
+    assert np.isclose(np.dot(v, normal), 0.0)
+    assert np.isclose(np.dot(u, v), 0.0)
+    # Check unit length
+    assert np.isclose(np.linalg.norm(u), 1.0)
+    assert np.isclose(np.linalg.norm(v), 1.0)
+
+def test_fit_plane_ransac():
+    """Test that fit plane ransac works as expected."""
+    # Points on the plane Z = 2.0
+    points_zyx = np.array([
+        [2.0, 0.0, 0.0],
+        [2.0, 1.0, 0.0],
+        [2.0, 0.0, 1.0],
+        [2.0, 1.0, 1.0],
+        [5.0, 5.0, 5.0] # Outlier
+    ])
+
+    p0, normal = fit_plane_ransac(points_zyx, pixel_sizes={'Z': 1.0, 'Y': 1.0, 'X': 1.0}, inlier_threshold_um=0.1)
+
+    assert np.isclose(p0[0], 2.0)
+    assert np.isclose(np.abs(normal[0]), 1.0)
+    assert np.isclose(normal[1], 0.0)
+    assert np.isclose(normal[2], 0.0)
+
+def test_sample_volume_plane():
+    """Test that sample volume plane works as expected."""
+    volume = np.zeros((10, 10, 10))
+    volume[5, :, :] = 1.0
+
+    p0 = np.array([5.0, 5.0, 5.0])
+    normal = np.array([1.0, 0.0, 0.0]) # plane Z=5
+
+    sampled, spacing = sample_volume_plane(
+        volume, pixel_sizes={'Z': 1.0, 'Y': 1.0, 'X': 1.0},
+        p0_phys=p0, normal_phys=normal,
+        u_range_um=(-2, 2), v_range_um=(-2, 2),
+        u_res=5, v_res=5
+    )
+
+    # Should all be 1s since we are sampling the plane at Z=5
+    assert np.allclose(sampled, 1.0)

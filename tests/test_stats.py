@@ -6,6 +6,7 @@ from eigenp_utils.stats import add_stat_annotations, cohens_d, bootstrap_ci, sum
 from statannotations.Annotator import Annotator
 
 def test_add_stat_annotations():
+    """Test that add stat annotations works as expected."""
     # Setup simple data
     np.random.seed(42)
     data = pd.DataFrame({
@@ -37,6 +38,7 @@ def test_add_stat_annotations():
     assert isinstance(annotator, Annotator)
 
 def test_cohens_d():
+    """Test that cohens d works as expected."""
     group1 = np.array([1, 2, 3, 4, 5])
     group2 = np.array([2, 3, 4, 5, 6])
 
@@ -64,6 +66,7 @@ def test_cohens_d():
     assert np.isnan(cohens_d([1], [2, 3]))
 
 def test_bootstrap_ci():
+    """Test that bootstrap ci works as expected."""
     np.random.seed(42)
     data = np.random.normal(10, 2, 100)
 
@@ -75,6 +78,7 @@ def test_bootstrap_ci():
     assert upper < 11.0
 
 def test_summary_stats():
+    """Test that summary stats works as expected."""
     df = pd.DataFrame({
         'group': ['A', 'A', 'A', 'B', 'B', 'B'],
         'value': [1, 2, 3, 10, 20, 30]
@@ -99,6 +103,7 @@ def test_summary_stats():
     assert b_stats['median'] == 20.0
 
 def test_remove_outliers_array():
+    """Test that remove outliers array works as expected."""
     data = np.array([1, 2, 3, 4, 5, 100, -100])
 
     # Test IQR
@@ -113,6 +118,7 @@ def test_remove_outliers_array():
     assert -100 not in cleaned_z
 
 def test_remove_outliers_dataframe():
+    """Test that remove outliers dataframe works as expected."""
     df = pd.DataFrame({
         'A': [1, 2, 3, 4, 5, 100, 2],
         'B': [1, 2, 3, 4, 5, 2, -100]
@@ -130,6 +136,7 @@ def test_remove_outliers_dataframe():
     assert -100 not in cleaned_all['B'].values
 
 def test_remove_outliers_mahalanobis_array():
+    """Test that remove outliers mahalanobis array works as expected."""
     np.random.seed(42)
     # Generate large multivariate normal dataset
     mean = [0, 0]
@@ -153,6 +160,7 @@ def test_remove_outliers_mahalanobis_array():
         assert not np.allclose(row, outlier2)
 
 def test_remove_outliers_mahalanobis_dataframe():
+    """Test that remove outliers mahalanobis dataframe works as expected."""
     np.random.seed(42)
     mean = [0, 0]
     cov = [[1, 0.8], [0.8, 1]]
@@ -173,6 +181,7 @@ def test_remove_outliers_mahalanobis_dataframe():
     assert np.isnan(cleaned_nan.loc[0, 'x'])
 
 def test_remove_outliers_mahalanobis_errors():
+    """Test that remove outliers mahalanobis errors works as expected."""
     df = pd.DataFrame({'x': [1, 2, 3], 'y': [4, 5, 6]})
 
     with pytest.raises(ValueError, match="cannot be applied to a single column"):

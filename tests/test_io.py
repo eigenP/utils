@@ -3,6 +3,7 @@ from pathlib import Path
 from eigenp_utils.io import check_file_before_save, ensure_directory
 
 def test_check_file_before_save(tmp_path):
+    """Test that check file before save works as expected."""
     # Test case 1: File does not exist
     test_file = tmp_path / "test_file.txt"
     check_file_before_save(test_file)  # Should not raise
@@ -16,6 +17,7 @@ def test_check_file_before_save(tmp_path):
     check_file_before_save(test_file, overwrite=True)  # Should not raise
 
 def test_ensure_directory(tmp_path):
+    """Test that ensure directory works as expected."""
     # Test case 1: Create nested directory
     nested_file = tmp_path / "subdir1" / "subdir2" / "file.txt"
     ensure_directory(nested_file)
