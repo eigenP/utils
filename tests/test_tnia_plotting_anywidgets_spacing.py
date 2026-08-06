@@ -44,4 +44,4 @@ def test_xy_anisotropy():
     # X physical = 100 * 1 = 100. Z physical = 10 * 1 = 10. Max width = 100.
     # Y physical = 50 * 0.2 = 10. Z physical = 10 * 1 = 10. Max height = 10.
     assert width_ratios[0] == 100
-    assert height_ratios[0] == 10
+    assert height_ratios[1] == 10

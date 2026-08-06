@@ -318,22 +318,37 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
         n_labels = len(channel_labels)
         if n_labels > 0:
+            import matplotlib.colors as mcolors
+            def _get_color_str(c):
+                if isinstance(c, mcolors.Colormap):
+                    return mcolors.to_hex(c(1.0)[:3])
+                return resolve_color(c)
+
             if isinstance(colormap, (list, tuple)):
-                color_list = [resolve_color(c) for c in colormap]
+                color_list = [_get_color_str(c) for c in colormap]
                 if len(color_list) < n_labels:
                     color_list = color_list * (n_labels // len(color_list) + 1)
             else:
-                c = resolve_color(colormap) if colormap is not None else 'black'
+                c = _get_color_str(colormap) if colormap is not None else 'black'
                 color_list = [c] * n_labels
 
             fig_h_in = figsize[1] if figsize is not None else 10
             fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
 
             from matplotlib.offsetbox import TextArea, HPacker, AnchoredOffsetbox
+            import matplotlib.colors as mcolors
+
+            def _darken(c):
+                try:
+                    rgb = mcolors.to_rgb(c)
+                    return tuple(val * 0.8 for val in rgb)
+                except ValueError:
+                    return c
 
             text_areas = []
             for i, label in enumerate(channel_labels):
-                ta = TextArea(label, textprops=dict(color=color_list[i], fontsize=fontsize_pt, fontweight='bold'))
+                darkened_color = _darken(color_list[i])
+                ta = TextArea(label, textprops=dict(color=darkened_color, fontsize=fontsize_pt, fontweight='bold'))
                 text_areas.append(ta)
 
             packer = HPacker(children=text_areas, align="center", pad=0, sep=10) # 10 points spacing
@@ -1478,7 +1493,10 @@ class TNIASliceWidget(TNIAWidgetBase):
             if self.channel_labels_input is not None:
                 channel_labels_curr = [self.channel_names[i] for i in visible_indices]
             else:
-                channel_labels_curr = None
+                import matplotlib.colors as mcolors
+                def _get_name(c):
+                    return c.name if isinstance(c, mcolors.Colormap) else str(c)
+                channel_labels_curr = [_get_name(c) for c in colors_curr] if isinstance(colors_curr, list) else _get_name(colors_curr)
 
         else:
             vmin_val = None if self.vmin_list[0] == "" else float(self.vmin_list[0])
@@ -1503,7 +1521,14 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmax_curr = vmax_val
             gamma_curr = gamma_val
             opacity_curr = opacity_val
-            channel_labels_curr = self.channel_names if self.channel_labels_input is not None else None
+
+            if self.channel_labels_input is not None:
+                channel_labels_curr = self.channel_names
+            else:
+                import matplotlib.colors as mcolors
+                def _get_name(c):
+                    return c.name if isinstance(c, mcolors.Colormap) else str(c)
+                channel_labels_curr = [_get_name(c) for c in colors_curr] if isinstance(colors_curr, list) else [_get_name(colors_curr)]
 
         # Pass pixel_sizes directly to trigger scale bar logic
         pass_pixel_sizes = (self.sz, self.sy, self.sx) if getattr(self, '_pixel_sizes_given', False) else None
