@@ -1,4 +1,5 @@
 import numpy as np
+import functools
 import warnings
 from skimage.exposure import adjust_gamma, rescale_intensity
 from scipy.optimize import curve_fit
@@ -9,54 +10,57 @@ import skimage.transform as transform
 
 def ensure_float_and_restore_dtype(func):
     """
-    Decorator to safely convert input to float32 for processing,
-    and restore the original data type upon return without forcefully
-    stretching the intensity range.
+    Decorator to safely convert integer arrays to normalized float32 [0.0, 1.0]
+    for processing, and restore original integer ranges upon completion.
+    Floats pass through without range modification.
     """
+    @functools.wraps(func)
     def wrapper(image, *args, **kwargs):
+        if not isinstance(image, np.ndarray):
+            return func(image, *args, **kwargs)
+
         orig_dtype = image.dtype
         is_integer = np.issubdtype(orig_dtype, np.integer)
 
-        # Determine valid bounds for clipping if original is integer
         if is_integer:
             info = np.iinfo(orig_dtype)
             valid_min, valid_max = info.min, info.max
-
-        # Convert to float32 only if it isn't already a float
-        if not np.issubdtype(orig_dtype, np.floating):
-            image_float = image.astype(np.float32)
+            scale = float(valid_max - valid_min)
+            # Normalize integers to [0.0, 1.0] float32
+            image_float = (image.astype(np.float32) - valid_min) / scale
         else:
-            image_float = image
+            image_float = image if orig_dtype == np.float32 else image.astype(np.float32)
 
-        # Execute the core function
         result = func(image_float, *args, **kwargs)
 
         def convert_output(arr):
-            # If the original was float, just cast back to original float precision
+            if not isinstance(arr, np.ndarray):
+                return arr
+
             if not is_integer:
                 return arr.astype(orig_dtype)
 
-            # If original was integer, we must clip to prevent underflow/overflow wrap-around
-            # We do NOT rescale, we only clip out-of-bounds values.
-            if arr.max() > valid_max or arr.min() < valid_min:
-                warnings.warn(f"Values outside {orig_dtype} range were clipped to [{valid_min}, {valid_max}].")
-                arr = np.clip(arr, valid_min, valid_max)
+            # Denormalize float [0.0, 1.0] back to integer range [valid_min, valid_max]
+            arr_scaled = (arr * scale) + valid_min
 
-            # Round before casting to integer to avoid truncation errors
-            # (e.g., 254.9 becoming 254 instead of 255)
-            return np.round(arr).astype(orig_dtype)
+            if np.nanmax(arr_scaled) > valid_max or np.nanmin(arr_scaled) < valid_min:
+                warnings.warn(
+                    f"Values outside {orig_dtype} range were clipped to [{valid_min}, {valid_max}].",
+                    RuntimeWarning,
+                    stacklevel=3
+                )
+                arr_scaled = np.clip(arr_scaled, valid_min, valid_max)
 
-        # Handle tuple returns (rescale primary output only)
+            return np.round(arr_scaled).astype(orig_dtype)
+
         if isinstance(result, tuple):
-            primary = convert_output(result[0])
-            return (primary,) + result[1:]
+            return tuple(convert_output(res) if i == 0 else res for i, res in enumerate(result))
         elif isinstance(result, dict):
-            # Try to convert primary output if it exists in expected keys
-            if 'image' in result:
-                result['image'] = convert_output(result['image'])
-            elif 'corrected' in result:
-                result['corrected'] = convert_output(result['corrected'])
-            return result
+            res_dict = result.copy()
+            for key in ['image', 'corrected']:
+                if key in res_dict:
+                    res_dict[key] = convert_output(res_dict[key])
+            return res_dict
         else:
             return convert_output(result)
 
@@ -66,45 +70,24 @@ def ensure_float_and_restore_dtype(func):
 def contrast_stretching(image, p_min=0.0, p_max=99.9):
     """
     Stretch the intensity range of the image based on percentiles.
-
-    Args:
-        image (numpy.ndarray): Input image.
-        p_min (float): Lower percentile (0-100). Default 0.0.
-        p_max (float): Upper percentile (0-100). Default 99.9.
-
-    Returns:
-        numpy.ndarray: Rescaled image.
     """
     v_min, v_max = np.percentile(image, (p_min, p_max))
-    print(v_min, v_max)
-    image = rescale_intensity(image, in_range=(v_min, v_max))
-    return image
+    if v_min == v_max:
+        return image
+    return rescale_intensity(image, in_range=(v_min, v_max))
 
 def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=None):
     """
-    Normalize image intensities to lie between 0 and 1 (for float) or 0 and 255/MAX (for int).
-
-    Args:
-        image (numpy.ndarray): Input image.
-        lower_percentile (float): Percentile for lower bound.
-        upper_percentile (float): Percentile for upper bound.
-        dtype (type, optional): Output data type. If None, matches input dtype.
-
-    Returns:
-        numpy.ndarray: Normalized image.
+    Normalize image intensities to lie between 0 and 1 (for float) or 0 and MAX (for int).
     """
     lower_bound = np.percentile(image, lower_percentile)
     upper_bound = np.percentile(image, upper_percentile)
 
-    # Clip image to bounds
     image_clipped = np.clip(image, lower_bound, upper_bound)
-
-    # Avoid division by zero
     denom = upper_bound - lower_bound
     if denom == 0:
         denom = 1.0
 
-    # Normalize to 0-1 float
     normalized_image = (image_clipped - lower_bound) / denom
 
     if dtype is None:
@@ -115,7 +98,7 @@ def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=No
     elif np.issubdtype(dtype, np.integer):
         max_val = np.iinfo(dtype).max
         normalized_image *= max_val
-        return normalized_image.astype(dtype)
+        return np.round(normalized_image).astype(dtype)
     else:
         return normalized_image.astype(dtype)
 
@@ -125,19 +108,14 @@ def _fit_linear(x_data, y_data):
     return m * x_data + c
 
 def _fit_exponential(x_data, y_data):
-    """OLS-seeded NLLS for exponential decay (additive noise)."""
     y_safe = np.clip(y_data, 1e-9, None)
     b_guess, log_a_guess = np.polyfit(x_data, np.log(y_safe), 1)
     a_guess = np.exp(log_a_guess)
-
-    # If the data is actually flat or slightly growing due to noise, b_guess might be > 0.
-    # We must clip b_guess to conform to the <= 0 bound before passing to curve_fit.
     b_guess = min(b_guess, 0.0)
 
     def model(x, a, b):
         return a * np.exp(b * x)
 
-    # Bound amplitude to positive, decay rate to <= 0
     params, _ = curve_fit(
         model,
         x_data,
@@ -154,27 +132,23 @@ FIT_MODELS = {
     'exponential': _fit_exponential
 }
 
-@ensure_float_and_restore_dtype
+# Removed @ensure_float_and_restore_dtype to avoid double-decoration
 def adjust_gamma_per_slice(*args, **kwargs):
-    """
-    Deprecated. Use correct_z_intensity_decay with method='gamma' instead.
-    """
+    """Deprecated. Use correct_z_intensity_decay with method='gamma' instead."""
     warnings.warn(
         "adjust_gamma_per_slice is deprecated. Use correct_z_intensity_decay with method='gamma' instead.",
         DeprecationWarning, stacklevel=2
     )
-    # Map old arguments to new
     if 'gamma_fit_func' in kwargs:
         kwargs['fit_model'] = kwargs.pop('gamma_fit_func')
     if 'FLIP_Z_AXIS' in kwargs:
-        kwargs.pop('FLIP_Z_AXIS') # No longer supported directly, user handles manually
+        kwargs.pop('FLIP_Z_AXIS')
     return correct_z_intensity_decay(*args, method='gamma', **kwargs)
 
-@ensure_float_and_restore_dtype
+
+# Removed @ensure_float_and_restore_dtype to avoid double-decoration
 def adjust_brightness_per_slice(*args, **kwargs):
-    """
-    Deprecated. Use correct_z_intensity_decay instead.
-    """
+    """Deprecated. Use correct_z_intensity_decay instead."""
     warnings.warn(
         "adjust_brightness_per_slice is deprecated. Use correct_z_intensity_decay instead.",
         DeprecationWarning, stacklevel=2
@@ -185,19 +159,10 @@ def adjust_brightness_per_slice(*args, **kwargs):
         kwargs.pop('FLIP_Z_AXIS')
     return correct_z_intensity_decay(*args, **kwargs)
 
-# @ensure_float_and_restore_dtype handled by decorator on adjust_gamma/brightness logic, applying here to unified logic
 @ensure_float_and_restore_dtype
 def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', final_gamma=0.8, return_diagnostic=False):
     """
-    Corrects Z-axis intensity attenuation using rigorous statistical decay modeling.
-
-    Args:
-        image (numpy.ndarray): 3D image array (Z, Y, X).
-        method (str): 'gamma' for non-linear correction, 'gain' for linear scaling.
-        fit_model (str or callable, optional): Model to fit intensity decay ('exponential', 'linear', or callable).
-            If None, applies a manual linear ramp ending at final_gamma.
-        final_gamma (float): Target gamma for the last slice (only used if fit_model is None).
-        return_diagnostic (bool): If True, returns dict with transformed image and fitting data.
+    Corrects Z-axis intensity attenuation using statistical decay modeling.
     """
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
@@ -205,23 +170,14 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
     num_slices = image.shape[0]
     adjusted_image = np.empty_like(image)
 
-    is_integer = np.issubdtype(image.dtype, np.integer)
-    max_dtype_val = np.iinfo(image.dtype).max if is_integer else None
-    should_clip_float = not is_integer and np.max(image) <= 1.0
-
     diagnostic_data = None
 
     if fit_model is not None:
         x_data = np.arange(num_slices)
-        # Extract 99th percentile to represent signal while rejecting hot pixels
         y_data = np.array([np.percentile(image[i], 99) for i in range(num_slices)])
 
-        # Normalize target intensities
-        max_val = max_dtype_val if is_integer else (1.0 if should_clip_float else np.max(image))
-        max_val = max_val if max_val != 0 else 1.0
-        y_data_norm = y_data / max_val
+        y_data_norm = y_data
 
-        # Dispatch fitting algorithm
         try:
             if isinstance(fit_model, str):
                 if fit_model not in FIT_MODELS:
@@ -232,7 +188,7 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
             else:
                 raise ValueError("fit_model must be a string or callable.")
         except Exception as e:
-            raise RuntimeError(f"Z-decay fitting failed: {e}. Pipeline aborted to prevent silent data corruption.")
+            raise RuntimeError(f"Z-decay fitting failed: {e}. Pipeline aborted.")
 
         if return_diagnostic:
             diagnostic_data = {
@@ -242,7 +198,6 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
                 "gamma_fit_func": fit_model if isinstance(fit_model, str) else "custom_callable"
             }
 
-        # Calculate correction factors
         y_fit_norm = np.clip(y_fit_norm, 1e-9, 1.0)
         y_ref_norm = np.clip(np.max(y_fit_norm), 1e-9, 1.0)
 
@@ -256,25 +211,14 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
         else:
             raise ValueError(f"Unknown correction method: {method}")
     else:
-        # Manual fallback
         factors = np.linspace(1.0, final_gamma, num_slices)
 
-    # Apply correction loop
-    warned = False
     for i in range(num_slices):
         if method == 'gamma':
-            # Assumes adjust_gamma from skimage.exposure or similar is defined elsewhere
             adjusted_image[i, :, :] = adjust_gamma(image[i, :, :], gamma=factors[i])
         elif method == 'gain':
-            img_slice = image[i, :, :].astype(np.float32) * factors[i]
-            if is_integer:
-                img_slice = np.clip(img_slice, 0, max_dtype_val)
-            elif should_clip_float:
-                if not warned and np.any(img_slice > 1.0):
-                    warnings.warn("Intensity values clipped to 1.0 during gain adjustment.")
-                    warned = True
-                img_slice = np.clip(img_slice, 0, 1.0)
-            adjusted_image[i, :, :] = img_slice.astype(image.dtype)
+            img_slice = image[i, :, :] * factors[i]
+            adjusted_image[i, :, :] = np.clip(img_slice, 0, 1.0)
 
     if return_diagnostic:
         return {"image": adjusted_image, "diagnostic_data": diagnostic_data}
