@@ -1,10 +1,33 @@
+import sys
+import warnings
+
+from matplotlib.colors import to_rgb
+from matplotlib.figure import Figure
+import matplotlib
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
-import matplotlib
-matplotlib.use("Agg")
+import types
+
+from eigenp_utils.plotting_utils import labels_cmap
+from eigenp_utils.tnia_plotting_anywidgets import resolve_color, show_zyx_max_slice_interactive
+from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slabs, show_zyx_max_slice_interactive
 from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, TNIASliceWidget
+from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_scatter_interactive
+from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_slabs, show_zyx
+from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, show_zyx_max_scatter_interactive
+from eigenp_utils.tnia_plotting_anywidgets import show_zyx_slice, show_zyx_max_slabs, create_multichannel_rgb
+
+
+
+# =========================================
+# Source: test_tnia_plotting_anywidgets.py
+# =========================================
+matplotlib.use("Agg")
 
 def test_single_channel_instantiation():
+    """Test that single channel instantiation works as expected."""
     im = np.zeros((10, 20, 30))
     w = show_zyx_max_slice_interactive(im)
     assert isinstance(w, TNIASliceWidget)
@@ -14,6 +37,7 @@ def test_single_channel_instantiation():
     assert w.image_data is not None and len(w.image_data) > 0
 
 def test_multi_channel_instantiation():
+    """Test that multi channel instantiation works as expected."""
     im = [np.zeros((10, 20, 30)) for _ in range(3)]
     w = show_zyx_max_slice_interactive(im)
     assert w.num_channels == 3
@@ -23,6 +47,7 @@ def test_multi_channel_instantiation():
     assert w.image_data is not None and len(w.image_data) > 0
 
 def test_channel_visibility_update():
+    """Test that channel visibility update works as expected."""
     # Use different values to ensure visual difference
     im = [np.zeros((10, 10, 10)), np.ones((10, 10, 10)) * 255]
     w = show_zyx_max_slice_interactive(im)
@@ -44,6 +69,7 @@ def test_channel_visibility_update():
     assert empty_data != initial_data
 
 def test_default_colors_resolution():
+    """Test that default colors resolution works as expected."""
     im = [np.zeros((10, 10, 10)) for _ in range(2)]
     w = show_zyx_max_slice_interactive(im, colors=None)
     assert w.colors_resolved == ['white', 'lime'] # Defaults
@@ -52,6 +78,7 @@ def test_default_colors_resolution():
     assert w2.colors_resolved == ['red', 'blue']
 
 def test_show_zyx_max_slice_interactive_point_annotator_args():
+    """Test that show zyx max slice interactive point annotator args works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, TNIAAnnotatorWidget
     im = [np.zeros((10, 10, 10)) for _ in range(2)]
     w = show_zyx_max_slice_interactive_point_annotator(
@@ -67,6 +94,7 @@ def test_show_zyx_max_slice_interactive_point_annotator_args():
     assert w.sz == 3
 
 def test_point_size_scaling():
+    """Test that point size scaling works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import TNIAAnnotatorWidget
     im = np.zeros((1, 100, 100)) # Thin Z dimension
 
@@ -81,6 +109,7 @@ def test_point_size_scaling():
     assert w1.point_size < w2.point_size
 
 def test_show_zyx_max_scatter_interactive_colormap():
+    """Test that show zyx max scatter interactive colormap works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
     X = np.random.rand(10) * 10
     Y = np.random.rand(10) * 10
@@ -101,6 +130,7 @@ def test_show_zyx_max_scatter_interactive_colormap():
     assert w4 is not None
 
 def test_show_zyx_max_scatter_interactive_signature():
+    """Test that show zyx max scatter interactive signature works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
     X = np.random.rand(10) * 10
     Y = np.random.rand(10) * 10
@@ -131,6 +161,7 @@ def test_show_zyx_max_scatter_interactive_signature():
         show_zyx_max_scatter_interactive(invalid_points, channels=channels)
 
 def test_colormap_list_multi_channel():
+    """Test that colormap list multi channel works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
     im = [np.zeros((10, 20, 30)) for _ in range(3)]
     # This should not raise any TypeError about unhashable lists
@@ -139,6 +170,7 @@ def test_colormap_list_multi_channel():
     assert w.colors_resolved == ['red', 'blue', 'green']
 
 def test_colormap_list_scatter_multi_channel():
+    """Test that colormap list scatter multi channel works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
     X = np.random.rand(10) * 10
     Y = np.random.rand(10) * 10
@@ -148,20 +180,20 @@ def test_colormap_list_scatter_multi_channel():
     assert w is not None
 
 def test_deprecation_warning_colors():
+    """Test that deprecation warning colors works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
     im = np.zeros((10, 20, 30))
     with pytest.warns(DeprecationWarning, match="The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead."):
         w = show_zyx_max_slice_interactive(im, colors=['red'])
         assert w is not None
 
-from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, show_zyx_max_scatter_interactive
-import warnings
 
 @pytest.mark.parametrize("factory_fn", [
     show_zyx_max_slice_interactive,
     show_zyx_max_slice_interactive_point_annotator,
 ])
 def test_interactive_kwargs_images(factory_fn):
+    """Test that interactive kwargs images works as expected."""
     im = np.zeros((10, 20, 30))
     w = factory_fn(im,
                    show_crosshair=False,
@@ -184,6 +216,7 @@ def test_interactive_kwargs_images(factory_fn):
     assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
 
 def test_interactive_kwargs_scatter():
+    """Test that interactive kwargs scatter works as expected."""
     X, Y, Z = np.random.rand(10), np.random.rand(10), np.random.rand(10)
     w = show_zyx_max_scatter_interactive((X, Y, Z),
                    show_crosshair=False,
@@ -204,6 +237,7 @@ def test_interactive_kwargs_scatter():
     show_zyx_max_slice_interactive_point_annotator,
 ])
 def test_deprecation_warnings_interactive(factory_fn):
+    """Test that deprecation warnings interactive works as expected."""
     im = np.zeros((10, 20, 30))
     with pytest.warns(DeprecationWarning, match="The 'sxy' and 'sz' parameters are deprecated"):
         factory_fn(im, sxy=0.5, sz=2.0)
@@ -221,6 +255,7 @@ def test_deprecation_warnings_interactive(factory_fn):
     ((10, 512, 512), (10, 2, 2), '200 µm')      # user requested anisotropic
 ])
 def test_scale_bar_logic(shape, pixel_sizes, expected_text):
+    """Test that scale bar logic works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_scatter_interactive
     import numpy as np
 
@@ -268,6 +303,7 @@ def test_scale_bar_logic(shape, pixel_sizes, expected_text):
     assert font_size_scaled > font_size_unscaled
 
 def test_parse_zyx_tuple_or_dict_various_types():
+    """Test that parse zyx tuple or dict various types works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import _parse_zyx_tuple_or_dict
 
     # 1. Native tuple of floats
@@ -297,6 +333,7 @@ def test_parse_zyx_tuple_or_dict_various_types():
     assert res == (1e-6, 1e6, 0.0)
 
 def test_show_zyx_max_slabs_zero_sized_slices():
+    """Test that show zyx max slabs zero sized slices works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slabs, show_zyx_max_slice_interactive
     im = np.random.rand(10, 10, 10)
 
@@ -313,6 +350,7 @@ def test_show_zyx_max_slabs_zero_sized_slices():
     assert isinstance(w.sz, float)
 
 def test_interactive_channel_labels():
+    """Test that interactive channel labels works as expected."""
     from eigenp_utils.tnia_plotting_anywidgets import (
         show_zyx_max_slice_interactive,
         show_zyx_max_slice_interactive_point_annotator,
@@ -349,3 +387,358 @@ def test_interactive_channel_labels():
         render='points'
     )
     assert w3.channel_labels_input == labels
+
+# =========================================
+# Source: test_tnia_annotator_widget.py
+# =========================================
+def test_tnia_annotator_widget():
+    """Test that tnia annotator widget works as expected."""
+    from eigenp_utils.tnia_plotting_anywidgets import TNIAAnnotatorWidget
+    import numpy as np
+    import os
+
+    os.environ['TEST_DIR'] = '/tmp'
+
+    im = np.random.randint(0, 255, (10, 10, 10), dtype=np.uint8)
+    w = TNIAAnnotatorWidget(im)
+    w.points = [[5, 5, 5], [6, 6, 6]]
+    w.save_csv_filename = "$TEST_DIR/test_points.csv"
+    w._save_csv(None)
+
+    with open("/tmp/test_points.csv", "r") as f:
+        print(f.read())
+
+# =========================================
+# Source: test_tnia_plotting_anywidgets_resolve_color.py
+# =========================================
+
+def test_resolve_color():
+    """Test that resolve color works as expected."""
+    # Test hex colors
+    assert resolve_color("#ff0000") == "#ff0000"
+
+    # Test valid colormap names
+    assert resolve_color("viridis") == "#fde725" # final color of viridis
+
+    # Test colormap instances directly raise TypeError
+    cmap = mcolors.LinearSegmentedColormap.from_list('test', ['black', 'white'])
+    with pytest.raises(TypeError, match="Expected a registered colormap name"):
+        resolve_color(cmap)
+
+    # Test actual labels_cmap issue from prompt
+    with pytest.raises(TypeError, match="Expected a registered colormap name"):
+        resolve_color(labels_cmap)
+
+def test_widget_rejects_colormap_instance():
+    """Test that widget rejects colormap instance works as expected."""
+    im = np.zeros((10, 20, 30))
+    # This crashed previously due to channel_colors list expecting a unicode string but getting a Colormap instance
+    with pytest.raises(TypeError, match="Expected a registered colormap name"):
+        w = show_zyx_max_slice_interactive(im, colormap=labels_cmap)
+
+# =========================================
+# Source: test_tnia_plotting_rotation.py
+# =========================================
+
+def test_rotation_slice_interactive():
+    """Test that rotation slice interactive works as expected."""
+    im = np.random.rand(10, 20, 30)
+
+    # Test no rotation
+    w0 = show_zyx_max_slice_interactive(im)
+    assert w0.rotate_view is None
+
+    # Test float rotation
+    w1 = show_zyx_max_slice_interactive(im, rotate_view=45.0)
+    assert w1.rotate_view == 45.0
+
+    # Test tuple rotation
+    w2 = show_zyx_max_slice_interactive(im, rotate_view=(10, 20, 30))
+    assert w2.rotate_view == (10, 20, 30)
+
+    # Force a render with rotation to check for runtime errors
+    w2._render_wrapper(None)
+    assert w2.image_data is not None
+
+def test_rotation_scatter_interactive():
+    """Test that rotation scatter interactive works as expected."""
+    N = 100
+    X = np.random.rand(N) * 30
+    Y = np.random.rand(N) * 20
+    Z = np.random.rand(N) * 10
+
+    # Test no rotation
+    w0 = show_zyx_max_scatter_interactive((Z, Y, X))
+    assert w0.rotate_view is None
+
+    # Test float rotation
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), rotate_view=45.0)
+    assert w1.rotate_view == 45.0
+
+    # Test tuple rotation
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), rotate_view=(10, 20, 30))
+    assert w2.rotate_view == (10, 20, 30)
+
+    # Force a render with points rotation to check for runtime errors
+    w2.render = 'points'
+    w2._render_wrapper(None)
+    assert w2.image_data is not None
+
+    # Force a render with density rotation to check for runtime errors
+    w2.render = 'density'
+    w2._render_wrapper(None)
+    assert w2.image_data is not None
+
+# =========================================
+# Source: test_marimo_update.py
+# =========================================
+def test_marimo_update():
+    """Test that marimo update works as expected."""
+    import marimo
+    import pathlib
+
+    app_code = """
+    import marimo as mo
+
+    app = mo.App()
+
+    @app.cell
+    def __():
+        import numpy as np
+        from skimage.data import cells3d
+        from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+
+        try:
+            im = cells3d()
+        except:
+            from eigenp_utils.io import download_file
+            url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
+            download_file(url_to_fetch, "./cells3d.tif")
+            from skimage.io import imread
+            im = imread("./cells3d.tif")  # (Z, C, Y, X)
+        membrane = im[:, 0, :, :]
+        nuclei = im[:, 1, :, :]
+
+        widget = show_xyz_max_slice_interactive(
+            [membrane, nuclei],
+            colors=['magma', 'viridis']
+        )
+        return widget,
+
+    if __name__ == "__main__":
+        app.run()
+    """
+    with open("marimo_app.py", "w") as f:
+        f.write(app_code)
+
+# =========================================
+# Source: test_tnia_figsize_scale.py
+# =========================================
+def test_tnia_figsize_scale():
+    """Test that tnia figsize scale works as expected."""
+    import numpy as np
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+
+    im = np.random.rand(100, 100, 100)
+    widget1 = show_zyx_max_slice_interactive(im, figsize_scale=1)
+    widget2 = show_zyx_max_slice_interactive(im, figsize_scale=2)
+    widget3 = show_zyx_max_slice_interactive(im, figsize_scale=10)
+    print(widget1.figsize)
+    print(widget2.figsize)
+    print(widget3.figsize)
+
+# =========================================
+# Source: test_tnia_plotting_anywidgets_3d_logic.py
+# =========================================
+
+matplotlib = pytest.importorskip("matplotlib")
+matplotlib.use("Agg")
+
+
+
+def test_show_zyx_slice_returns_correct_slices():
+    """Test that show zyx slice returns correct slices works as expected."""
+    arr = np.arange(4 * 3 * 2).reshape(4, 3, 2)
+    fig = show_zyx_slice(arr, x=1, y=1, z=2, use_plt=False)
+    assert isinstance(fig, Figure)
+    xy_expected = arr[2, :, :]
+    xz_expected = arr[:, 1, :]
+    zy_expected = np.flip(np.rot90(arr[:, :, 1], 1), 0)
+    xy_img = fig.axes[0].images[0].get_array()
+    zy_img = fig.axes[1].images[0].get_array()
+    xz_img = fig.axes[2].images[0].get_array()
+    assert np.array_equal(xy_img, xy_expected)
+    assert np.array_equal(zy_img, zy_expected)
+    assert np.array_equal(xz_img, xz_expected)
+
+
+def test_show_zyx_max_slabs_projection():
+    """Test that show zyx max slabs projection works as expected."""
+    arr = np.arange(4 * 3 * 2).reshape(4, 3, 2)
+    fig = show_zyx_max_slabs(arr, x=[0, 1], y=[0, 2], z=[1, 4])
+    xy_expected = np.max(arr[1:4, :, :], axis=0)
+    xz_expected = np.max(arr[:, 0:2, :], axis=1)
+    zy_expected = np.flip(np.rot90(np.max(arr[:, :, 0:1], axis=2), 1), 0)
+    xy_img = fig.axes[0].images[0].get_array()
+    zy_img = fig.axes[1].images[0].get_array()
+    xz_img = fig.axes[2].images[0].get_array()
+    assert np.array_equal(xy_img, xy_expected)
+    assert np.array_equal(xz_img, xz_expected)
+    assert np.array_equal(zy_img, zy_expected)
+    plt.close(fig)
+
+
+def test_deprecated_tnia_plotting_3d_warning():
+    """Test that deprecated tnia plotting 3d warning works as expected."""
+    import warnings
+    import importlib
+
+    # Remove from sys.modules to ensure re-evaluation
+    import sys
+    if "eigenp_utils.tnia_plotting_3d" in sys.modules:
+        del sys.modules["eigenp_utils.tnia_plotting_3d"]
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        import eigenp_utils.tnia_plotting_3d as tnia3d
+
+        assert len(w) == 1
+        assert issubclass(w[-1].category, DeprecationWarning)
+        assert "deprecated" in str(w[-1].message)
+
+    # verify re-export works
+    assert hasattr(tnia3d, "show_zyx")
+
+
+def test_create_multichannel_rgb_basic():
+    """Test that create multichannel rgb basic works as expected."""
+    xy_list = [np.ones((2, 2)), np.zeros((2, 2))]
+    xz_list = [np.zeros((2, 2)), np.ones((2, 2))]
+    zy_list = [np.zeros((2, 2)), np.zeros((2, 2))]
+    xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb(
+        xy_list, xz_list, zy_list, colors=["red", "green"]
+    )
+    red = np.asarray(to_rgb("red"))
+    green = np.asarray(to_rgb("green"))
+    expected_xy = np.broadcast_to(red, (2, 2, 3))
+    expected_xz = np.broadcast_to(green, (2, 2, 3))
+    expected_zy = np.zeros((2, 2, 3))
+    assert np.allclose(xy_rgb, expected_xy)
+    assert np.allclose(xz_rgb, expected_xz)
+    assert np.allclose(zy_rgb, expected_zy)
+
+def test_show_zyx_max_scatter_interactive_colormap():
+    """Test that show zyx max scatter interactive colormap works as expected."""
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
+    X = np.random.rand(10) * 10
+    Y = np.random.rand(10) * 10
+    Z = np.random.rand(10) * 10
+    channels = np.random.rand(10)
+
+    # Should not throw exception for invalid RGBA string, and _render should not throw NameError
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
+    w1._render() # Trigger render directly
+
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
+    w2._render() # Trigger render directly
+
+    channels_multi = [np.random.rand(10), np.random.rand(10)]
+    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
+    w3._render() # Trigger render directly
+
+    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w4._render() # Trigger render directly
+
+    assert w1 is not None
+    assert w2 is not None
+    assert w3 is not None
+    assert w4 is not None
+
+# =========================================
+# Source: test_show_zyx_scale_bar.py
+# =========================================
+
+def test_show_zyx_max_slabs_scale_bar():
+    """Test that show zyx max slabs scale bar works as expected."""
+    im = np.random.randint(0, 255, (10, 100, 100), dtype=np.uint8)
+
+    # Using tuple
+    fig2 = show_zyx_max_slabs(im, pixel_sizes=(1.5, 0.5, 0.5))
+
+    # Using dictionary
+    fig3 = show_zyx_max_slabs(im, pixel_sizes={'Z': 1.5, 'Y': 0.5, 'X': 0.5})
+
+    def get_text_from_fig(fig):
+        axBar = fig.axes[-1]
+        for t in axBar.texts:
+            if "µm" in t.get_text() or "pixel_sizes" in t.get_text() or "sxy" in t.get_text():
+                return t.get_text()
+        return None
+
+    # Assert
+    assert "µm" in get_text_from_fig(fig2)
+    assert "µm" in get_text_from_fig(fig3)
+
+def test_interactive_factory_passes_pixel_sizes():
+    """Test that interactive factory passes pixel sizes works as expected."""
+    im = np.random.randint(0, 255, (10, 100, 100), dtype=np.uint8)
+
+    # Should not throw errors and initialize perfectly
+    widget = show_zyx_max_slice_interactive(im, pixel_sizes=(1.5, 0.5, 0.5))
+    assert widget._pixel_sizes_given is True
+    assert widget.sx == 0.5
+    assert widget.sy == 0.5
+    assert widget.sz == 1.5
+
+if __name__ == '__main__':
+    test_show_zyx_max_slabs_scale_bar()
+    test_interactive_factory_passes_pixel_sizes()
+    print("Tests passed")
+
+# =========================================
+# Source: test_tnia_plotting_anywidgets_spacing.py
+# =========================================
+
+def test_interactive_spacing_pixel_sizes_vs_sxy():
+    """
+    Test that when figsize is None, dynamically computed figsize parses
+    pixel_sizes=(Z, Y, X) dicts correctly.
+    """
+    im = np.random.rand(10, 50, 50)
+
+    # Using pixel_sizes dict
+    w_dict = show_zyx_max_slice_interactive(im, pixel_sizes={'Z':2, 'Y':1, 'X':1})
+    fig_dict = w_dict._render()
+    size_dict = fig_dict.get_size_inches()
+
+    # Using pixel_sizes tuple
+    w_tuple = show_zyx_max_slice_interactive(im, pixel_sizes=(2, 1, 1))
+    fig_tuple = w_tuple._render()
+    size_tuple = fig_tuple.get_size_inches()
+
+    np.testing.assert_allclose(size_dict, size_tuple)
+
+    # Test the height ratios generated inside the gridspec
+    gs_dict = fig_dict.axes[0].get_subplotspec().get_gridspec().get_height_ratios()
+    gs_tuple = fig_tuple.axes[0].get_subplotspec().get_gridspec().get_height_ratios()
+
+    assert gs_dict == gs_tuple
+
+def test_xy_anisotropy():
+    """
+    Test that XY anisotropy is correctly respected in show_zyx spacing calculations.
+    """
+    im = np.random.rand(10, 50, 100) # Z, Y, X
+    # Highly anisotropic XY pixels
+    w = show_zyx_max_slice_interactive(im, pixel_sizes={'Z': 1.0, 'Y': 0.2, 'X': 1.0})
+    fig = w._render()
+
+    # Check gridspec ratios directly to see if physical scaling is applied
+    gs = fig.axes[0].get_subplotspec().get_gridspec()
+    width_ratios = gs.get_width_ratios()
+    height_ratios = gs.get_height_ratios()
+
+    # X physical = 100 * 1 = 100. Z physical = 10 * 1 = 10. Max width = 100.
+    # Y physical = 50 * 0.2 = 10. Z physical = 10 * 1 = 10. Max height = 10.
+    assert width_ratios[0] == 100
+    assert height_ratios[1] == 10
