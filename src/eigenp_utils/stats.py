@@ -336,8 +336,9 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
         covariance matrix. It requires at least 2 dimensions and bypasses NaNs.
     threshold : float, default 1.5
         The threshold for filtering (IQR multiplier or Z-score threshold).
-        If method='mahalanobis', this functions as a Chi-Square cumulative probability
-        (e.g., 0.95 or 0.99).
+        If method='mahalanobis', this functions as a cumulative probability
+        (e.g., 0.95 or 0.99) for the exact scaled Beta distribution (or Chi-Square
+        if N <= d + 1).
     column : str, optional
         If data is a DataFrame, the column to filter on. If None and data
         is a DataFrame, filters rows where any column has an outlier.
@@ -416,9 +417,17 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                     left = np.dot(X_centered, inv_cov)
                     D_squared = np.sum(left * X_centered, axis=1)
 
-                    chi2_thresh = stats.chi2.ppf(threshold, df=n_features)
+                    if n_samples <= n_features + 1:
+                        thresh = stats.chi2.ppf(threshold, df=n_features)
+                    else:
+                        beta_thresh = stats.beta.ppf(
+                            threshold,
+                            n_features / 2,
+                            (n_samples - n_features - 1) / 2
+                        )
+                        thresh = ((n_samples - 1) ** 2 / n_samples) * beta_thresh
 
-                    valid_keep = D_squared <= chi2_thresh
+                    valid_keep = D_squared <= thresh
                     bool_mask[valid_row_mask] = valid_keep
 
                 mask = pd.Series(bool_mask, index=df_out.index)
@@ -481,9 +490,17 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                 left = np.dot(X_centered, inv_cov)
                 D_squared = np.sum(left * X_centered, axis=1)
 
-                chi2_thresh = stats.chi2.ppf(threshold, df=n_features)
+                if n_samples <= n_features + 1:
+                    thresh = stats.chi2.ppf(threshold, df=n_features)
+                else:
+                    beta_thresh = stats.beta.ppf(
+                        threshold,
+                        n_features / 2,
+                        (n_samples - n_features - 1) / 2
+                    )
+                    thresh = ((n_samples - 1) ** 2 / n_samples) * beta_thresh
 
-                valid_keep = D_squared <= chi2_thresh
+                valid_keep = D_squared <= thresh
                 keep_mask[valid_row_mask] = valid_keep
 
             return values[keep_mask]
