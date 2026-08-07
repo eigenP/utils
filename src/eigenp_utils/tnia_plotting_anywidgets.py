@@ -63,9 +63,9 @@ def is_colormap(c):
     if not isinstance(c, str):
         return False
     try:
-        plt.get_cmap(c)
+        matplotlib.colormaps[c]
         return True
-    except ValueError:
+    except (ValueError, KeyError):
         return False
 
 def resolve_color(c):
@@ -82,16 +82,16 @@ def resolve_color(c):
     if not isinstance(c, str):
         return c
 
+    if is_colormap(c):
+        cmap = matplotlib.colormaps[c]
+        return mcolors.to_hex(cmap(1.0)[:3])  # Get hex of final color
+
     try:
         # Check if it's already a valid color name or hex
         to_rgb(c)
         return c
     except ValueError:
         pass
-
-    if is_colormap(c):
-        cmap = plt.get_cmap(c)
-        return mcolors.to_hex(cmap(1.0)[:3])  # Get hex of final color
 
     return c
 
@@ -185,11 +185,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         if colormap is None:
             colormap = colors
 
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-
     pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
     both_given = pixel_sizes is not None
 
@@ -226,8 +221,8 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             c = colormap
             if isinstance(c, str):
                 try:
-                    plt.get_cmap(c)
-                except ValueError:
+                    matplotlib.colormaps[c]
+                except (ValueError, KeyError):
                     resolved = resolve_color(c)
                     colormap = black_to(resolved)
             else:
@@ -476,11 +471,6 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
     """
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
@@ -807,7 +797,7 @@ def create_multichannel_rgb_cmap(
     cmap_list = []
     for c in colormap:
         if is_colormap(c):
-            cmap_list.append(plt.get_cmap(c))
+            cmap_list.append(matplotlib.colormaps[c])
         else:
             cmap_list.append(black_to(resolve_color(c)))
 
@@ -940,8 +930,15 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     N, C = intensities.shape
     colors = np.zeros((N, 3), dtype=float)
 
-    vmin = np.zeros(C) if vmin is None else np.broadcast_to(vmin, (C,))
-    vmax = np.ones(C)  if vmax is None else np.broadcast_to(vmax, (C,))
+    vmin = [None]*C if vmin is None else (vmin.tolist() if hasattr(vmin, 'tolist') else vmin)
+    if not isinstance(vmin, (list, tuple)): vmin = [vmin]*C
+    elif len(vmin) == 1: vmin = [vmin[0]]*C
+    elif len(vmin) < C: vmin = list(vmin) + [None]*(C-len(vmin))
+
+    vmax = [None]*C if vmax is None else (vmax.tolist() if hasattr(vmax, 'tolist') else vmax)
+    if not isinstance(vmax, (list, tuple)): vmax = [vmax]*C
+    elif len(vmax) == 1: vmax = [vmax[0]]*C
+    elif len(vmax) < C: vmax = list(vmax) + [None]*(C-len(vmax))
     gammas = np.ones(C) if np.isscalar(gamma) else np.asarray(gamma)
 
     for c in range(C):
@@ -955,7 +952,7 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
         c_name = base_colors[c]
         if is_colormap(c_name):
-            cmap = plt.get_cmap(c_name)
+            cmap = matplotlib.colormaps[c_name]
             rgb = cmap(norm)[:, :3]
             colors += rgb
         else:
@@ -1982,7 +1979,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 self.colors_use = [colormap]
 
         if self.mode == 'ids' and len(self.colors_use) == 1 and is_colormap(self.colors_use[0]):
-            cmap = plt.get_cmap(self.colors_use[0])
+            cmap = matplotlib.colormaps[self.colors_use[0]]
             self.colors_rgb = [cmap(i / max(1, self.C - 1))[:3] for i in range(self.C)]
         else:
             self.colors_rgb = [matplotlib.colors.to_rgb(resolve_color(c)) for c in self.colors_use]
@@ -2350,7 +2347,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 vals = self.cont_single
                 c_use = self.colors_use[0]
                 if is_colormap(c_use):
-                    cmap = plt.get_cmap(c_use)
+                    cmap = matplotlib.colormaps[c_use]
                 else:
                     cmap = black_to(resolve_color(c_use))
 
@@ -2930,7 +2927,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
                  # Use a distinct colormap for categorical
                  # We'll generate a color mapping dictionary
                  # Use matplotlib 'tab10' or 'tab20' or 'viridis' if too many
-                 base_cmap = plt.get_cmap('tab20' if n_cats > 10 else 'tab10')
+                 base_cmap = matplotlib.colormaps['tab20' if n_cats > 10 else 'tab10']
                  self.cat_color_map = {cat: base_cmap(i % base_cmap.N) for i, cat in enumerate(self.unique_cats)}
                  self.c_mapped = [self.cat_color_map[c] for c in self.color]
 
@@ -3092,7 +3089,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         if self.is_continuous:
             # Safely add colorbar only if collection exists
             if hasattr(p3d, 'cmap'):
-                 cbar = plt.colorbar(p3d, ax=ax_leg, fraction=0.8, pad=0.05, aspect=20)
+                 cbar = fig.colorbar(p3d, ax=ax_leg, fraction=0.8, pad=0.05, aspect=20)
                  cbar.set_label('Value')
         elif self.is_categorical:
             handles = [
