@@ -63,7 +63,12 @@ def is_colormap(c):
     if not isinstance(c, str):
         return False
     try:
-        plt.get_cmap(c)
+        matplotlib.colormaps[c]
+        return True
+    except (ValueError, KeyError):
+        return False
+    try:
+        matplotlib.colormaps[c]
         return True
     except ValueError:
         return False
@@ -82,16 +87,16 @@ def resolve_color(c):
     if not isinstance(c, str):
         return c
 
+    if is_colormap(c):
+        cmap = matplotlib.colormaps[c]
+        return mcolors.to_hex(cmap(1.0)[:3])  # Get hex of final color
+
     try:
         # Check if it's already a valid color name or hex
         to_rgb(c)
         return c
     except ValueError:
         pass
-
-    if is_colormap(c):
-        cmap = plt.get_cmap(c)
-        return mcolors.to_hex(cmap(1.0)[:3])  # Get hex of final color
 
     return c
 
@@ -185,11 +190,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         if colormap is None:
             colormap = colors
 
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-
     pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
     both_given = pixel_sizes is not None
 
@@ -226,8 +226,8 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             c = colormap
             if isinstance(c, str):
                 try:
-                    plt.get_cmap(c)
-                except ValueError:
+                    matplotlib.colormaps[c]
+                except (ValueError, KeyError):
                     resolved = resolve_color(c)
                     colormap = black_to(resolved)
             else:
@@ -476,11 +476,6 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
     """
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
@@ -807,7 +802,7 @@ def create_multichannel_rgb_cmap(
     cmap_list = []
     for c in colormap:
         if is_colormap(c):
-            cmap_list.append(plt.get_cmap(c))
+            cmap_list.append(matplotlib.colormaps[c])
         else:
             cmap_list.append(black_to(resolve_color(c)))
 
@@ -940,8 +935,15 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     N, C = intensities.shape
     colors = np.zeros((N, 3), dtype=float)
 
-    vmin = np.zeros(C) if vmin is None else np.broadcast_to(vmin, (C,))
-    vmax = np.ones(C)  if vmax is None else np.broadcast_to(vmax, (C,))
+    vmin = [None]*C if vmin is None else (vmin.tolist() if hasattr(vmin, 'tolist') else vmin)
+    if not isinstance(vmin, (list, tuple)): vmin = [vmin]*C
+    elif len(vmin) == 1: vmin = [vmin[0]]*C
+    elif len(vmin) < C: vmin = list(vmin) + [None]*(C-len(vmin))
+
+    vmax = [None]*C if vmax is None else (vmax.tolist() if hasattr(vmax, 'tolist') else vmax)
+    if not isinstance(vmax, (list, tuple)): vmax = [vmax]*C
+    elif len(vmax) == 1: vmax = [vmax[0]]*C
+    elif len(vmax) < C: vmax = list(vmax) + [None]*(C-len(vmax))
     gammas = np.ones(C) if np.isscalar(gamma) else np.asarray(gamma)
 
     for c in range(C):
@@ -955,7 +957,7 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
         c_name = base_colors[c]
         if is_colormap(c_name):
-            cmap = plt.get_cmap(c_name)
+            cmap = matplotlib.colormaps[c_name]
             rgb = cmap(norm)[:, :3]
             colors += rgb
         else:
@@ -1580,26 +1582,26 @@ class TNIASliceWidget(TNIAWidgetBase):
                 ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
 
             w_x = X * self.sx
-            w_y = Y * self.sx
+            w_y = Y * self.sy
             w_z = Z * self.sz
 
             # XY
-            plot_line(fig.axes[0], x_lims[0]*self.sx + 0.5, 0, x_lims[0]*self.sx + 0.5, w_y, rot_z, w_x, w_y)
-            plot_line(fig.axes[0], 0, y_lims[0]*self.sx + 0.5, w_x, y_lims[0]*self.sx + 0.5, rot_z, w_x, w_y)
-            plot_line(fig.axes[0], x_lims[1]*self.sx + 0.5, 0, x_lims[1]*self.sx + 0.5, w_y, rot_z, w_x, w_y)
-            plot_line(fig.axes[0], 0, y_lims[1]*self.sx + 0.5, w_x, y_lims[1]*self.sx + 0.5, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], 0, (y_lims[0] + 0.5)*self.sy, w_x, (y_lims[0] + 0.5)*self.sy, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], 0, (y_lims[1] + 0.5)*self.sy, w_x, (y_lims[1] + 0.5)*self.sy, rot_z, w_x, w_y)
 
             # ZY
-            plot_line(fig.axes[1], z_lims[0]*self.sz + 0.5*self.sz, 0, z_lims[0]*self.sz + 0.5*self.sz, w_y, rot_x, w_z, w_y)
-            plot_line(fig.axes[1], 0, y_lims[0]*self.sx + 0.5, w_z, y_lims[0]*self.sx + 0.5, rot_x, w_z, w_y)
-            plot_line(fig.axes[1], z_lims[1]*self.sz + 0.5*self.sz, 0, z_lims[1]*self.sz + 0.5*self.sz, w_y, rot_x, w_z, w_y)
-            plot_line(fig.axes[1], 0, y_lims[1]*self.sx + 0.5, w_z, y_lims[1]*self.sx + 0.5, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], (z_lims[0] + 0.5)*self.sz, 0, (z_lims[0] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], 0, (y_lims[0] + 0.5)*self.sy, w_z, (y_lims[0] + 0.5)*self.sy, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], (z_lims[1] + 0.5)*self.sz, 0, (z_lims[1] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], 0, (y_lims[1] + 0.5)*self.sy, w_z, (y_lims[1] + 0.5)*self.sy, rot_x, w_z, w_y)
 
             # XZ
-            plot_line(fig.axes[2], x_lims[0]*self.sx + 0.5, 0, x_lims[0]*self.sx + 0.5, w_z, rot_y, w_x, w_z)
-            plot_line(fig.axes[2], 0, z_lims[0]*self.sz + 0.5*self.sz, w_x, z_lims[0]*self.sz + 0.5*self.sz, rot_y, w_x, w_z)
-            plot_line(fig.axes[2], x_lims[1]*self.sx + 0.5, 0, x_lims[1]*self.sx + 0.5, w_z, rot_y, w_x, w_z)
-            plot_line(fig.axes[2], 0, z_lims[1]*self.sz + 0.5*self.sz, w_x, z_lims[1]*self.sz + 0.5*self.sz, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], 0, (z_lims[0] + 0.5)*self.sz, w_x, (z_lims[0] + 0.5)*self.sz, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], 0, (z_lims[1] + 0.5)*self.sz, w_x, (z_lims[1] + 0.5)*self.sz, rot_y, w_x, w_z)
 
         return fig
 
@@ -1798,6 +1800,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
                 dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 0] - data_z)**2
 
             closest_idx_in_visible = np.argmin(dist)
+            if dist[closest_idx_in_visible] > 400: # 20 pixels max radius
+                return
             closest_pt = visible_pts[closest_idx_in_visible]
             self.remove_point(closest_pt[0], closest_pt[1], closest_pt[2])
 
@@ -1982,7 +1986,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 self.colors_use = [colormap]
 
         if self.mode == 'ids' and len(self.colors_use) == 1 and is_colormap(self.colors_use[0]):
-            cmap = plt.get_cmap(self.colors_use[0])
+            cmap = matplotlib.colormaps[self.colors_use[0]]
             self.colors_rgb = [cmap(i / max(1, self.C - 1))[:3] for i in range(self.C)]
         else:
             self.colors_rgb = [matplotlib.colors.to_rgb(resolve_color(c)) for c in self.colors_use]
@@ -2235,16 +2239,16 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
 
                 w_x = (self.xmax - self.xmin + 1) * self.sx
-                w_y = (self.ymax - self.ymin + 1) * self.sx
+                w_y = (self.ymax - self.ymin + 1) * self.sy
                 w_z = (self.zmax - self.zmin + 1) * self.sz
 
                 axXY, axZY, axXZ = fig.axes[-4], fig.axes[-3], fig.axes[-2]
 
                 # XY
-                x0_adj = (x_lims[0] - self.xmin) * self.sx + 0.5
-                x1_adj = (x_lims[1] - self.xmin + 1) * self.sx + 0.5
-                y0_adj = (y_lims[0] - self.ymin) * self.sx + 0.5
-                y1_adj = (y_lims[1] - self.ymin + 1) * self.sx + 0.5
+                x0_adj = (x_lims[0] - self.xmin + 0.5) * self.sx
+                x1_adj = (x_lims[1] - self.xmin + 1.5) * self.sx
+                y0_adj = (y_lims[0] - self.ymin + 0.5) * self.sy
+                y1_adj = (y_lims[1] - self.ymin + 1.5) * self.sy
 
                 plot_line(axXY, x0_adj, 0, x0_adj, w_y, rot_z, w_x, w_y)
                 plot_line(axXY, x1_adj, 0, x1_adj, w_y, rot_z, w_x, w_y)
@@ -2252,8 +2256,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 plot_line(axXY, 0, y1_adj, w_x, y1_adj, rot_z, w_x, w_y)
 
                 # ZY
-                z0_adj = (z_lims[0] - self.zmin) * self.sz + 0.5 * self.sz
-                z1_adj = (z_lims[1] - self.zmin + 1) * self.sz + 0.5 * self.sz
+                z0_adj = (z_lims[0] - self.zmin + 0.5) * self.sz
+                z1_adj = (z_lims[1] - self.zmin + 1.5) * self.sz
 
                 plot_line(axZY, z0_adj, 0, z0_adj, w_y, rot_x, w_z, w_y)
                 plot_line(axZY, z1_adj, 0, z1_adj, w_y, rot_x, w_z, w_y)
@@ -2350,7 +2354,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 vals = self.cont_single
                 c_use = self.colors_use[0]
                 if is_colormap(c_use):
-                    cmap = plt.get_cmap(c_use)
+                    cmap = matplotlib.colormaps[c_use]
                 else:
                     cmap = black_to(resolve_color(c_use))
 
@@ -2802,15 +2806,16 @@ def show_zyx_max_scatter_interactive(
     # x_s0 = _clip(int(x_s if x_s is not None else x_center_default), x_lo0, x_hi0)
     # So original input x_s is data coordinate.
 
-    # So if x_s is provided, I need to subtract xmin to get 0-based offset for the widget init.
-    if x_s is not None: x_s = int(x_s - xmin)
-    if y_s is not None: y_s = int(y_s - ymin)
-    if z_s is not None: z_s = int(z_s - zmin)
-
+    # Merge individual args and tuple arg before offsetting
     z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
     x_s = x_s_in if x_s is None else x_s
     y_s = y_s_in if y_s is None else y_s
     z_s = z_s_in if z_s is None else z_s
+
+    # So if x_s is provided, I need to subtract xmin to get 0-based offset for the widget init.
+    if x_s is not None: x_s = int(x_s - xmin)
+    if y_s is not None: y_s = int(y_s - ymin)
+    if z_s is not None: z_s = int(z_s - zmin)
     z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
     x_t = x_t_in if x_t is None else x_t
     y_t = y_t_in if y_t is None else y_t
@@ -2847,7 +2852,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
 
     def __init__(self, X, Y, Z, color=None, sxy=1, sz=1, figsize=(12, 10),
                  point_size=5, alpha=0.6, cmap='viridis', max_points=10000,
-                 title=None):
+                 title=None, pixel_sizes=None, channel_labels=None):
         super().__init__()
 
         # Store ORIGINAL Data
@@ -2893,12 +2898,13 @@ class IsoScatterWidget(anywidget.AnyWidget):
             if self.color is not None:
                  self.color = self.color[idx]
 
+        if pixel_sizes is None:
+            pixel_sizes = (sz, sxy, sxy)
         pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
         self.sx = px
         self.sy = py
         self.sz = pz
         self.channel_labels_input = channel_labels
-        self.sz = sz
         self.figsize = figsize
         self.point_size = point_size
         self.alpha = alpha
@@ -2930,7 +2936,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
                  # Use a distinct colormap for categorical
                  # We'll generate a color mapping dictionary
                  # Use matplotlib 'tab10' or 'tab20' or 'viridis' if too many
-                 base_cmap = plt.get_cmap('tab20' if n_cats > 10 else 'tab10')
+                 base_cmap = matplotlib.colormaps['tab20' if n_cats > 10 else 'tab10']
                  self.cat_color_map = {cat: base_cmap(i % base_cmap.N) for i, cat in enumerate(self.unique_cats)}
                  self.c_mapped = [self.cat_color_map[c] for c in self.color]
 
@@ -3092,7 +3098,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         if self.is_continuous:
             # Safely add colorbar only if collection exists
             if hasattr(p3d, 'cmap'):
-                 cbar = plt.colorbar(p3d, ax=ax_leg, fraction=0.8, pad=0.05, aspect=20)
+                 cbar = fig.colorbar(p3d, ax=ax_leg, fraction=0.8, pad=0.05, aspect=20)
                  cbar.set_label('Value')
         elif self.is_categorical:
             handles = [
