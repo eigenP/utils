@@ -194,3 +194,23 @@ def test_remove_outliers_mahalanobis_errors():
     arr_1d = np.array([1, 2, 3])
     with pytest.raises(ValueError, match="requires at least 2 dimensions"):
         remove_outliers(arr_1d, method='mahalanobis')
+
+def test_remove_outliers_mahalanobis_small_sample():
+    np.random.seed(42)
+    # Generate small multivariate dataset (n_samples = 10, n_features = 3)
+    mean = [0, 0, 0]
+    cov = np.eye(3)
+    data = np.random.multivariate_normal(mean, cov, 9)
+
+    # Insert one extreme outlier
+    outlier = [100, 100, 100]
+    data_with_outlier = np.vstack((data, outlier))
+
+    # 0.99 probability threshold
+    cleaned = remove_outliers(data_with_outlier, method='mahalanobis', threshold=0.99)
+
+    # The outlier should be identified and removed
+    for row in cleaned:
+        assert not np.allclose(row, outlier)
+
+    assert len(cleaned) < 10
