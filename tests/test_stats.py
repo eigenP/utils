@@ -180,6 +180,37 @@ def test_remove_outliers_mahalanobis_dataframe():
     # The NaN row should be kept
     assert np.isnan(cleaned_nan.loc[0, 'x'])
 
+def test_remove_outliers_mahalanobis_small_n():
+    # Test beta distribution path (n_samples > n_features + 1)
+    # n_samples = 5, n_features = 2
+    data_beta = np.array([
+        [1.0, 1.0],
+        [1.1, 0.9],
+        [0.9, 1.1],
+        [1.0, 1.05],
+        [10.0, -10.0]  # outlier
+    ])
+
+    cleaned_beta = remove_outliers(data_beta, method='mahalanobis', threshold=0.99)
+    assert len(cleaned_beta) == 4
+    for row in cleaned_beta:
+        assert not np.allclose(row, [10.0, -10.0])
+
+    # Test chi2 fallback path (n_samples <= n_features + 1)
+    # n_samples = 3, n_features = 2
+    data_chi2 = np.array([
+        [1.0, 1.0],
+        [1.1, 0.9],
+        [10.0, -10.0]  # outlier
+    ])
+
+    cleaned_chi2 = remove_outliers(data_chi2, method='mahalanobis', threshold=0.99)
+    # With only 3 points it's hard to definitively remove the outlier without rejecting everything
+    # depending on the geometry, but we mostly just want to ensure it doesn't crash
+    # due to degrees of freedom issues in the Beta distribution.
+    assert len(cleaned_chi2) > 0
+
+
 def test_remove_outliers_mahalanobis_errors():
     """Test that remove outliers mahalanobis errors works as expected."""
     df = pd.DataFrame({'x': [1, 2, 3], 'y': [4, 5, 6]})
