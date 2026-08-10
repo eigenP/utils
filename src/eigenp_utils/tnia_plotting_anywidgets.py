@@ -1577,26 +1577,26 @@ class TNIASliceWidget(TNIAWidgetBase):
                 ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
 
             w_x = X * self.sx
-            w_y = Y * self.sx
+            w_y = Y * self.sy
             w_z = Z * self.sz
 
             # XY
-            plot_line(fig.axes[0], x_lims[0]*self.sx + 0.5, 0, x_lims[0]*self.sx + 0.5, w_y, rot_z, w_x, w_y)
-            plot_line(fig.axes[0], 0, y_lims[0]*self.sx + 0.5, w_x, y_lims[0]*self.sx + 0.5, rot_z, w_x, w_y)
-            plot_line(fig.axes[0], x_lims[1]*self.sx + 0.5, 0, x_lims[1]*self.sx + 0.5, w_y, rot_z, w_x, w_y)
-            plot_line(fig.axes[0], 0, y_lims[1]*self.sx + 0.5, w_x, y_lims[1]*self.sx + 0.5, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], 0, (y_lims[0] + 0.5)*self.sy, w_x, (y_lims[0] + 0.5)*self.sy, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
+            plot_line(fig.axes[0], 0, (y_lims[1] + 0.5)*self.sy, w_x, (y_lims[1] + 0.5)*self.sy, rot_z, w_x, w_y)
 
             # ZY
-            plot_line(fig.axes[1], z_lims[0]*self.sz + 0.5*self.sz, 0, z_lims[0]*self.sz + 0.5*self.sz, w_y, rot_x, w_z, w_y)
-            plot_line(fig.axes[1], 0, y_lims[0]*self.sx + 0.5, w_z, y_lims[0]*self.sx + 0.5, rot_x, w_z, w_y)
-            plot_line(fig.axes[1], z_lims[1]*self.sz + 0.5*self.sz, 0, z_lims[1]*self.sz + 0.5*self.sz, w_y, rot_x, w_z, w_y)
-            plot_line(fig.axes[1], 0, y_lims[1]*self.sx + 0.5, w_z, y_lims[1]*self.sx + 0.5, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], (z_lims[0] + 0.5)*self.sz, 0, (z_lims[0] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], 0, (y_lims[0] + 0.5)*self.sy, w_z, (y_lims[0] + 0.5)*self.sy, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], (z_lims[1] + 0.5)*self.sz, 0, (z_lims[1] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
+            plot_line(fig.axes[1], 0, (y_lims[1] + 0.5)*self.sy, w_z, (y_lims[1] + 0.5)*self.sy, rot_x, w_z, w_y)
 
             # XZ
-            plot_line(fig.axes[2], x_lims[0]*self.sx + 0.5, 0, x_lims[0]*self.sx + 0.5, w_z, rot_y, w_x, w_z)
-            plot_line(fig.axes[2], 0, z_lims[0]*self.sz + 0.5*self.sz, w_x, z_lims[0]*self.sz + 0.5*self.sz, rot_y, w_x, w_z)
-            plot_line(fig.axes[2], x_lims[1]*self.sx + 0.5, 0, x_lims[1]*self.sx + 0.5, w_z, rot_y, w_x, w_z)
-            plot_line(fig.axes[2], 0, z_lims[1]*self.sz + 0.5*self.sz, w_x, z_lims[1]*self.sz + 0.5*self.sz, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], 0, (z_lims[0] + 0.5)*self.sz, w_x, (z_lims[0] + 0.5)*self.sz, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
+            plot_line(fig.axes[2], 0, (z_lims[1] + 0.5)*self.sz, w_x, (z_lims[1] + 0.5)*self.sz, rot_y, w_x, w_z)
 
         return fig
 
@@ -1795,6 +1795,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
                 dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 0] - data_z)**2
 
             closest_idx_in_visible = np.argmin(dist)
+            if dist[closest_idx_in_visible] > 400: # 20 pixels max radius
+                return
             closest_pt = visible_pts[closest_idx_in_visible]
             self.remove_point(closest_pt[0], closest_pt[1], closest_pt[2])
 
@@ -2232,16 +2234,16 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
 
                 w_x = (self.xmax - self.xmin + 1) * self.sx
-                w_y = (self.ymax - self.ymin + 1) * self.sx
+                w_y = (self.ymax - self.ymin + 1) * self.sy
                 w_z = (self.zmax - self.zmin + 1) * self.sz
 
                 axXY, axZY, axXZ = fig.axes[-4], fig.axes[-3], fig.axes[-2]
 
                 # XY
-                x0_adj = (x_lims[0] - self.xmin) * self.sx + 0.5
-                x1_adj = (x_lims[1] - self.xmin + 1) * self.sx + 0.5
-                y0_adj = (y_lims[0] - self.ymin) * self.sx + 0.5
-                y1_adj = (y_lims[1] - self.ymin + 1) * self.sx + 0.5
+                x0_adj = (x_lims[0] - self.xmin + 0.5) * self.sx
+                x1_adj = (x_lims[1] - self.xmin + 1.5) * self.sx
+                y0_adj = (y_lims[0] - self.ymin + 0.5) * self.sy
+                y1_adj = (y_lims[1] - self.ymin + 1.5) * self.sy
 
                 plot_line(axXY, x0_adj, 0, x0_adj, w_y, rot_z, w_x, w_y)
                 plot_line(axXY, x1_adj, 0, x1_adj, w_y, rot_z, w_x, w_y)
@@ -2249,8 +2251,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 plot_line(axXY, 0, y1_adj, w_x, y1_adj, rot_z, w_x, w_y)
 
                 # ZY
-                z0_adj = (z_lims[0] - self.zmin) * self.sz + 0.5 * self.sz
-                z1_adj = (z_lims[1] - self.zmin + 1) * self.sz + 0.5 * self.sz
+                z0_adj = (z_lims[0] - self.zmin + 0.5) * self.sz
+                z1_adj = (z_lims[1] - self.zmin + 1.5) * self.sz
 
                 plot_line(axZY, z0_adj, 0, z0_adj, w_y, rot_x, w_z, w_y)
                 plot_line(axZY, z1_adj, 0, z1_adj, w_y, rot_x, w_z, w_y)
@@ -2799,15 +2801,16 @@ def show_zyx_max_scatter_interactive(
     # x_s0 = _clip(int(x_s if x_s is not None else x_center_default), x_lo0, x_hi0)
     # So original input x_s is data coordinate.
 
-    # So if x_s is provided, I need to subtract xmin to get 0-based offset for the widget init.
-    if x_s is not None: x_s = int(x_s - xmin)
-    if y_s is not None: y_s = int(y_s - ymin)
-    if z_s is not None: z_s = int(z_s - zmin)
-
+    # Merge individual args and tuple arg before offsetting
     z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
     x_s = x_s_in if x_s is None else x_s
     y_s = y_s_in if y_s is None else y_s
     z_s = z_s_in if z_s is None else z_s
+
+    # So if x_s is provided, I need to subtract xmin to get 0-based offset for the widget init.
+    if x_s is not None: x_s = int(x_s - xmin)
+    if y_s is not None: y_s = int(y_s - ymin)
+    if z_s is not None: z_s = int(z_s - zmin)
     z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
     x_t = x_t_in if x_t is None else x_t
     y_t = y_t_in if y_t is None else y_t
@@ -2844,7 +2847,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
 
     def __init__(self, X, Y, Z, color=None, sxy=1, sz=1, figsize=(12, 10),
                  point_size=5, alpha=0.6, cmap='viridis', max_points=10000,
-                 title=None):
+                 title=None, pixel_sizes=None, channel_labels=None):
         super().__init__()
 
         # Store ORIGINAL Data
@@ -2890,12 +2893,13 @@ class IsoScatterWidget(anywidget.AnyWidget):
             if self.color is not None:
                  self.color = self.color[idx]
 
+        if pixel_sizes is None:
+            pixel_sizes = (sz, sxy, sxy)
         pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
         self.sx = px
         self.sy = py
         self.sz = pz
         self.channel_labels_input = channel_labels
-        self.sz = sz
         self.figsize = figsize
         self.point_size = point_size
         self.alpha = alpha
