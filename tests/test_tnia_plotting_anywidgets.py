@@ -742,3 +742,75 @@ def test_xy_anisotropy():
     # Y physical = 50 * 0.2 = 10. Z physical = 10 * 1 = 10. Max height = 10.
     assert width_ratios[0] == 100
     assert height_ratios[1] == 10
+
+def test_annotation_coordinate_registration():
+    # Synthetic 3D image volume: Z=16, Y=64, X=128
+    Z, Y, X = 16, 64, 128
+    synthetic_im = np.zeros((Z, Y, X), dtype=np.float32)
+
+    # Anisotropic voxel dimensions: sz=2.0 um, sy=0.5 um, sx=0.5 um
+    pixel_sizes = (2.0, 0.5, 0.5)
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        synthetic_im,
+        pixel_sizes=pixel_sizes,
+        slabs_position=(8 * 2.0, 32 * 0.5, 64 * 0.5), # Physical center
+        slabs_thickness=(2 * 2.0, 4 * 0.5, 4 * 0.5)
+    )
+
+    widget.annotation_mode = True
+    widget.annotation_action = 'add'
+
+    # Target voxel to annotate: z=8, y=20, x=45
+    target_z, target_y, target_x = 8, 20, 45
+    widget.z_s = target_z
+
+    # Compute where this target voxel lands in physical space
+    px_target = (target_x + 0.5) * pixel_sizes[2]
+    py_target = (target_y + 0.5) * pixel_sizes[1]
+
+    # Extract calculated axis bounds for 'xy' plane
+    info = widget.axis_bounds['xy']
+    b_x0, b_y0, b_w, b_h = info['bbox']
+    xlim = info['xlim']
+    ylim = info['ylim']
+
+    # Map physical coords to normalized figure coords
+    u = (px_target - xlim[0]) / (xlim[1] - xlim[0])
+    v = (py_target - ylim[0]) / (ylim[1] - ylim[0])
+
+    frac_x = b_x0 + u * b_w
+    mpl_y_frac = b_y0 + v * b_h
+    frac_y = 1.0 - mpl_y_frac  # Convert to JS top-down fraction
+
+    # Simulate user click
+    widget._handle_click({'new': {'plane': 'xy', 'x': frac_x, 'y': frac_y}})
+
+    # Assert point registered correctly
+    assert [target_z, target_y, target_x] in widget.points, \
+        f"Expected {[target_z, target_y, target_x]} in registered points, got {widget.points}"
+
+def test_annotation_deletion():
+    synthetic_im = np.zeros((10, 32, 32), dtype=np.float32)
+    widget = show_zyx_max_slice_interactive_point_annotator(synthetic_im)
+
+    widget.add_point(5, 10, 15)
+    assert [5, 10, 15] in widget.points
+
+    widget.annotation_mode = True
+    widget.annotation_action = 'delete'
+    widget.z_s = 5
+
+    info = widget.axis_bounds['xy']
+    b_x0, b_y0, b_w, b_h = info['bbox']
+    xlim, ylim = info['xlim'], info['ylim']
+
+    u = (15.5 - xlim[0]) / (xlim[1] - xlim[0])
+    v = (10.5 - ylim[0]) / (ylim[1] - ylim[0])
+
+    frac_x = b_x0 + u * b_w
+    mpl_y_frac = b_y0 + v * b_h
+    frac_y = 1.0 - mpl_y_frac
+
+    widget._handle_click({'new': {'plane': 'xy', 'x': frac_x, 'y': frac_y}})
+    assert [5, 10, 15] not in widget.points

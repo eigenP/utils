@@ -56,6 +56,16 @@ import matplotlib.colors as mcolors
 from matplotlib.figure import Figure
 
 
+def _rotate_points_2d(px, py, angle_deg, cx, cy):
+    if angle_deg == 0:
+        return px, py
+    theta = np.radians(angle_deg)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+    rx = cos_t * (px - cx) - sin_t * (py - cy) + cx
+    ry = sin_t * (px - cx) + cos_t * (py - cy) + cy
+    return rx, ry
+
 def is_colormap(c):
     """
     Checks if a string is a valid matplotlib colormap name.
@@ -66,11 +76,6 @@ def is_colormap(c):
         matplotlib.colormaps[c]
         return True
     except (ValueError, KeyError):
-        return False
-    try:
-        matplotlib.colormaps[c]
-        return True
-    except ValueError:
         return False
 
 def resolve_color(c):
@@ -1152,35 +1157,35 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         if self.z_s > hi: self.z_s = hi
 
     def _render_wrapper(self, change):
-        fig = self._render()
-        if fig:
-            if len(fig.axes) >= 3:
-                ax_xy = fig.axes[0]
-                ax_zy = fig.axes[1]
-                ax_xz = fig.axes[2]
+        fig = None
+        try:
+            fig = self._render()
+            if fig:
+                buf = io.BytesIO()
+                fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
+                fig.savefig(buf, format='png')
 
-                def get_bounds(ax):
-                    bbox = ax.get_position()
-                    return [bbox.x0, bbox.y0, bbox.width, bbox.height]
+                if len(fig.axes) >= 3:
+                    def get_axis_info(ax):
+                        bbox = ax.get_position(original=False)
+                        xlim = ax.get_xlim()
+                        ylim = ax.get_ylim()
+                        return {
+                            'bbox': [float(bbox.x0), float(bbox.y0), float(bbox.width), float(bbox.height)],
+                            'xlim': [float(xlim[0]), float(xlim[1])],
+                            'ylim': [float(ylim[0]), float(ylim[1])]
+                        }
 
-                self.axis_bounds = {
-                    'xy': get_bounds(ax_xy),
-                    'zy': get_bounds(ax_zy),
-                    'xz': get_bounds(ax_xz)
-                }
+                    self.axis_bounds = {
+                        'xy': get_axis_info(fig.axes[0]),
+                        'zy': get_axis_info(fig.axes[1]),
+                        'xz': get_axis_info(fig.axes[2])
+                    }
 
-            buf = io.BytesIO()
-            fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
-            fig.savefig(buf, format='png')
-
-            if len(fig.axes) >= 3:
-                self.axis_bounds = {
-                    'xy': get_bounds(fig.axes[0]),
-                    'zy': get_bounds(fig.axes[1]),
-                    'xz': get_bounds(fig.axes[2])
-                }
-            self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
-            plt.close(fig) # Close to avoid memory leak
+                self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+        finally:
+            if fig is not None:
+                plt.close(fig)
 
     def _handle_hover_sync(self, change):
         if not self.sync_on_hover:
@@ -1194,10 +1199,11 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         frac_x = coords.get('x')
         frac_y = coords.get('y')
 
-        bounds = self.axis_bounds.get(plane)
-        if not bounds:
+        info = self.axis_bounds.get(plane)
+        if not info or not isinstance(info, dict) or 'bbox' not in info:
             return
 
+        bounds = info['bbox']
         b_x0, b_y0, b_w, b_h = bounds
 
         # Check if click is inside this axis
@@ -1207,10 +1213,11 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         if not (b_x0 <= frac_x <= b_x0 + b_w and b_y0 <= mpl_y_frac <= b_y0 + b_h):
             return
 
-        local_x = (frac_x - b_x0) / b_w
-        local_y_mpl = (mpl_y_frac - b_y0) / b_h
+        local_x = (frac_x - b_x0) / b_w if b_w > 0 else 0.0
+        local_y_mpl = (mpl_y_frac - b_y0) / b_h if b_h > 0 else 0.0
         fraction_from_top = 1.0 - local_y_mpl
 
+        # For hover sync, we keep the original simplified logic (no rotation needed for hover cursors)
         if plane == 'xy':
             data_x = int(local_x * self.dims[2])
             data_y = int(fraction_from_top * self.dims[1])
@@ -1731,48 +1738,70 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             return
 
         plane = coords.get('plane')
-        frac_x = coords.get('x')
-        frac_y = coords.get('y')
+        frac_x = coords.get('x') # Figure normalized x (0 to 1, left to right)
+        frac_y = coords.get('y') # Figure normalized y (0 to 1, top to bottom)
 
-        bounds = self.axis_bounds.get(plane)
-        if not bounds:
+        info = self.axis_bounds.get(plane)
+        if not info or not isinstance(info, dict) or 'bbox' not in info:
             return
 
-        b_x0, b_y0, b_w, b_h = bounds
+        bbox = info['bbox']
+        xlim = info['xlim']
+        ylim = info['ylim']
 
-        # Check if click is inside this axis
-        # Note: JS y_frac is from top-left. Matplotlib bounds are from bottom-left.
-        mpl_y_frac = 1.0 - frac_y
+        b_x0, b_y0, b_w, b_h = bbox
+        mpl_y_frac = 1.0 - frac_y  # Convert top-left (JS) to bottom-left (Matplotlib)
 
+        # Check if click is inside rendered image boundaries
         if not (b_x0 <= frac_x <= b_x0 + b_w and b_y0 <= mpl_y_frac <= b_y0 + b_h):
             return
 
-        local_x = (frac_x - b_x0) / b_w
-        local_y_mpl = (mpl_y_frac - b_y0) / b_h
-        fraction_from_top = 1.0 - local_y_mpl
+        # Fractional offsets within the rendered image
+        u = (frac_x - b_x0) / b_w if b_w > 0 else 0.0
+        v = (mpl_y_frac - b_y0) / b_h if b_h > 0 else 0.0
 
-        x0 = max(0, self.x_s - self.x_t)
-        x1 = min(self.dims[2] - 1, self.x_s + self.x_t)
-        y0 = max(0, self.y_s - self.y_t)
-        y1 = min(self.dims[1] - 1, self.y_s + self.y_t)
-        z0 = max(0, self.z_s - self.z_t)
-        z1 = min(self.dims[0] - 1, self.z_s + self.z_t)
+        # Interpolate physical data coordinates using actual axis limits
+        x_phys = xlim[0] + u * (xlim[1] - xlim[0])
+        y_phys = ylim[0] + v * (ylim[1] - ylim[0])
 
+        # Un-rotate coordinates if 2D view rotation was applied
+        def _parse_rotation(val):
+            if val is None: return 0.0, 0.0, 0.0
+            if isinstance(val, (int, float)): return float(val), 0.0, 0.0
+            try:
+                vl = list(val)
+                if len(vl) == 3: return float(vl[0]), float(vl[1]), float(vl[2])
+            except TypeError: pass
+            return 0.0, 0.0, 0.0
+
+        rot_z, rot_y, rot_x = _parse_rotation(getattr(self, 'rotate_view', None))
+        rot_angle = 0.0
+        if plane == 'xy': rot_angle = rot_z
+        elif plane == 'zy': rot_angle = rot_x
+        elif plane == 'xz': rot_angle = rot_y
+
+        if rot_angle != 0.0:
+            cx_phys = (xlim[0] + xlim[1]) / 2.0
+            cy_phys = (ylim[0] + ylim[1]) / 2.0
+            x_phys, y_phys = _rotate_points_2d(x_phys, y_phys, -rot_angle, cx_phys, cy_phys)
+
+        # Convert physical coordinates back to pixel indices based on slice plane
         if plane == 'xy':
-            data_x = int(local_x * self.dims[2])
-            data_y = int(fraction_from_top * self.dims[1])
+            data_x = int(np.floor(x_phys / self.sx))
+            data_y = int(np.floor(y_phys / self.sy))
             data_z = self.z_s
         elif plane == 'zy':
-            data_z = int(local_x * self.dims[0])
-            data_y = int(fraction_from_top * self.dims[1])
+            data_z = int(np.floor(x_phys / self.sz)) # Horizontal axis of ZY plane is Z
+            data_y = int(np.floor(y_phys / self.sy)) # Vertical axis of ZY plane is Y
             data_x = self.x_s
         elif plane == 'xz':
-            data_x = int(local_x * self.dims[2])
-            data_z = int(fraction_from_top * self.dims[0])
+            data_x = int(np.floor(x_phys / self.sx)) # Horizontal axis of XZ plane is X
+            data_z = int(np.floor(y_phys / self.sz)) # Vertical axis of XZ plane is Z
             data_y = self.y_s
         else:
             return
 
+        # Boundary clamping
         data_x = max(0, min(self.dims[2] - 1, data_x))
         data_y = max(0, min(self.dims[1] - 1, data_y))
         data_z = max(0, min(self.dims[0] - 1, data_z))
@@ -1780,9 +1809,16 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         if self.annotation_action == 'add':
             self.add_point(data_z, data_y, data_x)
         elif self.annotation_action == 'delete':
-            if not self.points: return
-
+            if not self.points:
+                return
             pts = np.array(self.points)
+            x0 = max(0, self.x_s - self.x_t)
+            x1 = min(self.dims[2] - 1, self.x_s + self.x_t)
+            y0 = max(0, self.y_s - self.y_t)
+            y1 = min(self.dims[1] - 1, self.y_s + self.y_t)
+            z0 = max(0, self.z_s - self.z_t)
+            z1 = min(self.dims[0] - 1, self.z_s + self.z_t)
+
             if plane == 'xy':
                 mask = (pts[:, 0] >= z0) & (pts[:, 0] <= z1)
                 if not np.any(mask): return
@@ -1799,11 +1835,10 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
                 visible_pts = pts[mask]
                 dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 0] - data_z)**2
 
-            closest_idx_in_visible = np.argmin(dist)
-            if dist[closest_idx_in_visible] > 400: # 20 pixels max radius
-                return
-            closest_pt = visible_pts[closest_idx_in_visible]
-            self.remove_point(closest_pt[0], closest_pt[1], closest_pt[2])
+            closest_idx = np.argmin(dist)
+            if dist[closest_idx] <= 400: # 20px threshold squared
+                closest_pt = visible_pts[closest_idx]
+                self.remove_point(closest_pt[0], closest_pt[1], closest_pt[2])
 
     def add_point(self, z, y, x):
         """Programmatically add a point"""
