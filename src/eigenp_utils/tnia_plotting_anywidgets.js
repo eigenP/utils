@@ -8,7 +8,7 @@ export default {
 
     // Create Image Container
     const imgContainer = document.createElement("div");
-    imgContainer.style.flexShrink = "0"; // Don't shrink below content size
+    imgContainer.style.flexShrink = "0"; 
     imgContainer.style.marginRight = "20px";
 
     const img = document.createElement("img");
@@ -16,7 +16,7 @@ export default {
     img.style.display = "block";
     imgContainer.appendChild(img);
 
-    // Helper: Safely extract bounding box array [x0, y0, width, height] from Python axis_bounds object
+    // Helper: Safely extract bounding box array [x0, y0, width, height]
     function getBbox(b) {
       if (!b) return null;
       if (Array.isArray(b)) return b;
@@ -27,10 +27,34 @@ export default {
       return null;
     }
 
+    // New Safe Coordinate Helpers
+    function getFractions(e, imgElement) {
+      const rect = imgElement.getBoundingClientRect();
+      const x_frac = (e.clientX - rect.left) / rect.width;
+      const y_frac = (e.clientY - rect.top) / rect.height;
+      return { x_frac, y_frac };
+    }
+
+    function findPlane(bounds, x_frac, y_frac) {
+      if (!bounds) return null;
+      const planes = ['xy', 'zy', 'xz'];
+      for (const plane of planes) {
+        const b = bounds[plane]; // bypasses Object.entries on proxies
+        if (!b) continue;
+        const bbox = getBbox(b);
+        if (!bbox) continue;
+        const [bx0, by0, bw, bh] = bbox;
+        if (x_frac >= bx0 && x_frac <= bx0 + bw && y_frac >= by0 && y_frac <= by0 + bh) {
+          return plane;
+        }
+      }
+      return null;
+    }
+
     function createSlider(label, traitName, minTrait, maxTrait, scaleTrait) {
       const container = document.createElement("div");
       container.style.display = "flex";
-      container.style.flexDirection = "column";  // Stack label over slider+input for compactness
+      container.style.flexDirection = "column";  
       container.style.alignItems = "flex-start";
       container.style.gap = "4px";
       container.style.minWidth = "80px";
@@ -83,7 +107,7 @@ export default {
       if (scaleTrait) {
         model.on(`change:${scaleTrait}`, update);
       }
-      // Sync slider -> model
+      
       slider.addEventListener("input", () => {
         model.set(traitName, parseInt(slider.value));
         model.save_changes();
@@ -93,7 +117,7 @@ export default {
         const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
         const min = model.get(minTrait) || 1;
         const max = model.get(maxTrait);
-        // Inverse scale to get integer index
+        
         let newIndex = Math.round(parseFloat(numberInput.value) / scale);
         if (isNaN(newIndex)) {
           update();
@@ -238,7 +262,6 @@ export default {
     controlsDiv.style.flexDirection = "column";
     controlsDiv.style.gap = "10px";
     
-    // Thickness Sliders Container
     const thicknessContainer = document.createElement("div");
     thicknessContainer.style.display = "flex";
     thicknessContainer.style.gap = "15px";
@@ -248,7 +271,6 @@ export default {
     thicknessContainer.appendChild(yThick);
     thicknessContainer.appendChild(zThick);
 
-    // Position Sliders Container
     const positionContainer = document.createElement("div");
     positionContainer.style.display = "flex";
     positionContainer.style.gap = "15px";
@@ -258,7 +280,6 @@ export default {
     positionContainer.appendChild(yPos);
     positionContainer.appendChild(zPos);
 
-    // Channels Container (Dynamic updates via observer)
     const channelsContainer = document.createElement("div");
     channelsContainer.style.display = "flex";
     channelsContainer.style.flexDirection = "column";
@@ -356,7 +377,6 @@ export default {
         chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0, 2.0, false));
         chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
 
-        // Histogram Canvas
         const histCanvas = document.createElement("canvas");
         histCanvas.width = 160;
         histCanvas.height = 30;
@@ -393,7 +413,6 @@ export default {
             ctx.globalAlpha = 1.0;
           }
 
-          // Draw curve
           const vmin_arr = model.get("vmin_list");
           const vmax_arr = model.get("vmax_list");
           const gamma_arr = model.get("gamma_list");
@@ -487,7 +506,6 @@ export default {
     syncLabel.style.fontSize = "14px";
     syncLabel.style.marginLeft = "10px";
 
-    // Sync on hover toggle
     const syncCb = document.createElement("input");
     syncCb.type = "checkbox";
     syncCb.checked = model.get("sync_on_hover");
@@ -504,7 +522,7 @@ export default {
     syncLabel.appendChild(document.createTextNode("Sync on Hover ('C')"));
     uiTogglesContainer.appendChild(syncLabel);
 
-    // Annotation Controls (only if annotator widget)
+    // Annotation setup UI
     if (hasAnnotation) {
       const annotLabel = document.createElement("label");
       annotLabel.style.display = "flex";
@@ -557,44 +575,33 @@ export default {
       uiTogglesContainer.appendChild(annotLabel);
       uiTogglesContainer.appendChild(actionSelect);
 
-      img.addEventListener("click", (e) => {
-        if (!model.get("annotation_mode")) return;
-
-        const x_frac = e.offsetX / img.clientWidth;
-        const y_frac = e.offsetY / img.clientHeight;
-
-        const bounds = model.get("axis_bounds");
-        if (!bounds) return;
-
-        let clicked_plane = null;
-
-        for (const [plane, b] of Object.entries(bounds)) {
-          const bbox = getBbox(b);
-          if (!bbox) continue;
-          const [bx0, by0, bw, bh] = bbox;
-          if (x_frac >= bx0 && x_frac <= bx0 + bw && y_frac >= by0 && y_frac <= by0 + bh) {
-            clicked_plane = plane;
-            break;
-          }
-        }
-
-        if (clicked_plane) {
-          model.set("click_coords", {
-            'plane': clicked_plane,
-            'x': x_frac,
-            'y': y_frac,
-            't': Date.now()
-          });
-          model.save_changes();
-        }
-      });
-
       if (model.get("annotation_mode")) {
         img.style.cursor = "crosshair";
       }
     }
 
-    // Hover + 'C' key sync logic
+    // ----------------------------------------------------
+    // ROBUST MOUSE EVENT LISTENERS (Guaranteed attachment)
+    // ----------------------------------------------------
+
+    img.addEventListener("click", (e) => {
+      if (!model.get("annotation_mode")) return; // Safe dynamic check
+
+      const { x_frac, y_frac } = getFractions(e, img);
+      const bounds = model.get("axis_bounds");
+      const clicked_plane = findPlane(bounds, x_frac, y_frac);
+
+      if (clicked_plane) {
+        model.set("click_coords", {
+          'plane': clicked_plane,
+          'x': x_frac,
+          'y': y_frac,
+          't': Date.now()
+        });
+        model.save_changes();
+      }
+    });
+
     let currentHoverCoords = null;
 
     img.addEventListener("mousemove", (e) => {
@@ -602,24 +609,10 @@ export default {
         currentHoverCoords = null;
         return;
       }
-
-      const x_frac = e.offsetX / img.clientWidth;
-      const y_frac = e.offsetY / img.clientHeight;
-
+      
+      const { x_frac, y_frac } = getFractions(e, img);
       const bounds = model.get("axis_bounds");
-      if (!bounds) return;
-
-      let hover_plane = null;
-
-      for (const [plane, b] of Object.entries(bounds)) {
-        const bbox = getBbox(b);
-        if (!bbox) continue;
-        const [bx0, by0, bw, bh] = bbox;
-        if (x_frac >= bx0 && x_frac <= bx0 + bw && y_frac >= by0 && y_frac <= by0 + bh) {
-          hover_plane = plane;
-          break;
-        }
-      }
+      const hover_plane = findPlane(bounds, x_frac, y_frac);
 
       if (hover_plane) {
         currentHoverCoords = {
@@ -636,8 +629,6 @@ export default {
       currentHoverCoords = null;
     });
 
-      // We attach keydown to document to catch 'C' presses reliably
-    // when hovering over the image, but we only trigger if we have valid hover coords.
     const keydownListener = (e) => {
       if (!model.get("sync_on_hover")) return;
       if ((e.key === "c" || e.key === "C") && currentHoverCoords) {
