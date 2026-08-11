@@ -7,7 +7,6 @@ export default {
     el.style.fontFamily = "sans-serif";
 
     // Create Image Container
-
     const imgContainer = document.createElement("div");
     imgContainer.style.flexShrink = "0"; // Don't shrink below content size
     imgContainer.style.marginRight = "20px";
@@ -17,11 +16,21 @@ export default {
     img.style.display = "block";
     imgContainer.appendChild(img);
 
+    // Helper: Safely extract bounding box array [x0, y0, width, height] from Python axis_bounds object
+    function getBbox(b) {
+      if (!b) return null;
+      if (Array.isArray(b)) return b;
+      if (Array.isArray(b.bbox)) return b.bbox;
+      if (b.x0 !== undefined && b.y0_js !== undefined && b.x1 !== undefined && b.y1_js !== undefined) {
+        return [b.x0, b.y0_js, b.x1 - b.x0, b.y1_js - b.y0_js];
+      }
+      return null;
+    }
 
     function createSlider(label, traitName, minTrait, maxTrait, scaleTrait) {
       const container = document.createElement("div");
       container.style.display = "flex";
-      container.style.flexDirection = "column"; // Stack label over slider+input for compactness
+      container.style.flexDirection = "column";  // Stack label over slider+input for compactness
       container.style.alignItems = "flex-start";
       container.style.gap = "4px";
       container.style.minWidth = "80px";
@@ -58,11 +67,11 @@ export default {
 
         const displayVal = val * scale;
         if (scale !== 1.0) {
-            numberInput.value = parseFloat(displayVal.toFixed(2));
-            numberInput.step = "0.01";
+          numberInput.value = parseFloat(displayVal.toFixed(2));
+          numberInput.step = "0.01";
         } else {
-            numberInput.value = val;
-            numberInput.step = "1";
+          numberInput.value = val;
+          numberInput.step = "1";
         }
       }
 
@@ -74,40 +83,33 @@ export default {
       if (scaleTrait) {
         model.on(`change:${scaleTrait}`, update);
       }
-
       // Sync slider -> model
       slider.addEventListener("input", () => {
         model.set(traitName, parseInt(slider.value));
         model.save_changes();
       });
 
-      // Sync number input -> model
       numberInput.addEventListener("change", () => {
         const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
         const min = model.get(minTrait) || 1;
         const max = model.get(maxTrait);
-
         // Inverse scale to get integer index
         let newIndex = Math.round(parseFloat(numberInput.value) / scale);
-
         if (isNaN(newIndex)) {
-            update();
-            return;
+          update();
+          return;
         }
 
-        // Clamp
         if (newIndex < min) newIndex = min;
         if (newIndex > max) newIndex = max;
 
         model.set(traitName, newIndex);
         model.save_changes();
-        // Immediately re-update the UI to reflect clamped/rounded value
         update();
       });
 
       controlRow.appendChild(slider);
       controlRow.appendChild(numberInput);
-
       container.appendChild(labelEl);
       container.appendChild(controlRow);
 
@@ -149,12 +151,8 @@ export default {
     saveBtn.style.borderRadius = "4px";
     saveBtn.style.cursor = "pointer";
     saveBtn.style.fontWeight = "bold";
-    saveBtn.addEventListener("mouseover", () => {
-        saveBtn.style.backgroundColor = "#ccc";
-    });
-    saveBtn.addEventListener("mouseout", () => {
-        saveBtn.style.backgroundColor = "#e0e0e0";
-    });
+    saveBtn.addEventListener("mouseover", () => { saveBtn.style.backgroundColor = "#ccc"; });
+    saveBtn.addEventListener("mouseout", () => { saveBtn.style.backgroundColor = "#e0e0e0"; });
     saveBtn.addEventListener("click", () => {
       let current = model.get("save_trigger");
       model.set("save_trigger", current + 1);
@@ -162,7 +160,7 @@ export default {
     });
 
     const copyParamsBtn = document.createElement("button");
-    copyParamsBtn.innerHTML = "📋"; // copy icon
+    copyParamsBtn.innerHTML = "📋";
     copyParamsBtn.title = "Copy parameters to clipboard";
     copyParamsBtn.style.padding = "6px 12px";
     copyParamsBtn.style.backgroundColor = "#e0e0e0";
@@ -171,32 +169,23 @@ export default {
     copyParamsBtn.style.borderRadius = "4px";
     copyParamsBtn.style.cursor = "pointer";
     copyParamsBtn.style.fontSize = "16px";
-    copyParamsBtn.addEventListener("mouseover", () => {
-        copyParamsBtn.style.backgroundColor = "#ccc";
-    });
-    copyParamsBtn.addEventListener("mouseout", () => {
-        copyParamsBtn.style.backgroundColor = "#e0e0e0";
-    });
+    copyParamsBtn.addEventListener("mouseover", () => { copyParamsBtn.style.backgroundColor = "#ccc"; });
+    copyParamsBtn.addEventListener("mouseout", () => { copyParamsBtn.style.backgroundColor = "#e0e0e0"; });
     copyParamsBtn.addEventListener("click", () => {
-        let current = model.get("copy_params_trigger") || 0;
-        model.set("copy_params_trigger", current + 1);
-        model.save_changes();
+      let current = model.get("copy_params_trigger") || 0;
+      model.set("copy_params_trigger", current + 1);
+      model.save_changes();
     });
 
-    // Listen for python returning the copy string
     model.on("change:copy_params_string", () => {
-        const str = model.get("copy_params_string");
-        if (str && navigator.clipboard) {
-            navigator.clipboard.writeText(str).then(() => {
-                const originalHTML = copyParamsBtn.innerHTML;
-                copyParamsBtn.innerHTML = "✅";
-                setTimeout(() => {
-                    copyParamsBtn.innerHTML = originalHTML;
-                }, 1500);
-            }).catch(err => {
-                console.error("Failed to copy text: ", err);
-            });
-        }
+      const str = model.get("copy_params_string");
+      if (str && navigator.clipboard) {
+        navigator.clipboard.writeText(str).then(() => {
+          const originalHTML = copyParamsBtn.innerHTML;
+          copyParamsBtn.innerHTML = "✅";
+          setTimeout(() => { copyParamsBtn.innerHTML = originalHTML; }, 1500);
+        }).catch(err => console.error("Failed to copy text: ", err));
+      }
     });
 
     saveContainer.appendChild(saveLabel);
@@ -206,42 +195,38 @@ export default {
 
     const hasAnnotation = model.get("annotation_mode") !== undefined;
     if (hasAnnotation) {
-        const saveCsvLabel = document.createElement("span");
-        saveCsvLabel.textContent = "CSV:";
-        saveCsvLabel.style.marginLeft = "20px";
+      const saveCsvLabel = document.createElement("span");
+      saveCsvLabel.textContent = "CSV:";
+      saveCsvLabel.style.marginLeft = "20px";
 
-        const saveCsvInput = document.createElement("input");
-        saveCsvInput.type = "text";
-        saveCsvInput.value = model.get("save_csv_filename") || "points.csv";
-        saveCsvInput.addEventListener("change", () => {
-          model.set("save_csv_filename", saveCsvInput.value);
-          model.save_changes();
-        });
+      const saveCsvInput = document.createElement("input");
+      saveCsvInput.type = "text";
+      saveCsvInput.value = model.get("save_csv_filename") || "points.csv";
+      saveCsvInput.addEventListener("change", () => {
+        model.set("save_csv_filename", saveCsvInput.value);
+        model.save_changes();
+      });
 
-        const saveCsvBtn = document.createElement("button");
-        saveCsvBtn.textContent = "Save Points as CSV";
-        saveCsvBtn.style.padding = "6px 12px";
-        saveCsvBtn.style.backgroundColor = "#e0e0e0";
-        saveCsvBtn.style.color = "#333";
-        saveCsvBtn.style.border = "1px solid #999";
-        saveCsvBtn.style.borderRadius = "4px";
-        saveCsvBtn.style.cursor = "pointer";
-        saveCsvBtn.style.fontWeight = "bold";
-        saveCsvBtn.addEventListener("mouseover", () => {
-            saveCsvBtn.style.backgroundColor = "#ccc";
-        });
-        saveCsvBtn.addEventListener("mouseout", () => {
-            saveCsvBtn.style.backgroundColor = "#e0e0e0";
-        });
-        saveCsvBtn.addEventListener("click", () => {
-          let current = model.get("save_csv_trigger");
-          model.set("save_csv_trigger", current + 1);
-          model.save_changes();
-        });
+      const saveCsvBtn = document.createElement("button");
+      saveCsvBtn.textContent = "Save Points as CSV";
+      saveCsvBtn.style.padding = "6px 12px";
+      saveCsvBtn.style.backgroundColor = "#e0e0e0";
+      saveCsvBtn.style.color = "#333";
+      saveCsvBtn.style.border = "1px solid #999";
+      saveCsvBtn.style.borderRadius = "4px";
+      saveCsvBtn.style.cursor = "pointer";
+      saveCsvBtn.style.fontWeight = "bold";
+      saveCsvBtn.addEventListener("mouseover", () => { saveCsvBtn.style.backgroundColor = "#ccc"; });
+      saveCsvBtn.addEventListener("mouseout", () => { saveCsvBtn.style.backgroundColor = "#e0e0e0"; });
+      saveCsvBtn.addEventListener("click", () => {
+        let current = model.get("save_csv_trigger");
+        model.set("save_csv_trigger", current + 1);
+        model.save_changes();
+      });
 
-        saveContainer.appendChild(saveCsvLabel);
-        saveContainer.appendChild(saveCsvInput);
-        saveContainer.appendChild(saveCsvBtn);
+      saveContainer.appendChild(saveCsvLabel);
+      saveContainer.appendChild(saveCsvInput);
+      saveContainer.appendChild(saveCsvBtn);
     }
 
     el.appendChild(imgContainer);
@@ -252,7 +237,7 @@ export default {
     controlsDiv.style.display = "flex";
     controlsDiv.style.flexDirection = "column";
     controlsDiv.style.gap = "10px";
-
+    
     // Thickness Sliders Container
     const thicknessContainer = document.createElement("div");
     thicknessContainer.style.display = "flex";
@@ -273,9 +258,7 @@ export default {
     positionContainer.appendChild(yPos);
     positionContainer.appendChild(zPos);
 
-
-
-    // Channels Container
+    // Channels Container (Dynamic updates via observer)
     const channelsContainer = document.createElement("div");
     channelsContainer.style.display = "flex";
     channelsContainer.style.flexDirection = "column";
@@ -284,14 +267,17 @@ export default {
     channelsContainer.style.overflowY = "auto";
     channelsContainer.style.maxHeight = "300px";
 
-    const channelNames = model.get("channel_names");
-    const channelDtypes = model.get("channel_dtypes");
-    const channelColors = model.get("channel_colors");
+    function updateChannelsUI() {
+      channelsContainer.innerHTML = "";
+      const channelNames = model.get("channel_names");
+      const channelDtypes = model.get("channel_dtypes");
+      const channelColors = model.get("channel_colors");
 
-    if (channelNames && channelNames.length > 0) {
+      if (!channelNames || channelNames.length === 0) return;
+
       channelNames.forEach((name, index) => {
-        const dtype = channelDtypes[index] || "unknown";
-        const color = channelColors && channelColors.length > index ? channelColors[index] : "black";
+        const dtype = (channelDtypes && channelDtypes[index]) || "unknown";
+        const color = (channelColors && channelColors[index]) || "black";
 
         const chDiv = document.createElement("div");
         chDiv.style.border = "1px solid #ccc";
@@ -319,7 +305,7 @@ export default {
           lbl.style.fontSize = "11px";
 
           const inp = document.createElement("input");
-          inp.type = "text"; // use text to easily handle empty string 'auto'
+          inp.type = "text";
           inp.style.width = "35px";
           inp.style.fontSize = "11px";
 
@@ -340,7 +326,6 @@ export default {
             } else {
               val = isFloat ? parseFloat(val) : parseInt(val);
               if (isNaN(val)) {
-                // revert
                 updateInput();
                 return;
               }
@@ -371,7 +356,7 @@ export default {
         chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0, 2.0, false));
         chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
 
-        // Add Histogram Canvas
+        // Histogram Canvas
         const histCanvas = document.createElement("canvas");
         histCanvas.width = 160;
         histCanvas.height = 30;
@@ -450,10 +435,9 @@ export default {
       });
     }
 
-
-
-
-
+    updateChannelsUI();
+    model.on("change:channel_names", updateChannelsUI);
+    model.on("change:channel_colors", updateChannelsUI);
 
     const uiTogglesContainer = document.createElement("div");
     uiTogglesContainer.style.display = "flex";
@@ -464,14 +448,14 @@ export default {
     const warningSpan = document.createElement("span");
     warningSpan.style.color = "red";
     warningSpan.style.fontSize = "14px";
-    warningSpan.style.marginLeft = "auto"; // Push to right if in flex
+    warningSpan.style.marginLeft = "auto";
     warningSpan.textContent = model.get("warning_msg");
     warningSpan.style.display = model.get("warning_msg") ? "block" : "none";
 
     model.on("change:warning_msg", () => {
-        const msg = model.get("warning_msg");
-        warningSpan.textContent = msg;
-        warningSpan.style.display = msg ? "block" : "none";
+      const msg = model.get("warning_msg");
+      warningSpan.textContent = msg;
+      warningSpan.style.display = msg ? "block" : "none";
     });
 
     const crosshairLabel = document.createElement("label");
@@ -489,15 +473,13 @@ export default {
     });
 
     model.on("change:show_crosshair", () => {
-        crosshairCb.checked = model.get("show_crosshair");
+      crosshairCb.checked = model.get("show_crosshair");
     });
 
     crosshairLabel.appendChild(crosshairCb);
     crosshairLabel.appendChild(document.createTextNode("Show Crosshair"));
-
     uiTogglesContainer.appendChild(crosshairLabel);
 
-    // Sync on hover toggle
     const syncLabel = document.createElement("label");
     syncLabel.style.display = "flex";
     syncLabel.style.alignItems = "center";
@@ -505,6 +487,7 @@ export default {
     syncLabel.style.fontSize = "14px";
     syncLabel.style.marginLeft = "10px";
 
+    // Sync on hover toggle
     const syncCb = document.createElement("input");
     syncCb.type = "checkbox";
     syncCb.checked = model.get("sync_on_hover");
@@ -514,125 +497,68 @@ export default {
     });
 
     model.on("change:sync_on_hover", () => {
-        syncCb.checked = model.get("sync_on_hover");
+      syncCb.checked = model.get("sync_on_hover");
     });
 
     syncLabel.appendChild(syncCb);
     syncLabel.appendChild(document.createTextNode("Sync on Hover ('C')"));
-
     uiTogglesContainer.appendChild(syncLabel);
-
 
     // Annotation Controls (only if annotator widget)
     if (hasAnnotation) {
-        const annotLabel = document.createElement("label");
-        annotLabel.style.display = "flex";
-        annotLabel.style.alignItems = "center";
-        annotLabel.style.gap = "4px";
-        annotLabel.style.fontSize = "14px";
-        annotLabel.style.marginLeft = "20px";
+      const annotLabel = document.createElement("label");
+      annotLabel.style.display = "flex";
+      annotLabel.style.alignItems = "center";
+      annotLabel.style.gap = "4px";
+      annotLabel.style.fontSize = "14px";
+      annotLabel.style.marginLeft = "20px";
 
-        const annotCb = document.createElement("input");
-        annotCb.type = "checkbox";
-        annotCb.checked = model.get("annotation_mode");
-        annotCb.addEventListener("change", () => {
-          model.set("annotation_mode", annotCb.checked);
-          model.save_changes();
-          actionSelect.disabled = !annotCb.checked;
-          if(annotCb.checked) {
-              img.style.cursor = "crosshair";
-          } else {
-              img.style.cursor = "default";
-          }
-        });
+      const annotCb = document.createElement("input");
+      annotCb.type = "checkbox";
+      annotCb.checked = model.get("annotation_mode");
 
-        model.on("change:annotation_mode", () => {
-            annotCb.checked = model.get("annotation_mode");
-            actionSelect.disabled = !annotCb.checked;
-            img.style.cursor = annotCb.checked ? "crosshair" : "default";
-        });
+      const actionSelect = document.createElement("select");
+      actionSelect.disabled = !annotCb.checked;
+      const addOpt = document.createElement("option");
+      addOpt.value = "add";
+      addOpt.textContent = "Add";
+      const delOpt = document.createElement("option");
+      delOpt.value = "delete";
+      delOpt.textContent = "Delete";
+      actionSelect.appendChild(addOpt);
+      actionSelect.appendChild(delOpt);
 
-        annotLabel.appendChild(annotCb);
-        annotLabel.appendChild(document.createTextNode("ANNOTATION"));
-
-        const actionSelect = document.createElement("select");
+      annotCb.addEventListener("change", () => {
+        model.set("annotation_mode", annotCb.checked);
+        model.save_changes();
         actionSelect.disabled = !annotCb.checked;
-        const addOpt = document.createElement("option");
-        addOpt.value = "add";
-        addOpt.textContent = "Add";
-        const delOpt = document.createElement("option");
-        delOpt.value = "delete";
-        delOpt.textContent = "Delete";
-        actionSelect.appendChild(addOpt);
-        actionSelect.appendChild(delOpt);
+        img.style.cursor = annotCb.checked ? "crosshair" : "default";
+      });
 
+      model.on("change:annotation_mode", () => {
+        annotCb.checked = model.get("annotation_mode");
+        actionSelect.disabled = !annotCb.checked;
+        img.style.cursor = annotCb.checked ? "crosshair" : "default";
+      });
+
+      annotLabel.appendChild(annotCb);
+      annotLabel.appendChild(document.createTextNode("ANNOTATION"));
+
+      actionSelect.value = model.get("annotation_action");
+      actionSelect.addEventListener("change", () => {
+        model.set("annotation_action", actionSelect.value);
+        model.save_changes();
+      });
+
+      model.on("change:annotation_action", () => {
         actionSelect.value = model.get("annotation_action");
-        actionSelect.addEventListener("change", () => {
-            model.set("annotation_action", actionSelect.value);
-            model.save_changes();
-        });
+      });
 
-        model.on("change:annotation_action", () => {
-            actionSelect.value = model.get("annotation_action");
-        });
+      uiTogglesContainer.appendChild(annotLabel);
+      uiTogglesContainer.appendChild(actionSelect);
 
-        uiTogglesContainer.appendChild(annotLabel);
-        uiTogglesContainer.appendChild(actionSelect);
-
-        // Add click listener for the image
-        img.addEventListener("click", (e) => {
-            if (!model.get("annotation_mode")) return;
-
-            // e.offsetX and e.offsetY are relative to the padding edge of the target node
-            const x_frac = e.offsetX / img.clientWidth;
-            const y_frac = e.offsetY / img.clientHeight;
-
-            // Map the click fraction to the axes.
-            // We use the Python-computed axis_bounds to determine which axis was clicked.
-            const bounds = model.get("axis_bounds");
-            if (!bounds) return;
-
-            let clicked_plane = null;
-            // Bounds are [x0, y0, width, height] from 0 to 1 with origin at bottom-left in Matplotlib.
-            // However, JS y_frac is from top-left.
-            // Let's invert y_frac to match matplotlib's bottom-up coordinate system:
-            const mpl_y_frac = 1.0 - y_frac;
-
-            for (const [plane, b] of Object.entries(bounds)) {
-                const [bx0, by0, bw, bh] = b;
-                if (x_frac >= bx0 && x_frac <= bx0 + bw && mpl_y_frac >= by0 && mpl_y_frac <= by0 + bh) {
-                    clicked_plane = plane;
-                    break;
-                }
-            }
-
-            if (clicked_plane) {
-                // Send click directly to python
-                // We add a timestamp so that consecutive identical clicks still trigger the observer
-                model.set("click_coords", {
-                    'plane': clicked_plane,
-                    'x': x_frac,
-                    'y': y_frac,
-                    't': Date.now()
-                });
-                model.save_changes();
-            }
-        });
-
-        // Initial cursor state
-        if(model.get("annotation_mode")) {
-            img.style.cursor = "crosshair";
-        }
-    }
-
-    // Hover + 'C' key sync logic
-    let currentHoverCoords = null;
-
-    img.addEventListener("mousemove", (e) => {
-        if (!model.get("sync_on_hover")) {
-            currentHoverCoords = null;
-            return;
-        }
+      img.addEventListener("click", (e) => {
+        if (!model.get("annotation_mode")) return;
 
         const x_frac = e.offsetX / img.clientWidth;
         const y_frac = e.offsetY / img.clientHeight;
@@ -640,56 +566,97 @@ export default {
         const bounds = model.get("axis_bounds");
         if (!bounds) return;
 
-        let hover_plane = null;
-        const mpl_y_frac = 1.0 - y_frac;
+        let clicked_plane = null;
 
         for (const [plane, b] of Object.entries(bounds)) {
-            const [bx0, by0, bw, bh] = b;
-            if (x_frac >= bx0 && x_frac <= bx0 + bw && mpl_y_frac >= by0 && mpl_y_frac <= by0 + bh) {
-                hover_plane = plane;
-                break;
-            }
+          const bbox = getBbox(b);
+          if (!bbox) continue;
+          const [bx0, by0, bw, bh] = bbox;
+          if (x_frac >= bx0 && x_frac <= bx0 + bw && y_frac >= by0 && y_frac <= by0 + bh) {
+            clicked_plane = plane;
+            break;
+          }
         }
 
-        if (hover_plane) {
-            currentHoverCoords = {
-                'plane': hover_plane,
-                'x': x_frac,
-                'y': y_frac
-            };
-        } else {
-            currentHoverCoords = null;
+        if (clicked_plane) {
+          model.set("click_coords", {
+            'plane': clicked_plane,
+            'x': x_frac,
+            'y': y_frac,
+            't': Date.now()
+          });
+          model.save_changes();
         }
+      });
+
+      if (model.get("annotation_mode")) {
+        img.style.cursor = "crosshair";
+      }
+    }
+
+    // Hover + 'C' key sync logic
+    let currentHoverCoords = null;
+
+    img.addEventListener("mousemove", (e) => {
+      if (!model.get("sync_on_hover")) {
+        currentHoverCoords = null;
+        return;
+      }
+
+      const x_frac = e.offsetX / img.clientWidth;
+      const y_frac = e.offsetY / img.clientHeight;
+
+      const bounds = model.get("axis_bounds");
+      if (!bounds) return;
+
+      let hover_plane = null;
+
+      for (const [plane, b] of Object.entries(bounds)) {
+        const bbox = getBbox(b);
+        if (!bbox) continue;
+        const [bx0, by0, bw, bh] = bbox;
+        if (x_frac >= bx0 && x_frac <= bx0 + bw && y_frac >= by0 && y_frac <= by0 + bh) {
+          hover_plane = plane;
+          break;
+        }
+      }
+
+      if (hover_plane) {
+        currentHoverCoords = {
+          'plane': hover_plane,
+          'x': x_frac,
+          'y': y_frac
+        };
+      } else {
+        currentHoverCoords = null;
+      }
     });
 
     img.addEventListener("mouseleave", () => {
-        currentHoverCoords = null;
+      currentHoverCoords = null;
     });
 
-    // We attach keydown to document to catch 'C' presses reliably
+      // We attach keydown to document to catch 'C' presses reliably
     // when hovering over the image, but we only trigger if we have valid hover coords.
     const keydownListener = (e) => {
-        if (!model.get("sync_on_hover")) return;
-        if ((e.key === "c" || e.key === "C") && currentHoverCoords) {
-            model.set("hover_coords", {
-                ...currentHoverCoords,
-                't': Date.now()
-            });
-            model.save_changes();
-        }
+      if (!model.get("sync_on_hover")) return;
+      if ((e.key === "c" || e.key === "C") && currentHoverCoords) {
+        model.set("hover_coords", {
+          ...currentHoverCoords,
+          't': Date.now()
+        });
+        model.save_changes();
+      }
     };
 
     document.addEventListener("keydown", keydownListener);
 
-    // Cleanup listener when widget is destroyed
     model.on("destroy", () => {
-        document.removeEventListener("keydown", keydownListener);
+      document.removeEventListener("keydown", keydownListener);
     });
-
 
     uiTogglesContainer.appendChild(warningSpan);
 
-    // Assemble controlsDiv in requested order
     controlsDiv.appendChild(uiTogglesContainer);
     controlsDiv.appendChild(channelsContainer);
     controlsDiv.appendChild(thicknessContainer);

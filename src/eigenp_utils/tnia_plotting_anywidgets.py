@@ -1,3 +1,4 @@
+from skimage.transform import resize, rotate
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
@@ -190,6 +191,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     Returns:
         [type]: [description]
     """
+    
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
@@ -239,9 +241,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
                 resolved = resolve_color(c)
                 colormap = black_to(resolved)
 
-
-    # Apply rotation if requested
-    from skimage.transform import rotate
     def _parse_rotation(val):
         if val is None:
             return 0.0, 0.0, 0.0
@@ -257,8 +256,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
     rot_z, rot_y, rot_x = _parse_rotation(rotate_view)
 
-    xdim_orig = xy.shape[1]
-
     if rot_z != 0.0:
         xy = rotate(xy, rot_z, resize=True, order=3, preserve_range=True)
     if rot_y != 0.0:
@@ -267,16 +264,12 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         zy = rotate(zy, rot_x, resize=True, order=3, preserve_range=True)
 
     if use_plt:
-        fig=plt.figure(figsize=figsize, constrained_layout=False)
+        fig = plt.figure(figsize=figsize, constrained_layout=False)
     else:
         fig = Figure(figsize=figsize, constrained_layout=False)
 
-
     xdim = xy.shape[1]
     ydim = xy.shape[0]
-    zdim_xz = xz.shape[0]
-    zdim_zy = zy.shape[1]
-    zdim = max(zdim_xz, zdim_zy)
 
     # # compute the same-gap factor
     # if figsize is not None:
@@ -321,7 +314,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
     axLabels = None
     if channel_labels is not None:
-        # Scale label row height proportionally without a disruptive large absolute minimum
         label_row_h = (row1_h + row2_h) * 0.05
         spec = gridspec.GridSpec(
             ncols=2,
@@ -333,11 +325,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             figure=fig,
         )
         axLabels = fig.add_subplot(spec[0, 0])
-
-        axXY=fig.add_subplot(spec[1, 0])
-        axZY=fig.add_subplot(spec[1, 1])
-        axXZ=fig.add_subplot(spec[2, 0])
-        axBar=fig.add_subplot(spec[2, 1])
+        axXY = fig.add_subplot(spec[1, 0])
+        axZY = fig.add_subplot(spec[1, 1])
+        axXZ = fig.add_subplot(spec[2, 0])
+        axBar = fig.add_subplot(spec[2, 1])
 
         axLabels.set_facecolor((0.6, 0.6, 0.6))
         axLabels.set_xticks([])
@@ -347,25 +338,26 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
         n_labels = len(channel_labels)
         if n_labels > 0:
-            import matplotlib.colors as mcolors
             def _get_color_str(c):
                 if isinstance(c, mcolors.Colormap):
                     return mcolors.to_hex(c(1.0)[:3])
                 return resolve_color(c)
 
-            if isinstance(colormap, (list, tuple)):
-                color_list = [_get_color_str(c) for c in colormap]
+            # Use orig_colormap so multi-channel RGB arrays don't fall back to black labels
+            if isinstance(orig_colormap, (list, tuple)):
+                color_list = [_get_color_str(c) for c in orig_colormap]
                 if len(color_list) < n_labels:
                     color_list = color_list * (n_labels // len(color_list) + 1)
-            else:
-                c = _get_color_str(colormap) if colormap is not None else 'black'
+            elif orig_colormap is not None:
+                c = _get_color_str(orig_colormap)
                 color_list = [c] * n_labels
+            else:
+                color_list = ['black'] * n_labels
 
             fig_h_in = figsize[1] if figsize is not None else 10
             fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
 
             from matplotlib.offsetbox import TextArea, HPacker, AnchoredOffsetbox
-            import matplotlib.colors as mcolors
 
             def _darken(c):
                 try:
@@ -380,77 +372,58 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
                 ta = TextArea(label, textprops=dict(color=darkened_color, fontsize=fontsize_pt, fontweight='bold'))
                 text_areas.append(ta)
 
-            packer = HPacker(children=text_areas, align="center", pad=0, sep=10) # 10 points spacing
+            packer = HPacker(children=text_areas, align="center", pad=0, sep=10)
             anchored_box = AnchoredOffsetbox(loc='center', child=packer, pad=0.0, frameon=False, borderpad=0.0)
             axLabels.add_artist(anchored_box)
     else:
-        spec=gridspec.GridSpec(ncols=2, nrows=2,
-                               height_ratios=[row1_h, row2_h],
-                               width_ratios=[col1_w, col2_w],
-                               hspace=.01 * hspace_factor,
-                               wspace=.01,
-                               figure = fig)
+        spec = gridspec.GridSpec(ncols=2, nrows=2,
+                                 height_ratios=[row1_h, row2_h],
+                                 width_ratios=[col1_w, col2_w],
+                                 hspace=.01 * hspace_factor,
+                                 wspace=.01,
+                                 figure=fig)
 
-        axXY=fig.add_subplot(spec[0])
-        axZY=fig.add_subplot(spec[1])
-        axXZ=fig.add_subplot(spec[2])
-        axBar=fig.add_subplot(spec[3])
+        axXY = fig.add_subplot(spec[0])
+        axZY = fig.add_subplot(spec[1])
+        axXZ = fig.add_subplot(spec[2])
+        axBar = fig.add_subplot(spec[3])
 
     if gamma == 1:
-        axXY.imshow(xy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,xdim*px,ydim*py,0], interpolation = 'nearest', alpha=opacity)
-        axZY.imshow(zy, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,w_zy*pz,h_zy*py,0], interpolation = 'nearest', alpha=opacity)
-        axXZ.imshow(xz, cmap = colormap, vmin=vmin, vmax=vmax, extent=[0,w_xz*px,h_xz*pz,0], interpolation = 'nearest', alpha=opacity)
+        axXY.imshow(xy, cmap=colormap, vmin=vmin, vmax=vmax, extent=[0, xdim*px, ydim*py, 0], interpolation='nearest', alpha=opacity)
+        axZY.imshow(zy, cmap=colormap, vmin=vmin, vmax=vmax, extent=[0, w_zy*pz, h_zy*py, 0], interpolation='nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap=colormap, vmin=vmin, vmax=vmax, extent=[0, w_xz*px, h_xz*pz, 0], interpolation='nearest', alpha=opacity)
     else:
-        norm=PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax, clip=True)
-        axXY.imshow(xy, cmap = colormap, norm=norm, extent=[0,xdim*px,ydim*py,0], interpolation = 'nearest', alpha=opacity)
-        axZY.imshow(zy, cmap = colormap, norm=norm, extent=[0,w_zy*pz,h_zy*py,0], interpolation = 'nearest', alpha=opacity)
-        axXZ.imshow(xz, cmap = colormap, norm=norm, extent=[0,w_xz*px,h_xz*pz,0], interpolation = 'nearest', alpha=opacity)
+        norm = PowerNorm(gamma=gamma, vmin=vmin, vmax=vmax, clip=True)
+        axXY.imshow(xy, cmap=colormap, norm=norm, extent=[0, xdim*px, ydim*py, 0], interpolation='nearest', alpha=opacity)
+        axZY.imshow(zy, cmap=colormap, norm=norm, extent=[0, w_zy*pz, h_zy*py, 0], interpolation='nearest', alpha=opacity)
+        axXZ.imshow(xz, cmap=colormap, norm=norm, extent=[0, w_xz*px, h_xz*pz, 0], interpolation='nearest', alpha=opacity)
 
-    # Set exact limits to prevent axis from expanding to match other row/col unnecessarily
-    # The image might not fill the entire GridSpec cell if the other cell is larger.
     axXY.set_xlim([0, xdim*px]); axXY.set_ylim([ydim*py, 0])
     axZY.set_xlim([0, w_zy*pz]); axZY.set_ylim([h_zy*py, 0])
     axXZ.set_xlim([0, w_xz*px]); axXZ.set_ylim([h_xz*pz, 0])
 
-    ### Axes and titles
-    # axXY.set_title('xy')
-    # axZY.set_title('zy')
-    # axXZ.set_title('xz')
-
-    # Remove in-between axes ticks
-    for i, ax in enumerate([axXY,axZY,axXZ, axBar]):
+    for i, ax in enumerate([axXY, axZY, axXZ, axBar]):
         if i < 3 and subplot_bg is not None:
             ax.set_facecolor(subplot_bg)
         elif ax == axBar:
             ax.patch.set_visible(False)
-        else:
-            # Leave axXY, axZY, axXZ visible in case there is no subplot_bg (will be transparent below anyway, or matplotlib default)
-            pass
+
         ax.set_xticks([])
         ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
-    # axXY.xaxis.set_ticklabels([])
-    # axZY.yaxis.set_ticklabels([])
 
-    fig.patch.set_alpha(0.0) # set transparent bgnd
+    fig.patch.set_alpha(0.0)  # set transparent bgnd
 
-    # fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
-
-    # Add scale bar (use original dimension so bar scales correctly relative to internal content)
-    # However, since the axis width is the NEW width, the physical width the bar measures against
-    # is the NEW width.
     main_physical_width_um = xdim * px
     _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, figsize)
 
-    # Attach named axes explicitly to avoid positional index errors
     fig.axXY = axXY
     fig.axZY = axZY
     fig.axXZ = axXZ
     fig.axBar = axBar
     fig.axLabels = axLabels
 
-    # Force geometry update and match axLabels width to axXY's image area
     fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
     fig.canvas.draw()
     if axLabels is not None:
@@ -459,8 +432,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         axLabels.set_position([pos_xy.x0, pos_labels.y0, pos_xy.width, pos_labels.height])
 
     return fig
-
-
 
 def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, figsize):
     # a small utility to pick the largest "nice" number ≤ target
@@ -582,62 +553,126 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
 
 
 ### New Function
-# def create_multichannel_rgb(xy_list, xz_list, zy_list, vmin = None, vmax = None, gamma = 1, colors = None):
-#     """
-#     Display an interactive widget to explore a 3D image by showing a slice in the x, y, and z directions.
+# def create_multichannel_rgb(xy_list, xz_list, zy_list, vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None, blend='add', soft_clip=True, eps=1e-12):
+    if colors is not None:
+        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        if colormap is None:
+            colormap = colors
 
-#     Requires ipywidgets to be installed.
+    assert isinstance(xy_list, list) and isinstance(xz_list, list) and isinstance(zy_list, list)
+    n = len(xy_list)
+    assert len(xz_list) == n and len(zy_list) == n, "xy/xz/zy must have same number of channels"
 
-#     Parameters
-#     ----------
-#     xy_list, xz_list, zy_list : lists of images (len of list is number of channels)
-#     vmax : float
-#         maximum value to use for the PowerNorm
-#     gamma : float
-#         gamma value to use for the PowerNorm
-#     colors : list of strs
-#         one color per channel
-#     """
+    Hxy, Wxy = xy_list[0].shape
+    Hxz, Wxz = xz_list[0].shape
+    Hzy, Wzy = zy_list[0].shape
 
-#     assert isinstance(xy_list,list)
+    xy_rgb = np.zeros((Hxy, Wxy, 3), dtype=np.float32)
+    xz_rgb = np.zeros((Hxz, Wxz, 3), dtype=np.float32)
+    zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
 
-#     num_channels = len(xy_list)
+    gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+    opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
 
-#     if gamma == 1:
-#         gamma = [1] * num_channels
-#     if vmax is None:
-#         vmax = [1] * num_channels
-#     if vmin is None:
-#         vmin = [0] * num_channels
+    if colormap is None:
+        if n == 1:
+            colormap = ['white']
+        else:
+            defaults = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
+            colormap = [defaults[i % len(defaults)] for i in range(n)]
+    color_map = [np.asarray(to_rgb(resolve_color(c)), dtype=np.float32) for c in colormap]
 
-#     if colors is None:
-#         colors = ['magenta', 'cyan', 'yellow', 'green']
-#         colors = colors[0:num_channels]
-#     # Convert color names or tuples to RGB
-#     color_map = [to_rgb(color) for color in colors]
+    if vmin is None:
+        vmins = [0.0] * n
+    else:
+        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
 
+    if vmax is None:
+        vmaxs = [None] * n
+    else:
+        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
 
-#     # # Initialize RGB arrays for each orientation
-#     # xy_rgb = np.zeros(xy_list[0].shape + (3,))
-#     # xz_rgb = np.zeros(xz_list[0].shape + (3,))
-#     # zy_rgb = np.zeros(zy_list[0].shape + (3,))
+    for i in range(n):
+        if vmins[i] is None:
+            vmins[i] = 0.0
+        else:
+            vmins[i] = float(vmins[i])
 
-#     # # Apply PowerNorm per channel
-#     # for idx_i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
-#     #     eps = 1e-12
-#     #     xy = xy / max(eps, float(np.max(xy)))
-#     #     xz = xz / max(eps, float(np.max(xz)))
-#     #     zy = zy / max(eps, float(np.max(zy)))
-#     #     norm = PowerNorm(gamma=gamma[idx_i], vmin=vmin[idx_i], vmax=vmax[idx_i], clip = True)
-#     #     xy_norm, xz_norm, zy_norm = norm(xy), norm(xz), norm(zy)  # manually applying norm to the image data
-#     #     # xy_list[idx_i], xz_list[idx_i], zy_list[idx_i] = [idx_i]
+        if vmaxs[i] is None:
+            m_xy = float(np.max(xy_list[i]))
+            m_xz = float(np.max(xz_list[i]))
+            m_zy = float(np.max(zy_list[i]))
+            vmaxs[i] = float(max(m_xy, m_xz, m_zy))
+        else:
+            vmaxs[i] = float(vmaxs[i])
 
-#     #     # Combine channels into RGB using color weights
-#     #     xy_rgb += np.outer(xy_norm.flatten(), color_map[idx_i]).reshape(xy_norm.shape + (3,))
-#     #     xz_rgb += np.outer(xz_norm.flatten(), color_map[idx_i]).reshape(xz_norm.shape + (3,))
-#     #     zy_rgb += np.outer(zy_norm.flatten(), color_map[idx_i]).reshape(zy_norm.shape + (3,))
+    for i in range(n):
+        if not np.isfinite(vmins[i]): vmins[i] = 0.0
+        if not np.isfinite(vmaxs[i]): vmaxs[i] = vmins[i] + 1.0
+        if vmaxs[i] <= vmins[i] + eps:
+            vmaxs[i] = vmins[i] + 1.0
 
+    if blend == 'screen':
+        xy_acc = np.ones_like(xy_rgb)
+        xz_acc = np.ones_like(xz_rgb)
+        zy_acc = np.ones_like(zy_rgb)
+    else:
+        xy_acc = xy_rgb
+        xz_acc = xz_rgb
+        zy_acc = zy_rgb
 
+    def _norm(a, lo, hi, g):
+        out = (a.astype(np.float32, copy=False) - lo) / max(hi - lo, eps)
+        out = np.clip(out, 0.0, 1.0, out=out)
+        if g != 1:
+            out = np.power(out, g, out=out)
+        return out
+
+    for i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
+        c = color_map[i]
+        g = gammas[i]
+        o = opacities[i]
+        lo, hi = vmins[i], vmaxs[i]
+
+        c_o = (c * o).astype(np.float32)
+
+        xy_n = _norm(xy, lo, hi, g)[..., None] * c_o
+        xz_n = _norm(xz, lo, hi, g)[..., None] * c_o
+        zy_n = _norm(zy, lo, hi, g)[..., None] * c_o
+
+        if blend == 'screen':
+            xy_acc *= (1.0 - xy_n)
+            xz_acc *= (1.0 - xz_n)
+            zy_acc *= (1.0 - zy_n)
+        elif blend == 'max':
+            xy_acc = np.maximum(xy_acc, xy_n)
+            xz_acc = np.maximum(xz_acc, xz_n)
+            zy_acc = np.maximum(zy_acc, zy_n)
+        else:
+            xy_acc += xy_n
+            xz_acc += xz_n
+            zy_acc += zy_n
+
+    if blend == 'screen':
+        xy_rgb = 1.0 - xy_acc
+        xz_rgb = 1.0 - xz_acc
+        zy_rgb = 1.0 - zy_acc
+    else:
+        xy_rgb = xy_acc
+        xz_rgb = xz_acc
+        zy_rgb = zy_acc
+
+        if blend == 'add':
+            if soft_clip:
+                for rgb in (xy_rgb, xz_rgb, zy_rgb):
+                    m = rgb.max(axis=-1, keepdims=True)
+                    scale = np.maximum(1.0, m)
+                    rgb /= scale
+            xy_rgb = np.clip(xy_rgb, 0.0, 1.0)
+            xz_rgb = np.clip(xz_rgb, 0.0, 1.0)
+            zy_rgb = np.clip(zy_rgb, 0.0, 1.0)
+
+    return xy_rgb, xz_rgb, zy_rgb
 
 def create_multichannel_rgb(
     xy_list, xz_list, zy_list,
@@ -805,16 +840,7 @@ def create_multichannel_rgb(
     # # return show_zyx(xy_rgb, xz_rgb, zy_rgb, vmin = None, vmax=None, gamma = 1, use_plt=True)
     # return xy_rgb, xz_rgb, zy_rgb
 
-def create_multichannel_rgb_cmap(
-    xy_list, xz_list, zy_list,
-    vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None,
-    blend='max',        # 'add' | 'screen' | 'max'
-    soft_clip=True,     # only used for blend='add'
-    eps=1e-12,
-):
-    """
-    Compose multi-channel XY/XZ/ZY into RGB with per-channel normalization using full colormaps.
-    """
+def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None, blend='max', soft_clip=True, eps=1e-12):
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
@@ -827,12 +853,10 @@ def create_multichannel_rgb_cmap(
     Hxz, Wxz = xz_list[0].shape
     Hzy, Wzy = zy_list[0].shape
 
-    # Prepare outputs
     xy_rgb = np.zeros((Hxy, Wxy, 3), dtype=np.float32)
     xz_rgb = np.zeros((Hxz, Wxz, 3), dtype=np.float32)
     zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
 
-    # Broadcast params
     gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
     opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
 
@@ -850,7 +874,6 @@ def create_multichannel_rgb_cmap(
         else:
             cmap_list.append(black_to(resolve_color(c)))
 
-    # Determine per-channel vmin/vmax if not provided
     if vmin is None:
         vmins = [0.0] * n
     else:
@@ -875,14 +898,12 @@ def create_multichannel_rgb_cmap(
         else:
             vmaxs[i] = float(vmaxs[i])
 
-    # Sanitize: ensure vmax > vmin
     for i in range(n):
         if not np.isfinite(vmins[i]): vmins[i] = 0.0
         if not np.isfinite(vmaxs[i]): vmaxs[i] = vmins[i] + 1.0
         if vmaxs[i] <= vmins[i] + eps:
-            vmaxs[i] = vmins[i] + 1.0  # avoid zero range
+            vmaxs[i] = vmins[i] + 1.0
 
-    # Choose blending accumulators
     if blend == 'screen':
         xy_acc = np.ones_like(xy_rgb)
         xz_acc = np.ones_like(xz_rgb)
@@ -892,7 +913,6 @@ def create_multichannel_rgb_cmap(
         xz_acc = xz_rgb
         zy_acc = zy_rgb
 
-    # Helpers
     def _norm(a, lo, hi, g):
         out = (a.astype(np.float32, copy=False) - lo) / max(hi - lo, eps)
         out = np.clip(out, 0.0, 1.0, out=out)
@@ -900,14 +920,12 @@ def create_multichannel_rgb_cmap(
             out = np.power(out, g, out=out)
         return out
 
-    # Per-channel accumulate
     for i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
         cmap = cmap_list[i]
         g = gammas[i]
         o = opacities[i]
         lo, hi = vmins[i], vmaxs[i]
 
-        # Apply colormap to normalized array
         xy_n = (cmap(_norm(xy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
         xz_n = (cmap(_norm(xz, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
         zy_n = (cmap(_norm(zy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
@@ -920,12 +938,11 @@ def create_multichannel_rgb_cmap(
             xy_acc = np.maximum(xy_acc, xy_n)
             xz_acc = np.maximum(xz_acc, xz_n)
             zy_acc = np.maximum(zy_acc, zy_n)
-        else:  # 'add'
+        else:
             xy_acc += xy_n
             xz_acc += xz_n
             zy_acc += zy_n
 
-    # Finalize per blend
     if blend == 'screen':
         xy_rgb = 1.0 - xy_acc
         xz_rgb = 1.0 - xz_acc
@@ -1204,19 +1221,24 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                     def get_axis_info(ax):
                         xlim = ax.get_xlim()
                         ylim = ax.get_ylim()
-                        # Extract exact image bounds in normalized figure coordinates
                         p_top_left = fig.transFigure.inverted().transform(ax.transData.transform((xlim[0], ylim[1])))
                         p_bot_right = fig.transFigure.inverted().transform(ax.transData.transform((xlim[1], ylim[0])))
                         x0 = float(p_top_left[0])
-                        y1 = float(p_top_left[1])
                         x1 = float(p_bot_right[0])
-                        y0 = float(p_bot_right[1])
+                        y1_mpl = float(p_top_left[1])
+                        y0_mpl = float(p_bot_right[1])
+                        # Map Matplotlib figure coordinates (bottom-left) to JS top-left origin coordinates
+                        y0_js = float(1.0 - y1_mpl)
+                        y1_js = float(1.0 - y0_mpl)
                         return {
                             'x0': x0,
                             'x1': x1,
-                            'y0': y0,
-                            'y1': y1,
-                            'bbox': [x0, y0, x1 - x0, y1 - y0],
+                            'y0': y0_mpl,
+                            'y1': y1_mpl,
+                            'y0_js': y0_js,
+                            'y1_js': y1_js,
+                            'bbox': [x0, y0_js, x1 - x0, y1_js - y0_js],
+                            'bbox_mpl': [x0, y0_mpl, x1 - x0, y1_mpl - y0_mpl],
                             'xlim': [float(xlim[0]), float(xlim[1])],
                             'ylim': [float(ylim[0]), float(ylim[1])]
                         }
@@ -1233,7 +1255,6 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         finally:
             if fig is not None:
                 plt.close(fig)
-
     def _handle_hover_sync(self, change):
         if not self.sync_on_hover:
             return
@@ -1251,18 +1272,18 @@ class TNIAWidgetBase(anywidget.AnyWidget):
             return
 
         x0, x1 = info.get('x0'), info.get('x1')
-        y0, y1 = info.get('y0'), info.get('y1')
-        if x0 is None or x1 is None or y0 is None or y1 is None:
+        y0_js, y1_js = info.get('y0_js'), info.get('y1_js')
+        if x0 is None or x1 is None or y0_js is None or y1_js is None:
             return
 
         mpl_x = frac_x
-        mpl_y = 1.0 - frac_y
+        mpl_y_js = frac_y
 
-        if not (x0 <= mpl_x <= x1 and y0 <= mpl_y <= y1):
+        if not (x0 <= mpl_x <= x1 and y0_js <= mpl_y_js <= y1_js):
             return
 
         u = (mpl_x - x0) / (x1 - x0) if (x1 - x0) > 0 else 0.0
-        v = (y1 - mpl_y) / (y1 - y0) if (y1 - y0) > 0 else 0.0
+        v = (mpl_y_js - y0_js) / (y1_js - y0_js) if (y1_js - y0_js) > 0 else 0.0
 
         if plane == 'xy':
             data_x = int(np.floor(u * self.dims[2]))
@@ -1279,7 +1300,6 @@ class TNIAWidgetBase(anywidget.AnyWidget):
             data_z = int(np.floor(v * self.dims[0]))
             self.x_s = max(0, min(self.dims[2] - 1, data_x))
             self.z_s = max(0, min(self.dims[0] - 1, data_z))
-
     def _render(self):
         raise NotImplementedError
 
@@ -1789,40 +1809,105 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             return
 
         plane = coords.get('plane')
-        frac_x = coords.get('x') # Figure normalized x (0 to 1, left to right)
-        frac_y = coords.get('y') # Figure normalized y (0 to 1, top to bottom)
+        frac_x = coords.get('x')
+        frac_y = coords.get('y')
 
         info = self.axis_bounds.get(plane)
         if not info or not isinstance(info, dict):
             return
 
         x0, x1 = info.get('x0'), info.get('x1')
-        y0, y1 = info.get('y0'), info.get('y1')
-        if x0 is None or x1 is None or y0 is None or y1 is None:
+        y0_js, y1_js = info.get('y0_js'), info.get('y1_js')
+        if x0 is None or x1 is None or y0_js is None or y1_js is None:
             return
 
         mpl_x = frac_x
-        mpl_y = 1.0 - frac_y
+        mpl_y_js = frac_y
 
-        if not (x0 <= mpl_x <= x1 and y0 <= mpl_y <= y1):
+        if not (x0 <= mpl_x <= x1 and y0_js <= mpl_y_js <= y1_js):
             return
 
         u = (mpl_x - x0) / (x1 - x0) if (x1 - x0) > 0 else 0.0
-        v = (y1 - mpl_y) / (y1 - y0) if (y1 - y0) > 0 else 0.0
+        v = (mpl_y_js - y0_js) / (y1_js - y0_js) if (y1_js - y0_js) > 0 else 0.0
+
+        xlim = info.get('xlim')
+        ylim = info.get('ylim')
+
+        if not xlim or not ylim:
+            return
+
+        phys_x = xlim[0] + u * (xlim[1] - xlim[0])
+        phys_y = ylim[1] + v * (ylim[0] - ylim[1])
+
+        rot_z, rot_y, rot_x = 0.0, 0.0, 0.0
+        if hasattr(self, 'rotate_view'):
+            def _parse_rotation(val):
+                if val is None: return 0.0, 0.0, 0.0
+                if isinstance(val, (int, float)): return float(val), 0.0, 0.0
+                try:
+                    vl = list(val)
+                    if len(vl) == 3: return float(vl[0]), float(vl[1]), float(vl[2])
+                except TypeError: pass
+                return 0.0, 0.0, 0.0
+            rot_z, rot_y, rot_x = _parse_rotation(self.rotate_view)
 
         Z, Y, X = self.dims
 
+        def unrotate_2d(px, py, angle_deg, cx, cy):
+            if angle_deg == 0.0:
+                return px, py
+            rad = np.radians(-angle_deg)
+            c, s = np.cos(rad), np.sin(rad)
+            dx = px - cx
+            dy = py - cy
+            nx = dx * c - dy * s
+            ny = dx * s + dy * c
+            return cx + nx, cy + ny
+
         if plane == 'xy':
-            data_x = int(np.floor(u * X))
-            data_y = int(np.floor(v * Y))
+            if rot_z != 0.0:
+                cx_new = (xlim[1] - xlim[0]) / 2.0
+                cy_new = (ylim[0] - ylim[1]) / 2.0
+                orig_cx = (X * self.sx) / 2.0
+                orig_cy = (Y * self.sy) / 2.0
+                orig_x, orig_y = unrotate_2d(phys_x, phys_y, rot_z, cx_new, cy_new)
+                orig_x = orig_cx + (orig_x - cx_new)
+                orig_y = orig_cy + (orig_y - cy_new)
+                data_x = int(np.floor(orig_x / self.sx))
+                data_y = int(np.floor(orig_y / self.sy))
+            else:
+                data_x = int(np.floor(phys_x / self.sx))
+                data_y = int(np.floor(phys_y / self.sy))
             data_z = self.z_s
         elif plane == 'zy':
-            data_z = int(np.floor(u * Z))
-            data_y = int(np.floor(v * Y))
+            if rot_x != 0.0:
+                cx_new = (xlim[1] - xlim[0]) / 2.0
+                cy_new = (ylim[0] - ylim[1]) / 2.0
+                orig_cx = (Z * self.sz) / 2.0
+                orig_cy = (Y * self.sy) / 2.0
+                orig_z_phys, orig_y = unrotate_2d(phys_x, phys_y, rot_x, cx_new, cy_new)
+                orig_z_phys = orig_cx + (orig_z_phys - cx_new)
+                orig_y = orig_cy + (orig_y - cy_new)
+                data_z = int(np.floor(orig_z_phys / self.sz))
+                data_y = int(np.floor(orig_y / self.sy))
+            else:
+                data_z = int(np.floor(phys_x / self.sz))
+                data_y = int(np.floor(phys_y / self.sy))
             data_x = self.x_s
         elif plane == 'xz':
-            data_x = int(np.floor(u * X))
-            data_z = int(np.floor(v * Z))
+            if rot_y != 0.0:
+                cx_new = (xlim[1] - xlim[0]) / 2.0
+                cy_new = (ylim[0] - ylim[1]) / 2.0
+                orig_cx = (X * self.sx) / 2.0
+                orig_cy = (Z * self.sz) / 2.0
+                orig_x_phys, orig_z_phys = unrotate_2d(phys_x, phys_y, rot_y, cx_new, cy_new)
+                orig_x_phys = orig_cx + (orig_x_phys - cx_new)
+                orig_z_phys = orig_cy + (orig_z_phys - cy_new)
+                data_x = int(np.floor(orig_x_phys / self.sx))
+                data_z = int(np.floor(orig_z_phys / self.sz))
+            else:
+                data_x = int(np.floor(phys_x / self.sx))
+                data_z = int(np.floor(phys_y / self.sz))
             data_y = self.y_s
         else:
             return
@@ -1837,34 +1922,33 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             if not self.points:
                 return
             pts = np.array(self.points)
-            x0 = max(0, self.x_s - self.x_t)
-            x1 = min(self.dims[2] - 1, self.x_s + self.x_t)
-            y0 = max(0, self.y_s - self.y_t)
-            y1 = min(self.dims[1] - 1, self.y_s + self.y_t)
-            z0 = max(0, self.z_s - self.z_t)
-            z1 = min(self.dims[0] - 1, self.z_s + self.z_t)
+            x0_sl = max(0, self.x_s - self.x_t)
+            x1_sl = min(self.dims[2] - 1, self.x_s + self.x_t)
+            y0_sl = max(0, self.y_s - self.y_t)
+            y1_sl = min(self.dims[1] - 1, self.y_s + self.y_t)
+            z0_sl = max(0, self.z_s - self.z_t)
+            z1_sl = min(self.dims[0] - 1, self.z_s + self.z_t)
 
             if plane == 'xy':
-                mask = (pts[:, 0] >= z0) & (pts[:, 0] <= z1)
+                mask = (pts[:, 0] >= z0_sl) & (pts[:, 0] <= z1_sl)
                 if not np.any(mask): return
                 visible_pts = pts[mask]
                 dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 1] - data_y)**2
             elif plane == 'zy':
-                mask = (pts[:, 2] >= x0) & (pts[:, 2] <= x1)
+                mask = (pts[:, 2] >= x0_sl) & (pts[:, 2] <= x1_sl)
                 if not np.any(mask): return
                 visible_pts = pts[mask]
                 dist = (visible_pts[:, 0] - data_z)**2 + (visible_pts[:, 1] - data_y)**2
             elif plane == 'xz':
-                mask = (pts[:, 1] >= y0) & (pts[:, 1] <= y1)
+                mask = (pts[:, 1] >= y0_sl) & (pts[:, 1] <= y1_sl)
                 if not np.any(mask): return
                 visible_pts = pts[mask]
                 dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 0] - data_z)**2
 
             closest_idx = np.argmin(dist)
-            if dist[closest_idx] <= 400: # 20px threshold squared
+            if dist[closest_idx] <= 400:
                 closest_pt = visible_pts[closest_idx]
                 self.remove_point(closest_pt[0], closest_pt[1], closest_pt[2])
-
     def add_point(self, z, y, x):
         """Programmatically add a point"""
         pt = [int(z), int(y), int(x)]
