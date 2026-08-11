@@ -299,6 +299,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     row1_h = max(ydim * py, h_zy * py)
     row2_h = h_xz * pz
 
+    axLabels = None
     if channel_labels is not None:
         # Calculate label row height, e.g. 5% of total figure height
         label_row_h = max((row1_h + row2_h) * 0.05, 15)
@@ -418,6 +419,21 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     # is the NEW width.
     main_physical_width_um = xdim * px
     _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, figsize)
+
+    # Attach named axes explicitly to avoid positional index errors
+    fig.axXY = axXY
+    fig.axZY = axZY
+    fig.axXZ = axXZ
+    fig.axBar = axBar
+    fig.axLabels = axLabels
+
+    # Force geometry update and match axLabels width to axXY's image area
+    fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
+    fig.canvas.draw()
+    if axLabels is not None:
+        pos_xy = axXY.get_position(original=False)
+        pos_labels = axLabels.get_position(original=False)
+        axLabels.set_position([pos_xy.x0, pos_labels.y0, pos_xy.width, pos_labels.height])
 
     return fig
 
@@ -1161,11 +1177,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         try:
             fig = self._render()
             if fig:
-                buf = io.BytesIO()
-                fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
-                fig.savefig(buf, format='png')
-
-                if len(fig.axes) >= 3:
+                if hasattr(fig, 'axXY') and hasattr(fig, 'axZY') and hasattr(fig, 'axXZ'):
                     def get_axis_info(ax):
                         bbox = ax.get_position(original=False)
                         xlim = ax.get_xlim()
@@ -1177,11 +1189,13 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                         }
 
                     self.axis_bounds = {
-                        'xy': get_axis_info(fig.axes[0]),
-                        'zy': get_axis_info(fig.axes[1]),
-                        'xz': get_axis_info(fig.axes[2])
+                        'xy': get_axis_info(fig.axXY),
+                        'zy': get_axis_info(fig.axZY),
+                        'xz': get_axis_info(fig.axXZ)
                     }
 
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png')
                 self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
         finally:
             if fig is not None:
@@ -1563,52 +1577,57 @@ class TNIASliceWidget(TNIAWidgetBase):
         rot_z, rot_y, rot_x = _parse_rotation(self.rotate_view)
 
         if self.show_crosshair and fig:
-            def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_w, orig_h):
-                if angle_deg == 0.0:
-                    return [x0, x1], [y0, y1]
-                rad = np.radians(angle_deg)
-                c, s = np.cos(rad), np.sin(rad)
-                new_w = int(np.ceil(abs(orig_w * c) + abs(orig_h * s)))
-                new_h = int(np.ceil(abs(orig_w * s) + abs(orig_h * c)))
-                cx_orig = (orig_w - 1) / 2.0
-                cy_orig = (orig_h - 1) / 2.0
-                cx_new = (new_w - 1) / 2.0
-                cy_new = (new_h - 1) / 2.0
-                def trans(x, y):
-                    dx = x - cx_orig
-                    dy = y - cy_orig
-                    nx = dx * c + dy * s
-                    ny = -dx * s + dy * c
-                    return cx_new + nx, cy_new + ny
-                rx0, ry0 = trans(x0, y0)
-                rx1, ry1 = trans(x1, y1)
-                return [rx0, rx1], [ry0, ry1]
+            axXY = getattr(fig, 'axXY', None)
+            axZY = getattr(fig, 'axZY', None)
+            axXZ = getattr(fig, 'axXZ', None)
 
-            def plot_line(ax, px0, py0, px1, py1, angle, orig_w, orig_h):
-                xs, ys = _get_rotated_line(px0, py0, px1, py1, angle, orig_w, orig_h)
-                ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
+            if axXY and axZY and axXZ:
+                def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_w, orig_h):
+                    if angle_deg == 0.0:
+                        return [x0, x1], [y0, y1]
+                    rad = np.radians(angle_deg)
+                    c, s = np.cos(rad), np.sin(rad)
+                    new_w = int(np.ceil(abs(orig_w * c) + abs(orig_h * s)))
+                    new_h = int(np.ceil(abs(orig_w * s) + abs(orig_h * c)))
+                    cx_orig = (orig_w - 1) / 2.0
+                    cy_orig = (orig_h - 1) / 2.0
+                    cx_new = (new_w - 1) / 2.0
+                    cy_new = (new_h - 1) / 2.0
+                    def trans(x, y):
+                        dx = x - cx_orig
+                        dy = y - cy_orig
+                        nx = dx * c + dy * s
+                        ny = -dx * s + dy * c
+                        return cx_new + nx, cy_new + ny
+                    rx0, ry0 = trans(x0, y0)
+                    rx1, ry1 = trans(x1, y1)
+                    return [rx0, rx1], [ry0, ry1]
 
-            w_x = X * self.sx
-            w_y = Y * self.sy
-            w_z = Z * self.sz
+                def plot_line(ax, px0, py0, px1, py1, angle, orig_w, orig_h):
+                    xs, ys = _get_rotated_line(px0, py0, px1, py1, angle, orig_w, orig_h)
+                    ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
 
-            # XY
-            plot_line(fig.axes[0], (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
-            plot_line(fig.axes[0], 0, (y_lims[0] + 0.5)*self.sy, w_x, (y_lims[0] + 0.5)*self.sy, rot_z, w_x, w_y)
-            plot_line(fig.axes[0], (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
-            plot_line(fig.axes[0], 0, (y_lims[1] + 0.5)*self.sy, w_x, (y_lims[1] + 0.5)*self.sy, rot_z, w_x, w_y)
+                w_x = X * self.sx
+                w_y = Y * self.sy
+                w_z = Z * self.sz
 
-            # ZY
-            plot_line(fig.axes[1], (z_lims[0] + 0.5)*self.sz, 0, (z_lims[0] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
-            plot_line(fig.axes[1], 0, (y_lims[0] + 0.5)*self.sy, w_z, (y_lims[0] + 0.5)*self.sy, rot_x, w_z, w_y)
-            plot_line(fig.axes[1], (z_lims[1] + 0.5)*self.sz, 0, (z_lims[1] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
-            plot_line(fig.axes[1], 0, (y_lims[1] + 0.5)*self.sy, w_z, (y_lims[1] + 0.5)*self.sy, rot_x, w_z, w_y)
+                # XY
+                plot_line(axXY, (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
+                plot_line(axXY, 0, (y_lims[0] + 0.5)*self.sy, w_x, (y_lims[0] + 0.5)*self.sy, rot_z, w_x, w_y)
+                plot_line(axXY, (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
+                plot_line(axXY, 0, (y_lims[1] + 0.5)*self.sy, w_x, (y_lims[1] + 0.5)*self.sy, rot_z, w_x, w_y)
 
-            # XZ
-            plot_line(fig.axes[2], (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
-            plot_line(fig.axes[2], 0, (z_lims[0] + 0.5)*self.sz, w_x, (z_lims[0] + 0.5)*self.sz, rot_y, w_x, w_z)
-            plot_line(fig.axes[2], (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
-            plot_line(fig.axes[2], 0, (z_lims[1] + 0.5)*self.sz, w_x, (z_lims[1] + 0.5)*self.sz, rot_y, w_x, w_z)
+                # ZY
+                plot_line(axZY, (z_lims[0] + 0.5)*self.sz, 0, (z_lims[0] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
+                plot_line(axZY, 0, (y_lims[0] + 0.5)*self.sy, w_z, (y_lims[0] + 0.5)*self.sy, rot_x, w_z, w_y)
+                plot_line(axZY, (z_lims[1] + 0.5)*self.sz, 0, (z_lims[1] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
+                plot_line(axZY, 0, (y_lims[1] + 0.5)*self.sy, w_z, (y_lims[1] + 0.5)*self.sy, rot_x, w_z, w_y)
+
+                # XZ
+                plot_line(axXZ, (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
+                plot_line(axXZ, 0, (z_lims[0] + 0.5)*self.sz, w_x, (z_lims[0] + 0.5)*self.sz, rot_y, w_x, w_z)
+                plot_line(axXZ, (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
+                plot_line(axXZ, 0, (z_lims[1] + 0.5)*self.sz, w_x, (z_lims[1] + 0.5)*self.sz, rot_y, w_x, w_z)
 
         return fig
 
@@ -1746,65 +1765,37 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             return
 
         bbox = info['bbox']
-        xlim = info['xlim']
-        ylim = info['ylim']
-
         b_x0, b_y0, b_w, b_h = bbox
-        mpl_y_frac = 1.0 - frac_y  # Convert top-left (JS) to bottom-left (Matplotlib)
+        mpl_y_frac = 1.0 - frac_y  # Convert top-left JS to bottom-left Matplotlib
 
-        # Check if click is inside rendered image boundaries
         if not (b_x0 <= frac_x <= b_x0 + b_w and b_y0 <= mpl_y_frac <= b_y0 + b_h):
             return
 
-        # Fractional offsets within the rendered image
         u = (frac_x - b_x0) / b_w if b_w > 0 else 0.0
-        v = (mpl_y_frac - b_y0) / b_h if b_h > 0 else 0.0
+        v_mpl = (mpl_y_frac - b_y0) / b_h if b_h > 0 else 0.0
+        frac_from_top = 1.0 - v_mpl
 
-        # Interpolate physical data coordinates using actual axis limits
-        x_phys = xlim[0] + u * (xlim[1] - xlim[0])
-        y_phys = ylim[0] + v * (ylim[1] - ylim[0])
+        Z, Y, X = self.dims
+        px, py, pz = self.sx, self.sy, self.sz
 
-        # Un-rotate coordinates if 2D view rotation was applied
-        def _parse_rotation(val):
-            if val is None: return 0.0, 0.0, 0.0
-            if isinstance(val, (int, float)): return float(val), 0.0, 0.0
-            try:
-                vl = list(val)
-                if len(vl) == 3: return float(vl[0]), float(vl[1]), float(vl[2])
-            except TypeError: pass
-            return 0.0, 0.0, 0.0
-
-        rot_z, rot_y, rot_x = _parse_rotation(getattr(self, 'rotate_view', None))
-        rot_angle = 0.0
-        if plane == 'xy': rot_angle = rot_z
-        elif plane == 'zy': rot_angle = rot_x
-        elif plane == 'xz': rot_angle = rot_y
-
-        if rot_angle != 0.0:
-            cx_phys = (xlim[0] + xlim[1]) / 2.0
-            cy_phys = (ylim[0] + ylim[1]) / 2.0
-            x_phys, y_phys = _rotate_points_2d(x_phys, y_phys, -rot_angle, cx_phys, cy_phys)
-
-        # Convert physical coordinates back to pixel indices based on slice plane
         if plane == 'xy':
-            data_x = int(np.floor(x_phys / self.sx))
-            data_y = int(np.floor(y_phys / self.sy))
+            data_x = int(np.floor(u * X))
+            data_y = int(np.floor(frac_from_top * Y))
             data_z = self.z_s
         elif plane == 'zy':
-            data_z = int(np.floor(x_phys / self.sz)) # Horizontal axis of ZY plane is Z
-            data_y = int(np.floor(y_phys / self.sy)) # Vertical axis of ZY plane is Y
+            data_z = int(np.floor(u * Z))
+            data_y = int(np.floor(frac_from_top * Y))
             data_x = self.x_s
         elif plane == 'xz':
-            data_x = int(np.floor(x_phys / self.sx)) # Horizontal axis of XZ plane is X
-            data_z = int(np.floor(y_phys / self.sz)) # Vertical axis of XZ plane is Z
+            data_x = int(np.floor(u * X))
+            data_z = int(np.floor(frac_from_top * Z))
             data_y = self.y_s
         else:
             return
 
-        # Boundary clamping
-        data_x = max(0, min(self.dims[2] - 1, data_x))
-        data_y = max(0, min(self.dims[1] - 1, data_y))
-        data_z = max(0, min(self.dims[0] - 1, data_z))
+        data_x = max(0, min(X - 1, data_x))
+        data_y = max(0, min(Y - 1, data_y))
+        data_z = max(0, min(Z - 1, data_z))
 
         if self.annotation_action == 'add':
             self.add_point(data_z, data_y, data_x)

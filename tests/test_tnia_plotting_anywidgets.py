@@ -71,10 +71,10 @@ def test_channel_visibility_update():
 def test_default_colors_resolution():
     """Test that default colors resolution works as expected."""
     im = [np.zeros((10, 10, 10)) for _ in range(2)]
-    w = show_zyx_max_slice_interactive(im, colors=None)
+    w = show_zyx_max_slice_interactive(im, colormap=None)
     assert w.colors_resolved == ['white', 'lime'] # Defaults
 
-    w2 = show_zyx_max_slice_interactive(im, colors=['red', 'blue'])
+    w2 = show_zyx_max_slice_interactive(im, colormap=['red', 'blue'])
     assert w2.colors_resolved == ['red', 'blue']
 
 def test_show_zyx_max_slice_interactive_point_annotator_args():
@@ -85,7 +85,7 @@ def test_show_zyx_max_slice_interactive_point_annotator_args():
         im,
         pixel_sizes=(3, 2, 2),
         point_size_scale=0.05,
-        colors=['red', 'blue'],
+        colormap=['red', 'blue'],
         opacity=[0.5, 0.8]
     )
     assert isinstance(w, TNIAAnnotatorWidget)
@@ -117,12 +117,12 @@ def test_show_zyx_max_scatter_interactive_colormap():
     channels = np.random.rand(10)
 
     # Should not throw exception for invalid RGBA string
-    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
-    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='points')
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='density')
 
     channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
-    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='points')
+    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='density')
 
     assert w1 is not None
     assert w2 is not None
@@ -521,7 +521,7 @@ def test_marimo_update():
 
         widget = show_xyz_max_slice_interactive(
             [membrane, nuclei],
-            colors=['magma', 'viridis']
+            colormap=['magma', 'viridis']
         )
         return widget,
 
@@ -616,7 +616,7 @@ def test_create_multichannel_rgb_basic():
     xz_list = [np.zeros((2, 2)), np.ones((2, 2))]
     zy_list = [np.zeros((2, 2)), np.zeros((2, 2))]
     xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb(
-        xy_list, xz_list, zy_list, colors=["red", "green"]
+        xy_list, xz_list, zy_list, colormap=["red", "green"]
     )
     red = np.asarray(to_rgb("red"))
     green = np.asarray(to_rgb("green"))
@@ -636,17 +636,17 @@ def test_show_zyx_max_scatter_interactive_colormap():
     channels = np.random.rand(10)
 
     # Should not throw exception for invalid RGBA string, and _render should not throw NameError
-    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='points')
     w1._render() # Trigger render directly
 
-    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='density')
     w2._render() # Trigger render directly
 
     channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
+    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='points')
     w3._render() # Trigger render directly
 
-    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='density')
     w4._render() # Trigger render directly
 
     assert w1 is not None
@@ -790,6 +790,54 @@ def test_annotation_coordinate_registration():
     assert [target_z, target_y, target_x] in widget.points, \
         f"Expected {[target_z, target_y, target_x]} in registered points, got {widget.points}"
 
+def test_annotation_with_labels_and_anisotropy():
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        im,
+        pixel_sizes=pixel_sizes,
+        channel_labels=['GRAY'],
+        slabs_position=(8, 32, 64)
+    )
+
+    widget.annotation_mode = True
+    widget.annotation_action = 'add'
+
+    # Target voxel [Z, Y, X]
+    target_z, target_y, target_x = 8, 20, 45
+    widget.z_s = target_z
+
+    # Fetch updated bounds for the XY plane
+    widget._render_wrapper(None)
+    info = widget.axis_bounds['xy']
+    b_x0, b_y0, b_w, b_h = info['bbox']
+
+    # Target voxel fraction within axXY
+    u = (target_x + 0.5) / X
+    v_from_top = (target_y + 0.5) / Y
+    v_mpl = 1.0 - v_from_top
+
+    frac_x = b_x0 + u * b_w
+    mpl_y_frac = b_y0 + v_mpl * b_h
+    frac_y = 1.0 - mpl_y_frac
+
+    # Simulate click (trigger handle click manually to avoid traitlet identity check filtering)
+    click_dict = {'plane': 'xy', 'x': frac_x, 'y': frac_y}
+    widget._handle_click({'new': click_dict})
+
+    assert [target_z, target_y, target_x] in widget.points, \
+        f"Expected {[target_z, target_y, target_x]} in {widget.points}"
+
+    # Verify point deletion
+    widget.annotation_action = 'delete'
+    widget._handle_click({'new': click_dict})
+
+    assert [target_z, target_y, target_x] not in widget.points, \
+        f"Point {[target_z, target_y, target_x]} was not deleted from {widget.points}"
+
+
 def test_annotation_deletion():
     synthetic_im = np.zeros((10, 32, 32), dtype=np.float32)
     widget = show_zyx_max_slice_interactive_point_annotator(synthetic_im)
@@ -814,3 +862,75 @@ def test_annotation_deletion():
 
     widget._handle_click({'new': {'plane': 'xy', 'x': frac_x, 'y': frac_y}})
     assert [5, 10, 15] not in widget.points
+
+
+
+def test_ground_truth_user_click_annotation():
+    # 1. Setup anisotropic image volume
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        im,
+        pixel_sizes=pixel_sizes,
+        channel_labels=['GRAY'],
+        slabs_position=(8, 32, 64)
+    )
+
+    widget.annotation_mode = True
+    widget.annotation_action = 'add'
+
+    # Target voxel to click on: [z, y, x]
+    target_z, target_y, target_x = 8, 20, 45
+    widget.z_s = target_z
+
+    # 2. Render figure and locate axXY safely
+    fig = widget._render()
+    try:
+        # Robustly locate ax_xy without assuming fig.axXY exists
+        ax_xy = None
+        if hasattr(fig, 'axXY'):
+            ax_xy = fig.axXY
+        else:
+            # Match by image extent [0, X*px, Y*py, 0]
+            target_extent = (0.0, X * widget.sx, Y * widget.sy, 0.0)
+            for ax in fig.axes:
+                images = ax.get_images()
+                if images and np.allclose(images[0].get_extent(), target_extent):
+                    ax_xy = ax
+                    break
+
+            # Fallback based on axes count if extent match is inconclusive
+            if ax_xy is None:
+                ax_xy = fig.axes[1] if len(fig.axes) == 5 else fig.axes[0]
+
+        # Physical coordinates of voxel center
+        phys_x = (target_x + 0.5) * widget.sx
+        phys_y = (target_y + 0.5) * widget.sy
+
+        # Matplotlib native transform pipeline:
+        # Data coords (um) -> Display pixels -> Normalized Figure Coords [0.0 to 1.0]
+        display_pixel = ax_xy.transData.transform((phys_x, phys_y))
+        fig_norm = fig.transFigure.inverted().transform(display_pixel)
+
+        # Convert Matplotlib bottom-left origin to JS top-left origin
+        simulated_user_click_x = float(fig_norm[0])
+        simulated_user_click_y = float(1.0 - fig_norm[1])
+
+    finally:
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+    # 3. Inject simulated raw browser click event into the widget
+    # Use direct handle click bypass logic since anywidget identity cache might drop identical clicks
+    widget._handle_click({'new': {
+        'plane': 'xy',
+        'x': simulated_user_click_x,
+        'y': simulated_user_click_y
+    }})
+
+    # 4. Assert ground-truth mapping
+    assert [target_z, target_y, target_x] in widget.points, \
+        f"Click at ({simulated_user_click_x:.3f}, {simulated_user_click_y:.3f}) " \
+        f"mapped incorrectly. Expected {[target_z, target_y, target_x]} in {widget.points}"
