@@ -178,6 +178,20 @@ def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projec
 
 # Copyright tnia 2021 - BSD License
 def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None):
+    """ shows pre-computed xy, xz and zy of a 3D image in a plot
+
+    Args:
+        xy (2d numpy array): xy projection
+        xz (2d numpy array): xz projection
+        zy (2d numpy array): zy projection
+        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
+        figsize (tuple, optional): figure size. Defaults to (10,10).
+        colormap (_type_, optional): _description_. Defaults to None.
+        vmax (float, optional): maximum value for display range. Defaults to None.
+    Returns:
+        [type]: [description]
+    """
+    
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
@@ -365,7 +379,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         for spine in ax.spines.values():
             spine.set_visible(False)
 
-    fig.patch.set_alpha(0.0)
+    fig.patch.set_alpha(0.0)  # set transparent bgnd
 
     main_physical_width_um = xdim * px
     _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, figsize)
