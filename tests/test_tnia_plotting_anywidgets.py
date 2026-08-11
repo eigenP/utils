@@ -923,10 +923,15 @@ def test_hover_sync_all_planes():
         sync_on_hover=True
     )
 
+    widget._render_wrapper(None) # Forces bounds calculation as it would in reality
+    
+    # Do not call _render() directly. Rely on axis_bounds populated by the wrapper.
+    ax_xy_info = widget.axis_bounds['xy']
+
     target_z, target_y, target_x = 10, 25, 80
 
     # Hover over XY plane
-    fig = widget._render()
+    # fig = widget._render()
     try:
         ax = fig.axXY
         phys_x = (target_x + 0.5) * widget.sx
@@ -959,3 +964,57 @@ def test_axis_bounds_alignment():
         np.testing.assert_allclose(info['y0'], cell_bbox.y0, atol=1e-2)
     finally:
         plt.close(fig)
+
+
+
+def test_scatter_widget_axis_bounds_population():
+    """
+    Ensure scatter widget properly assigns axes to the figure, executes canvas.draw(),
+    and computes the physical bounding boxes required by the JavaScript frontend.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
+    
+    X = np.random.rand(10) * 10
+    Y = np.random.rand(10) * 10
+    Z = np.random.rand(10) * 10
+
+    # Test points rendering mode
+    w_points = show_zyx_max_scatter_interactive((Z, Y, X), render='points')
+    w_points._render_wrapper(None)  # Force full render pipeline
+    
+    assert 'xy' in w_points.axis_bounds, "Scatter (points) failed to populate 'xy' axis bounds."
+    assert 'zy' in w_points.axis_bounds, "Scatter (points) failed to populate 'zy' axis bounds."
+    assert 'xz' in w_points.axis_bounds, "Scatter (points) failed to populate 'xz' axis bounds."
+
+    # Validate that canvas.draw() occurred by checking for non-zero, correctly oriented coordinates
+    for plane in ['xy', 'zy', 'xz']:
+        bbox = w_points.axis_bounds[plane]
+        assert bbox['x1'] > bbox['x0'], f"Invalid x-coordinates for {plane} plane bounds."
+        # Note: y1_js > y0_js because JS origin is top-left, while mpl origin is bottom-left
+        assert bbox['y1_js'] > bbox['y0_js'], f"Invalid JS y-coordinates for {plane} plane bounds."
+        assert len(bbox['bbox']) == 4, "JS bounding box array is improperly sized."
+
+    # Test density rendering mode
+    w_density = show_zyx_max_scatter_interactive((Z, Y, X), render='density')
+    w_density._render_wrapper(None)
+    assert 'xy' in w_density.axis_bounds, "Scatter (density) failed to populate axis bounds."
+
+def test_slice_widget_axis_bounds_structure():
+    """
+    Verify the dictionary structure of axis_bounds exactly matches the expectations 
+    of the JS Proxy traversal fix.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+    im = np.zeros((10, 20, 30))
+    w = show_zyx_max_slice_interactive(im)
+    w._render_wrapper(None)
+    
+    bounds = w.axis_bounds
+    
+    for plane in ['xy', 'zy', 'xz']:
+        plane_data = bounds.get(plane)
+        assert plane_data is not None
+        
+        # The JS explicitly looks for x0, x1, y0_js, y1_js OR a 'bbox' array
+        expected_keys = {'x0', 'x1', 'y0', 'y1', 'y0_js', 'y1_js', 'bbox', 'xlim', 'ylim'}
+        assert expected_keys.issubset(plane_data.keys()), f"Missing required keys in {plane} bounds payload."
