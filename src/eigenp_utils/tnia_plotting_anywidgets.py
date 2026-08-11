@@ -271,42 +271,34 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     xdim = xy.shape[1]
     ydim = xy.shape[0]
 
-    # compute the same-gap factor
-    if figsize is not None:
-        figW, figH = figsize
-        hspace_factor = figW / figH
-    else:
-        figH = 10
-        hspace_factor = 1.0
 
-    # # Determine the extent widths for the grid layout
-    # w_zy = zy.shape[1]
-    # h_xz = xz.shape[0]
 
-    # w_xz = xz.shape[1]
-    # h_zy = zy.shape[0]
-
-    # # Use max width/height to properly align the grid
-    # col1_w = max(xdim * px, w_xz * px)
-    # col2_w = w_zy * pz
-    # row1_h = max(ydim * py, h_zy * py)
-    # row2_h = h_xz * pz
-
-    # Compute identical physical gap size (minimum of horizontal and vertical gaps)
+    # Compute exact 1/16 inch physical gap size
     figW, figH = figsize if figsize is not None else (10, 10)
-    gap_h_in = 0.005 * figW
-    gap_v_in = 0.005 * figH
-    min_gap_in = min(gap_h_in, gap_v_in)
 
-    wspace = min_gap_in / (0.5 * figW)
-    hspace = min_gap_in / (0.5 * figH)
+    # 1. Target exactly 1/16 of an inch
+    target_gap_in = 1.0 / 16.0 
 
+    # 2. Calculate the usable area (accounting for the 0.01 and 0.99 margins from fig.subplots_adjust)
+    usable_W = figW * 0.98
+    usable_H = figH * 0.98
+
+    # 3. Apply the fraction-of-average-axis formula
+    ncols = 2
+    nrows = 3 if channel_labels is not None else 2
+
+    # max(..., 0.1) prevents division-by-zero if someone passes an unreadably small figsize
+    wspace = (ncols * target_gap_in) / max(usable_W - (ncols - 1) * target_gap_in, 0.1)
+    hspace = (nrows * target_gap_in) / max(usable_H - (nrows - 1) * target_gap_in, 0.1)
+
+    # Determine the extent widths for the grid layout
     w_zy = zy.shape[1]
     h_xz = xz.shape[0]
 
     w_xz = xz.shape[1]
     h_zy = zy.shape[0]
 
+    # Use max width/height to properly align the grid
     col1_w = max(xdim * px, w_xz * px)
     col2_w = w_zy * pz
     row1_h = max(ydim * py, h_zy * py)
@@ -376,11 +368,12 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             anchored_box = AnchoredOffsetbox(loc='center', child=packer, pad=0.0, frameon=False, borderpad=0.0)
             axLabels.add_artist(anchored_box)
     else:
+        # APPLIED FIX: Using the newly calculated hspace and wspace instead of hardcoded .01
         spec = gridspec.GridSpec(ncols=2, nrows=2,
                                  height_ratios=[row1_h, row2_h],
                                  width_ratios=[col1_w, col2_w],
-                                 hspace=.01 * hspace_factor,
-                                 wspace=.01,
+                                 hspace=hspace,
+                                 wspace=wspace,
                                  figure=fig)
 
         axXY = fig.add_subplot(spec[0])
@@ -2472,6 +2465,13 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             width_ratios  = [col1_w, col2_w]
             height_ratios = [row1_h, row2_h]
+
+            TARGET_GAP_INCHES = 1.0 / 16.0
+            usable_W = self.figsize[0] * 0.98
+            usable_H = self.figsize[1] * 0.98
+    
+            wspace = (2 * TARGET_GAP_INCHES) / max(usable_W - TARGET_GAP_INCHES, 0.1)
+            hspace = (2 * TARGET_GAP_INCHES) / max(usable_H - TARGET_GAP_INCHES, 0.1)
 
             fig, axs = plt.subplots(
                 2, 2, figsize=self.figsize, constrained_layout=False,
