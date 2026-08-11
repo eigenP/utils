@@ -885,50 +885,35 @@ def test_ground_truth_user_click_annotation():
     target_z, target_y, target_x = 8, 20, 45
     widget.z_s = target_z
 
-    # 2. Render figure and locate axXY safely
+    # 2. Render the matplotlib figure independently to query its coordinate transforms
     fig = widget._render()
     try:
-        # Robustly locate ax_xy without assuming fig.axXY exists
-        ax_xy = None
-        if hasattr(fig, 'axXY'):
-            ax_xy = fig.axXY
-        else:
-            # Match by image extent [0, X*px, Y*py, 0]
-            target_extent = (0.0, X * widget.sx, Y * widget.sy, 0.0)
-            for ax in fig.axes:
-                images = ax.get_images()
-                if images and np.allclose(images[0].get_extent(), target_extent):
-                    ax_xy = ax
-                    break
-
-            # Fallback based on axes count if extent match is inconclusive
-            if ax_xy is None:
-                ax_xy = fig.axes[1] if len(fig.axes) == 5 else fig.axes[0]
-
-        # Physical coordinates of voxel center
+        ax_xy = fig.axXY
+        
+        # Physical coordinates of voxel center in matplotlib's display extent
         phys_x = (target_x + 0.5) * widget.sx
         phys_y = (target_y + 0.5) * widget.sy
 
         # Matplotlib native transform pipeline:
-        # Data coords (um) -> Display pixels -> Normalized Figure Coords [0.0 to 1.0]
+        # Step A: Data coords (um) -> Display pixels (bottom-left origin)
         display_pixel = ax_xy.transData.transform((phys_x, phys_y))
+        
+        # Step B: Display pixels -> Normalized Figure Coords [0.0 to 1.0]
         fig_norm = fig.transFigure.inverted().transform(display_pixel)
 
-        # Convert Matplotlib bottom-left origin to JS top-left origin
+        # Step C: Convert Matplotlib bottom-left origin to JS top-left origin
         simulated_user_click_x = float(fig_norm[0])
         simulated_user_click_y = float(1.0 - fig_norm[1])
 
     finally:
-        import matplotlib.pyplot as plt
         plt.close(fig)
 
     # 3. Inject simulated raw browser click event into the widget
-    # Use direct handle click bypass logic since anywidget identity cache might drop identical clicks
-    widget._handle_click({'new': {
+    widget.click_coords = {
         'plane': 'xy',
         'x': simulated_user_click_x,
         'y': simulated_user_click_y
-    }})
+    }
 
     # 4. Assert ground-truth mapping
     assert [target_z, target_y, target_x] in widget.points, \
