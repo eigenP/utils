@@ -301,8 +301,8 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
     axLabels = None
     if channel_labels is not None:
-        # Calculate label row height, e.g. 5% of total figure height
-        label_row_h = max((row1_h + row2_h) * 0.05, 15)
+        # Scale label row height proportionally without a disruptive large absolute minimum
+        label_row_h = (row1_h + row2_h) * 0.05
         spec=gridspec.GridSpec(ncols=2, nrows=3,
                                height_ratios=[label_row_h, row1_h, row2_h],
                                width_ratios=[col1_w, col2_w],
@@ -1179,11 +1179,21 @@ class TNIAWidgetBase(anywidget.AnyWidget):
             if fig:
                 if hasattr(fig, 'axXY') and hasattr(fig, 'axZY') and hasattr(fig, 'axXZ'):
                     def get_axis_info(ax):
-                        bbox = ax.get_position(original=False)
                         xlim = ax.get_xlim()
                         ylim = ax.get_ylim()
+                        # Extract exact image bounds in normalized figure coordinates
+                        p_top_left = fig.transFigure.inverted().transform(ax.transData.transform((xlim[0], ylim[1])))
+                        p_bot_right = fig.transFigure.inverted().transform(ax.transData.transform((xlim[1], ylim[0])))
+                        x0 = float(p_top_left[0])
+                        y1 = float(p_top_left[1])
+                        x1 = float(p_bot_right[0])
+                        y0 = float(p_bot_right[1])
                         return {
-                            'bbox': [float(bbox.x0), float(bbox.y0), float(bbox.width), float(bbox.height)],
+                            'x0': x0,
+                            'x1': x1,
+                            'y0': y0,
+                            'y1': y1,
+                            'bbox': [x0, y0, x1 - x0, y1 - y0],
                             'xlim': [float(xlim[0]), float(xlim[1])],
                             'ylim': [float(ylim[0]), float(ylim[1])]
                         }
@@ -1214,37 +1224,36 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         frac_y = coords.get('y')
 
         info = self.axis_bounds.get(plane)
-        if not info or not isinstance(info, dict) or 'bbox' not in info:
+        if not info or not isinstance(info, dict):
             return
 
-        bounds = info['bbox']
-        b_x0, b_y0, b_w, b_h = bounds
-
-        # Check if click is inside this axis
-        # Note: JS y_frac is from top-left. Matplotlib bounds are from bottom-left.
-        mpl_y_frac = 1.0 - frac_y
-
-        if not (b_x0 <= frac_x <= b_x0 + b_w and b_y0 <= mpl_y_frac <= b_y0 + b_h):
+        x0, x1 = info.get('x0'), info.get('x1')
+        y0, y1 = info.get('y0'), info.get('y1')
+        if x0 is None or x1 is None or y0 is None or y1 is None:
             return
 
-        local_x = (frac_x - b_x0) / b_w if b_w > 0 else 0.0
-        local_y_mpl = (mpl_y_frac - b_y0) / b_h if b_h > 0 else 0.0
-        fraction_from_top = 1.0 - local_y_mpl
+        mpl_x = frac_x
+        mpl_y = 1.0 - frac_y
 
-        # For hover sync, we keep the original simplified logic (no rotation needed for hover cursors)
+        if not (x0 <= mpl_x <= x1 and y0 <= mpl_y <= y1):
+            return
+
+        u = (mpl_x - x0) / (x1 - x0) if (x1 - x0) > 0 else 0.0
+        v = (y1 - mpl_y) / (y1 - y0) if (y1 - y0) > 0 else 0.0
+
         if plane == 'xy':
-            data_x = int(local_x * self.dims[2])
-            data_y = int(fraction_from_top * self.dims[1])
+            data_x = int(np.floor(u * self.dims[2]))
+            data_y = int(np.floor(v * self.dims[1]))
             self.x_s = max(0, min(self.dims[2] - 1, data_x))
             self.y_s = max(0, min(self.dims[1] - 1, data_y))
         elif plane == 'zy':
-            data_z = int(local_x * self.dims[0])
-            data_y = int(fraction_from_top * self.dims[1])
+            data_z = int(np.floor(u * self.dims[0]))
+            data_y = int(np.floor(v * self.dims[1]))
             self.z_s = max(0, min(self.dims[0] - 1, data_z))
             self.y_s = max(0, min(self.dims[1] - 1, data_y))
         elif plane == 'xz':
-            data_x = int(local_x * self.dims[2])
-            data_z = int(fraction_from_top * self.dims[0])
+            data_x = int(np.floor(u * self.dims[2]))
+            data_z = int(np.floor(v * self.dims[0]))
             self.x_s = max(0, min(self.dims[2] - 1, data_x))
             self.z_s = max(0, min(self.dims[0] - 1, data_z))
 
@@ -1761,34 +1770,36 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         frac_y = coords.get('y') # Figure normalized y (0 to 1, top to bottom)
 
         info = self.axis_bounds.get(plane)
-        if not info or not isinstance(info, dict) or 'bbox' not in info:
+        if not info or not isinstance(info, dict):
             return
 
-        bbox = info['bbox']
-        b_x0, b_y0, b_w, b_h = bbox
-        mpl_y_frac = 1.0 - frac_y  # Convert top-left JS to bottom-left Matplotlib
-
-        if not (b_x0 <= frac_x <= b_x0 + b_w and b_y0 <= mpl_y_frac <= b_y0 + b_h):
+        x0, x1 = info.get('x0'), info.get('x1')
+        y0, y1 = info.get('y0'), info.get('y1')
+        if x0 is None or x1 is None or y0 is None or y1 is None:
             return
 
-        u = (frac_x - b_x0) / b_w if b_w > 0 else 0.0
-        v_mpl = (mpl_y_frac - b_y0) / b_h if b_h > 0 else 0.0
-        frac_from_top = 1.0 - v_mpl
+        mpl_x = frac_x
+        mpl_y = 1.0 - frac_y
+
+        if not (x0 <= mpl_x <= x1 and y0 <= mpl_y <= y1):
+            return
+
+        u = (mpl_x - x0) / (x1 - x0) if (x1 - x0) > 0 else 0.0
+        v = (y1 - mpl_y) / (y1 - y0) if (y1 - y0) > 0 else 0.0
 
         Z, Y, X = self.dims
-        px, py, pz = self.sx, self.sy, self.sz
 
         if plane == 'xy':
             data_x = int(np.floor(u * X))
-            data_y = int(np.floor(frac_from_top * Y))
+            data_y = int(np.floor(v * Y))
             data_z = self.z_s
         elif plane == 'zy':
             data_z = int(np.floor(u * Z))
-            data_y = int(np.floor(frac_from_top * Y))
+            data_y = int(np.floor(v * Y))
             data_x = self.x_s
         elif plane == 'xz':
             data_x = int(np.floor(u * X))
-            data_z = int(np.floor(frac_from_top * Z))
+            data_z = int(np.floor(v * Z))
             data_y = self.y_s
         else:
             return
@@ -2562,13 +2573,16 @@ def show_zyx_max_slice_interactive(
         im = im[np.newaxis, ...]
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
-    z_xy_ratio = (pz / px) if px != pz else 1
+
+    # Calculate physical layout dimensions (microns)
+    phys_w = X * px + Z * pz
+    phys_h = Y * py + Z * pz
+    if channel_labels is not None:
+        phys_h += phys_h * 0.05
 
     if figsize is None:
-        width_px  = X + Z * z_xy_ratio
-        height_px = Y + Z * z_xy_ratio
-        divisor = max(width_px / 8, height_px / 8)
-        w, h = float(width_px / divisor), float(height_px / divisor)
+        divisor = max(phys_w / 8.0, phys_h / 8.0)
+        w, h = float(phys_w / divisor), float(phys_h / divisor)
         figsize = (w * figsize_scale, h * figsize_scale)
     elif figsize_scale != 1.0:
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
@@ -2664,13 +2678,15 @@ def show_zyx_max_slice_interactive_point_annotator(
         im = im[np.newaxis, ...]
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
-    z_xy_ratio = (pz / px) if px != pz else 1
+
+    phys_w = X * px + Z * pz
+    phys_h = Y * py + Z * pz
+    if channel_labels is not None:
+        phys_h += phys_h * 0.05
 
     if figsize is None:
-        width_px  = X + Z * z_xy_ratio
-        height_px = Y + Z * z_xy_ratio
-        divisor = max(width_px / 8, height_px / 8)
-        w, h = float(width_px / divisor), float(height_px / divisor)
+        divisor = max(phys_w / 8.0, phys_h / 8.0)
+        w, h = float(phys_w / divisor), float(phys_h / divisor)
         figsize = (w * figsize_scale, h * figsize_scale)
     elif figsize_scale != 1.0:
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)

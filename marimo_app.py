@@ -22,7 +22,7 @@
 
         widget = show_xyz_max_slice_interactive(
             [membrane, nuclei],
-            colors=['magma', 'viridis']
+            colormap=['magma', 'viridis']
         )
         return widget,
 
