@@ -8,7 +8,7 @@ export default {
 
     // Create Image Container
     const imgContainer = document.createElement("div");
-    imgContainer.style.flexShrink = "0";
+    imgContainer.style.flexShrink = "0"; // Don't shrink below content size
     imgContainer.style.marginRight = "20px";
 
     const img = document.createElement("img");
@@ -30,7 +30,7 @@ export default {
     function createSlider(label, traitName, minTrait, maxTrait, scaleTrait) {
       const container = document.createElement("div");
       container.style.display = "flex";
-      container.style.flexDirection = "column";
+      container.style.flexDirection = "column";  // Stack label over slider+input for compactness
       container.style.alignItems = "flex-start";
       container.style.gap = "4px";
       container.style.minWidth = "80px";
@@ -83,7 +83,7 @@ export default {
       if (scaleTrait) {
         model.on(`change:${scaleTrait}`, update);
       }
-
+      // Sync slider -> model
       slider.addEventListener("input", () => {
         model.set(traitName, parseInt(slider.value));
         model.save_changes();
@@ -93,7 +93,7 @@ export default {
         const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
         const min = model.get(minTrait) || 1;
         const max = model.get(maxTrait);
-
+        // Inverse scale to get integer index
         let newIndex = Math.round(parseFloat(numberInput.value) / scale);
         if (isNaN(newIndex)) {
           update();
@@ -237,7 +237,8 @@ export default {
     controlsDiv.style.display = "flex";
     controlsDiv.style.flexDirection = "column";
     controlsDiv.style.gap = "10px";
-
+    
+    // Thickness Sliders Container
     const thicknessContainer = document.createElement("div");
     thicknessContainer.style.display = "flex";
     thicknessContainer.style.gap = "15px";
@@ -247,6 +248,7 @@ export default {
     thicknessContainer.appendChild(yThick);
     thicknessContainer.appendChild(zThick);
 
+    // Position Sliders Container
     const positionContainer = document.createElement("div");
     positionContainer.style.display = "flex";
     positionContainer.style.gap = "15px";
@@ -354,6 +356,7 @@ export default {
         chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0, 2.0, false));
         chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
 
+        // Histogram Canvas
         const histCanvas = document.createElement("canvas");
         histCanvas.width = 160;
         histCanvas.height = 30;
@@ -390,6 +393,7 @@ export default {
             ctx.globalAlpha = 1.0;
           }
 
+          // Draw curve
           const vmin_arr = model.get("vmin_list");
           const vmax_arr = model.get("vmax_list");
           const gamma_arr = model.get("gamma_list");
@@ -483,6 +487,7 @@ export default {
     syncLabel.style.fontSize = "14px";
     syncLabel.style.marginLeft = "10px";
 
+    // Sync on hover toggle
     const syncCb = document.createElement("input");
     syncCb.type = "checkbox";
     syncCb.checked = model.get("sync_on_hover");
@@ -499,6 +504,7 @@ export default {
     syncLabel.appendChild(document.createTextNode("Sync on Hover ('C')"));
     uiTogglesContainer.appendChild(syncLabel);
 
+    // Annotation Controls (only if annotator widget)
     if (hasAnnotation) {
       const annotLabel = document.createElement("label");
       annotLabel.style.display = "flex";
@@ -630,6 +636,8 @@ export default {
       currentHoverCoords = null;
     });
 
+      // We attach keydown to document to catch 'C' presses reliably
+    // when hovering over the image, but we only trigger if we have valid hover coords.
     const keydownListener = (e) => {
       if (!model.get("sync_on_hover")) return;
       if ((e.key === "c" || e.key === "C") && currentHoverCoords) {
