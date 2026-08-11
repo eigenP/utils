@@ -2480,6 +2480,13 @@ class TNIAScatterWidget(TNIAWidgetBase):
             )
             axXY, axZY = axs[0,0], axs[0,1]
             axXZ, axBar = axs[1,0], axs[1,1]
+
+            # ASSIGN AXES TO FIGURE (CRITICAL FOR BOUNDING BOXES) <<<
+            fig.axXY = axXY
+            fig.axZY = axZY
+            fig.axXZ = axXZ
+            fig.axBar = axBar
+            
             for ax in (axXY, axZY, axXZ, axBar):
                 if ax is not axBar and self.subplot_bg is not None:
                     ax.set_facecolor(self.subplot_bg)
@@ -2609,6 +2616,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
             _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, self.figsize)
 
             fig.tight_layout(pad=0.0)
+            # FORCE MATPLOTLIB TRANSFORMS BEFORE RETURN <<<
+            fig.canvas.draw()
             return fig
 
 
