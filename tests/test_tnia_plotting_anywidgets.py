@@ -814,3 +814,60 @@ def test_annotation_deletion():
 
     widget._handle_click({'new': {'plane': 'xy', 'x': frac_x, 'y': frac_y}})
     assert [5, 10, 15] not in widget.points
+
+
+
+def test_ground_truth_user_click_annotation():
+    # 1. Setup anisotropic image volume
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        im,
+        pixel_sizes=pixel_sizes,
+        channel_labels=['GRAY'],
+        slabs_position=(8, 32, 64)
+    )
+
+    widget.annotation_mode = True
+    widget.annotation_action = 'add'
+
+    # Target voxel to click on: [z, y, x]
+    target_z, target_y, target_x = 8, 20, 45
+    widget.z_s = target_z
+
+    # 2. Render the matplotlib figure independently to query its coordinate transforms
+    fig = widget._render()
+    try:
+        ax_xy = fig.axXY
+        
+        # Physical coordinates of voxel center in matplotlib's display extent
+        phys_x = (target_x + 0.5) * widget.sx
+        phys_y = (target_y + 0.5) * widget.sy
+
+        # Matplotlib native transform pipeline:
+        # Step A: Data coords (um) -> Display pixels (bottom-left origin)
+        display_pixel = ax_xy.transData.transform((phys_x, phys_y))
+        
+        # Step B: Display pixels -> Normalized Figure Coords [0.0 to 1.0]
+        fig_norm = fig.transFigure.inverted().transform(display_pixel)
+
+        # Step C: Convert Matplotlib bottom-left origin to JS top-left origin
+        simulated_user_click_x = float(fig_norm[0])
+        simulated_user_click_y = float(1.0 - fig_norm[1])
+
+    finally:
+        plt.close(fig)
+
+    # 3. Inject simulated raw browser click event into the widget
+    widget.click_coords = {
+        'plane': 'xy',
+        'x': simulated_user_click_x,
+        'y': simulated_user_click_y
+    }
+
+    # 4. Assert ground-truth mapping
+    assert [target_z, target_y, target_x] in widget.points, \
+        f"Click at ({simulated_user_click_x:.3f}, {simulated_user_click_y:.3f}) " \
+        f"mapped incorrectly. Expected {[target_z, target_y, target_x]} in {widget.points}"
