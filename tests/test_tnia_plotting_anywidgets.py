@@ -864,7 +864,6 @@ def test_annotation_deletion():
     assert [5, 10, 15] not in widget.points
 
 
-
 def test_ground_truth_annotation_all_planes():
     Z, Y, X = 16, 64, 128
     im = np.zeros((Z, Y, X), dtype=np.float32)
@@ -904,12 +903,13 @@ def test_ground_truth_annotation_all_planes():
             display_pixel = ax.transData.transform((phys_a, phys_b))
             fig_norm = fig.transFigure.inverted().transform(display_pixel)
             click_x, click_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+            
+            # Execute the property assignment and validation before closing the figure
+            widget.click_coords = {'plane': plane, 'x': click_x, 'y': click_y}
+            assert [target_z, target_y, target_x] in widget.points, \
+                f"Plane {plane} click at ({click_x:.3f}, {click_y:.3f}) mapped incorrectly."
         finally:
             plt.close(fig)
-
-        widget.click_coords = {'plane': plane, 'x': click_x, 'y': click_y}
-        assert [target_z, target_y, target_x] in widget.points, \
-            f"Plane {plane} click at ({click_x:.3f}, {click_y:.3f}) mapped incorrectly."
 
 
 def test_hover_sync_all_planes():
@@ -927,11 +927,14 @@ def test_hover_sync_all_planes():
     
     # Do not call _render() directly. Rely on axis_bounds populated by the wrapper.
     ax_xy_info = widget.axis_bounds['xy']
-
+    
     target_z, target_y, target_x = 10, 25, 80
 
-    # Hover over XY plane
-    # fig = widget._render()
+    # Retrieve the figure created and cached by the wrapper to generate true display coordinates
+    fig = getattr(widget, 'fig', getattr(widget, 'figure', None))
+    if fig is None:
+        raise RuntimeError("Widget did not expose a valid 'fig' attribute after _render_wrapper.")
+
     try:
         ax = fig.axXY
         phys_x = (target_x + 0.5) * widget.sx
@@ -939,13 +942,13 @@ def test_hover_sync_all_planes():
         display_pixel = ax.transData.transform((phys_x, phys_y))
         fig_norm = fig.transFigure.inverted().transform(display_pixel)
         hover_x, hover_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+
+        # Execute assignment and assert prior to destruction 
+        widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
+        assert widget.x_s == target_x and widget.y_s == target_y, \
+            f"Hover sync failed on XY plane. Got x={widget.x_s}, y={widget.y_s}"
     finally:
         plt.close(fig)
-
-    widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
-    assert widget.x_s == target_x and widget.y_s == target_y, \
-        f"Hover sync failed on XY plane. Got x={widget.x_s}, y={widget.y_s}"
-
 
 def test_axis_bounds_alignment():
     Z, Y, X = 16, 64, 128
