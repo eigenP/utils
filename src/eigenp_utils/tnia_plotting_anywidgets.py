@@ -271,13 +271,13 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     xdim = xy.shape[1]
     ydim = xy.shape[0]
 
-    # # compute the same-gap factor
-    # if figsize is not None:
-    #     figW, figH = figsize
-    #     hspace_factor = figW / figH
-    # else:
-    #     figH = 10
-    #     hspace_factor = 1.0
+    # compute the same-gap factor
+    if figsize is not None:
+        figW, figH = figsize
+        hspace_factor = figW / figH
+    else:
+        figH = 10
+        hspace_factor = 1.0
 
     # # Determine the extent widths for the grid layout
     # w_zy = zy.shape[1]
