@@ -865,8 +865,7 @@ def test_annotation_deletion():
 
 
 
-def test_ground_truth_user_click_annotation():
-    # 1. Setup anisotropic image volume
+def test_ground_truth_annotation_all_planes():
     Z, Y, X = 16, 64, 128
     im = np.zeros((Z, Y, X), dtype=np.float32)
     pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
@@ -877,45 +876,86 @@ def test_ground_truth_user_click_annotation():
         channel_labels=['GRAY'],
         slabs_position=(8, 32, 64)
     )
-
     widget.annotation_mode = True
     widget.annotation_action = 'add'
 
-    # Target voxel to click on: [z, y, x]
-    target_z, target_y, target_x = 8, 20, 45
-    widget.z_s = target_z
+    # Target voxels for XY, ZY, and XZ views
+    targets = [
+        ('xy', 8, 20, 45),
+        ('zy', 12, 40, 64),
+        ('xz', 5, 32, 100)
+    ]
 
-    # 2. Render the matplotlib figure independently to query its coordinate transforms
+    for plane, target_z, target_y, target_x in targets:
+        widget.z_s = target_z
+        widget.y_s = target_y
+        widget.x_s = target_x
+
+        fig = widget._render()
+        try:
+            ax = getattr(fig, f"ax{plane.upper()}")
+            if plane == 'xy':
+                phys_a, phys_b = (target_x + 0.5) * widget.sx, (target_y + 0.5) * widget.sy
+            elif plane == 'zy':
+                phys_a, phys_b = (target_z + 0.5) * widget.sz, (target_y + 0.5) * widget.sy
+            elif plane == 'xz':
+                phys_a, phys_b = (target_x + 0.5) * widget.sx, (target_z + 0.5) * widget.sz
+
+            display_pixel = ax.transData.transform((phys_a, phys_b))
+            fig_norm = fig.transFigure.inverted().transform(display_pixel)
+            click_x, click_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+        finally:
+            plt.close(fig)
+
+        widget.click_coords = {'plane': plane, 'x': click_x, 'y': click_y}
+        assert [target_z, target_y, target_x] in widget.points, \
+            f"Plane {plane} click at ({click_x:.3f}, {click_y:.3f}) mapped incorrectly."
+
+
+def test_hover_sync_all_planes():
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
+
+    widget = show_zyx_max_slice_interactive(
+        im,
+        pixel_sizes=pixel_sizes,
+        sync_on_hover=True
+    )
+
+    target_z, target_y, target_x = 10, 25, 80
+
+    # Hover over XY plane
     fig = widget._render()
     try:
-        ax_xy = fig.axXY
-        
-        # Physical coordinates of voxel center in matplotlib's display extent
+        ax = fig.axXY
         phys_x = (target_x + 0.5) * widget.sx
         phys_y = (target_y + 0.5) * widget.sy
-
-        # Matplotlib native transform pipeline:
-        # Step A: Data coords (um) -> Display pixels (bottom-left origin)
-        display_pixel = ax_xy.transData.transform((phys_x, phys_y))
-        
-        # Step B: Display pixels -> Normalized Figure Coords [0.0 to 1.0]
+        display_pixel = ax.transData.transform((phys_x, phys_y))
         fig_norm = fig.transFigure.inverted().transform(display_pixel)
-
-        # Step C: Convert Matplotlib bottom-left origin to JS top-left origin
-        simulated_user_click_x = float(fig_norm[0])
-        simulated_user_click_y = float(1.0 - fig_norm[1])
-
+        hover_x, hover_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
     finally:
         plt.close(fig)
 
-    # 3. Inject simulated raw browser click event into the widget
-    widget.click_coords = {
-        'plane': 'xy',
-        'x': simulated_user_click_x,
-        'y': simulated_user_click_y
-    }
+    widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
+    assert widget.x_s == target_x and widget.y_s == target_y, \
+        f"Hover sync failed on XY plane. Got x={widget.x_s}, y={widget.y_s}"
 
-    # 4. Assert ground-truth mapping
-    assert [target_z, target_y, target_x] in widget.points, \
-        f"Click at ({simulated_user_click_x:.3f}, {simulated_user_click_y:.3f}) " \
-        f"mapped incorrectly. Expected {[target_z, target_y, target_x]} in {widget.points}"
+
+def test_axis_bounds_alignment():
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
+
+    widget = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes)
+    fig = widget._render()
+    try:
+        ax_xy = fig.axXY
+        cell_bbox = ax_xy.get_position()
+        info = widget.axis_bounds['xy']
+
+        # Verify that the image extent exactly fills the subplot cell bounding box without extra margins
+        np.testing.assert_allclose(info['x0'], cell_bbox.x0, atol=1e-2)
+        np.testing.assert_allclose(info['y0'], cell_bbox.y0, atol=1e-2)
+    finally:
+        plt.close(fig)
