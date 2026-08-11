@@ -198,32 +198,32 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
     both_given = pixel_sizes is not None
 
-    if isinstance(xy,list):
-        MULTI_CHANNEL = True
-        has_colormap = False
-        if colormap is not None:
-            has_colormap = any(is_colormap(c) for c in colormap)
-        else:
-            has_colormap = False
+    # Preserve original colormap reference before resetting colormap=None for RGB arrays
+    orig_colormap = colormap
+    
+    if isinstance(xy, list):
+        has_colormap = any(is_colormap(c) for c in colormap) if colormap is not None else False
 
         if has_colormap:
-            xy, xz, zy = create_multichannel_rgb_cmap(xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity)
+            xy, xz, zy = create_multichannel_rgb_cmap(
+                xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity
+            )
         else:
-            xy, xz, zy = create_multichannel_rgb(xy, xz, zy, vmin = vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity)
+            xy, xz, zy = create_multichannel_rgb(
+                xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity
+            )
 
         colormap = None
-
-        # Set those back to default bcs they are dealt with in the RGB function
         vmin, vmax, gamma = None, None, 1
-        # Set opacity back to None, it is applied by create_multichannel_rgb
         opacity = None
     else:
-        # In single channel, ensure these are floats/None, not lists
-        if isinstance(opacity, list): opacity = opacity[0]
-        if isinstance(vmin, list): vmin = vmin[0]
-        if isinstance(vmax, list): vmax = vmax[0]
+        if isinstance(opacity, list):
+            opacity = opacity[0]
+        if isinstance(vmin, list):
+            vmin = vmin[0]
+        if isinstance(vmax, list):
+            vmax = vmax[0]
 
-        # If colormap is provided as a list with one item, unpack it
         if isinstance(colormap, list) and len(colormap) == 1:
             colormap = colormap[0]
 
@@ -278,22 +278,42 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     zdim_zy = zy.shape[1]
     zdim = max(zdim_xz, zdim_zy)
 
-    # compute the same-gap factor
-    if figsize is not None:
-        figW, figH = figsize
-        hspace_factor = figW / figH
-    else:
-        figH = 10
-        hspace_factor = 1.0
+    # # compute the same-gap factor
+    # if figsize is not None:
+    #     figW, figH = figsize
+    #     hspace_factor = figW / figH
+    # else:
+    #     figH = 10
+    #     hspace_factor = 1.0
 
-    # Determine the extent widths for the grid layout
+    # # Determine the extent widths for the grid layout
+    # w_zy = zy.shape[1]
+    # h_xz = xz.shape[0]
+
+    # w_xz = xz.shape[1]
+    # h_zy = zy.shape[0]
+
+    # # Use max width/height to properly align the grid
+    # col1_w = max(xdim * px, w_xz * px)
+    # col2_w = w_zy * pz
+    # row1_h = max(ydim * py, h_zy * py)
+    # row2_h = h_xz * pz
+
+    # Compute identical physical gap size (minimum of horizontal and vertical gaps)
+    figW, figH = figsize if figsize is not None else (10, 10)
+    gap_h_in = 0.005 * figW
+    gap_v_in = 0.005 * figH
+    min_gap_in = min(gap_h_in, gap_v_in)
+
+    wspace = min_gap_in / (0.5 * figW)
+    hspace = min_gap_in / (0.5 * figH)
+
     w_zy = zy.shape[1]
     h_xz = xz.shape[0]
 
     w_xz = xz.shape[1]
     h_zy = zy.shape[0]
 
-    # Use max width/height to properly align the grid
     col1_w = max(xdim * px, w_xz * px)
     col2_w = w_zy * pz
     row1_h = max(ydim * py, h_zy * py)
@@ -303,12 +323,15 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     if channel_labels is not None:
         # Scale label row height proportionally without a disruptive large absolute minimum
         label_row_h = (row1_h + row2_h) * 0.05
-        spec=gridspec.GridSpec(ncols=2, nrows=3,
-                               height_ratios=[label_row_h, row1_h, row2_h],
-                               width_ratios=[col1_w, col2_w],
-                               hspace=.01 * hspace_factor,
-                               wspace=.01,
-                               figure = fig)
+        spec = gridspec.GridSpec(
+            ncols=2,
+            nrows=3,
+            height_ratios=[label_row_h, row1_h, row2_h],
+            width_ratios=[col1_w, col2_w],
+            hspace=hspace,
+            wspace=wspace,
+            figure=fig,
+        )
         axLabels = fig.add_subplot(spec[0, 0])
 
         axXY=fig.add_subplot(spec[1, 0])
