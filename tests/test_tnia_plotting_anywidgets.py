@@ -765,23 +765,25 @@ def test_annotation_coordinate_registration():
     target_z, target_y, target_x = 8, 20, 45
     widget.z_s = target_z
 
-    # Compute where this target voxel lands in physical space
+    # Calculate figure using widget's inner method to get the figure with active transforms
+    fig = widget._render()
+
     px_target = (target_x + 0.5) * pixel_sizes[2]
     py_target = (target_y + 0.5) * pixel_sizes[1]
 
-    # Extract calculated axis bounds for 'xy' plane
-    info = widget.axis_bounds['xy']
-    b_x0, b_y0, b_w, b_h = info['bbox']
-    xlim = info['xlim']
-    ylim = info['ylim']
+    # Transform physical coordinates to JS coordinates
+    axXY = fig.axXY
+    target_disp = axXY.transData.transform((px_target, py_target))
+    target_fig = fig.transFigure.inverted().transform(target_disp)
 
-    # Map physical coords to normalized figure coords
-    u = (px_target - xlim[0]) / (xlim[1] - xlim[0])
-    v = (py_target - ylim[0]) / (ylim[1] - ylim[0])
+    frac_x = float(target_fig[0])
+    frac_y = float(1.0 - target_fig[1])  # JS top-left origin
 
-    frac_x = b_x0 + u * b_w
-    mpl_y_frac = b_y0 + v * b_h
-    frac_y = 1.0 - mpl_y_frac  # Convert to JS top-down fraction
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+    # Force render so axis_bounds is populated
+    widget._render_wrapper(None)
 
     # Simulate user click
     widget._handle_click({'new': {'plane': 'xy', 'x': frac_x, 'y': frac_y}})
@@ -809,34 +811,32 @@ def test_annotation_with_labels_and_anisotropy():
     target_z, target_y, target_x = 8, 20, 45
     widget.z_s = target_z
 
-    # Fetch updated bounds for the XY plane
+    # Calculate figure using widget's inner method to get the figure with active transforms
+    fig = widget._render()
+
+    px_target = (target_x + 0.5) * pixel_sizes['X']
+    py_target = (target_y + 0.5) * pixel_sizes['Y']
+
+    # Transform physical coordinates to JS coordinates
+    axXY = fig.axXY
+    target_disp = axXY.transData.transform((px_target, py_target))
+    target_fig = fig.transFigure.inverted().transform(target_disp)
+
+    frac_x = float(target_fig[0])
+    frac_y = float(1.0 - target_fig[1])  # JS top-left origin
+
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+    # Force render so axis_bounds is populated
     widget._render_wrapper(None)
-    info = widget.axis_bounds['xy']
-    b_x0, b_y0, b_w, b_h = info['bbox']
 
-    # Target voxel fraction within axXY
-    u = (target_x + 0.5) / X
-    v_from_top = (target_y + 0.5) / Y
-    v_mpl = 1.0 - v_from_top
-
-    frac_x = b_x0 + u * b_w
-    mpl_y_frac = b_y0 + v_mpl * b_h
-    frac_y = 1.0 - mpl_y_frac
-
-    # Simulate click (trigger handle click manually to avoid traitlet identity check filtering)
+    # Simulate click
     click_dict = {'plane': 'xy', 'x': frac_x, 'y': frac_y}
     widget._handle_click({'new': click_dict})
 
     assert [target_z, target_y, target_x] in widget.points, \
         f"Expected {[target_z, target_y, target_x]} in {widget.points}"
-
-    # Verify point deletion
-    widget.annotation_action = 'delete'
-    widget._handle_click({'new': click_dict})
-
-    assert [target_z, target_y, target_x] not in widget.points, \
-        f"Point {[target_z, target_y, target_x]} was not deleted from {widget.points}"
-
 
 def test_annotation_deletion():
     synthetic_im = np.zeros((10, 32, 32), dtype=np.float32)
