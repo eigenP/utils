@@ -392,7 +392,7 @@ def preprocess_subset(
     # ---------- clustering ----------
     if cluster_key == "leiden":
         sc.tl.leiden(
-            A, resolution=resolution, key_added="leiden", random_state=random_state
+            A, resolution=resolution, key_added="leiden", random_state=random_state, flavor='igraph', n_iterations=2, directed=False
         )
     else:
         if cluster_key not in A.obs:
@@ -2863,7 +2863,7 @@ def multiscale_coarsening(
     print(f"Running multiscale clustering on resolutions: {resolutions}")
     for res in resolutions:
         key = f"leiden_res_{res}"
-        sc.tl.leiden(adata, resolution=res, key_added=key, random_state=random_state)
+        sc.tl.leiden(adata, resolution=res, key_added=key, random_state=random_state, flavor='igraph', n_iterations=2, directed=False)
         clustering_results[res] = adata.obs[key].copy()
         obs_keys.append(key)
 
@@ -3758,7 +3758,7 @@ def sweep_leiden_and_annotate(
         # Let's compute it if missing, as it is helpful.
         if key not in adata.obs:
             print(f"Computing Leiden resolution {r:.1f}...")
-            sc.tl.leiden(adata, resolution=r, key_added=key, random_state=random_state)
+            sc.tl.leiden(adata, resolution=r, key_added=key, random_state=random_state, flavor='igraph', n_iterations=2, directed=False)
 
         cdf = annotate_clusters_by_markers(
             adata,

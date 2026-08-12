@@ -733,7 +733,7 @@ def test_tl_pacmap_init_paga():
 
     # Need to compute neighbors and paga first
     sc.pp.neighbors(adata, n_neighbors=5, use_rep="X")
-    sc.tl.leiden(adata, resolution=1.0)
+    sc.tl.leiden(adata, resolution=1.0, flavor='igraph', n_iterations=2, directed=False)
     sc.tl.paga(adata, groups="leiden")
     sc.pl.paga(adata, show=False)
 
