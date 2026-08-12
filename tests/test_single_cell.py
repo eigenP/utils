@@ -1,3 +1,4 @@
+from eigenp_utils.single_cell import pflogpf
 import os
 import time
 import warnings
@@ -2873,3 +2874,72 @@ def test_kknn_ingest_no_recompute_no_save():
 
     # Still maps labels
     assert "cell_type_kknn" in adata_query.obs
+
+# --- PFlogPF Tests ---
+
+def test_pflogpf_import_error(capsys):
+    """
+    Test that calling pflogpf without scclr installed raises ImportError
+    and prints the docstring.
+    """
+    adata = anndata.AnnData(X=np.array([[1.0, 2.0], [3.0, 4.0]]))
+
+    with patch("builtins.__import__") as mock_import:
+        # Mock __import__ to raise ImportError when scclr is requested
+        orig_import = __import__
+        def side_effect(name, *args, **kwargs):
+            if name == "scclr":
+                raise ImportError("Mocked ImportError")
+            return orig_import(name, *args, **kwargs)
+
+        mock_import.side_effect = side_effect
+
+        with pytest.raises(ImportError, match="The 'scclr' package is required"):
+            pflogpf(adata)
+
+        # check that docstring was printed
+        captured = capsys.readouterr()
+        assert "Computes the PFlogPF (shifted-CLR) normalization" in captured.out
+
+def test_pflogpf_non_integer_counts():
+    """
+    Test that calling pflogpf with non-integer counts raises a ValueError.
+    """
+    # Create non-integer data
+    adata = anndata.AnnData(X=np.array([[1.5, 2.1], [3.2, 4.9]]))
+
+    with pytest.raises(ValueError, match="does not look like raw integer counts"):
+        pflogpf(adata)
+
+def test_pflogpf_success():
+    """
+    Test that pflogpf correctly calls scclr and handles layer renaming and copying.
+    """
+    adata = anndata.AnnData(X=np.array([[1.0, 2.0], [3.0, 4.0]]))
+
+    # Mock scclr
+    mock_scclr = MagicMock()
+    def mock_pflog(a, target, **kwargs):
+        a.layers["pflog"] = a.X + 10 # dummy operation
+
+    mock_scclr.pp.pflog.side_effect = mock_pflog
+
+    import sys
+    sys.modules["scclr"] = mock_scclr
+
+    try:
+        # Test inplace
+        res = pflogpf(adata, key_added="custom_pflog")
+        assert res is None
+        assert "custom_pflog" in adata.layers
+        assert "pflog" not in adata.layers
+        assert np.allclose(adata.layers["custom_pflog"], adata.X + 10)
+
+        # Test copy
+        adata2 = anndata.AnnData(X=np.array([[1.0, 2.0], [3.0, 4.0]]))
+        res2 = pflogpf(adata2, key_added="pflogpf", copy=True)
+        assert res2 is not None
+        assert "pflogpf" in res2.layers
+        assert "pflogpf" not in adata2.layers
+    finally:
+        del sys.modules["scclr"]
