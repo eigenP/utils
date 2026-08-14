@@ -43,7 +43,7 @@ def test_voronoi_otsu_labeling():
 
     spacing = {'Z': 2.0, 'Y': 0.5, 'X': 0.5}
     # Pass a tuple to spot_sigma
-    labels_3d = voronoi_otsu_labeling(img_3d, spot_sigma=(2, 1, 1), outline_sigma=1, spacing=spacing)
+    labels_3d = voronoi_otsu_labeling(img_3d, spot_sigma=(2, 1, 1), outline_sigma=1, pixel_sizes=spacing)
 
     assert labels_3d.shape == (10, 20, 20)
     assert len(np.unique(labels_3d[labels_3d > 0])) >= 2

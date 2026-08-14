@@ -913,6 +913,13 @@ def test_ground_truth_annotation_all_planes():
 
 
 def test_hover_sync_all_planes():
+    """
+    Test that hover coordinates correctly sync back to the widget's physical state.
+    We first call _render() explicitly to acquire the Matplotlib Figure and calculate
+    accurate physical-to-display coordinate mappings for our simulated hover. We then
+    close the figure, call _render_wrapper to populate internal state (like axis_bounds)
+    as it would in production, and finally dispatch the hover coordinates.
+    """
     Z, Y, X = 16, 64, 128
     im = np.zeros((Z, Y, X), dtype=np.float32)
     pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
@@ -923,18 +930,9 @@ def test_hover_sync_all_planes():
         sync_on_hover=True
     )
 
-    widget._render_wrapper(None) # Forces bounds calculation as it would in reality
-    
-    # Do not call _render() directly. Rely on axis_bounds populated by the wrapper.
-    ax_xy_info = widget.axis_bounds['xy']
-    
     target_z, target_y, target_x = 10, 25, 80
 
-    # Retrieve the figure created and cached by the wrapper to generate true display coordinates
-    fig = getattr(widget, 'fig', getattr(widget, 'figure', None))
-    if fig is None:
-        raise RuntimeError("Widget did not expose a valid 'fig' attribute after _render_wrapper.")
-
+    fig = widget._render()
     try:
         ax = fig.axXY
         phys_x = (target_x + 0.5) * widget.sx
@@ -942,13 +940,16 @@ def test_hover_sync_all_planes():
         display_pixel = ax.transData.transform((phys_x, phys_y))
         fig_norm = fig.transFigure.inverted().transform(display_pixel)
         hover_x, hover_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
-
-        # Execute assignment and assert prior to destruction 
-        widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
-        assert widget.x_s == target_x and widget.y_s == target_y, \
-            f"Hover sync failed on XY plane. Got x={widget.x_s}, y={widget.y_s}"
     finally:
         plt.close(fig)
+
+    widget._render_wrapper(None) # Forces bounds calculation as it would in reality
+
+    # Execute assignment and assert prior to destruction
+    widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
+    assert widget.x_s == target_x and widget.y_s == target_y, \
+        f"Hover sync failed on XY plane. Got x={widget.x_s}, y={widget.y_s}"
+
 
 def test_axis_bounds_alignment():
     Z, Y, X = 16, 64, 128

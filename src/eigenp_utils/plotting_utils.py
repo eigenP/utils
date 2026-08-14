@@ -594,7 +594,7 @@ def raincloud_plot(data,
             violin_vals = vals
 
         parts = ax.violinplot(violin_vals, positions=[pos], widths=width,
-                              showextrema=False, vert=vert)
+                              showextrema=False, orientation='vertical' if vert else 'horizontal')
 
         for pc in parts["bodies"]:
             pc.set_facecolor(col)
