@@ -180,6 +180,35 @@ def test_remove_outliers_mahalanobis_dataframe():
     # The NaN row should be kept
     assert np.isnan(cleaned_nan.loc[0, 'x'])
 
+def test_remove_outliers_mahalanobis_small_sample():
+    """Test Mahalanobis outlier removal with small N to test Beta vs Chi2 fallback logic."""
+    np.random.seed(42)
+    # Generate an extremely small dataset
+    # N=3, d=2 -> N <= d+1 (3 <= 3) -> Should trigger Chi2 fallback
+    small_data = np.array([
+        [0.0, 0.0],
+        [1.0, 1.0],
+        [-1.0, -1.0],
+        [100.0, -100.0] # N=4, d=2 -> N > d+1 (4 > 3) -> Beta distribution
+    ])
+
+    # First test N > d+1 with beta dist
+    # With threshold 0.99 it should filter the extreme outlier
+    cleaned_beta = remove_outliers(small_data, method='mahalanobis', threshold=0.99)
+    assert len(cleaned_beta) < 4
+
+    # Test N <= d+1 with chi2 fallback
+    tiny_data = np.array([
+        [0.0, 0.0],
+        [1.0, 1.0],
+        [-1.0, -1.0]
+    ])
+    # This shouldn't crash, it should just use chi2 and probably keep everything
+    # because covariance of 3 points is very loose
+    cleaned_chi2 = remove_outliers(tiny_data, method='mahalanobis', threshold=0.99)
+    assert len(cleaned_chi2) == 3
+
+
 def test_remove_outliers_mahalanobis_errors():
     """Test that remove outliers mahalanobis errors works as expected."""
     df = pd.DataFrame({'x': [1, 2, 3], 'y': [4, 5, 6]})
