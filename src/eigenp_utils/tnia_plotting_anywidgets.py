@@ -71,7 +71,7 @@ def _rotate_points_2d(px, py, angle_deg, cx, cy):
 def _unrotate_2d(phys_x, phys_y, angle_deg, orig_dim_x, orig_dim_y, sx, sy):
     """
     Unrotates physical coordinate (phys_x, phys_y) on a rotated 2D view back to
-    the original unrotated physical space.
+    the original unrotated physical space in pixel space.
     """
     if angle_deg == 0.0 or angle_deg is None:
         return phys_x, phys_y
@@ -80,30 +80,36 @@ def _unrotate_2d(phys_x, phys_y, angle_deg, orig_dim_x, orig_dim_y, sx, sy):
     c = np.cos(rad)
     s = np.sin(rad)
 
-    orig_cx = (orig_dim_x - 1) / 2.0 * sx
-    orig_cy = (orig_dim_y - 1) / 2.0 * sy
+    px_in = phys_x / sx
+    py_in = phys_y / sy
+
+    orig_cx_px = (orig_dim_x - 1) / 2.0
+    orig_cy_px = (orig_dim_y - 1) / 2.0
 
     rot_w_px = int(np.ceil(abs(orig_dim_x * c) + abs(orig_dim_y * s)))
     rot_h_px = int(np.ceil(abs(orig_dim_x * s) + abs(orig_dim_y * c)))
 
-    cx_new = (rot_w_px - 1) / 2.0 * sx
-    cy_new = (rot_h_px - 1) / 2.0 * sy
+    cx_new_px = (rot_w_px - 1) / 2.0
+    cy_new_px = (rot_h_px - 1) / 2.0
 
-    dx = phys_x - cx_new
-    dy = phys_y - cy_new
+    dx_px = px_in - cx_new_px
+    dy_px = py_in - cy_new_px
 
-    orig_dx = dx * c - dy * s
-    orig_dy = dx * s + dy * c
+    orig_dx_px = dx_px * c - dy_px * s
+    orig_dy_px = dx_px * s + dy_px * c
 
-    orig_phys_x = orig_cx + orig_dx
-    orig_phys_y = orig_cy + orig_dy
+    orig_px = orig_cx_px + orig_dx_px
+    orig_py = orig_cy_px + orig_dy_px
+
+    orig_phys_x = orig_px * sx
+    orig_phys_y = orig_py * sy
 
     return orig_phys_x, orig_phys_y
 
 
 def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_dim_w, orig_dim_h, s_w, s_h):
     """
-    Transforms a 2D line segment (x0,y0)->(x1,y1) in physical space through 2D rotation.
+    Transforms a 2D line segment (x0,y0)->(x1,y1) in physical space through 2D rotation in pixel space.
     """
     if angle_deg == 0.0 or angle_deg is None:
         return [x0, x1], [y0, y1]
@@ -112,23 +118,30 @@ def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_dim_w, orig_dim_h, s_w, s_
     c = np.cos(rad)
     s = np.sin(rad)
 
+    x0_px, y0_px = x0 / s_w, y0 / s_h
+    x1_px, y1_px = x1 / s_w, y1 / s_h
+
     rot_w_px = int(np.ceil(abs(orig_dim_w * c) + abs(orig_dim_h * s)))
     rot_h_px = int(np.ceil(abs(orig_dim_w * s) + abs(orig_dim_h * c)))
 
-    cx_orig = (orig_dim_w - 1) / 2.0 * s_w
-    cy_orig = (orig_dim_h - 1) / 2.0 * s_h
-    cx_new = (rot_w_px - 1) / 2.0 * s_w
-    cy_new = (rot_h_px - 1) / 2.0 * s_h
+    cx_orig_px = (orig_dim_w - 1) / 2.0
+    cy_orig_px = (orig_dim_h - 1) / 2.0
+    cx_new_px = (rot_w_px - 1) / 2.0
+    cy_new_px = (rot_h_px - 1) / 2.0
 
-    def trans(x, y):
-        dx = x - cx_orig
-        dy = y - cy_orig
-        nx = dx * c + dy * s
-        ny = -dx * s + dy * c
-        return cx_new + nx, cy_new + ny
+    def trans_px(x_px, y_px):
+        dx_px = x_px - cx_orig_px
+        dy_px = y_px - cy_orig_px
+        nx_px = dx_px * c + dy_px * s
+        ny_px = -dx_px * s + dy_px * c
+        return cx_new_px + nx_px, cy_new_px + ny_px
 
-    rx0, ry0 = trans(x0, y0)
-    rx1, ry1 = trans(x1, y1)
+    rx0_px, ry0_px = trans_px(x0_px, y0_px)
+    rx1_px, ry1_px = trans_px(x1_px, y1_px)
+
+    rx0, ry0 = rx0_px * s_w, ry0_px * s_h
+    rx1, ry1 = rx1_px * s_w, ry1_px * s_h
+
     return [rx0, rx1], [ry0, ry1]
 
 def is_colormap(c):
