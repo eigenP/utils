@@ -1022,3 +1022,91 @@ def test_slice_widget_axis_bounds_structure():
         # The JS explicitly looks for x0, x1, y0_js, y1_js OR a 'bbox' array
         expected_keys = {'x0', 'x1', 'y0', 'y1', 'y0_js', 'y1_js', 'bbox', 'xlim', 'ylim'}
         assert expected_keys.issubset(plane_data.keys()), f"Missing required keys in {plane} bounds payload."
+
+
+def test_hover_sync_with_rotate_view():
+    """
+    Verify that hover sync ('C' key) correctly unrotates cursor coordinates and sets
+    the slice sliders (x_s, y_s, z_s) to the exact target voxel when rotate_view is active.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, _unrotate_2d, _get_rotated_line
+
+    Z, Y, X = 20, 60, 80
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 1.0, 'Y': 1.0, 'Z': 1.0}
+
+    target_z, target_y, target_x = 10, 25, 35
+    rotate_view = (30.0, 15.0, 45.0)  # (rot_z, rot_y, rot_x)
+
+    widget = show_zyx_max_slice_interactive(
+        im,
+        pixel_sizes=pixel_sizes,
+        sync_on_hover=True,
+        rotate_view=rotate_view
+    )
+
+    # Force initial render to generate axis_bounds
+    fig = widget._render()
+    try:
+        # Determine physical location of target in unrotated space
+        orig_phys_x = (target_x + 0.5) * widget.sx
+        orig_phys_y = (target_y + 0.5) * widget.sy
+
+        # Rotate target point forward to display physical space
+        xs, ys = _get_rotated_line(orig_phys_x, orig_phys_y, orig_phys_x, orig_phys_y, rotate_view[0], X, Y, widget.sx, widget.sy)
+        rot_phys_x, rot_phys_y = xs[0], ys[0]
+
+        # Convert rotated physical position to figure coordinates
+        ax = fig.axXY
+        display_pixel = ax.transData.transform((rot_phys_x, rot_phys_y))
+        fig_norm = fig.transFigure.inverted().transform(display_pixel)
+        hover_x, hover_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+    finally:
+        plt.close(fig)
+
+    widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
+
+    assert widget.x_s == target_x and widget.y_s == target_y, \
+        f"Hover sync with rotation failed on XY plane. Expected ({target_x}, {target_y}), got ({widget.x_s}, {widget.y_s})"
+
+
+def test_annotator_click_with_rotate_view():
+    """
+    Verify that point annotation clicks on a rotated view accurately unrotate
+    coordinates and record the exact target voxel in widget.points.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, _get_rotated_line
+
+    Z, Y, X = 20, 60, 80
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    rotate_view = 30.0
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        im,
+        rotate_view=rotate_view
+    )
+    widget.annotation_mode = True
+    widget.annotation_action = 'add'
+
+    target_z, target_y, target_x = 10, 20, 30
+    widget.z_s = target_z
+
+    fig = widget._render()
+    try:
+        orig_phys_x = (target_x + 0.5) * widget.sx
+        orig_phys_y = (target_y + 0.5) * widget.sy
+
+        xs, ys = _get_rotated_line(orig_phys_x, orig_phys_y, orig_phys_x, orig_phys_y, rotate_view, X, Y, widget.sx, widget.sy)
+        rot_phys_x, rot_phys_y = xs[0], ys[0]
+
+        ax = fig.axXY
+        display_pixel = ax.transData.transform((rot_phys_x, rot_phys_y))
+        fig_norm = fig.transFigure.inverted().transform(display_pixel)
+        click_x, click_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+    finally:
+        plt.close(fig)
+
+    widget.click_coords = {'plane': 'xy', 'x': click_x, 'y': click_y}
+
+    assert [target_z, target_y, target_x] in widget.points, \
+        f"Annotator click with rotation failed. Expected {[target_z, target_y, target_x]} in {widget.points}"

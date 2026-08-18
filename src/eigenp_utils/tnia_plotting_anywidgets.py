@@ -67,6 +67,70 @@ def _rotate_points_2d(px, py, angle_deg, cx, cy):
     ry = sin_t * (px - cx) + cos_t * (py - cy) + cy
     return rx, ry
 
+
+def _unrotate_2d(phys_x, phys_y, angle_deg, orig_dim_x, orig_dim_y, sx, sy):
+    """
+    Unrotates physical coordinate (phys_x, phys_y) on a rotated 2D view back to
+    the original unrotated physical space.
+    """
+    if angle_deg == 0.0 or angle_deg is None:
+        return phys_x, phys_y
+
+    rad = np.radians(angle_deg)
+    c = np.cos(rad)
+    s = np.sin(rad)
+
+    orig_cx = (orig_dim_x - 1) / 2.0 * sx
+    orig_cy = (orig_dim_y - 1) / 2.0 * sy
+
+    rot_w_px = int(np.ceil(abs(orig_dim_x * c) + abs(orig_dim_y * s)))
+    rot_h_px = int(np.ceil(abs(orig_dim_x * s) + abs(orig_dim_y * c)))
+
+    cx_new = (rot_w_px - 1) / 2.0 * sx
+    cy_new = (rot_h_px - 1) / 2.0 * sy
+
+    dx = phys_x - cx_new
+    dy = phys_y - cy_new
+
+    orig_dx = dx * c - dy * s
+    orig_dy = dx * s + dy * c
+
+    orig_phys_x = orig_cx + orig_dx
+    orig_phys_y = orig_cy + orig_dy
+
+    return orig_phys_x, orig_phys_y
+
+
+def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_dim_w, orig_dim_h, s_w, s_h):
+    """
+    Transforms a 2D line segment (x0,y0)->(x1,y1) in physical space through 2D rotation.
+    """
+    if angle_deg == 0.0 or angle_deg is None:
+        return [x0, x1], [y0, y1]
+
+    rad = np.radians(angle_deg)
+    c = np.cos(rad)
+    s = np.sin(rad)
+
+    rot_w_px = int(np.ceil(abs(orig_dim_w * c) + abs(orig_dim_h * s)))
+    rot_h_px = int(np.ceil(abs(orig_dim_w * s) + abs(orig_dim_h * c)))
+
+    cx_orig = (orig_dim_w - 1) / 2.0 * s_w
+    cy_orig = (orig_dim_h - 1) / 2.0 * s_h
+    cx_new = (rot_w_px - 1) / 2.0 * s_w
+    cy_new = (rot_h_px - 1) / 2.0 * s_h
+
+    def trans(x, y):
+        dx = x - cx_orig
+        dy = y - cy_orig
+        nx = dx * c + dy * s
+        ny = -dx * s + dy * c
+        return cx_new + nx, cy_new + ny
+
+    rx0, ry0 = trans(x0, y0)
+    rx1, ry1 = trans(x1, y1)
+    return [rx0, rx1], [ry0, ry1]
+
 def is_colormap(c):
     """
     Checks if a string is a valid matplotlib colormap name.
@@ -1278,19 +1342,48 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         u = (mpl_x - x0) / (x1 - x0) if (x1 - x0) > 0 else 0.0
         v = (mpl_y_js - y0_js) / (y1_js - y0_js) if (y1_js - y0_js) > 0 else 0.0
 
+        xlim = info.get('xlim')
+        ylim = info.get('ylim')
+
+        if not xlim or not ylim:
+            return
+
+        phys_x = xlim[0] + u * (xlim[1] - xlim[0])
+        phys_y = ylim[1] + v * (ylim[0] - ylim[1])
+
+        rot_z, rot_y, rot_x = 0.0, 0.0, 0.0
+        if hasattr(self, 'rotate_view') and self.rotate_view is not None:
+            def _parse_rotation(val):
+                if val is None: return 0.0, 0.0, 0.0
+                if isinstance(val, (int, float)): return float(val), 0.0, 0.0
+                try:
+                    vl = list(val)
+                    if len(vl) == 3: return float(vl[0]), float(vl[1]), float(vl[2])
+                except TypeError: pass
+                return 0.0, 0.0, 0.0
+            rot_z, rot_y, rot_x = _parse_rotation(self.rotate_view)
+
+        Z, Y, X = self.dims
+        xmin = getattr(self, 'xmin', 0.0)
+        ymin = getattr(self, 'ymin', 0.0)
+        zmin = getattr(self, 'zmin', 0.0)
+
         if plane == 'xy':
-            data_x = int(np.floor(u * self.dims[2]))
-            data_y = int(np.floor(v * self.dims[1]))
+            orig_phys_x, orig_phys_y = _unrotate_2d(phys_x, phys_y, rot_z, X, Y, self.sx, self.sy)
+            data_x = int(np.floor(orig_phys_x / self.sx - xmin))
+            data_y = int(np.floor(orig_phys_y / self.sy - ymin))
             self.x_s = max(0, min(self.dims[2] - 1, data_x))
             self.y_s = max(0, min(self.dims[1] - 1, data_y))
         elif plane == 'zy':
-            data_z = int(np.floor(u * self.dims[0]))
-            data_y = int(np.floor(v * self.dims[1]))
+            orig_phys_z, orig_phys_y = _unrotate_2d(phys_x, phys_y, rot_x, Z, Y, self.sz, self.sy)
+            data_z = int(np.floor(orig_phys_z / self.sz - zmin))
+            data_y = int(np.floor(orig_phys_y / self.sy - ymin))
             self.z_s = max(0, min(self.dims[0] - 1, data_z))
             self.y_s = max(0, min(self.dims[1] - 1, data_y))
         elif plane == 'xz':
-            data_x = int(np.floor(u * self.dims[2]))
-            data_z = int(np.floor(v * self.dims[0]))
+            orig_phys_x, orig_phys_z = _unrotate_2d(phys_x, phys_y, rot_y, X, Z, self.sx, self.sz)
+            data_x = int(np.floor(orig_phys_x / self.sx - xmin))
+            data_z = int(np.floor(orig_phys_z / self.sz - zmin))
             self.x_s = max(0, min(self.dims[2] - 1, data_x))
             self.z_s = max(0, min(self.dims[0] - 1, data_z))
     def _render(self):
@@ -1627,29 +1720,8 @@ class TNIASliceWidget(TNIAWidgetBase):
             axXZ = getattr(fig, 'axXZ', None)
 
             if axXY and axZY and axXZ:
-                def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_w, orig_h):
-                    if angle_deg == 0.0:
-                        return [x0, x1], [y0, y1]
-                    rad = np.radians(angle_deg)
-                    c, s = np.cos(rad), np.sin(rad)
-                    new_w = int(np.ceil(abs(orig_w * c) + abs(orig_h * s)))
-                    new_h = int(np.ceil(abs(orig_w * s) + abs(orig_h * c)))
-                    cx_orig = (orig_w - 1) / 2.0
-                    cy_orig = (orig_h - 1) / 2.0
-                    cx_new = (new_w - 1) / 2.0
-                    cy_new = (new_h - 1) / 2.0
-                    def trans(x, y):
-                        dx = x - cx_orig
-                        dy = y - cy_orig
-                        nx = dx * c + dy * s
-                        ny = -dx * s + dy * c
-                        return cx_new + nx, cy_new + ny
-                    rx0, ry0 = trans(x0, y0)
-                    rx1, ry1 = trans(x1, y1)
-                    return [rx0, rx1], [ry0, ry1]
-
-                def plot_line(ax, px0, py0, px1, py1, angle, orig_w, orig_h):
-                    xs, ys = _get_rotated_line(px0, py0, px1, py1, angle, orig_w, orig_h)
+                def plot_line(ax, px0, py0, px1, py1, angle, orig_dim_w, orig_dim_h, s_w, s_h):
+                    xs, ys = _get_rotated_line(px0, py0, px1, py1, angle, orig_dim_w, orig_dim_h, s_w, s_h)
                     ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
 
                 w_x = X * self.sx
@@ -1657,22 +1729,22 @@ class TNIASliceWidget(TNIAWidgetBase):
                 w_z = Z * self.sz
 
                 # XY
-                plot_line(axXY, (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
-                plot_line(axXY, 0, (y_lims[0] + 0.5)*self.sy, w_x, (y_lims[0] + 0.5)*self.sy, rot_z, w_x, w_y)
-                plot_line(axXY, (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_y, rot_z, w_x, w_y)
-                plot_line(axXY, 0, (y_lims[1] + 0.5)*self.sy, w_x, (y_lims[1] + 0.5)*self.sy, rot_z, w_x, w_y)
+                plot_line(axXY, (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_y, rot_z, X, Y, self.sx, self.sy)
+                plot_line(axXY, 0, (y_lims[0] + 0.5)*self.sy, w_x, (y_lims[0] + 0.5)*self.sy, rot_z, X, Y, self.sx, self.sy)
+                plot_line(axXY, (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_y, rot_z, X, Y, self.sx, self.sy)
+                plot_line(axXY, 0, (y_lims[1] + 0.5)*self.sy, w_x, (y_lims[1] + 0.5)*self.sy, rot_z, X, Y, self.sx, self.sy)
 
                 # ZY
-                plot_line(axZY, (z_lims[0] + 0.5)*self.sz, 0, (z_lims[0] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
-                plot_line(axZY, 0, (y_lims[0] + 0.5)*self.sy, w_z, (y_lims[0] + 0.5)*self.sy, rot_x, w_z, w_y)
-                plot_line(axZY, (z_lims[1] + 0.5)*self.sz, 0, (z_lims[1] + 0.5)*self.sz, w_y, rot_x, w_z, w_y)
-                plot_line(axZY, 0, (y_lims[1] + 0.5)*self.sy, w_z, (y_lims[1] + 0.5)*self.sy, rot_x, w_z, w_y)
+                plot_line(axZY, (z_lims[0] + 0.5)*self.sz, 0, (z_lims[0] + 0.5)*self.sz, w_y, rot_x, Z, Y, self.sz, self.sy)
+                plot_line(axZY, 0, (y_lims[0] + 0.5)*self.sy, w_z, (y_lims[0] + 0.5)*self.sy, rot_x, Z, Y, self.sz, self.sy)
+                plot_line(axZY, (z_lims[1] + 0.5)*self.sz, 0, (z_lims[1] + 0.5)*self.sz, w_y, rot_x, Z, Y, self.sz, self.sy)
+                plot_line(axZY, 0, (y_lims[1] + 0.5)*self.sy, w_z, (y_lims[1] + 0.5)*self.sy, rot_x, Z, Y, self.sz, self.sy)
 
                 # XZ
-                plot_line(axXZ, (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
-                plot_line(axXZ, 0, (z_lims[0] + 0.5)*self.sz, w_x, (z_lims[0] + 0.5)*self.sz, rot_y, w_x, w_z)
-                plot_line(axXZ, (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_z, rot_y, w_x, w_z)
-                plot_line(axXZ, 0, (z_lims[1] + 0.5)*self.sz, w_x, (z_lims[1] + 0.5)*self.sz, rot_y, w_x, w_z)
+                plot_line(axXZ, (x_lims[0] + 0.5)*self.sx, 0, (x_lims[0] + 0.5)*self.sx, w_z, rot_y, X, Z, self.sx, self.sz)
+                plot_line(axXZ, 0, (z_lims[0] + 0.5)*self.sz, w_x, (z_lims[0] + 0.5)*self.sz, rot_y, X, Z, self.sx, self.sz)
+                plot_line(axXZ, (x_lims[1] + 0.5)*self.sx, 0, (x_lims[1] + 0.5)*self.sx, w_z, rot_y, X, Z, self.sx, self.sz)
+                plot_line(axXZ, 0, (z_lims[1] + 0.5)*self.sz, w_x, (z_lims[1] + 0.5)*self.sz, rot_y, X, Z, self.sx, self.sz)
 
         return fig
 
@@ -1846,61 +1918,20 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
         Z, Y, X = self.dims
 
-        def unrotate_2d(px, py, angle_deg, cx, cy):
-            if angle_deg == 0.0:
-                return px, py
-            rad = np.radians(-angle_deg)
-            c, s = np.cos(rad), np.sin(rad)
-            dx = px - cx
-            dy = py - cy
-            nx = dx * c - dy * s
-            ny = dx * s + dy * c
-            return cx + nx, cy + ny
-
         if plane == 'xy':
-            if rot_z != 0.0:
-                cx_new = (xlim[1] - xlim[0]) / 2.0
-                cy_new = (ylim[0] - ylim[1]) / 2.0
-                orig_cx = (X * self.sx) / 2.0
-                orig_cy = (Y * self.sy) / 2.0
-                orig_x, orig_y = unrotate_2d(phys_x, phys_y, rot_z, cx_new, cy_new)
-                orig_x = orig_cx + (orig_x - cx_new)
-                orig_y = orig_cy + (orig_y - cy_new)
-                data_x = int(np.floor(orig_x / self.sx))
-                data_y = int(np.floor(orig_y / self.sy))
-            else:
-                data_x = int(np.floor(phys_x / self.sx))
-                data_y = int(np.floor(phys_y / self.sy))
+            orig_phys_x, orig_phys_y = _unrotate_2d(phys_x, phys_y, rot_z, X, Y, self.sx, self.sy)
+            data_x = int(np.floor(orig_phys_x / self.sx))
+            data_y = int(np.floor(orig_phys_y / self.sy))
             data_z = self.z_s
         elif plane == 'zy':
-            if rot_x != 0.0:
-                cx_new = (xlim[1] - xlim[0]) / 2.0
-                cy_new = (ylim[0] - ylim[1]) / 2.0
-                orig_cx = (Z * self.sz) / 2.0
-                orig_cy = (Y * self.sy) / 2.0
-                orig_z_phys, orig_y = unrotate_2d(phys_x, phys_y, rot_x, cx_new, cy_new)
-                orig_z_phys = orig_cx + (orig_z_phys - cx_new)
-                orig_y = orig_cy + (orig_y - cy_new)
-                data_z = int(np.floor(orig_z_phys / self.sz))
-                data_y = int(np.floor(orig_y / self.sy))
-            else:
-                data_z = int(np.floor(phys_x / self.sz))
-                data_y = int(np.floor(phys_y / self.sy))
+            orig_phys_z, orig_phys_y = _unrotate_2d(phys_x, phys_y, rot_x, Z, Y, self.sz, self.sy)
+            data_z = int(np.floor(orig_phys_z / self.sz))
+            data_y = int(np.floor(orig_phys_y / self.sy))
             data_x = self.x_s
         elif plane == 'xz':
-            if rot_y != 0.0:
-                cx_new = (xlim[1] - xlim[0]) / 2.0
-                cy_new = (ylim[0] - ylim[1]) / 2.0
-                orig_cx = (X * self.sx) / 2.0
-                orig_cy = (Z * self.sz) / 2.0
-                orig_x_phys, orig_z_phys = unrotate_2d(phys_x, phys_y, rot_y, cx_new, cy_new)
-                orig_x_phys = orig_cx + (orig_x_phys - cx_new)
-                orig_z_phys = orig_cy + (orig_z_phys - cy_new)
-                data_x = int(np.floor(orig_x_phys / self.sx))
-                data_z = int(np.floor(orig_z_phys / self.sz))
-            else:
-                data_x = int(np.floor(phys_x / self.sx))
-                data_z = int(np.floor(phys_y / self.sz))
+            orig_phys_x, orig_phys_z = _unrotate_2d(phys_x, phys_y, rot_y, X, Z, self.sx, self.sz)
+            data_x = int(np.floor(orig_phys_x / self.sx))
+            data_z = int(np.floor(orig_phys_z / self.sz))
             data_y = self.y_s
         else:
             return
@@ -2350,34 +2381,17 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Crosshairs
             if self.show_crosshair:
-                def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_w, orig_h):
-                    if angle_deg == 0.0:
-                        return [x0, x1], [y0, y1]
-                    rad = np.radians(angle_deg)
-                    c, s = np.cos(rad), np.sin(rad)
-                    new_w = int(np.ceil(abs(orig_w * c) + abs(orig_h * s)))
-                    new_h = int(np.ceil(abs(orig_w * s) + abs(orig_h * c)))
-                    cx_orig = (orig_w - 1) / 2.0
-                    cy_orig = (orig_h - 1) / 2.0
-                    cx_new = (new_w - 1) / 2.0
-                    cy_new = (new_h - 1) / 2.0
-                    def trans(x, y):
-                        dx = x - cx_orig
-                        dy = y - cy_orig
-                        nx = dx * c + dy * s
-                        ny = -dx * s + dy * c
-                        return cx_new + nx, cy_new + ny
-                    rx0, ry0 = trans(x0, y0)
-                    rx1, ry1 = trans(x1, y1)
-                    return [rx0, rx1], [ry0, ry1]
+                dim_x = int(np.ceil(self.xmax - self.xmin + 1))
+                dim_y = int(np.ceil(self.ymax - self.ymin + 1))
+                dim_z = int(np.ceil(self.zmax - self.zmin + 1))
 
-                def plot_line(ax, px0, py0, px1, py1, angle, orig_w, orig_h):
-                    xs, ys = _get_rotated_line(px0, py0, px1, py1, angle, orig_w, orig_h)
+                def plot_line(ax, px0, py0, px1, py1, angle, orig_dim_w, orig_dim_h, s_w, s_h):
+                    xs, ys = _get_rotated_line(px0, py0, px1, py1, angle, orig_dim_w, orig_dim_h, s_w, s_h)
                     ax.plot(xs, ys, color='r', ls=':', alpha=0.3)
 
-                w_x = (self.xmax - self.xmin + 1) * self.sx
-                w_y = (self.ymax - self.ymin + 1) * self.sy
-                w_z = (self.zmax - self.zmin + 1) * self.sz
+                w_x = dim_x * self.sx
+                w_y = dim_y * self.sy
+                w_z = dim_z * self.sz
 
                 axXY, axZY, axXZ = fig.axes[-4], fig.axes[-3], fig.axes[-2]
 
@@ -2387,25 +2401,25 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 y0_adj = (y_lims[0] - self.ymin + 0.5) * self.sy
                 y1_adj = (y_lims[1] - self.ymin + 1.5) * self.sy
 
-                plot_line(axXY, x0_adj, 0, x0_adj, w_y, rot_z, w_x, w_y)
-                plot_line(axXY, x1_adj, 0, x1_adj, w_y, rot_z, w_x, w_y)
-                plot_line(axXY, 0, y0_adj, w_x, y0_adj, rot_z, w_x, w_y)
-                plot_line(axXY, 0, y1_adj, w_x, y1_adj, rot_z, w_x, w_y)
+                plot_line(axXY, x0_adj, 0, x0_adj, w_y, rot_z, dim_x, dim_y, self.sx, self.sy)
+                plot_line(axXY, x1_adj, 0, x1_adj, w_y, rot_z, dim_x, dim_y, self.sx, self.sy)
+                plot_line(axXY, 0, y0_adj, w_x, y0_adj, rot_z, dim_x, dim_y, self.sx, self.sy)
+                plot_line(axXY, 0, y1_adj, w_x, y1_adj, rot_z, dim_x, dim_y, self.sx, self.sy)
 
                 # ZY
                 z0_adj = (z_lims[0] - self.zmin + 0.5) * self.sz
                 z1_adj = (z_lims[1] - self.zmin + 1.5) * self.sz
 
-                plot_line(axZY, z0_adj, 0, z0_adj, w_y, rot_x, w_z, w_y)
-                plot_line(axZY, z1_adj, 0, z1_adj, w_y, rot_x, w_z, w_y)
-                plot_line(axZY, 0, y0_adj, w_z, y0_adj, rot_x, w_z, w_y)
-                plot_line(axZY, 0, y1_adj, w_z, y1_adj, rot_x, w_z, w_y)
+                plot_line(axZY, z0_adj, 0, z0_adj, w_y, rot_x, dim_z, dim_y, self.sz, self.sy)
+                plot_line(axZY, z1_adj, 0, z1_adj, w_y, rot_x, dim_z, dim_y, self.sz, self.sy)
+                plot_line(axZY, 0, y0_adj, w_z, y0_adj, rot_x, dim_z, dim_y, self.sz, self.sy)
+                plot_line(axZY, 0, y1_adj, w_z, y1_adj, rot_x, dim_z, dim_y, self.sz, self.sy)
 
                 # XZ
-                plot_line(axXZ, x0_adj, 0, x0_adj, w_z, rot_y, w_x, w_z)
-                plot_line(axXZ, x1_adj, 0, x1_adj, w_z, rot_y, w_x, w_z)
-                plot_line(axXZ, 0, z0_adj, w_x, z0_adj, rot_y, w_x, w_z)
-                plot_line(axXZ, 0, z1_adj, w_x, z1_adj, rot_y, w_x, w_z)
+                plot_line(axXZ, x0_adj, 0, x0_adj, w_z, rot_y, dim_x, dim_z, self.sx, self.sz)
+                plot_line(axXZ, x1_adj, 0, x1_adj, w_z, rot_y, dim_x, dim_z, self.sx, self.sz)
+                plot_line(axXZ, 0, z0_adj, w_x, z0_adj, rot_y, dim_x, dim_z, self.sx, self.sz)
+                plot_line(axXZ, 0, z1_adj, w_x, z1_adj, rot_y, dim_x, dim_z, self.sx, self.sz)
 
             return fig
 
