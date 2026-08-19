@@ -6,13 +6,13 @@
 #     "scipy",
 # ]
 # ///
-### extended depth of focus with patch blending
+"""extended depth of focus with patch blending"""
 
 import numpy as np
 import skimage.io
 
-from scipy.ndimage import generic_filter, zoom, laplace, uniform_filter
-
+from scipy.ndimage import laplace, uniform_filter
+from scipy.interpolate import RegularGridInterpolator
 from skimage.filters import median
 from skimage.morphology import disk
 
@@ -27,13 +27,8 @@ def apply_median_filter(height_map):
     Returns:
     ndarray: The filtered 2D array.
     """
-    # Define a 3x3 (radius 1) disk structuring element for the median filter
     selem = disk(1)
-
-    # Apply the median filter with the defined structuring element
-    filtered_map = median(height_map, selem, mode='reflect')
-
-    return filtered_map
+    return median(height_map, selem, mode='reflect')
 
 
 def _get_1d_weight_variants(patch_size, overlap):
@@ -44,11 +39,10 @@ def _get_1d_weight_variants(patch_size, overlap):
     - end: Taper Start, Flat End (Bottom/Right Boundary)
     - flat: Flat Start, Flat End (Single Patch)
     """
-    def weight_1d(x):
-        return 3 * x**2 - 2 * x**3
-
-    x = np.linspace(0, 1, overlap)
-    taper = weight_1d(x).astype(np.float32)
+    x = np.linspace(0, 1, overlap, dtype=np.float32)
+    x2 = x * x
+    x3 = x2 * x
+    taper = (3.0 * x2 - 2.0 * x3).astype(np.float32)
 
     # Base: Flat
     w_base = np.ones(patch_size, dtype=np.float32)
@@ -67,28 +61,30 @@ def _get_1d_weight_variants(patch_size, overlap):
     w_end[:overlap] *= taper
 
     # Flat (Single Patch -> No Taper)
-    w_flat = w_base.copy()
+    w_flat = w_base
 
     return w_full, w_start, w_end, w_flat
 
 
 def _cubic_interp_1d(p0, p1, p2, p3, t):
     """
-    Cubic Hermite spline (Catmull-Rom) interpolation.
-    p0, p1, p2, p3: values at t=-1, 0, 1, 2
-    t: fractional position between p1 and p2 (0 <= t <= 1)
+    Cubic Hermite spline (Catmull-Rom) interpolation evaluated via scalar basis weights.
+    p0, p1, p2, p3: ndarray values at t=-1, 0, 1, 2
+    t: scalar fractional position between p1 and p2 (0 <= t <= 1)
     """
-    return 0.5 * (
-        (2 * p1) +
-        (-p0 + p2) * t +
-        (2 * p0 - 5 * p1 + 4 * p2 - p3) * (t ** 2) +
-        (-p0 + 3 * p1 - 3 * p2 + p3) * (t ** 3)
-    )
+    t2 = t * t
+    t3 = t2 * t
+    c0 = 0.5 * (-t + 2.0 * t2 - t3)
+    c1 = 0.5 * (2.0 - 5.0 * t2 + 3.0 * t3)
+    c2 = 0.5 * (t + 4.0 * t2 - 3.0 * t3)
+    c3 = 0.5 * (-t2 + t3)
+
+    return c0 * p0 + c1 * p1 + c2 * p2 + c3 * p3
 
 
 def _get_fractional_peak(score_matrix):
     """
-    Refines the discrete argmax peak using parabolic interpolation.
+    Refines the discrete argmax peak using parabolic interpolation on log-scores.
 
     score_matrix: (Z, H, W)
 
@@ -96,364 +92,209 @@ def _get_fractional_peak(score_matrix):
     peak_z: (H, W) float32
     """
     Z, H, W = score_matrix.shape
-    idx = np.argmax(score_matrix, axis=0) # (H, W)
+    idx = np.argmax(score_matrix, axis=0)  # (H, W)
 
-    # We need values at idx-1, idx, idx+1
-    # Clamp to ensure we don't access out of bounds
     z_c = idx
     z_l = np.maximum(z_c - 1, 0)
     z_r = np.minimum(z_c + 1, Z - 1)
 
-    # Extract values
-    # Advanced indexing
-    grid_y, grid_x = np.indices((H, W))
-
-    # matth: Use Log-Parabolic Interpolation
-    # Focus metrics (squared Laplacian) often follow a Gaussian-like decay: E ~ exp(-(z-z0)^2).
-    # Fitting a parabola to the raw Gaussian yields biased peak estimates.
-    # Fitting a parabola to log(E) ~ -(z-z0)^2 recovers the peak exactly.
     eps = 1e-12
-    v_c = np.log(score_matrix[z_c, grid_y, grid_x] + eps)
-    v_l = np.log(score_matrix[z_l, grid_y, grid_x] + eps)
-    v_r = np.log(score_matrix[z_r, grid_y, grid_x] + eps)
+    # Extract values along Z using take_along_axis to avoid dense coordinate meshes
+    v_c = np.log(np.take_along_axis(score_matrix, z_c[None, ...], axis=0)[0] + eps)
+    v_l = np.log(np.take_along_axis(score_matrix, z_l[None, ...], axis=0)[0] + eps)
+    v_r = np.log(np.take_along_axis(score_matrix, z_r[None, ...], axis=0)[0] + eps)
 
-    # Parabolic fit on Log scores
-    # Delta = (v_l - v_r) / (2 * (v_l - 2*v_c + v_r))
-    denom = v_l - 2*v_c + v_r
+    denom = v_l - 2.0 * v_c + v_r
 
-    # Handle denominator close to zero (flat or linear)
-    # v_c is max, so denom is <= 0.
     delta = np.zeros_like(v_c, dtype=np.float32)
-    mask = np.abs(denom) > 1e-9
+    # Only refine valid non-flat interiors away from Z boundaries
+    valid = (np.abs(denom) > 1e-9) & (idx > 0) & (idx < Z - 1)
+    delta[valid] = (v_l[valid] - v_r[valid]) / (2.0 * denom[valid])
 
-    # We expect negative denominator for a maximum
-    delta[mask] = (v_l[mask] - v_r[mask]) / (2 * denom[mask])
-
-    # Clamp delta to [-0.5, 0.5] to prevent instability
-    # Also clamp to 0 if we are at the boundaries of the stack
-    boundary_mask = (idx == 0) | (idx == Z - 1)
-    delta[boundary_mask] = 0
-
-    delta = np.clip(delta, -0.5, 0.5)
+    np.clip(delta, -0.5, 0.5, out=delta)
 
     return idx.astype(np.float32) + delta
 
 
-def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test = None):
-    '''
-    Expecting an image with dimension order ZYX
-    If you have a timelapse, please pass in each individual frame
-    e.g. you can slice as frame_img = time_lapse_img[t, ...]
-    '''
+def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, test=None):
+    """
+    Extended depth of focus via local focus scoring and weighted subpixel patch blending.
+    Dimension order expected: ZYX
+    """
     # 1. Load the image
     if isinstance(image_or_path, str):
         img = skimage.io.imread(image_or_path)
     else:
         img = image_or_path
-    
-    # 1.1 Validate ndim
+
     if img.ndim != 3:
         raise ValueError(f'Image not 3D, instead received {img.ndim} dims')
 
     original_shape = img.shape[1:]
+    H, W = original_shape
 
-    # 2. Determine the patch size and pad the image to fit
+    # 2. Determine patch size and padding
     if patch_size is None:
         patch_size = min(original_shape) // 10
-    # overlap = patch_size // 4  # 25% overlap
     overlap = patch_size // 3  # 33% overlap
 
-    # Fix: padding should be based on Y and X dimensions (shape[1] and shape[2]), not Z (shape[0])
-    pad_y = (patch_size - img.shape[1] % patch_size) + overlap
-    pad_x = (patch_size - img.shape[2] % patch_size) + overlap
+    pad_y = (patch_size - H % patch_size) + overlap
+    pad_x = (patch_size - W % patch_size) + overlap
 
-    # bolt: Removed full 3D padding (img_padded) to save O(Z*H*W) memory.
-    # Instead, we apply padding on the fly per slice (scoring) or per patch (reconstruction).
-    # This reduces peak memory significantly (e.g. from 1.6GB to ~200MB for typical stacks).
+    padded_H = H + pad_y
+    padded_W = W + pad_x
 
-    # Virtual dimensions of the padded space
-    padded_H = img.shape[1] + pad_y
-    padded_W = img.shape[2] + pad_x
-
-    # 3. Calculate Focus Metric Vectorized
-    # Metric: Laplacian Energy (Sum of Squared Laplacian)
-    # Optimization: Use float32 to reduce memory usage by 50% compared to float64.
-
-    # Grid dimensions
     n_patches_y = padded_H // (patch_size - overlap)
     n_patches_x = padded_W // (patch_size - overlap)
 
-    # Initialize score matrix: (Z, rows, cols)
+    max_y_end = (n_patches_y - 1) * (patch_size - overlap) + patch_size
+    max_x_end = (n_patches_x - 1) * (patch_size - overlap) + patch_size
+
+    pad_y_needed = max(pad_y, max_y_end - H)
+    pad_x_needed = max(pad_x, max_x_end - W)
+
+    padded_H = H + pad_y_needed
+    padded_W = W + pad_x_needed
+
+    # 3. Calculate Focus Metric Vectorized
     score_matrix = np.zeros((img.shape[0], n_patches_y, n_patches_x), dtype=np.float32)
 
-    # Grid coordinates (centers of patches) for sampling
     y_starts = np.arange(n_patches_y) * (patch_size - overlap)
     x_starts = np.arange(n_patches_x) * (patch_size - overlap)
 
     y_centers = y_starts + patch_size // 2
     x_centers = x_starts + patch_size // 2
 
-    # Pre-allocate buffers to reuse memory across Z-slices
-    # Reduces allocation churn and runtime overhead significantly
-    # padded_buffer stores the padded input slice
-    # lap_buffer stores the laplacian (float32)
-    # energy_buffer stores the uniform filter result (float32)
+    # Pre-index mesh outside the slice loop to eliminate redundant allocations
+    sample_idx = np.ix_(y_centers, x_centers)
 
-    # Check if manual padding is safe (pad < dim - 1)
-    # If pad is too large, manual slice logic fails, so fallback to np.pad
-    H, W = img.shape[1], img.shape[2]
-    use_fast_pad = (pad_y < H - 1) and (pad_x < W - 1)
+    use_fast_pad = (pad_y_needed < H - 1) and (pad_x_needed < W - 1)
 
     padded_buffer = np.zeros((padded_H, padded_W), dtype=img.dtype)
     lap_buffer = np.zeros((padded_H, padded_W), dtype=np.float32)
     energy_buffer = np.zeros((padded_H, padded_W), dtype=np.float32)
 
-    # Iterate over Z-slices one by one to keep memory usage low
     for z in range(img.shape[0]):
-        # 1. Pad only the current slice (2D)
-        # This keeps memory overhead to O(H*W) instead of O(Z*H*W)
-
         if use_fast_pad:
-            # Copy core
             padded_buffer[:H, :W] = img[z]
-
-            # Reflect Right (approx, ensuring dims match)
-            # Reflect H rows, pad_x cols
-            # input: img[:H, W-pad_x-1:W-1][:, ::-1] -> shape (H, pad_x)
-            padded_buffer[:H, W:] = img[z][:, -pad_x-1:-1][:, ::-1]
-
-            # Reflect Bottom (approx)
-            # Reflect pad_y rows, all cols (including already padded right side)
-            # input: padded_buffer[H-pad_y-1:H-1, :][::-1, :] -> shape (pad_y, W+pad_x)
-            padded_buffer[H:, :] = padded_buffer[H-pad_y-1:H-1, :][::-1, :]
-
-            slice_padded = padded_buffer # Reference, no copy
+            padded_buffer[:H, W:] = img[z][:, -pad_x_needed-1:-1][:, ::-1]
+            padded_buffer[H:, :] = padded_buffer[H-pad_y_needed-1:H-1, :][::-1, :]
+            slice_padded = padded_buffer
         else:
-            # Fallback for large pads
-            slice_padded = np.pad(img[z], ((0, pad_y), (0, pad_x)), mode='reflect')
+            slice_padded = np.pad(img[z], ((0, pad_y_needed), (0, pad_x_needed)), mode='reflect')
 
-        # 2. Compute Laplacian directly into reusable float32 buffer
-        # 'output=lap_buffer' reuses memory
         laplace(slice_padded, output=lap_buffer)
-
-        # 3. Compute Energy (Squared) in-place
         np.square(lap_buffer, out=lap_buffer)
-
-        # 4. Local Average Energy (proxy for sum over patch)
-        # Reuses energy_buffer
         uniform_filter(lap_buffer, size=patch_size, output=energy_buffer, mode='reflect')
 
-        # 5. Sample at patch centers
-        score_matrix[z] = energy_buffer[np.ix_(y_centers, x_centers)]
-
-        # Explicit delete not needed as buffers are reused, but slice_padded might be a new array in fallback
-        if not use_fast_pad:
-             del slice_padded
+        score_matrix[z] = energy_buffer[sample_idx]
 
     # 4. Select best Z with Subpixel Precision
-    # matth: Use parabolic interpolation to find fractional peak
     height_map_small = _get_fractional_peak(score_matrix)
-
-    # Apply median filter (works on floats, preserves edges while removing outliers)
     height_map_small = apply_median_filter(height_map_small)
 
     # 5. Combine patches to create the final image
-    # Use float32 for accumulation to save memory
     final_img = np.zeros((padded_H, padded_W), dtype=np.float32)
-    counts = np.zeros((padded_H, padded_W), dtype=np.float32) # matth: Restored counts
+    counts = np.zeros((padded_H, padded_W), dtype=np.float32)
 
-    # Precompute 1D weight variants to handle boundaries
-    wy_full, wy_start, wy_end, wy_flat = _get_1d_weight_variants(patch_size, overlap)
-    wx_full, wx_start, wx_end, wx_flat = _get_1d_weight_variants(patch_size, overlap)
+    # Precompute unique 1D weight variants and unique 2D blending windows
+    w_variants = _get_1d_weight_variants(patch_size, overlap)  # (full, start, end, flat)
 
-    n_patches_y = height_map_small.shape[0]
-    n_patches_x = height_map_small.shape[1]
+    def _get_weight_type(idx, total):
+        if total == 1:
+            return 3  # flat
+        if idx == 0:
+            return 1  # start
+        if idx == total - 1:
+            return 2  # end
+        return 0      # full
+
+    # Cache unique 2D window arrays (max 9 combinations)
+    unique_windows = {}
+    for wy_t in range(4):
+        for wx_t in range(4):
+            unique_windows[(wy_t, wx_t)] = w_variants[wy_t][:, None] * w_variants[wx_t][None, :]
+
+    window_grid = [
+        [unique_windows[(_get_weight_type(i, n_patches_y), _get_weight_type(j, n_patches_x))]
+         for j in range(n_patches_x)]
+        for i in range(n_patches_y)
+    ]
 
     Z_dim = img.shape[0]
 
-    # Helper to extract a padded patch from a specific Z slice
-    def _get_padded_patch(z_idx, y_s, x_s, y_e, x_e, y_start, x_start):
-        # Determine safe extraction bounds from original image
-        y_s_clamped = y_s
-        y_e_clamped = min(y_e, img.shape[1])
-        pad_bottom = 0
+    # Fast patch extraction
+    def _get_padded_patch(z_idx, y_start, x_start):
+        y_end = y_start + patch_size
+        x_end = x_start + patch_size
 
-        if y_e > img.shape[1]:
-            pad_bottom = pad_y
-            needed_history = max(pad_bottom + 1, y_e - img.shape[1] + 2)
-            y_s_clamped = min(y_s_clamped, img.shape[1] - needed_history)
-            y_s_clamped = max(0, y_s_clamped)
-            y_e_clamped = img.shape[1]
+        # Fast path: strictly interior patch requiring no boundary reflection
+        if y_end <= H and x_end <= W:
+            return img[z_idx, y_start:y_end, x_start:x_end].astype(np.float32)
 
-        x_s_clamped = x_s
-        x_e_clamped = min(x_e, img.shape[2])
-        pad_right = 0
+        # Boundary path
+        return np.pad(img[z_idx], ((0, pad_y_needed), (0, pad_x_needed)), mode='reflect')[y_start:y_end, x_start:x_end].astype(np.float32)
 
-        if x_e > img.shape[2]:
-            pad_right = pad_x
-            needed_history = max(pad_right + 1, x_e - img.shape[2] + 2)
-            x_s_clamped = min(x_s_clamped, img.shape[2] - needed_history)
-            x_s_clamped = max(0, x_s_clamped)
-            x_e_clamped = img.shape[2]
-
-        # Extract chunk
-        chunk = img[z_idx, y_s_clamped:y_e_clamped, x_s_clamped:x_e_clamped]
-
-        # Pad chunk locally
-        if pad_bottom > 0 or pad_right > 0:
-            chunk_padded = np.pad(chunk, ((0, pad_bottom), (0, pad_right)), mode='reflect')
-        else:
-            chunk_padded = chunk
-
-        # Slice out the exact target region relative to chunk start
-        y_rel = y_start - y_s_clamped
-        x_rel = x_start - x_s_clamped
-
-        return chunk_padded[y_rel : y_rel + patch_size, x_rel : x_rel + patch_size].astype(np.float32)
-
-
+    # Main patch reconstruction loop
     for i in range(n_patches_y):
-        # Select Y-weight
-        if n_patches_y == 1:
-            wy = wy_flat
-        elif i == 0:
-            wy = wy_start
-        elif i == n_patches_y - 1:
-            wy = wy_end
-        else:
-            wy = wy_full
+        y_start = i * (patch_size - overlap)
+        y_end = y_start + patch_size
 
         for j in range(n_patches_x):
-            # Select X-weight
-            if n_patches_x == 1:
-                wx = wx_flat
-            elif j == 0:
-                wx = wx_start
-            elif j == n_patches_x - 1:
-                wx = wx_end
-            else:
-                wx = wx_full
-
-            # Construct 2D window on the fly
-            _2D_window = wy[:, None] * wx[None, :]
-
-            y_start = i * (patch_size - overlap)
             x_start = j * (patch_size - overlap)
-            best_z = height_map_small[i, j]
-
-            # Patch bounds
-            y_end = y_start + patch_size
             x_end = x_start + patch_size
 
-            # matth: Subpixel reconstruction
-            # Use Cubic (Catmull-Rom) interpolation to preserve high-frequency content (contrast)
-            # Linear interpolation acts as a low-pass filter, degrading the sharpness gained by subpixel depth estimation.
+            _2D_window = window_grid[i][j]
+            best_z = height_map_small[i, j]
 
             z_floor = int(np.floor(best_z))
-            alpha = best_z - z_floor
+            alpha = float(best_z - z_floor)
 
-            # Clamp indices for 4-point stencil
             z0 = max(0, min(z_floor - 1, Z_dim - 1))
             z1 = max(0, min(z_floor, Z_dim - 1))
             z2 = max(0, min(z_floor + 1, Z_dim - 1))
             z3 = max(0, min(z_floor + 2, Z_dim - 1))
 
-            # Fetch patches
-            # Optimization: If integer coordinates, skip interpolation
-            if z1 == z2:  # z_floor == z_ceil implies alpha=0
-                patch = _get_padded_patch(z1, y_start, x_start, y_end, x_end, y_start, x_start)
+            if z1 == z2:
+                patch = _get_padded_patch(z1, y_start, x_start)
             else:
-                p1 = _get_padded_patch(z1, y_start, x_start, y_end, x_end, y_start, x_start)
-                p2 = _get_padded_patch(z2, y_start, x_start, y_end, x_end, y_start, x_start)
-
-                # Fetch extra points for cubic spline
-                # If at boundaries, clamp (duplicate nearest neighbor)
-                # This corresponds to "natural" or "clamped" spline behavior at edges
-                if z0 == z1:
-                    p0 = p1
-                else:
-                    p0 = _get_padded_patch(z0, y_start, x_start, y_end, x_end, y_start, x_start)
-
-                if z3 == z2:
-                    p3 = p2
-                else:
-                    p3 = _get_padded_patch(z3, y_start, x_start, y_end, x_end, y_start, x_start)
+                p1 = _get_padded_patch(z1, y_start, x_start)
+                p2 = _get_padded_patch(z2, y_start, x_start)
+                p0 = p1 if z0 == z1 else _get_padded_patch(z0, y_start, x_start)
+                p3 = p2 if z3 == z2 else _get_padded_patch(z3, y_start, x_start)
 
                 patch = _cubic_interp_1d(p0, p1, p2, p3, alpha)
-                # matth: Clamp negative values that may arise from cubic undershoot (ringing)
-                np.maximum(patch, 0, out=patch)
+                np.maximum(patch, 0.0, out=patch)
 
-            # Create weighted patch
-            try:
-                # weighted_patch = patch * _2D_window
-                # In-place multiplication
-                np.multiply(patch, _2D_window, out=patch)
-                weight_matrix = _2D_window
-            except ValueError:
-                # Boundary case
-                min_shape = tuple(min(s1, s2) for s1, s2 in zip(patch.shape, _2D_window.shape))
-                patch = patch * _2D_window[:min_shape[0], :min_shape[1]]
-                weight_matrix = _2D_window[:min_shape[0], :min_shape[1]]
+            # In-place patch weighting
+            patch *= _2D_window
 
-            # Add to accumulators
-            final_img[y_start:y_start+patch_size, x_start:x_start+patch_size] += patch
-            counts[y_start:y_start+patch_size, x_start:x_start+patch_size] += weight_matrix
+            final_img[y_start:y_end, x_start:x_end] += patch
+            counts[y_start:y_end, x_start:x_end] += _2D_window
 
-    # Normalize by the weight counts
-    # Avoid division by zero
+    # Normalize by accumulated weights
     counts[counts < 1e-9] = 1.0
-    # In-place division
-    np.divide(final_img, counts, out=final_img)
+    final_img /= counts
 
-    # 6. Recrop
-    final_img = final_img[:original_shape[0], :original_shape[1]]
+    # 6. Recrop to original shape
+    final_img = final_img[:H, :W]
 
     if return_heightmap:
-        # matth: Use RegularGridInterpolator for spatially accurate upscaling
-        # scipy.ndimage.zoom assumes a different coordinate system that introduces
-        # a systematic shift. We map the exact patch centers to the pixel grid.
-        from scipy.interpolate import RegularGridInterpolator
+        y_c = (y_starts + patch_size // 2).astype(np.float32)
+        x_c = (x_starts + patch_size // 2).astype(np.float32)
 
-        n_patches_y = height_map_small.shape[0]
-        n_patches_x = height_map_small.shape[1]
-
-        # Coordinates of the centers where height_map_small is defined
-        # Note: In scoring, y_centers = y_starts + patch_size // 2
-        # y_starts = i * (patch_size - overlap)
-        y_starts = np.arange(n_patches_y) * (patch_size - overlap)
-        x_starts = np.arange(n_patches_x) * (patch_size - overlap)
-
-        y_c = y_starts + patch_size // 2
-        x_c = x_starts + patch_size // 2
-
-        # Create interpolator
-        # bounds_error=False, fill_value=None -> Linear extrapolation
         interp = RegularGridInterpolator((y_c, x_c), height_map_small, bounds_error=False, fill_value=None)
 
-        # Target grid coordinates
-        gy = np.arange(original_shape[0])
-        gx = np.arange(original_shape[1])
+        gy = np.arange(H, dtype=np.float32)
+        gx = np.arange(W, dtype=np.float32)
 
-        # Meshgrid for interpolation (indexing='ij')
-        # We can optimize by broadcasting if grid is huge, but RegularGridInterpolator
-        # usually expects (N, 2) points or tuple of grids.
-        # interp((gy[:, None], gx[None, :])) works if grid is tuple?
-        # No, RegularGridInterpolator.__call__ expects points (N, D) or (y, x) if method='linear'.
-        # Actually it supports meshgrid style inputs in newer scipy.
-        # Let's use the explicit meshgrid to be safe and clear.
-        GY, GX = np.meshgrid(gy, gx, indexing='ij')
-
-        # Flatten for interpolation then reshape, or pass directly if supported.
-        # Passing tuple (GY, GX) is supported in SciPy 1.9+.
-        # We'll assume a reasonably modern SciPy.
         try:
-            height_map_full = interp((GY, GX))
+            # SciPy 1.9+ broadcastable open grid evaluation
+            height_map_full = interp((gy[:, None], gx[None, :])).astype(np.float32)
         except (TypeError, ValueError):
-            # Fallback for older SciPy
+            GY, GX = np.meshgrid(gy, gx, indexing='ij')
             pts = np.array([GY.ravel(), GX.ravel()]).T
-            height_map_full = interp(pts).reshape(original_shape)
-
-        height_map_full = height_map_full.astype(np.float32)
+            height_map_full = interp(pts).reshape(original_shape).astype(np.float32)
 
         return final_img, height_map_full
 
