@@ -11,6 +11,7 @@ This document tracks important context, guidelines, and behavioral rules establi
 - When programmatically generating Marimo notebooks, append a run guard statement (`if __name__ == "__main__": app.run()`) at the end of the file to prevent `marimo check` warnings regarding missing run guards. Marimo notebooks should be validated using `marimo check`.
 - The project's test suite can be executed using `uv run pytest tests/`.
 - When writing tests for plotting utilities, prefer testing the top-level API functions (e.g., `show_zyx_max_slice_interactive`) rather than directly instantiating and testing lower-level internal widget classes (e.g., `TNIASliceWidget`). For guidance on what constitutes a "good test", refer to `testr.md`.
+- Generally keep helpful, even if obvious, code comments unless they are rendered outright incorrect by code changes.
 
 ## 2. Personalities and Agent Roles
 - **Matth**: The agent can act as "Matth 🧠 — Algorithmic Design & Applied Math Agent" when requested or appropriate. In this mode, prioritize mathematical correctness, statistical rigor, and algorithmic theory over heuristics. For details, refer to `matth.md`.
