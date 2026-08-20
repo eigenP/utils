@@ -194,3 +194,45 @@ def test_remove_outliers_mahalanobis_errors():
     arr_1d = np.array([1, 2, 3])
     with pytest.raises(ValueError, match="requires at least 2 dimensions"):
         remove_outliers(arr_1d, method='mahalanobis')
+
+def test_robust_standardize():
+    """Test that robust_standardize handles normal data, zero-inflated data, and constant arrays correctly."""
+    from eigenp_utils.stats import robust_standardize
+
+    # Normal case without collapse
+    normal_data = np.array([1, 2, 3, 4, 5, 100])
+    std_data = robust_standardize(normal_data)
+    assert not np.isnan(std_data).any()
+    # 100 should be heavily penalized (large z-score)
+    assert std_data[-1] > 10.0
+
+    # MAD collapse (needs MeanAD fallback)
+    mad_zero_data = np.array([0, 0, 0, 0, 100])
+    std_data = robust_standardize(mad_zero_data)
+    assert not np.isnan(std_data).any()
+    assert std_data[-1] > 1.5
+    assert np.isclose(std_data[0], -0.49868, atol=1e-4) # (0 - 20) / (32 * 1.2533...)
+
+    # MeanAD collapse? If MeanAD is 0, the array is constant
+    constant_data = np.array([5, 5, 5, 5, 5])
+    std_data = robust_standardize(constant_data)
+    assert np.all(std_data == 0.0)
+
+    # Array with NaNs
+    nan_data = np.array([1, 2, np.nan, 4, 5, 100])
+    std_data = robust_standardize(nan_data)
+    assert np.isnan(std_data[2])
+    assert std_data[-1] > 10.0
+
+def test_remove_outliers_robust_zscore_array():
+    """Test that remove outliers robust zscore array works as expected."""
+    data = np.array([0, 0, 0, 0, 100, -100])
+
+    # With standard zscore, variance gets heavily inflated by the 100 and -100
+    cleaned_z = remove_outliers(data, method='zscore', threshold=1.5)
+
+    # With robust zscore, the scale is much smaller, so 100/-100 are easily identified
+    cleaned_rz = remove_outliers(data, method='robust_zscore', threshold=1.5)
+    assert 100 not in cleaned_rz
+    assert -100 not in cleaned_rz
+    assert 0 in cleaned_rz
