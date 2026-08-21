@@ -143,6 +143,18 @@ def is_colormap(c):
     except (ValueError, KeyError):
         return False
 
+def get_gui_channel_color(c):
+    """
+    Darkens a given color to improve contrast for GUI elements like channel labels and histograms.
+    Converts color to RGB, multiplies by 0.75, and returns a hex string.
+    """
+    try:
+        rgb = mcolors.to_rgb(resolve_color(c))
+        darkened_rgb = tuple(val * 0.75 for val in rgb)
+        return mcolors.to_hex(darkened_rgb)
+    except (ValueError, TypeError):
+        return resolve_color(c)
+
 def resolve_color(c):
     """
     Attempts to resolve a string to a valid matplotlib color.
@@ -386,7 +398,8 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         axXZ = fig.add_subplot(spec[2, 0])
         axBar = fig.add_subplot(spec[2, 1])
 
-        axLabels.set_facecolor((0.6, 0.6, 0.6))
+        ### Color for channel_labels bbox !! ###
+        axLabels.set_facecolor((0.85, 0.85, 0.85))
         axLabels.set_xticks([])
         axLabels.set_yticks([])
         for spine in axLabels.spines.values():
@@ -415,17 +428,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
             from matplotlib.offsetbox import TextArea, HPacker, AnchoredOffsetbox
 
-            def _darken(c):
-                try:
-                    rgb = mcolors.to_rgb(c)
-                    return tuple(val * 0.8 for val in rgb)
-                except ValueError:
-                    return c
-
             text_areas = []
             for i, label in enumerate(channel_labels):
-                darkened_color = _darken(color_list[i])
-                ta = TextArea(label, textprops=dict(color=darkened_color, fontsize=fontsize_pt, fontweight='bold'))
+                GUI_CHANNEL_COLOR = get_gui_channel_color(color_list[i])
+                ta = TextArea(label, textprops=dict(color=GUI_CHANNEL_COLOR, fontsize=fontsize_pt, fontweight='bold'))
                 text_areas.append(ta)
 
             packer = HPacker(children=text_areas, align="center", pad=0, sep=10)
@@ -1522,7 +1528,8 @@ class TNIASliceWidget(TNIAWidgetBase):
                 self.colors_resolved = [colormap]
 
         # Use resolve_color for channel_colors (which is passed to JS)
-        self.channel_colors = [resolve_color(c) for c in self.colors_resolved]
+        GUI_CHANNEL_COLORS = [get_gui_channel_color(c) for c in self.colors_resolved]
+        self.channel_colors = GUI_CHANNEL_COLORS
 
         # Set traitlets lists for interactive parameters
         def _resolve_vmin(val, n):
@@ -2205,7 +2212,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
         self.channel_names = [f"Channel {i}" for i in range(self.C)]
         self.channel_dtypes = ["float"] * self.C
-        self.channel_colors = [matplotlib.colors.to_hex(c) for c in self.colors_rgb]
+        GUI_CHANNEL_COLORS = [get_gui_channel_color(matplotlib.colors.to_hex(c)) for c in self.colors_rgb]
+        self.channel_colors = GUI_CHANNEL_COLORS
 
         z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
         z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
