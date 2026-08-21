@@ -398,6 +398,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         axXZ = fig.add_subplot(spec[2, 0])
         axBar = fig.add_subplot(spec[2, 1])
 
+        ### Color for channel_labels bbox !! ###
         axLabels.set_facecolor((0.85, 0.85, 0.85))
         axLabels.set_xticks([])
         axLabels.set_yticks([])
