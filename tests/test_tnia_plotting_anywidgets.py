@@ -718,11 +718,10 @@ def test_interactive_spacing_pixel_sizes_vs_sxy():
 
     np.testing.assert_allclose(size_dict, size_tuple)
 
-    # Test the height ratios generated inside the gridspec
-    gs_dict = fig_dict.axes[0].get_subplotspec().get_gridspec().get_height_ratios()
-    gs_tuple = fig_tuple.axes[0].get_subplotspec().get_gridspec().get_height_ratios()
-
-    assert gs_dict == gs_tuple
+    # Verify positions of XY and XZ axes match between dict and tuple pixel_sizes
+    pos_xy_dict = fig_dict.axXY.get_position()
+    pos_xy_tuple = fig_tuple.axXY.get_position()
+    np.testing.assert_allclose(pos_xy_dict.bounds, pos_xy_tuple.bounds)
 
 def test_xy_anisotropy():
     """
@@ -733,15 +732,14 @@ def test_xy_anisotropy():
     w = show_zyx_max_slice_interactive(im, pixel_sizes={'Z': 1.0, 'Y': 0.2, 'X': 1.0})
     fig = w._render()
 
-    # Check gridspec ratios directly to see if physical scaling is applied
-    gs = fig.axes[0].get_subplotspec().get_gridspec()
-    width_ratios = gs.get_width_ratios()
-    height_ratios = gs.get_height_ratios()
-
-    # X physical = 100 * 1 = 100. Z physical = 10 * 1 = 10. Max width = 100.
-    # Y physical = 50 * 0.2 = 10. Z physical = 10 * 1 = 10. Max height = 10.
-    assert width_ratios[0] == 100
-    assert height_ratios[1] == 10
+    # X physical = 100 * 1 = 100. Z physical = 10 * 1 = 10.
+    # Y physical = 50 * 0.2 = 10. Z physical = 10 * 1 = 10.
+    # So axXY width should be 10x its height
+    pos_xy = fig.axXY.get_position()
+    figW, figH = fig.get_size_inches()
+    w_in = pos_xy.width * figW
+    h_in = pos_xy.height * figH
+    np.testing.assert_allclose(w_in / h_in, 10.0, rtol=1e-2)
 
 def test_annotation_coordinate_registration():
     # Synthetic 3D image volume: Z=16, Y=64, X=128
@@ -968,6 +966,74 @@ def test_axis_bounds_alignment():
         np.testing.assert_allclose(info['y0'], cell_bbox.y0, atol=1e-2)
     finally:
         plt.close(fig)
+
+
+@pytest.mark.parametrize("figsize", [(8, 8), (12, 6), (6, 12)])
+@pytest.mark.parametrize("with_labels", [False, True])
+@pytest.mark.parametrize("gap_in", [1.0 / 16.0, 1.0 / 8.0])
+def test_fixed_physical_axes_gap(figsize, with_labels, gap_in):
+    """
+    Verify that the physical distance between adjacent axes is strictly equal to
+    gap_in (in inches) regardless of figure size, aspect ratio, or channel_labels toggle.
+    """
+    Z, Y, X = 20, 40, 120
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    labels = ["Ch0", "Ch1"] if with_labels else None
+
+    fig = show_zyx(
+        xy=im[10, :, :], xz=im[:, 20, :], zy=np.flip(np.rot90(im[:, :, 60], 1), 0),
+        pixel_sizes={'X': 0.5, 'Y': 0.5, 'Z': 1.5},
+        figsize=figsize,
+        channel_labels=labels,
+        gap_in=gap_in
+    )
+
+    figW, figH = figsize
+    pos_xy = fig.axXY.get_position()
+    pos_zy = fig.axZY.get_position()
+    pos_xz = fig.axXZ.get_position()
+
+    # Horizontal gap between XY and ZY
+    gap_h_in = (pos_zy.x0 - pos_xy.x1) * figW
+    np.testing.assert_allclose(gap_h_in, gap_in, atol=1e-5)
+
+    # Vertical gap between XZ and XY
+    gap_v_in = (pos_xy.y0 - pos_xz.y1) * figH
+    np.testing.assert_allclose(gap_v_in, gap_in, atol=1e-5)
+
+    if with_labels and fig.axLabels is not None:
+        pos_labels = fig.axLabels.get_position()
+        # Vertical gap between XY and Labels
+        gap_labels_in = (pos_labels.y0 - pos_xy.y1) * figH
+        np.testing.assert_allclose(gap_labels_in, gap_in, atol=1e-5)
+
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("render_mode", ["points", "density"])
+def test_scatter_widget_physical_axes_gap(render_mode):
+    """
+    Verify that TNIAScatterWidget renders axes with exact 1/16th inch physical gap.
+    """
+    X = np.random.rand(50) * 10
+    Y = np.random.rand(50) * 20
+    Z = np.random.rand(50) * 5
+
+    w = show_zyx_max_scatter_interactive((Z, Y, X), figsize=(10, 8), render=render_mode)
+    fig = w._render()
+
+    figW, figH = (10, 8)
+    pos_xy = fig.axXY.get_position()
+    pos_zy = fig.axZY.get_position()
+    pos_xz = fig.axXZ.get_position()
+
+    gap_h_in = (pos_zy.x0 - pos_xy.x1) * figW
+    gap_v_in = (pos_xy.y0 - pos_xz.y1) * figH
+
+    np.testing.assert_allclose(gap_h_in, 1.0 / 16.0, atol=1e-5)
+    np.testing.assert_allclose(gap_v_in, 1.0 / 16.0, atol=1e-5)
+
+    plt.close(fig)
 
 
 

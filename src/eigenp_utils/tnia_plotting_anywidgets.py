@@ -253,7 +253,7 @@ def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projec
     return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None):
+def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, gap_in=1.0/16.0):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -349,56 +349,65 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
 
 
-    # Compute exact 1/16 inch physical gap size
     figW, figH = figsize if figsize is not None else (10, 10)
 
-    # 1. Target exactly 1/16 of an inch
-    target_gap_in = 1.0 / 16.0 
-
-    # 2. Calculate the usable area (accounting for the 0.01 and 0.99 margins from fig.subplots_adjust)
-    usable_W = figW * 0.98
-    usable_H = figH * 0.98
-
-    # 3. Apply the fraction-of-average-axis formula
-    ncols = 2
-    nrows = 3 if channel_labels is not None else 2
-
-    # max(..., 0.1) prevents division-by-zero if someone passes an unreadably small figsize
-    wspace = (ncols * target_gap_in) / max(usable_W - (ncols - 1) * target_gap_in, 0.1)
-    hspace = (nrows * target_gap_in) / max(usable_H - (nrows - 1) * target_gap_in, 0.1)
-
-    # Determine the extent widths for the grid layout
     w_zy = zy.shape[1]
     h_xz = xz.shape[0]
-
     w_xz = xz.shape[1]
     h_zy = zy.shape[0]
 
-    # Use max width/height to properly align the grid
     col1_w = max(xdim * px, w_xz * px)
     col2_w = w_zy * pz
     row1_h = max(ydim * py, h_zy * py)
     row2_h = h_xz * pz
+    label_row_h = (row1_h + row2_h) * 0.05 if channel_labels is not None else 0.0
+
+    margin_in = 0.05
+    avail_w_in = figW - gap_in - 2.0 * margin_in
+    total_unscaled_h = row1_h + row2_h + (label_row_h if channel_labels is not None else 0.0)
+    num_v_gaps = 2 if channel_labels is not None else 1
+    avail_h_in = figH - num_v_gaps * gap_in - 2.0 * margin_in
+
+    scale = min(avail_w_in / max(col1_w + col2_w, 1e-6), avail_h_in / max(total_unscaled_h, 1e-6))
+
+    w1_in = col1_w * scale
+    w2_in = col2_w * scale
+    h1_in = row1_h * scale
+    h2_in = row2_h * scale
+    hl_in = label_row_h * scale if channel_labels is not None else 0.0
+
+    block_w_in = w1_in + gap_in + w2_in
+    block_h_in = h1_in + gap_in + h2_in + (hl_in + gap_in if channel_labels is not None else 0.0)
+
+    left_margin_in = (figW - block_w_in) / 2.0
+    bottom_margin_in = (figH - block_h_in) / 2.0
+
+    x0_frac = left_margin_in / figW
+    w1_frac = w1_in / figW
+    gap_w_frac = gap_in / figW
+    w2_frac = w2_in / figW
+
+    x_col1 = x0_frac
+    x_col2 = x0_frac + w1_frac + gap_w_frac
+
+    y0_frac = bottom_margin_in / figH
+    h2_frac = h2_in / figH
+    gap_h_frac = gap_in / figH
+    h1_frac = h1_in / figH
+    hl_frac = hl_in / figH
+
+    y_row2 = y0_frac
+    y_row1 = y0_frac + h2_frac + gap_h_frac
 
     axLabels = None
     if channel_labels is not None:
-        label_row_h = (row1_h + row2_h) * 0.05
-        spec = gridspec.GridSpec(
-            ncols=2,
-            nrows=3,
-            height_ratios=[label_row_h, row1_h, row2_h],
-            width_ratios=[col1_w, col2_w],
-            hspace=hspace,
-            wspace=wspace,
-            figure=fig,
-        )
-        axLabels = fig.add_subplot(spec[0, 0])
-        axXY = fig.add_subplot(spec[1, 0])
-        axZY = fig.add_subplot(spec[1, 1])
-        axXZ = fig.add_subplot(spec[2, 0])
-        axBar = fig.add_subplot(spec[2, 1])
+        y_labels = y_row1 + h1_frac + gap_h_frac
+        axLabels = fig.add_axes([x_col1, y_labels, w1_frac, hl_frac])
+        axXY = fig.add_axes([x_col1, y_row1, w1_frac, h1_frac])
+        axZY = fig.add_axes([x_col2, y_row1, w2_frac, h1_frac])
+        axXZ = fig.add_axes([x_col1, y_row2, w1_frac, h2_frac])
+        axBar = fig.add_axes([x_col2, y_row2, w2_frac, h2_frac])
 
-        ### Color for channel_labels bbox !! ###
         axLabels.set_facecolor((0.85, 0.85, 0.85))
         axLabels.set_xticks([])
         axLabels.set_yticks([])
@@ -412,7 +421,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
                     return mcolors.to_hex(c(1.0)[:3])
                 return resolve_color(c)
 
-            # Use orig_colormap so multi-channel RGB arrays don't fall back to black labels
             if isinstance(orig_colormap, (list, tuple)):
                 color_list = [_get_color_str(c) for c in orig_colormap]
                 if len(color_list) < n_labels:
@@ -423,7 +431,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             else:
                 color_list = ['black'] * n_labels
 
-            fig_h_in = figsize[1] if figsize is not None else 10
+            fig_h_in = figH
             fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
 
             from matplotlib.offsetbox import TextArea, HPacker, AnchoredOffsetbox
@@ -438,18 +446,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             anchored_box = AnchoredOffsetbox(loc='center', child=packer, pad=0.0, frameon=False, borderpad=0.0)
             axLabels.add_artist(anchored_box)
     else:
-        # APPLIED FIX: Using the newly calculated hspace and wspace instead of hardcoded .01
-        spec = gridspec.GridSpec(ncols=2, nrows=2,
-                                 height_ratios=[row1_h, row2_h],
-                                 width_ratios=[col1_w, col2_w],
-                                 hspace=hspace,
-                                 wspace=wspace,
-                                 figure=fig)
-
-        axXY = fig.add_subplot(spec[0])
-        axZY = fig.add_subplot(spec[1])
-        axXZ = fig.add_subplot(spec[2])
-        axBar = fig.add_subplot(spec[3])
+        axXY = fig.add_axes([x_col1, y_row1, w1_frac, h1_frac])
+        axZY = fig.add_axes([x_col2, y_row1, w2_frac, h1_frac])
+        axXZ = fig.add_axes([x_col1, y_row2, w1_frac, h2_frac])
+        axBar = fig.add_axes([x_col2, y_row2, w2_frac, h2_frac])
 
     if gamma == 1:
         axXY.imshow(xy, cmap=colormap, vmin=vmin, vmax=vmax, extent=[0, xdim*px, ydim*py, 0], interpolation='nearest', alpha=opacity)
@@ -487,13 +487,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     fig.axBar = axBar
     fig.axLabels = axLabels
 
-    fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
     fig.canvas.draw()
-    if axLabels is not None:
-        pos_xy = axXY.get_position(original=False)
-        pos_labels = axLabels.get_position(original=False)
-        axLabels.set_position([pos_xy.x0, pos_labels.y0, pos_xy.width, pos_labels.height])
-
     return fig
 
 def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, figsize):
@@ -2479,35 +2473,59 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             z_xy_ratio = (self.sz / self.sx) if self.sx != self.sz else 1
 
-            # Grid logic uses max of the possible widths/heights
-            col1_w = int(max(w_x_xy, w_x_xz))
-            col2_w = int(w_z_zy * z_xy_ratio)
-            row1_h = int(max(w_y_xy, w_y_zy))
-            row2_h = int(w_z_xz * z_xy_ratio)
+            col1_w = max(w_x_xy, w_x_xz) * self.sx
+            col2_w = w_z_zy * z_xy_ratio * self.sx
+            row1_h = max(w_y_xy, w_y_zy) * self.sy
+            row2_h = w_z_xz * z_xy_ratio * self.sy
 
-            width_ratios  = [col1_w, col2_w]
-            height_ratios = [row1_h, row2_h]
+            figW, figH = self.figsize if self.figsize is not None else (10, 10)
+            gap_in = 1.0 / 16.0
+            margin_in = 0.05
 
-            TARGET_GAP_INCHES = 1.0 / 16.0
-            usable_W = self.figsize[0] * 0.98
-            usable_H = self.figsize[1] * 0.98
-    
-            wspace = (2 * TARGET_GAP_INCHES) / max(usable_W - TARGET_GAP_INCHES, 0.1)
-            hspace = (2 * TARGET_GAP_INCHES) / max(usable_H - TARGET_GAP_INCHES, 0.1)
+            avail_w_in = figW - gap_in - 2.0 * margin_in
+            avail_h_in = figH - gap_in - 2.0 * margin_in
 
-            fig, axs = plt.subplots(
-                2, 2, figsize=self.figsize, constrained_layout=False,
-                gridspec_kw=dict(width_ratios=width_ratios, height_ratios=height_ratios),
-                facecolor='none'
-            )
-            axXY, axZY = axs[0,0], axs[0,1]
-            axXZ, axBar = axs[1,0], axs[1,1]
+            scale = min(avail_w_in / max(col1_w + col2_w, 1e-6), avail_h_in / max(row1_h + row2_h, 1e-6))
 
-            # ASSIGN AXES TO FIGURE (CRITICAL FOR BOUNDING BOXES) <<<
+            w1_in = col1_w * scale
+            w2_in = col2_w * scale
+            h1_in = row1_h * scale
+            h2_in = row2_h * scale
+
+            block_w_in = w1_in + gap_in + w2_in
+            block_h_in = h1_in + gap_in + h2_in
+
+            left_margin_in = (figW - block_w_in) / 2.0
+            bottom_margin_in = (figH - block_h_in) / 2.0
+
+            x0_frac = left_margin_in / figW
+            w1_frac = w1_in / figW
+            gap_w_frac = gap_in / figW
+            w2_frac = w2_in / figW
+
+            x_col1 = x0_frac
+            x_col2 = x0_frac + w1_frac + gap_w_frac
+
+            y0_frac = bottom_margin_in / figH
+            h2_frac = h2_in / figH
+            gap_h_frac = gap_in / figH
+            h1_frac = h1_in / figH
+
+            y_row2 = y0_frac
+            y_row1 = y0_frac + h2_frac + gap_h_frac
+
+            fig = Figure(figsize=self.figsize, facecolor='none') if not plt.get_fignums() else plt.figure(figsize=self.figsize, facecolor='none')
+
+            axXY = fig.add_axes([x_col1, y_row1, w1_frac, h1_frac])
+            axZY = fig.add_axes([x_col2, y_row1, w2_frac, h1_frac])
+            axXZ = fig.add_axes([x_col1, y_row2, w1_frac, h2_frac])
+            axBar = fig.add_axes([x_col2, y_row2, w2_frac, h2_frac])
+
             fig.axXY = axXY
             fig.axZY = axZY
             fig.axXZ = axXZ
             fig.axBar = axBar
+            fig.axLabels = None
             
             for ax in (axXY, axZY, axXZ, axBar):
                 if ax is not axBar and self.subplot_bg is not None:
@@ -2637,7 +2655,6 @@ class TNIAScatterWidget(TNIAWidgetBase):
             both_given = getattr(self, '_pixel_sizes_given', False)
             _add_scale_bar(axXY, axBar, main_physical_width_um, both_given, self.figsize)
 
-            fig.tight_layout(pad=0.0)
             # FORCE MATPLOTLIB TRANSFORMS BEFORE RETURN <<<
             fig.canvas.draw()
             return fig
