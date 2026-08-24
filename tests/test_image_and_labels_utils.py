@@ -132,15 +132,100 @@ def test_sample_intensity_xyz_warning():
         res = sample_intensity_around_points(image_3d, points_xyz, diameter=3)
         assert np.isnan(res[0]) # Since 25 >= 5 (Z-dimension), it will be considered out of bounds
 
-def test_sample_intensity_along_surface_normals():
-    """Test that sample intensity along surface normals works as expected."""
-    img = np.ones((10, 10, 10))
-    grid = np.zeros((5, 5, 3))
-    grid[:, :, 0] = 5
-    grid[:, :, 1] = np.arange(5).reshape(-1, 1)
-    grid[:, :, 2] = np.arange(5)
-    res = sample_intensity_along_surface_normals(img, grid, thickness=3, num_steps=3, pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 1.0})
-    assert res.shape == (5, 5, 3)
+def test_sample_intensity_along_surface_normals_anisotropic_profile():
+    """
+    Test sampling intensity along surface normals for a planar mesh on an anisotropic volume.
+
+    Verifies that for an image with a Gaussian intensity profile centered at Z_phys = 10.0 um,
+    sampling along normals of a surface grid at Z_phys = 10.0 um (with Z pixel size = 2.0 um)
+    recovers a peak intensity at the central sampling step (offset 0.0) and symmetric falloff at +/- offsets.
+    """
+    # 3D volume of shape (11, 20, 20) with Z pixel size 2.0 um, Y & X 0.5 um
+    pixel_sizes = {'Z': 2.0, 'Y': 0.5, 'X': 0.5}
+
+    z_indices = np.arange(11)
+    z_phys = z_indices * pixel_sizes['Z']  # [0, 2, 4, ..., 20] um
+
+    # Peak intensity at Z_phys = 10.0 um (voxel Z = 5)
+    gaussian_z = np.exp(-((z_phys - 10.0) ** 2) / (2 * (2.0 ** 2))) * 100.0
+
+    img = np.zeros((11, 20, 20), dtype=float)
+    for z in range(11):
+        img[z, :, :] = gaussian_z[z]
+
+    # Create a planar surface grid at voxel Z = 5 (Z_phys = 10.0 um)
+    u_grid, v_grid = np.meshgrid(np.linspace(5, 15, 6), np.linspace(5, 15, 6), indexing='ij')
+    surface_grid = np.zeros((6, 6, 3), dtype=float)
+    surface_grid[:, :, 0] = 5.0  # Z coordinate in voxels
+    surface_grid[:, :, 1] = u_grid  # Y coordinate in voxels
+    surface_grid[:, :, 2] = v_grid  # X coordinate in voxels
+
+    # Sample thickness = 8.0 um centered at Z_phys = 10.0 um with 5 steps (-4.0, -2.0, 0.0, 2.0, 4.0 um)
+    # Using bicubic interpolation for smooth subpixel intensity evaluation
+    sampled = sample_intensity_along_surface_normals(
+        img,
+        surface_grid,
+        thickness=8.0,
+        num_steps=5,
+        interpolation='bicubic',
+        pixel_sizes=pixel_sizes
+    )
+
+    assert sampled.shape == (6, 6, 5)
+
+    # Check that for all interior grid points, step index 2 (offset 0.0 um, Z_phys = 10.0 um) is maximum
+    peak_step_indices = np.argmax(sampled, axis=-1)
+    assert np.all(peak_step_indices == 2)
+
+    # Check symmetry of sampled intensities across the central normal step
+    profile = sampled[3, 3, :]
+    assert np.isclose(profile[0], profile[4])
+    assert np.isclose(profile[1], profile[3])
+    assert profile[2] > profile[1] > profile[0]
+
+
+def test_sample_intensity_along_surface_normals_curved_surface_bicubic():
+    """
+    Test sampling intensity along surface normals over a curved mesh using bicubic interpolation.
+
+    Verifies subpixel continuous intensity sampling across normals of a spherical surface grid,
+    and checks that a UserWarning is raised when `pixel_sizes` is not provided.
+    """
+    # Create synthetic volume with a spherical intensity distribution centered at (15, 15, 15)
+    z, y, x = np.ogrid[:31, :31, :31]
+    radius_grid = np.sqrt((z - 15) ** 2 + (y - 15) ** 2 + (x - 15) ** 2)
+    img = np.exp(-((radius_grid - 8.0) ** 2) / (2 * (2.0 ** 2))) * 250.0
+
+    # Create a spherical surface grid at radius ~ 8 voxels
+    theta = np.linspace(0, np.pi, 8)
+    phi = np.linspace(0, 2 * np.pi, 12, endpoint=False)
+    theta_grid, phi_grid = np.meshgrid(theta, phi, indexing='ij')
+
+    r = 8.0
+    grid_z = 15.0 + r * np.cos(theta_grid)
+    grid_y = 15.0 + r * np.sin(theta_grid) * np.sin(phi_grid)
+    grid_x = 15.0 + r * np.sin(theta_grid) * np.cos(phi_grid)
+
+    surface_grid = np.stack([grid_z, grid_y, grid_x], axis=-1)
+
+    # Calling without pixel_sizes must issue a UserWarning
+    with pytest.warns(UserWarning, match="pixel_sizes not provided"):
+        sampled = sample_intensity_along_surface_normals(
+            img,
+            surface_grid,
+            thickness=4.0,
+            num_steps=7,
+            interpolation='bicubic',
+            pixel_sizes=None
+        )
+
+    assert sampled.shape == (8, 12, 7)
+    assert not np.isnan(sampled).any()
+
+    # The peak of the Gaussian shell is at radius = 8.0 (the surface grid position)
+    # The middle step (index 3, offset 0.0) should correspond to the maximum intensity along the normal profile
+    interior_peaks = np.argmax(sampled[2:6, :, :], axis=-1)
+    assert np.all(interior_peaks == 3)
 
 def test_sample_intensity_around_points_pixel_sizes():
     """Test that sample intensity around points pixel sizes works as expected."""
