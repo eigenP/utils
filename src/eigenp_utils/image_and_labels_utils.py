@@ -1,11 +1,23 @@
 import warnings
-import numpy as np
-from skimage.segmentation import expand_labels
-from scipy.ndimage import uniform_filter, map_coordinates
-from skimage import filters, feature, segmentation
-import scipy.ndimage as ndi
 from itertools import product
 from typing import Optional, Tuple, Dict, List, Union
+
+import numpy as np
+import scipy.ndimage as ndi
+from scipy.ndimage import uniform_filter, map_coordinates
+from scipy.interpolate import RegularGridInterpolator
+from skimage import filters, feature, segmentation
+from skimage.segmentation import expand_labels
+
+
+def _ensure_pixel_size_array(pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None) -> np.ndarray:
+    """Helper to convert dict or list to [Z, Y, X] numpy array."""
+    if pixel_sizes is None:
+        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
+        return np.array([1.0, 1.0, 1.0], dtype=np.float64)
+    if isinstance(pixel_sizes, dict):
+        return np.array([pixel_sizes.get('Z', 1.0), pixel_sizes.get('Y', 1.0), pixel_sizes.get('X', 1.0)], dtype=np.float64)
+    return np.array(pixel_sizes, dtype=np.float64)
 
 
 def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pixel_sizes=None):
@@ -256,7 +268,14 @@ def sample_intensity_around_points(image_3d, points_3d, diameter=5, pixel_sizes=
     return results.tolist()
 
 
-def sample_intensity_along_surface_normals(image, surface_points_grid, thickness=3, num_steps=5, interpolation='nearest', pixel_sizes=None):
+def sample_intensity_along_surface_normals(
+    image: np.ndarray,
+    surface_points_grid: np.ndarray,
+    thickness: float = 3.0,
+    num_steps: int = 5,
+    interpolation: str = 'nearest',
+    pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None
+) -> np.ndarray:
     """
     Samples an image along the normals of a precomputed surface grid, accounting for physical pixel sizes.
 
@@ -276,7 +295,7 @@ def sample_intensity_along_surface_normals(image, surface_points_grid, thickness
     interpolation : str, optional
         Interpolation method to use. Options are 'nearest' (order 0) or 'bicubic' (order 3).
         Default is 'nearest'.
-    pixel_sizes : dict, optional
+    pixel_sizes : dict, list or ndarray, optional
         Dictionary specifying physical pixel dimensions, e.g., {'Z': 0.79, 'Y': 0.468, 'X': 0.468}.
         If provided, normals and offsets are computed in physical space. Assumes Z, Y, X order.
 
@@ -285,14 +304,7 @@ def sample_intensity_along_surface_normals(image, surface_points_grid, thickness
     sampled_3d : ndarray
         A 3D array of shape (U, V, num_steps) containing the sampled intensities.
     """
-    if pixel_sizes is None:
-        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
-
-    # Determine spacing, default to isotropic 1.0 if not provided
-    if pixel_sizes is None:
-        spacing = np.array([1.0, 1.0, 1.0])
-    else:
-        spacing = np.array([pixel_sizes.get('Z', 1.0), pixel_sizes.get('Y', 1.0), pixel_sizes.get('X', 1.0)])
+    spacing = _ensure_pixel_size_array(pixel_sizes)
 
     # 1. Convert grid to physical space for accurate normal computation
     physical_grid = surface_points_grid * spacing
@@ -303,14 +315,14 @@ def sample_intensity_along_surface_normals(image, surface_points_grid, thickness
 
     physical_normals = np.cross(t_u, t_v)
     norms = np.linalg.norm(physical_normals, axis=2, keepdims=True)
-    physical_normals = np.divide(physical_normals, norms, out=np.zeros_like(physical_normals), where=norms!=0)
+    physical_normals = np.divide(physical_normals, norms, out=np.zeros_like(physical_normals), where=norms != 0)
 
     # 3. Reshape for sampling
     physical_pts = physical_grid.reshape(-1, 3)
     normals_flat = physical_normals.reshape(-1, 3)
 
     # 4. Create sampling coordinates along the normal in physical space
-    offsets = np.linspace(-thickness/2, thickness/2, num_steps)
+    offsets = np.linspace(-thickness / 2.0, thickness / 2.0, num_steps)
     physical_sampling_coords = physical_pts[:, np.newaxis, :] + (normals_flat[:, np.newaxis, :] * offsets[np.newaxis, :, np.newaxis])
 
     # 5. Convert back to pixel space for interpolation
@@ -323,19 +335,6 @@ def sample_intensity_along_surface_normals(image, surface_points_grid, thickness
 
     # 7. Reshape back to (U, V, steps)
     return sampled_flat.reshape(surface_points_grid.shape[0], surface_points_grid.shape[1], num_steps)
-import numpy as np
-from scipy.interpolate import RegularGridInterpolator
-from itertools import product
-from scipy.ndimage import map_coordinates
-
-def _ensure_pixel_size_array(pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None) -> np.ndarray:
-    """Helper to convert dict or list to [Z, Y, X] numpy array."""
-    if pixel_sizes is None:
-        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
-        return np.array([1.0, 1.0, 1.0], dtype=np.float64)
-    if isinstance(pixel_sizes, dict):
-        return np.array([pixel_sizes.get('Z', 1.0), pixel_sizes.get('Y', 1.0), pixel_sizes.get('X', 1.0)], dtype=np.float64)
-    return np.array(pixel_sizes, dtype=np.float64)
 
 def fit_plane_ransac(
     points_zyx: np.ndarray,
