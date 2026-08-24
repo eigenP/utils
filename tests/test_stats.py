@@ -180,6 +180,27 @@ def test_remove_outliers_mahalanobis_dataframe():
     # The NaN row should be kept
     assert np.isnan(cleaned_nan.loc[0, 'x'])
 
+def test_mahalanobis_finite_sample_bound():
+    """Test that exact Beta distribution thresholding effectively catches outliers in small datasets."""
+    np.random.seed(42)
+    N = 10
+    d = 2
+
+    # In a very small dataset with an extreme outlier, the exact D^2 is physically bounded by (N-1)^2/N = 8.1
+    # Using the asymptotic chi-square threshold (e.g. at 0.99) might exceed this bound and fail to filter the outlier.
+    # The Beta threshold correctly adjusts for the sample size.
+    X = np.random.randn(N, d)
+    X[0] = [1000000, 1000000]
+
+    df = pd.DataFrame(X, columns=['x', 'y'])
+
+    # 0.99 threshold. For N=10, d=2, the Chi-Square 0.99 threshold is 9.21, which is > 8.1 (impossible to exceed).
+    # The Beta threshold will be around 7.25, properly identifying the outlier.
+    filtered_df = remove_outliers(df, method='mahalanobis', threshold=0.99)
+
+    assert len(filtered_df) == N - 1
+    assert 1000000 not in filtered_df['x'].values
+
 def test_remove_outliers_mahalanobis_errors():
     """Test that remove outliers mahalanobis errors works as expected."""
     df = pd.DataFrame({'x': [1, 2, 3], 'y': [4, 5, 6]})
