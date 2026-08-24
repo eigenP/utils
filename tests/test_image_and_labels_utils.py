@@ -2,9 +2,20 @@ from scipy.ndimage import shift
 import numpy as np
 import pytest
 
-from eigenp_utils.image_and_labels_utils import _ensure_pixel_size_array, fit_plane_ransac, generate_plane_basis, sample_volume_plane
-from eigenp_utils.image_and_labels_utils import voronoi_otsu_labeling, windowed_slice_projection, sample_intensity_around_points
-from eigenp_utils.image_and_labels_utils import windowed_slice_projection, optimized_entire_labels_touching_mask, sample_intensity_around_points, sample_intensity_along_surface_normals, voronoi_otsu_labeling
+from eigenp_utils.image_and_labels_utils import (
+    _ensure_pixel_size_array,
+    fit_plane_ransac,
+    generate_plane_basis,
+    sample_volume_plane,
+    voronoi_otsu_labeling,
+    windowed_slice_projection,
+    sample_intensity_around_points,
+    optimized_entire_labels_touching_mask,
+    sample_intensity_along_surface_normals,
+    create_ellipsoid_struct,
+    generate_morphological_surface_mask,
+    estimate_inter_label_distance,
+)
 
 
 
@@ -444,3 +455,102 @@ def test_sample_volume_plane():
 
     # Should all be 1s since we are sampling the plane at Z=5
     assert np.allclose(sampled, 1.0)
+
+
+def test_create_ellipsoid_struct():
+    """
+    🔎 Test: Verify structuring element creation for 3D morphological operations.
+    💡 What: Tests that `create_ellipsoid_struct` generates correct boolean 3D masks for given radius and spacing.
+    🎯 Why: Ensures physical scaling correctly determines voxel bounding dimensions and active ellipsoid region.
+    """
+    # Isotropic test: radius = 3.0 um, spacing = 1.0 um -> radius 3 voxels -> shape (7, 7, 7)
+    struct_iso = create_ellipsoid_struct(radius_um=3.0, pixel_sizes={'Z': 1.0, 'Y': 1.0, 'X': 1.0})
+    assert struct_iso.shape == (7, 7, 7)
+    assert struct_iso.dtype == bool
+    # Center voxel must be True
+    assert struct_iso[3, 3, 3]
+
+    # Anisotropic test: spacing (2.0, 1.0, 1.0) -> radii_vox = (1.5, 3, 3) -> shape (5, 7, 7)
+    struct_aniso = create_ellipsoid_struct(radius_um=3.0, spacing=(2.0, 1.0, 1.0))
+    assert struct_aniso.shape == (5, 7, 7)
+    assert struct_aniso[2, 3, 3]
+
+    # Tiny radius returns 3x3x3 grid with center voxel True
+    struct_tiny = create_ellipsoid_struct(radius_um=1e-8, spacing=(1.0, 1.0, 1.0))
+    assert struct_tiny.shape == (3, 3, 3)
+    assert struct_tiny[1, 1, 1]
+    assert np.sum(struct_tiny) == 1
+
+
+def test_generate_morphological_surface_mask():
+    """
+    🔎 Test: Verify generation of morphological envelope and surface layer.
+    💡 What: Tests envelope closing and surface mask calculation on a synthetic 3D sphere/cube binary mask.
+    🎯 Why: Ensures surface layer extraction is accurately bounded within specified physical surface depth.
+    """
+    # Create synthetic 3D mask with a sphere of radius 10 at center
+    vol = np.zeros((30, 30, 30), dtype=bool)
+    z, y, x = np.ogrid[:30, :30, :30]
+    mask = (z - 15)**2 + (y - 15)**2 + (x - 15)**2 <= 10**2
+    vol[mask] = True
+
+    surface_mask, envelope = generate_morphological_surface_mask(
+        vol,
+        spacing=(1.0, 1.0, 1.0),
+        closing_radius_um=2.0,
+        surface_depth_um=3.0,
+        downscale_factor=1,
+        fill_holes=True
+    )
+
+    assert surface_mask.shape == vol.shape
+    assert envelope.shape == vol.shape
+    assert envelope.dtype == bool
+    assert surface_mask.dtype == bool
+
+    # Envelope should cover all foreground mask voxels
+    assert np.all(envelope[vol])
+    # Surface mask must be a subset of envelope
+    assert np.all(envelope[surface_mask])
+    # Center of sphere (dist > surface_depth_um) should not be in surface_mask
+    assert not surface_mask[15, 15, 15]
+
+    # Test empty mask handling
+    empty_vol = np.zeros((10, 10, 10), dtype=bool)
+    surf_empty, env_empty = generate_morphological_surface_mask(empty_vol)
+    assert not np.any(surf_empty)
+    assert not np.any(env_empty)
+
+
+def test_estimate_inter_label_distance():
+    """
+    🔎 Test: Verify inter-nucleus distance estimation using label centroids and KDTree.
+    💡 What: Tests inter-label physical distance calculations for synthetic 3D labeled centroids.
+    🎯 Why: Guarantees accurate statistical estimation (median, p75, p90, recommended closing radius).
+    """
+    labels = np.zeros((50, 50, 50), dtype=int)
+    # Place 3 distinct spherical labels at known physical locations
+    # Label 1 at (10, 10, 10), Label 2 at (10, 10, 20) -> dist = 10 um (with 1um spacing)
+    # Label 3 at (10, 10, 30) -> dist to nearest = 10 um
+    labels[8:12, 8:12, 8:12] = 1
+    labels[8:12, 8:12, 18:22] = 2
+    labels[8:12, 8:12, 28:32] = 3
+
+    metrics = estimate_inter_label_distance(
+        labels,
+        pixel_sizes={'Z': 1.0, 'Y': 1.0, 'X': 1.0},
+        k_nearest=2
+    )
+
+    assert "median_um" in metrics
+    assert "p75_um" in metrics
+    assert "p90_um" in metrics
+    assert "recommended_closing_um" in metrics
+
+    assert np.isclose(metrics["median_um"], 10.0, atol=0.5)
+
+    # Test fallback when fewer labels than k_nearest are provided
+    few_labels = np.zeros((20, 20, 20), dtype=int)
+    few_labels[5:8, 5:8, 5:8] = 1
+    fallback_metrics = estimate_inter_label_distance(few_labels, spacing=(2.0, 2.0, 2.0), k_nearest=2)
+    assert fallback_metrics["median_um"] == 2.0

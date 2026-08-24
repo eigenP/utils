@@ -2,10 +2,14 @@ import warnings
 import numpy as np
 from skimage.segmentation import expand_labels
 from scipy.ndimage import uniform_filter, map_coordinates
+from scipy import ndimage
+from scipy.spatial import KDTree
 from skimage import filters, feature, segmentation
+from skimage.transform import resize
 import scipy.ndimage as ndi
 from itertools import product
 from typing import Optional, Tuple, Dict, List, Union
+from collections.abc import Iterable
 
 
 def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pixel_sizes=None):
@@ -328,6 +332,30 @@ from scipy.interpolate import RegularGridInterpolator
 from itertools import product
 from scipy.ndimage import map_coordinates
 
+def _resolve_spacing(
+    spacing: Optional[Union[Iterable[float], Dict[str, float]]] = None,
+    pixel_sizes: Optional[Union[Dict[str, float], Iterable[float]]] = None,
+    ndim: int = 3
+) -> tuple[float, ...]:
+    """
+    Resolves physical pixel spacing from either `pixel_sizes` or legacy `spacing` argument.
+    Emits UserWarning if neither is provided.
+    """
+    if pixel_sizes is not None:
+        if isinstance(pixel_sizes, dict):
+            dim_keys = ['Z', 'Y', 'X'][-ndim:]
+            return tuple(float(pixel_sizes.get(k, 1.0)) for k in dim_keys)
+        return tuple(float(s) for s in pixel_sizes)
+
+    if spacing is not None:
+        if isinstance(spacing, dict):
+            dim_keys = ['Z', 'Y', 'X'][-ndim:]
+            return tuple(float(spacing.get(k, 1.0)) for k in dim_keys)
+        return tuple(float(s) for s in spacing)
+
+    warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
+    return (1.0,) * ndim
+
 def _ensure_pixel_size_array(pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None) -> np.ndarray:
     """Helper to convert dict or list to [Z, Y, X] numpy array."""
     if pixel_sizes is None:
@@ -336,6 +364,187 @@ def _ensure_pixel_size_array(pixel_sizes: Optional[Union[Dict[str, float], List[
     if isinstance(pixel_sizes, dict):
         return np.array([pixel_sizes.get('Z', 1.0), pixel_sizes.get('Y', 1.0), pixel_sizes.get('X', 1.0)], dtype=np.float64)
     return np.array(pixel_sizes, dtype=np.float64)
+
+def create_ellipsoid_struct(
+    radius_um: float,
+    spacing: Optional[Union[Iterable[float], Dict[str, float]]] = None,
+    pixel_sizes: Optional[Union[Dict[str, float], Iterable[float]]] = None
+) -> np.ndarray:
+    """Creates a boolean 3D ellipsoidal structuring element centered at origin."""
+    sp = _resolve_spacing(spacing, pixel_sizes, ndim=3)
+    radius_um = max(float(radius_um), 1e-6)
+
+    radii_vox = [radius_um / s for s in sp]
+    grids = [np.arange(-np.ceil(r), np.ceil(r) + 1) * s for r, s in zip(radii_vox, sp)]
+    mesh = np.meshgrid(*grids, indexing='ij')
+
+    dist_sq = sum(g**2 for g in mesh)
+    struct = dist_sq <= (radius_um ** 2)
+    # Guarantee at least the single center voxel is active
+    if not np.any(struct):
+        struct = np.ones((1, 1, 1), dtype=bool)
+    return struct
+
+
+def generate_morphological_surface_mask(
+    binary_mask: np.ndarray,
+    spacing: Optional[Union[Iterable[float], Dict[str, float]]] = None,
+    closing_radius_um: float = 10.0,
+    surface_depth_um: float = 2.0,
+    downscale_factor: int = 2,
+    fill_holes: bool = True,
+    pixel_sizes: Optional[Union[Dict[str, float], Iterable[float]]] = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Computes a continuous morphological envelope and extracts the physical surface layer.
+    """
+    sp = _resolve_spacing(spacing, pixel_sizes, ndim=binary_mask.ndim)
+
+    coords = np.argwhere(binary_mask)
+    if coords.size == 0:
+        return np.zeros_like(binary_mask, dtype=bool), np.zeros_like(binary_mask, dtype=bool)
+
+    # 1. Crop to global foreground bounding box
+    lo = coords.min(axis=0)
+    hi = coords.max(axis=0) + 1
+    slices = tuple(slice(a, b) for a, b in zip(lo, hi))
+    cropped_binary = binary_mask[slices]
+
+    # 2. Downscale
+    if downscale_factor > 1:
+        downscaled_shape = tuple(
+            max(1, int(np.ceil(s / downscale_factor)))
+            for s in cropped_binary.shape
+        )
+        downscaled_binary = resize(
+            cropped_binary,
+            output_shape=downscaled_shape,
+            order=0,
+            preserve_range=True,
+            anti_aliasing=False
+        ).astype(bool)
+        effective_spacing = tuple(s * downscale_factor for s in sp)
+    else:
+        downscaled_binary = cropped_binary
+        effective_spacing = sp
+
+    # 3. Anisotropic morphological closing with boundary padding to prevent edge erosion
+    struct = create_ellipsoid_struct(closing_radius_um, spacing=effective_spacing)
+    pad_width = tuple((s, s) for s in struct.shape)
+    padded_binary = np.pad(downscaled_binary, pad_width, mode='constant', constant_values=False)
+
+    downscaled_envelope = ndimage.binary_closing(padded_binary, structure=struct)
+
+    if fill_holes:
+        downscaled_envelope = ndimage.binary_fill_holes(downscaled_envelope)
+
+    # 4. Extract surface zone using physical distance transform
+    dist_from_outside = ndimage.distance_transform_edt(
+        downscaled_envelope,
+        sampling=effective_spacing
+    )
+    downscaled_surface = (dist_from_outside > 0) & (dist_from_outside <= surface_depth_um)
+
+    # Safety: if depth is smaller than 1 voxel step, take immediate 1-voxel outer shell
+    if not np.any(downscaled_surface) and np.any(downscaled_envelope):
+        eroded = ndimage.binary_erosion(downscaled_envelope)
+        downscaled_surface = downscaled_envelope & ~eroded
+
+    # Unpad back to downscaled dimensions
+    unpad_slices = tuple(
+        slice(p[0], p[0] + orig_s)
+        for p, orig_s in zip(pad_width, downscaled_binary.shape)
+    )
+    downscaled_envelope = downscaled_envelope[unpad_slices]
+    downscaled_surface = downscaled_surface[unpad_slices]
+
+    # 5. Upscale back to cropped dimensions
+    if downscale_factor > 1:
+        cropped_envelope = resize(
+            downscaled_envelope,
+            output_shape=cropped_binary.shape,
+            order=0,
+            preserve_range=True,
+            anti_aliasing=False
+        ).astype(bool)
+
+        cropped_surface = resize(
+            downscaled_surface,
+            output_shape=cropped_binary.shape,
+            order=0,
+            preserve_range=True,
+            anti_aliasing=False
+        ).astype(bool)
+    else:
+        cropped_envelope = downscaled_envelope
+        cropped_surface = downscaled_surface
+
+    # 6. Map back to original coordinate volume
+    full_envelope = np.zeros_like(binary_mask, dtype=bool)
+    surface_mask = np.zeros_like(binary_mask, dtype=bool)
+
+    full_envelope[slices] = cropped_envelope
+    surface_mask[slices] = cropped_surface
+
+    return surface_mask, full_envelope
+
+
+def estimate_inter_label_distance(
+    labels: np.ndarray,
+    spacing: Optional[Union[Iterable[float], Dict[str, float]]] = None,
+    sample_size: int = 500,
+    k_nearest: int = 2,
+    pixel_sizes: Optional[Union[Dict[str, float], Iterable[float]]] = None
+) -> dict[str, float]:
+    """
+    Rapidly estimates characteristic inter-nucleus spacing in physical units (µm).
+    """
+    sp = _resolve_spacing(spacing, pixel_sizes, ndim=labels.ndim)
+
+    unique_ids = np.unique(labels)
+    unique_ids = unique_ids[unique_ids != 0]
+
+    min_spacing = min(sp)
+    if len(unique_ids) < k_nearest:
+        return {
+            "median_um": float(min_spacing),
+            "p75_um": float(min_spacing),
+            "p90_um": float(min_spacing),
+            "recommended_closing_um": float(np.round(1.5 * min_spacing, 1))
+        }
+
+    # 1. Subsample label IDs
+    if len(unique_ids) > sample_size:
+        sample_ids = np.random.choice(unique_ids, size=sample_size, replace=False)
+    else:
+        sample_ids = unique_ids
+
+    # 2. Fast centroid computation (passes labels directly to avoid temporary boolean arrays)
+    centroids_vox = ndimage.center_of_mass(
+        labels,
+        labels=labels,
+        index=sample_ids
+    )
+    centroids_um = np.asarray(centroids_vox, dtype=np.float64) * np.asarray(sp, dtype=np.float64)
+
+    # 3. KDTree nearest-neighbor query
+    tree = KDTree(centroids_um)
+    distances, _ = tree.query(centroids_um, k=k_nearest)
+    nn_dists_um = distances[:, k_nearest - 1]
+
+    median_d = float(np.percentile(nn_dists_um, 50))
+    p75_d = float(np.percentile(nn_dists_um, 75))
+    p90_d = float(np.percentile(nn_dists_um, 90))
+
+    # Ensure closing radius is at least 1.0x the smallest voxel spacing
+    recommended_closing_um = float(np.round(max(0.6 * p75_d, min_spacing), 1))
+
+    return {
+        "median_um": median_d,
+        "p75_um": p75_d,
+        "p90_um": p90_d,
+        "recommended_closing_um": recommended_closing_um
+    }
 
 def fit_plane_ransac(
     points_zyx: np.ndarray,
