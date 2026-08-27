@@ -6,10 +6,12 @@
 
 ### Image Analysis
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
-* **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`. Memory optimized for large datasets, with a parallelization vignette available via `dask_extract_surface`.
+* **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`. Auxiliary capabilities include expanding surface thickness (`expand_surface_z`) and iteratively adjusting mask locations (`adjust_mask_location`). Memory optimized for large datasets, with a parallelization vignette available via `dask_extract_surface`.
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
 * **Intensity Rescaling**: Tools for contrast enhancement (including CLAHE), slice-by-slice brightness adjustment (`adjust_brightness_per_slice`), Z-axis intensity decay correction using exact analytical Ordinary Least Squares (OLS) fitting (`correct_z_intensity_decay`), and pure-NumPy/SciPy BaSiCPy shading correction (`fit_basic_shading`, `apply_basic_shading`).
 * **Segmentation**: Fast 2D/3D spot labeling using `voronoi_otsu_labeling`.
+* **Label & Mask Processing**: Utilities for rapid physical spacing estimation (`estimate_inter_label_distance`) and optimized mask filtering to isolate complete overlapping structures (`optimized_entire_labels_touching_mask`).
+* **Volumetric Sampling**: Thick Z-slice geometric aggregations (`windowed_slice_projection`), sub-volume spatial sampling (`sample_intensity_around_points`), and continuous intensity profiling evaluated strictly along geometric mesh normal vectors (`sample_intensity_along_surface_normals`).
 * **Anisotropic Pixel Support**: Core spatial processing and morphology functions natively handle physical pixel sizes to accurately support anisotropic microscopy data without structural distortion.
 * **3D Plane Sampling & Geometry**: Utilities to fit planes using RANSAC (`fit_plane_ransac`), compute orthonormal bases (`generate_plane_basis`), and dynamically extract or sample 2D oriented planes from anisotropic 3D volumes (`sample_volume_plane`).
 
@@ -37,9 +39,9 @@
 
 
 ### Core Utilities
-* **Spline Utilities**: Calculate tangent vectors, project points onto planes for arbitrary splines and discrete curves, and calculate real-world arc lengths (`calculate_spline_length`) (`spline_utils.py`).
+* **Spline Utilities**: Fit analytical cubic splines (`fit_cubic_spline`), calculate tangent vectors and real-world arc lengths (`calculate_spline_length`), and dynamically rasterize mathematical splines into volumetric image bounds (`create_nd_image_from_spline`, `create_3d_image_from_spline`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
-* **I/O Utilities**: Functions to streamline file and data reading.
+* **I/O Utilities**: Functions to streamline file operations, including safe atomic saves preventing data loss (`check_file_before_save`), streaming HTTP downloads (`download_file`), and gzip decompression (`un_gzip`).
 
 ### Examples
 * **Notebooks**: The `notebooks/` directory contains Marimo notebooks demonstrating package functionalities, such as using statistical utilities with classic datasets.
