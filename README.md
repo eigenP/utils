@@ -5,6 +5,7 @@
 ## Features
 
 ### Image Analysis
+* **Morphology & Spatial Estimations**: `generate_morphological_surface_mask` for robust continuous morphological envelope computation and extracting physical surface layers, and `estimate_inter_label_distance` to rapidly estimate characteristic inter-nucleus spacing in physical units.
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
 * **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`. Memory optimized for large datasets, with a parallelization vignette available via `dask_extract_surface`.
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
@@ -93,6 +94,25 @@ uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
 ```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+
+## Quickstart
+
+Here is a brief example showing how to import and use the interactive 3D viewer widget for orthogonal slicing:
+
+```python
+import numpy as np
+from eigenp_utils.tnia_plotting_anywidgets import show_zyx
+
+# Generate some sample 3D data (Z, Y, X)
+data = np.random.rand(10, 100, 100)
+
+# Display interactive orthogonal views
+show_zyx(data, data, data, pixel_sizes=(1.0, 1.0, 1.0))
+```
+
+## Contributing
+
+We welcome contributions and bug reports! Please visit our [GitHub Issues](https://github.com/eigenP/utils/issues) to report bugs or request new features, or check out our [Repository](https://github.com/eigenP/utils.git) to submit pull requests.
 
 ## License
 
