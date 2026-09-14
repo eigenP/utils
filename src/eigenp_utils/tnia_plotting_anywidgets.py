@@ -445,7 +445,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
                 text_areas.append(ta)
 
             packer = HPacker(children=text_areas, align="center", pad=0, sep=10)
-            anchored_box = AnchoredOffsetbox(loc='center', child=packer, pad=0.0, frameon=False, borderpad=0.0)
+            anchored_box = AnchoredOffsetbox(
+                loc='lower center', child=packer, pad=0.0, frameon=False, borderpad=0.0,
+                bbox_to_anchor=(0.5, 0.2), bbox_transform=axLabels.transAxes
+            )
             axLabels.add_artist(anchored_box)
     else:
         axXY = fig.add_axes([x_col1, y_row1, w1_frac, h1_frac])
