@@ -408,11 +408,16 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         axXZ = fig.add_axes([x_col1, y_row2, w1_frac, h2_frac])
         axBar = fig.add_axes([x_col2, y_row2, w2_frac, h2_frac])
 
-        axLabels.set_facecolor((0.85, 0.85, 0.85))
+        axLabels.patch.set_visible(False)
         axLabels.set_xticks([])
         axLabels.set_yticks([])
         for spine in axLabels.spines.values():
             spine.set_visible(False)
+
+        fig_h_in = figH
+        fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
+        bar_linewidth = max(1.0, fontsize_pt * 0.15)
+        axLabels.plot([0, 1], [0, 0], transform=axLabels.transAxes, color=(0.85, 0.85, 0.85), linewidth=bar_linewidth, clip_on=False)
 
         n_labels = len(channel_labels)
         if n_labels > 0:
@@ -430,9 +435,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
                 color_list = [c] * n_labels
             else:
                 color_list = ['black'] * n_labels
-
-            fig_h_in = figH
-            fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
 
             from matplotlib.offsetbox import TextArea, HPacker, AnchoredOffsetbox
 
