@@ -408,11 +408,16 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         axXZ = fig.add_axes([x_col1, y_row2, w1_frac, h2_frac])
         axBar = fig.add_axes([x_col2, y_row2, w2_frac, h2_frac])
 
-        axLabels.set_facecolor((0.85, 0.85, 0.85))
+        axLabels.patch.set_visible(False)
         axLabels.set_xticks([])
         axLabels.set_yticks([])
         for spine in axLabels.spines.values():
             spine.set_visible(False)
+
+        fig_h_in = figH
+        fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
+        bar_linewidth = max(1.0, fontsize_pt * 0.15)
+        axLabels.plot([0, 1], [0, 0], transform=axLabels.transAxes, color=(0.85, 0.85, 0.85), linewidth=bar_linewidth, clip_on=False)
 
         n_labels = len(channel_labels)
         if n_labels > 0:
@@ -431,9 +436,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             else:
                 color_list = ['black'] * n_labels
 
-            fig_h_in = figH
-            fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
-
             from matplotlib.offsetbox import TextArea, HPacker, AnchoredOffsetbox
 
             text_areas = []
@@ -443,7 +445,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
                 text_areas.append(ta)
 
             packer = HPacker(children=text_areas, align="center", pad=0, sep=10)
-            anchored_box = AnchoredOffsetbox(loc='center', child=packer, pad=0.0, frameon=False, borderpad=0.0)
+            anchored_box = AnchoredOffsetbox(
+                loc='lower center', child=packer, pad=0.0, frameon=False, borderpad=0.0,
+                bbox_to_anchor=(0.5, 0.2), bbox_transform=axLabels.transAxes
+            )
             axLabels.add_artist(anchored_box)
     else:
         axXY = fig.add_axes([x_col1, y_row1, w1_frac, h1_frac])
