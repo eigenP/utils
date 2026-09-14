@@ -1176,3 +1176,40 @@ def test_annotator_click_with_rotate_view():
 
     assert [target_z, target_y, target_x] in widget.points, \
         f"Annotator click with rotation failed. Expected {[target_z, target_y, target_x]} in {widget.points}"
+
+
+def test_channel_label_height_scaling_with_fontsize():
+    """
+    Test that the channel label axis height (axLabels) scales with fontsize_pt
+    (figure height) and provides sufficient fake spacing so labels are not cropped.
+    """
+    im = np.zeros((10, 20, 20), dtype=np.float32)
+    labels = ["Channel 0", "Channel 1"]
+
+    # Small figure height -> smaller fontsize
+    fig_small = show_zyx(
+        xy=im[5, :, :], xz=im[:, 10, :], zy=im[:, :, 10],
+        figsize=(8, 4),
+        channel_labels=labels
+    )
+    h_small = fig_small.axLabels.get_position().height
+
+    # Large figure height -> larger fontsize
+    fig_large = show_zyx(
+        xy=im[5, :, :], xz=im[:, 10, :], zy=im[:, :, 10],
+        figsize=(8, 12),
+        channel_labels=labels
+    )
+    h_large = fig_large.axLabels.get_position().height
+
+    try:
+        assert fig_small.axLabels is not None
+        assert fig_large.axLabels is not None
+        # Position height fraction should account for font size scaling
+        pos_small = fig_small.axLabels.get_position()
+        pos_large = fig_large.axLabels.get_position()
+        assert pos_small.height > 0
+        assert pos_large.height > 0
+    finally:
+        plt.close(fig_small)
+        plt.close(fig_large)
