@@ -7,7 +7,6 @@ import unittest
 from eigenp_utils.extended_depth_of_focus import best_focus_image
 
 
-
 # =========================================
 # Source: test_depth_of_focus_subpixel.py
 # =========================================
@@ -122,8 +121,6 @@ class TestDepthOfFocusSubpixel(unittest.TestCase):
         # but regular grid interpolation should handle it well.
         self.assertLess(rmse, 0.20, f"Slanted plane RMSE {rmse} is too high (expected < 0.20)")
 
-if __name__ == "__main__":
-    unittest.main()
 
 # =========================================
 # Source: test_focus_properties.py
@@ -214,8 +211,6 @@ class TestFocusProperties(unittest.TestCase):
         self.assertLess(max_diff, 0.1,
             "Ramp reconstruction failed. Partition of Unity violated?")
 
-if __name__ == '__main__':
-    unittest.main()
 
 # =========================================
 # Source: test_edof_interpolation.py
@@ -240,62 +235,29 @@ def test_interpolation_quality():
     true_peak_z = 2.5
     sigma_z = 1.0
 
-    # Create a texture (e.g. a bright spot)
-    # For simplicity, just a uniform plane that varies in Z
-    # Or a single pixel to check impulse response?
-    # Let's use a small Gaussian spot in XY as well to ensure it's "focused"
     y, x = np.ogrid[:ny, :nx]
     cy, cx = ny//2, nx//2
     sigma_xy = 5.0
     xy_profile = np.exp(-((y-cy)**2 + (x-cx)**2) / (2 * sigma_xy**2))
 
     for z in range(nz):
-        # Gaussian intensity profile in Z
-        # Note: In real EDOF, "focus" means sharpness (gradient), not just intensity.
-        # But best_focus_image reconstructs the PIXEL VALUE.
-        # If the pixel value varies with Z (as it does in focus), we want to recover the value at best_z.
-        # For a fluorescent bead, intensity is max at focus.
         intensity_factor = np.exp(-(z - true_peak_z)**2 / (2 * sigma_z**2))
         stack[z] = xy_profile * intensity_factor
 
-    # 2. Run best_focus_image
-    # We force the patch size to be large so we essentially treat it as one block
-    # to avoid patch boundary artifacts complicating the measurement.
-    # However, best_focus_image calculates focus metric.
-    # For a pure intensity gaussian, the "sharpness" (Laplacian) is also max at the peak intensity
-    # because Laplacian of Gaussian ~ Gaussian (roughly, second derivative).
-    # d2/dx2 (exp(-x^2)) = (4x^2 - 2) exp(-x^2). The envelope is still Gaussian-ish.
-
     result = best_focus_image(stack, patch_size=32)
-
-    # 3. Measure Peak Intensity
-    # The true peak intensity at (cy, cx) should be 1.0 * 1.0 = 1.0 (at z=2.5)
-    # At z=2 and z=3, intensity is exp(-0.5^2/2) = exp(-0.125) = 0.882
-    # Linear interp: (0.882 + 0.882) / 2 = 0.882.
-    # We expect the result to be significantly higher than 0.882 if cubic is used.
 
     reconstructed_peak = result[cy, cx]
 
     print(f"Reconstructed Peak: {reconstructed_peak:.4f}")
 
-    # Theoretical limits
     val_at_node = np.exp(-(0.5)**2 / 2) # 0.882
     print(f"Value at nodes (z=2,3): {val_at_node:.4f}")
     print(f"True Peak: 1.0000")
 
-    # For linear, it should be close to 0.882
-    # For cubic, it should be > 0.95 maybe?
-
-    # Check if we are doing better than linear
-    # We set a threshold halfway between linear and perfect
-    # Linear is approx 0.8825. 0.94 is a safe threshold for cubic (0.9522).
     threshold = 0.94
 
-    assert reconstructed_peak > threshold, f"Reconstruction {reconstructed_peak:.4f} is too low (Linear behavior?). Expected > {threshold:.4f}"
+    assert reconstructed_peak > threshold, f"Reconstruction {reconstructed_peak:.4f} is too low. Expected > {threshold:.4f}"
 
-
-if __name__ == "__main__":
-    test_interpolation_quality()
 
 # =========================================
 # Source: test_depth_of_focus.py
@@ -308,23 +270,6 @@ def test_best_focus_checkerboard_reconstruction():
 
     This test verifies that the `best_focus_image` algorithm correctly identifies and reconstructs
     regions of focus from a 3D stack.
-
-    The Setup:
-    - We create a "perfect" sharp texture (white noise).
-    - We create a "blurred" version (Gaussian blur).
-    - We construct a 2-slice stack where the focus plane follows a 2x2 checkerboard pattern.
-      - Quadrant 1 (Top-Left):  Slice 0 is Sharp
-      - Quadrant 2 (Top-Right): Slice 1 is Sharp
-      - Quadrant 3 (Bot-Left):  Slice 1 is Sharp
-      - Quadrant 4 (Bot-Right): Slice 0 is Sharp
-
-    The Invariants:
-    1. Focus Map Accuracy: The algorithm must recover a height map (index map) that matches
-       the checkerboard pattern (0s and 1s in correct quadrants), ignoring boundary effects.
-    2. Signal Preservation: The output image must closely resemble the sharp texture (low MSE)
-       and be significantly different from the blurred texture.
-    3. Contrast Conservation: The standard deviation of the output should match the input signal,
-       proving that the blending didn't wash out features.
     """
 
     # 1. Setup Parameters
@@ -333,25 +278,20 @@ def test_best_focus_checkerboard_reconstruction():
     np.random.seed(42)
 
     # 2. Generate Textures
-    # Signal scale 100.0 to make errors obvious
-    # Using random noise ensures high Laplacian energy
     sharp_texture = np.random.uniform(0, 100, (H, W)).astype(np.float32)
     blurred_texture = ndi.gaussian_filter(sharp_texture, sigma=5.0)
 
     # 3. Construct Checkerboard Stack
-    # Slices
     slice0 = np.zeros((H, W), dtype=np.float32)
     slice1 = np.zeros((H, W), dtype=np.float32)
 
     mid_y, mid_x = H // 2, W // 2
 
-    # Slice 0: Sharp in TL, BR. Blurred in TR, BL.
     slice0[:mid_y, :mid_x] = sharp_texture[:mid_y, :mid_x] # TL
     slice0[mid_y:, mid_x:] = sharp_texture[mid_y:, mid_x:] # BR
     slice0[:mid_y, mid_x:] = blurred_texture[:mid_y, mid_x:] # TR
     slice0[mid_y:, :mid_x] = blurred_texture[mid_y:, :mid_x] # BL
 
-    # Slice 1: Blurred in TL, BR. Sharp in TR, BL.
     slice1[:mid_y, :mid_x] = blurred_texture[:mid_y, :mid_x] # TL
     slice1[mid_y:, mid_x:] = blurred_texture[mid_y:, mid_x:] # BR
     slice1[:mid_y, mid_x:] = sharp_texture[:mid_y, mid_x:] # TR
@@ -359,36 +299,20 @@ def test_best_focus_checkerboard_reconstruction():
 
     stack = np.array([slice0, slice1])
 
-    # 4. Run Algorithm
-    # Note: We expect the algorithm to pick the sharpest texture in each patch.
     result_img, height_map = best_focus_image(stack, patch_size=patch_size, return_heightmap=True)
 
-    # 5. Verify Focus Map (Indices)
-    # We sample the center of each quadrant to avoid patch boundary artifacts
-    margin = patch_size  # Stay away from edges and center cross
+    margin = patch_size
 
-    # Quadrant Centers
-    tl_idx = height_map[mid_y//2, mid_x//2]
-    tr_idx = height_map[mid_y//2, mid_x + mid_x//2]
-    bl_idx = height_map[mid_y + mid_y//2, mid_x//2]
-    br_idx = height_map[mid_y + mid_y//2, mid_x + mid_x//2]
-
-    # Also check average over a region in the quadrant to be robust
     tl_region = height_map[margin : mid_y-margin, margin : mid_x-margin]
     tr_region = height_map[margin : mid_y-margin, mid_x+margin : W-margin]
 
     print(f"TL Mean Index: {tl_region.mean():.4f} (Expected 0)")
     print(f"TR Mean Index: {tr_region.mean():.4f} (Expected 1)")
 
-    # Assertions
     assert tl_region.mean() < 0.1, "Top-Left quadrant should be mostly index 0 (Sharp in Slice 0)"
     assert tr_region.mean() > 0.9, "Top-Right quadrant should be mostly index 1 (Sharp in Slice 1)"
 
-    # 6. Verify Reconstruction Quality (MSE)
-    # Compare output to the "Perfect Composite" (which is just sharp_texture everywhere)
-    # We exclude the boundaries (cross in the middle) from the stats calculation
     mask = np.ones((H, W), dtype=bool)
-    # Mask out the center cross seam (width approx 2 patches)
     mask[mid_y-patch_size:mid_y+patch_size, :] = False
     mask[:, mid_x-patch_size:mid_x+patch_size] = False
 
@@ -398,19 +322,14 @@ def test_best_focus_checkerboard_reconstruction():
     print(f"MSE vs Perfect: {mse_perfect:.4f}")
     print(f"MSE vs Blurred: {mse_blurred:.4f}")
 
-    # The reconstruction should be MUCH closer to perfect than to blurred
-    # Typically < 1% of the blurred error
     assert mse_perfect < 0.05 * mse_blurred, \
         f"Reconstruction failed to recover sharp texture. MSE_perfect={mse_perfect}, MSE_blurred={mse_blurred}"
 
-    # 7. Verify Contrast Preservation (Standard Deviation)
-    # Blending can sometimes lower contrast. We want to ensure we kept the signal.
     std_input = np.std(sharp_texture[mask])
     std_output = np.std(result_img[mask])
 
     print(f"Input Std: {std_input:.4f}, Output Std: {std_output:.4f}")
 
-    # Allow small drop due to potential blending/interpolation, but should be close
     assert std_output > 0.95 * std_input, \
         f"Output lost significant contrast. InStd={std_input}, OutStd={std_output}"
 
@@ -450,37 +369,29 @@ def generate_feature_stack(shape=(10, 200, 200), feature_size=60):
 
     return stack, depth_map
 
+
 def test_feature_preservation():
     """
     Verifies that best_focus_image preserves features of moderate size.
     A feature of size 60x60 in a 200x200 image corresponds to approx 4x4 patches (grid 14x14).
-    A 7x7 median filter (disk(3)) would erase this feature (16 pixels < 25 threshold).
     A 3x3 median filter (disk(1)) should preserve it.
     """
     stack, truth_map = generate_feature_stack(shape=(10, 200, 200), feature_size=60)
 
-    # Run reconstruction
     fused, height_map = best_focus_image(stack, return_heightmap=True)
 
-    # Check if the feature is preserved.
-    # We check the max depth value in the center region.
     mid_h, mid_w = 100, 100
-    # Average depth in the feature center
     center_depth = np.mean(height_map[mid_h-10:mid_h+10, mid_w-10:mid_w+10])
 
     print(f"Center Depth: {center_depth:.2f} (Expected ~7)")
 
-    # If erased, center_depth would be close to 2.
-    # If preserved, center_depth should be close to 7.
-
     assert center_depth > 5.0, \
         f"Feature erased! Center depth {center_depth:.2f} is too close to background (2). Over-smoothing detected."
 
-    # Also check MSE globally
     mse = np.mean((height_map - truth_map)**2)
     print(f"MSE: {mse:.4f}")
-    # MSE should be reasonable
     assert mse < 4.0
+
 
 def test_focal_plane_indices():
     """
@@ -491,3 +402,106 @@ def test_focal_plane_indices():
 
     assert height_map.min() >= 0
     assert height_map.max() < 5
+
+
+def generate_synthetic_focal_stack(sharp_image, num_slices=25, k_defocus=0.8):
+    """
+    Generates a synthetic 3D focal stack from a 2D sharp texture using a smooth ground-truth depth surface z_GT(y, x).
+    """
+    H, W = sharp_image.shape
+    y, x = np.mgrid[0:H, 0:W]
+
+    z_mid = num_slices / 2.0
+    z_gt = (
+        z_mid
+        + 0.35 * z_mid * np.sin(2.0 * np.pi * y / H)
+        + 0.25 * z_mid * np.cos(2.0 * np.pi * x / W)
+    ).astype(np.float32)
+
+    max_sigma = k_defocus * num_slices
+    sigma_steps = np.linspace(0, max_sigma, 35)
+    blurred_levels = [gaussian_filter(sharp_image, sigma=s) for s in sigma_steps]
+
+    focal_stack = np.zeros((num_slices, H, W), dtype=np.float32)
+
+    for z in range(num_slices):
+        dist = np.abs(z - z_gt)
+        level_idx = np.clip((dist / max_sigma * (len(sigma_steps) - 1)).astype(int), 0, len(sigma_steps) - 1)
+
+        slice_z = np.zeros((H, W), dtype=np.float32)
+        for idx in np.unique(level_idx):
+            mask = level_idx == idx
+            slice_z[mask] = blurred_levels[idx][mask]
+
+        noise = np.random.normal(0, 0.005, (H, W)).astype(np.float32)
+        focal_stack[z] = np.clip(slice_z + noise, 0.0, 1.0)
+
+    return focal_stack, z_gt
+
+
+def test_synthetic_focal_stack_reconstruction():
+    """
+    Verifies that best_focus_image accurately recovers depth map and focused texture
+    on a synthetic focal stack with a spatially varying ground-truth depth field.
+
+    Invariants and Metrics asserted:
+    1. Height map MAE relative to ground truth depth map z_gt is < 1.5 slices.
+    2. Reconstructed image PSNR and SSIM exceed both Maximum Intensity Projection (MIP)
+       and Mean baselines.
+    """
+    from skimage.metrics import peak_signal_noise_ratio as psnr
+    from skimage.metrics import structural_similarity as ssim
+
+    np.random.seed(42)
+    H, W = 256, 256
+    y, x = np.mgrid[0:H, 0:W]
+    base_texture = np.zeros((H, W), dtype=np.float32)
+    for _ in range(60):
+        cy, cx = np.random.uniform(20, H - 20), np.random.uniform(20, W - 20)
+        rad = np.random.uniform(5, 15)
+        base_texture += np.exp(-((y - cy)**2 + (x - cx)**2) / (2 * rad**2))
+
+    rng = np.random.default_rng(42)
+    speckle = rng.uniform(0.2, 1.0, (H, W)).astype(np.float32)
+    base_texture = base_texture * speckle
+    base_texture = (base_texture - base_texture.min()) / (base_texture.max() - base_texture.min() + 1e-8)
+
+    num_slices = 25
+    focal_stack, z_gt = generate_synthetic_focal_stack(base_texture, num_slices=num_slices)
+
+    patch_size = 32
+    reconstructed_img, estimated_heightmap = best_focus_image(
+        focal_stack, patch_size=patch_size, return_heightmap=True
+    )
+
+    mip_baseline = np.max(focal_stack, axis=0)
+    mean_baseline = np.mean(focal_stack, axis=0)
+
+    valid_crop = np.s_[patch_size:-patch_size, patch_size:-patch_size]
+
+    z_error = np.abs(estimated_heightmap[valid_crop] - z_gt[valid_crop])
+    mae_z = np.mean(z_error)
+
+    psnr_edf = psnr(base_texture[valid_crop], reconstructed_img[valid_crop], data_range=1.0)
+    ssim_edf = ssim(base_texture[valid_crop], reconstructed_img[valid_crop], data_range=1.0)
+
+    psnr_mip = psnr(base_texture[valid_crop], mip_baseline[valid_crop], data_range=1.0)
+    ssim_mip = ssim(base_texture[valid_crop], mip_baseline[valid_crop], data_range=1.0)
+
+    psnr_mean = psnr(base_texture[valid_crop], mean_baseline[valid_crop], data_range=1.0)
+    ssim_mean = ssim(base_texture[valid_crop], mean_baseline[valid_crop], data_range=1.0)
+
+    print(f"Height map MAE: {mae_z:.4f}")
+    print(f"EDF PSNR: {psnr_edf:.2f} dB, SSIM: {ssim_edf:.4f}")
+    print(f"MIP PSNR: {psnr_mip:.2f} dB, SSIM: {ssim_mip:.4f}")
+    print(f"Mean PSNR: {psnr_mean:.2f} dB, SSIM: {ssim_mean:.4f}")
+
+    assert mae_z < 1.5, f"MAE Z error {mae_z:.4f} exceeds 1.5 slices"
+    assert psnr_edf > psnr_mip, f"EDF PSNR ({psnr_edf:.2f}) failed to beat MIP ({psnr_mip:.2f})"
+    assert psnr_edf > psnr_mean, f"EDF PSNR ({psnr_edf:.2f}) failed to beat Mean ({psnr_mean:.2f})"
+    assert ssim_edf > ssim_mip, f"EDF SSIM ({ssim_edf:.4f}) failed to beat MIP ({ssim_mip:.4f})"
+    assert ssim_edf > ssim_mean, f"EDF SSIM ({ssim_edf:.4f}) failed to beat Mean ({ssim_mean:.4f})"
+
+
+if __name__ == "__main__":
+    unittest.main()

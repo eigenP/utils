@@ -2,7 +2,7 @@ from skimage.exposure import adjust_gamma
 import numpy as np
 import pytest
 
-from eigenp_utils.intensity_rescaling import adjust_gamma_per_slice
+from eigenp_utils.intensity_rescaling import correct_z_intensity_decay
 from eigenp_utils.intensity_rescaling import contrast_stretching, correct_z_intensity_decay
 from eigenp_utils.intensity_rescaling import correct_z_intensity_decay
 from eigenp_utils.intensity_rescaling import fit_basic_shading, apply_basic_shading
@@ -510,28 +510,6 @@ def generate_decaying_image(shape=(10, 100, 100), decay_rate=0.1, initial_intens
         image[i] = np.clip(slice_data, 0, 1)
     return image
 
-def test_adjust_gamma_per_slice_manual():
-    """Test the existing manual gamma adjustment."""
-    image = np.ones((10, 100, 100))
-    # Manual mode: final_gamma=0.5 -> linear ramp from 1.0 to 0.5
-    # find_gamma_corr removed in new impl, so just use defaults or explicit None
-    adjusted = adjust_gamma_per_slice(image, final_gamma=0.5, gamma_fit_func=None)
-
-    # First slice should be gamma=1.0 (no change)
-    assert np.allclose(adjusted[0], image[0])
-
-    # Last slice should be gamma=0.5 (sqrt)
-    # 1.0^0.5 = 1.0, so this is a bad test for value change if input is 1.0
-    # Let's use input 0.5
-    image[:] = 0.5
-    adjusted = adjust_gamma_per_slice(image, final_gamma=0.5, gamma_fit_func=None)
-
-    # First slice gamma=1.0 -> 0.5
-    assert np.allclose(adjusted[0], 0.5)
-
-    # Last slice gamma=0.5 -> 0.5^0.5 = 0.707...
-    assert np.isclose(adjusted[-1, 0, 0], 0.5**0.5)
-
 def test_adjust_gamma_per_slice_auto_exponential():
     """Test automatic gamma finding with exponential decay."""
     # Create an image that decays to 50% intensity
@@ -546,7 +524,7 @@ def test_adjust_gamma_per_slice_auto_exponential():
 
     # Apply correction using exponential fit
     try:
-        adjusted = adjust_gamma_per_slice(image, gamma_fit_func='exponential')
+        adjusted = correct_z_intensity_decay(image, method='gamma', fit_model='exponential')
     except TypeError:
          # Skip if not implemented yet
          pytest.skip("gamma_fit_func not implemented yet")
@@ -575,7 +553,7 @@ def test_adjust_gamma_per_slice_auto_linear():
         image[i] = np.random.normal(val, 0.01, (100, 100))
 
     try:
-        adjusted = adjust_gamma_per_slice(image, gamma_fit_func='linear')
+        adjusted = correct_z_intensity_decay(image, method='gamma', fit_model='linear')
     except TypeError:
         pytest.skip("gamma_fit_func not implemented yet")
 

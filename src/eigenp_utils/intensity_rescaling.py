@@ -204,7 +204,10 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
         if method == 'gamma':
             log_y_fit = np.log(y_fit_norm)
             log_y_ref = np.log(y_ref_norm)
-            factors = np.where(np.abs(log_y_fit) > 1e-9, log_y_ref / log_y_fit, 1.0)
+
+            # Avoid division by zero warning by replacing close-to-zero values temporarily
+            safe_log_y_fit = np.where(np.abs(log_y_fit) > 1e-9, log_y_fit, 1.0)
+            factors = np.where(np.abs(log_y_fit) > 1e-9, log_y_ref / safe_log_y_fit, 1.0)
             factors = np.clip(factors, 0.1, 10.0)
         elif method == 'gain':
             factors = np.clip(y_ref_norm / y_fit_norm, 0.1, 100.0)
@@ -537,7 +540,19 @@ def fit_basic_shading(
                     R_1 = np.where(S_outmask[np.newaxis, :] & validA1coeff_idx[:, np.newaxis], R_flat, np.nan)
 
                     mean_R = np.mean(R_flat)
-                    B1_coeff = (np.nanmean(R_0, axis=1) - np.nanmean(R_1, axis=1)) / (mean_R + 1e-6)
+
+                    # Avoid Mean of empty slice warnings by checking for all-NaN rows
+                    def safe_nanmean(arr, axis):
+                        # Returns NaN for rows that are all NaN, without triggering a RuntimeWarning
+                        mask = np.isnan(arr).all(axis=axis)
+                        res = np.zeros(arr.shape[0])
+                        res[mask] = np.nan
+                        res[~mask] = np.nanmean(arr[~mask], axis=axis)
+                        return res
+
+                    mean_R_0 = safe_nanmean(R_0, axis=1)
+                    mean_R_1 = safe_nanmean(R_1, axis=1)
+                    B1_coeff = (mean_R_0 - mean_R_1) / (mean_R + 1e-6)
 
                     num_valid = np.sum(validA1coeff_idx)
                     B_nan = np.where(validA1coeff_idx, B, np.nan)

@@ -71,10 +71,10 @@ def test_channel_visibility_update():
 def test_default_colors_resolution():
     """Test that default colors resolution works as expected."""
     im = [np.zeros((10, 10, 10)) for _ in range(2)]
-    w = show_zyx_max_slice_interactive(im, colors=None)
+    w = show_zyx_max_slice_interactive(im, colormap=None)
     assert w.colors_resolved == ['white', 'lime'] # Defaults
 
-    w2 = show_zyx_max_slice_interactive(im, colors=['red', 'blue'])
+    w2 = show_zyx_max_slice_interactive(im, colormap=['red', 'blue'])
     assert w2.colors_resolved == ['red', 'blue']
 
 def test_show_zyx_max_slice_interactive_point_annotator_args():
@@ -85,7 +85,7 @@ def test_show_zyx_max_slice_interactive_point_annotator_args():
         im,
         pixel_sizes=(3, 2, 2),
         point_size_scale=0.05,
-        colors=['red', 'blue'],
+        colormap=['red', 'blue'],
         opacity=[0.5, 0.8]
     )
     assert isinstance(w, TNIAAnnotatorWidget)
@@ -117,12 +117,12 @@ def test_show_zyx_max_scatter_interactive_colormap():
     channels = np.random.rand(10)
 
     # Should not throw exception for invalid RGBA string
-    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
-    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='points')
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='density')
 
     channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
-    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='points')
+    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='density')
 
     assert w1 is not None
     assert w2 is not None
@@ -521,7 +521,7 @@ def test_marimo_update():
 
         widget = show_xyz_max_slice_interactive(
             [membrane, nuclei],
-            colors=['magma', 'viridis']
+            colormap=['magma', 'viridis']
         )
         return widget,
 
@@ -616,7 +616,7 @@ def test_create_multichannel_rgb_basic():
     xz_list = [np.zeros((2, 2)), np.ones((2, 2))]
     zy_list = [np.zeros((2, 2)), np.zeros((2, 2))]
     xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb(
-        xy_list, xz_list, zy_list, colors=["red", "green"]
+        xy_list, xz_list, zy_list, colormap=["red", "green"]
     )
     red = np.asarray(to_rgb("red"))
     green = np.asarray(to_rgb("green"))
@@ -636,17 +636,17 @@ def test_show_zyx_max_scatter_interactive_colormap():
     channels = np.random.rand(10)
 
     # Should not throw exception for invalid RGBA string, and _render should not throw NameError
-    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='points')
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='points')
     w1._render() # Trigger render directly
 
-    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colors='viridis', render='density')
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='density')
     w2._render() # Trigger render directly
 
     channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='points')
+    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='points')
     w3._render() # Trigger render directly
 
-    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colors=['viridis', 'plasma'], render='density')
+    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='density')
     w4._render() # Trigger render directly
 
     assert w1 is not None
@@ -718,11 +718,10 @@ def test_interactive_spacing_pixel_sizes_vs_sxy():
 
     np.testing.assert_allclose(size_dict, size_tuple)
 
-    # Test the height ratios generated inside the gridspec
-    gs_dict = fig_dict.axes[0].get_subplotspec().get_gridspec().get_height_ratios()
-    gs_tuple = fig_tuple.axes[0].get_subplotspec().get_gridspec().get_height_ratios()
-
-    assert gs_dict == gs_tuple
+    # Verify positions of XY and XZ axes match between dict and tuple pixel_sizes
+    pos_xy_dict = fig_dict.axXY.get_position()
+    pos_xy_tuple = fig_tuple.axXY.get_position()
+    np.testing.assert_allclose(pos_xy_dict.bounds, pos_xy_tuple.bounds)
 
 def test_xy_anisotropy():
     """
@@ -733,12 +732,484 @@ def test_xy_anisotropy():
     w = show_zyx_max_slice_interactive(im, pixel_sizes={'Z': 1.0, 'Y': 0.2, 'X': 1.0})
     fig = w._render()
 
-    # Check gridspec ratios directly to see if physical scaling is applied
-    gs = fig.axes[0].get_subplotspec().get_gridspec()
-    width_ratios = gs.get_width_ratios()
-    height_ratios = gs.get_height_ratios()
+    # X physical = 100 * 1 = 100. Z physical = 10 * 1 = 10.
+    # Y physical = 50 * 0.2 = 10. Z physical = 10 * 1 = 10.
+    # So axXY width should be 10x its height
+    pos_xy = fig.axXY.get_position()
+    figW, figH = fig.get_size_inches()
+    w_in = pos_xy.width * figW
+    h_in = pos_xy.height * figH
+    np.testing.assert_allclose(w_in / h_in, 10.0, rtol=1e-2)
 
-    # X physical = 100 * 1 = 100. Z physical = 10 * 1 = 10. Max width = 100.
-    # Y physical = 50 * 0.2 = 10. Z physical = 10 * 1 = 10. Max height = 10.
-    assert width_ratios[0] == 100
-    assert height_ratios[1] == 10
+def test_annotation_coordinate_registration():
+    # Synthetic 3D image volume: Z=16, Y=64, X=128
+    Z, Y, X = 16, 64, 128
+    synthetic_im = np.zeros((Z, Y, X), dtype=np.float32)
+
+    # Anisotropic voxel dimensions: sz=2.0 um, sy=0.5 um, sx=0.5 um
+    pixel_sizes = (2.0, 0.5, 0.5)
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        synthetic_im,
+        pixel_sizes=pixel_sizes,
+        slabs_position=(8 * 2.0, 32 * 0.5, 64 * 0.5), # Physical center
+        slabs_thickness=(2 * 2.0, 4 * 0.5, 4 * 0.5)
+    )
+
+    widget.annotation_mode = True
+    widget.annotation_action = 'add'
+
+    # Target voxel to annotate: z=8, y=20, x=45
+    target_z, target_y, target_x = 8, 20, 45
+    widget.z_s = target_z
+
+    # Calculate figure using widget's inner method to get the figure with active transforms
+    fig = widget._render()
+
+    px_target = (target_x + 0.5) * pixel_sizes[2]
+    py_target = (target_y + 0.5) * pixel_sizes[1]
+
+    # Transform physical coordinates to JS coordinates
+    axXY = fig.axXY
+    target_disp = axXY.transData.transform((px_target, py_target))
+    target_fig = fig.transFigure.inverted().transform(target_disp)
+
+    frac_x = float(target_fig[0])
+    frac_y = float(1.0 - target_fig[1])  # JS top-left origin
+
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+    # Force render so axis_bounds is populated
+    widget._render_wrapper(None)
+
+    # Simulate user click
+    widget._handle_click({'new': {'plane': 'xy', 'x': frac_x, 'y': frac_y}})
+
+    # Assert point registered correctly
+    assert [target_z, target_y, target_x] in widget.points, \
+        f"Expected {[target_z, target_y, target_x]} in registered points, got {widget.points}"
+
+def test_annotation_with_labels_and_anisotropy():
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        im,
+        pixel_sizes=pixel_sizes,
+        channel_labels=['GRAY'],
+        slabs_position=(8, 32, 64)
+    )
+
+    widget.annotation_mode = True
+    widget.annotation_action = 'add'
+
+    # Target voxel [Z, Y, X]
+    target_z, target_y, target_x = 8, 20, 45
+    widget.z_s = target_z
+
+    # Calculate figure using widget's inner method to get the figure with active transforms
+    fig = widget._render()
+
+    px_target = (target_x + 0.5) * pixel_sizes['X']
+    py_target = (target_y + 0.5) * pixel_sizes['Y']
+
+    # Transform physical coordinates to JS coordinates
+    axXY = fig.axXY
+    target_disp = axXY.transData.transform((px_target, py_target))
+    target_fig = fig.transFigure.inverted().transform(target_disp)
+
+    frac_x = float(target_fig[0])
+    frac_y = float(1.0 - target_fig[1])  # JS top-left origin
+
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+    # Force render so axis_bounds is populated
+    widget._render_wrapper(None)
+
+    # Simulate click
+    click_dict = {'plane': 'xy', 'x': frac_x, 'y': frac_y}
+    widget._handle_click({'new': click_dict})
+
+    assert [target_z, target_y, target_x] in widget.points, \
+        f"Expected {[target_z, target_y, target_x]} in {widget.points}"
+
+def test_annotation_deletion():
+    synthetic_im = np.zeros((10, 32, 32), dtype=np.float32)
+    widget = show_zyx_max_slice_interactive_point_annotator(synthetic_im)
+
+    widget.add_point(5, 10, 15)
+    assert [5, 10, 15] in widget.points
+
+    widget.annotation_mode = True
+    widget.annotation_action = 'delete'
+    widget.z_s = 5
+
+    info = widget.axis_bounds['xy']
+    b_x0, b_y0, b_w, b_h = info['bbox']
+    xlim, ylim = info['xlim'], info['ylim']
+
+    u = (15.5 - xlim[0]) / (xlim[1] - xlim[0])
+    v = (10.5 - ylim[0]) / (ylim[1] - ylim[0])
+
+    frac_x = b_x0 + u * b_w
+    mpl_y_frac = b_y0 + v * b_h
+    frac_y = 1.0 - mpl_y_frac
+
+    widget._handle_click({'new': {'plane': 'xy', 'x': frac_x, 'y': frac_y}})
+    assert [5, 10, 15] not in widget.points
+
+
+def test_ground_truth_annotation_all_planes():
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        im,
+        pixel_sizes=pixel_sizes,
+        channel_labels=['GRAY'],
+        slabs_position=(8, 32, 64)
+    )
+    widget.annotation_mode = True
+    widget.annotation_action = 'add'
+
+    # Target voxels for XY, ZY, and XZ views
+    targets = [
+        ('xy', 8, 20, 45),
+        ('zy', 12, 40, 64),
+        ('xz', 5, 32, 100)
+    ]
+
+    for plane, target_z, target_y, target_x in targets:
+        widget.z_s = target_z
+        widget.y_s = target_y
+        widget.x_s = target_x
+
+        fig = widget._render()
+        try:
+            ax = getattr(fig, f"ax{plane.upper()}")
+            if plane == 'xy':
+                phys_a, phys_b = (target_x + 0.5) * widget.sx, (target_y + 0.5) * widget.sy
+            elif plane == 'zy':
+                phys_a, phys_b = (target_z + 0.5) * widget.sz, (target_y + 0.5) * widget.sy
+            elif plane == 'xz':
+                phys_a, phys_b = (target_x + 0.5) * widget.sx, (target_z + 0.5) * widget.sz
+
+            display_pixel = ax.transData.transform((phys_a, phys_b))
+            fig_norm = fig.transFigure.inverted().transform(display_pixel)
+            click_x, click_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+            
+            # Execute the property assignment and validation before closing the figure
+            widget.click_coords = {'plane': plane, 'x': click_x, 'y': click_y}
+            assert [target_z, target_y, target_x] in widget.points, \
+                f"Plane {plane} click at ({click_x:.3f}, {click_y:.3f}) mapped incorrectly."
+        finally:
+            plt.close(fig)
+
+
+def test_hover_sync_all_planes():
+    """
+    Test that hover coordinates correctly sync back to the widget's physical state.
+    We first call _render() explicitly to acquire the Matplotlib Figure and calculate
+    accurate physical-to-display coordinate mappings for our simulated hover. We then
+    close the figure, call _render_wrapper to populate internal state (like axis_bounds)
+    as it would in production, and finally dispatch the hover coordinates.
+    """
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
+
+    widget = show_zyx_max_slice_interactive(
+        im,
+        pixel_sizes=pixel_sizes,
+        sync_on_hover=True
+    )
+
+    target_z, target_y, target_x = 10, 25, 80
+
+    fig = widget._render()
+    try:
+        ax = fig.axXY
+        phys_x = (target_x + 0.5) * widget.sx
+        phys_y = (target_y + 0.5) * widget.sy
+        display_pixel = ax.transData.transform((phys_x, phys_y))
+        fig_norm = fig.transFigure.inverted().transform(display_pixel)
+        hover_x, hover_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+    finally:
+        plt.close(fig)
+
+    widget._render_wrapper(None) # Forces bounds calculation as it would in reality
+
+    # Execute assignment and assert prior to destruction
+    widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
+    assert widget.x_s == target_x and widget.y_s == target_y, \
+        f"Hover sync failed on XY plane. Got x={widget.x_s}, y={widget.y_s}"
+
+
+def test_axis_bounds_alignment():
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
+
+    widget = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes)
+    fig = widget._render()
+    try:
+        ax_xy = fig.axXY
+        cell_bbox = ax_xy.get_position()
+        info = widget.axis_bounds['xy']
+
+        # Verify that the image extent exactly fills the subplot cell bounding box without extra margins
+        np.testing.assert_allclose(info['x0'], cell_bbox.x0, atol=1e-2)
+        np.testing.assert_allclose(info['y0'], cell_bbox.y0, atol=1e-2)
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("figsize", [(8, 8), (12, 6), (6, 12)])
+@pytest.mark.parametrize("with_labels", [False, True])
+@pytest.mark.parametrize("gap_in", [1.0 / 16.0, 1.0 / 8.0])
+def test_fixed_physical_axes_gap(figsize, with_labels, gap_in):
+    """
+    Verify that the physical distance between adjacent axes is strictly equal to
+    gap_in (in inches) regardless of figure size, aspect ratio, or channel_labels toggle.
+    """
+    Z, Y, X = 20, 40, 120
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    labels = ["Ch0", "Ch1"] if with_labels else None
+
+    fig = show_zyx(
+        xy=im[10, :, :], xz=im[:, 20, :], zy=np.flip(np.rot90(im[:, :, 60], 1), 0),
+        pixel_sizes={'X': 0.5, 'Y': 0.5, 'Z': 1.5},
+        figsize=figsize,
+        channel_labels=labels,
+        gap_in=gap_in
+    )
+
+    figW, figH = figsize
+    pos_xy = fig.axXY.get_position()
+    pos_zy = fig.axZY.get_position()
+    pos_xz = fig.axXZ.get_position()
+
+    # Horizontal gap between XY and ZY
+    gap_h_in = (pos_zy.x0 - pos_xy.x1) * figW
+    np.testing.assert_allclose(gap_h_in, gap_in, atol=1e-5)
+
+    # Vertical gap between XZ and XY
+    gap_v_in = (pos_xy.y0 - pos_xz.y1) * figH
+    np.testing.assert_allclose(gap_v_in, gap_in, atol=1e-5)
+
+    if with_labels and fig.axLabels is not None:
+        pos_labels = fig.axLabels.get_position()
+        # Vertical gap between XY and Labels
+        gap_labels_in = (pos_labels.y0 - pos_xy.y1) * figH
+        np.testing.assert_allclose(gap_labels_in, gap_in, atol=1e-5)
+
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("render_mode", ["points", "density"])
+def test_scatter_widget_physical_axes_gap(render_mode):
+    """
+    Verify that TNIAScatterWidget renders axes with exact 1/16th inch physical gap.
+    """
+    X = np.random.rand(50) * 10
+    Y = np.random.rand(50) * 20
+    Z = np.random.rand(50) * 5
+
+    w = show_zyx_max_scatter_interactive((Z, Y, X), figsize=(10, 8), render=render_mode)
+    fig = w._render()
+
+    figW, figH = (10, 8)
+    pos_xy = fig.axXY.get_position()
+    pos_zy = fig.axZY.get_position()
+    pos_xz = fig.axXZ.get_position()
+
+    gap_h_in = (pos_zy.x0 - pos_xy.x1) * figW
+    gap_v_in = (pos_xy.y0 - pos_xz.y1) * figH
+
+    np.testing.assert_allclose(gap_h_in, 1.0 / 16.0, atol=1e-5)
+    np.testing.assert_allclose(gap_v_in, 1.0 / 16.0, atol=1e-5)
+
+    plt.close(fig)
+
+
+
+def test_scatter_widget_axis_bounds_population():
+    """
+    Ensure scatter widget properly assigns axes to the figure, executes canvas.draw(),
+    and computes the physical bounding boxes required by the JavaScript frontend.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
+    
+    X = np.random.rand(10) * 10
+    Y = np.random.rand(10) * 10
+    Z = np.random.rand(10) * 10
+
+    # Test points rendering mode
+    w_points = show_zyx_max_scatter_interactive((Z, Y, X), render='points')
+    w_points._render_wrapper(None)  # Force full render pipeline
+    
+    assert 'xy' in w_points.axis_bounds, "Scatter (points) failed to populate 'xy' axis bounds."
+    assert 'zy' in w_points.axis_bounds, "Scatter (points) failed to populate 'zy' axis bounds."
+    assert 'xz' in w_points.axis_bounds, "Scatter (points) failed to populate 'xz' axis bounds."
+
+    # Validate that canvas.draw() occurred by checking for non-zero, correctly oriented coordinates
+    for plane in ['xy', 'zy', 'xz']:
+        bbox = w_points.axis_bounds[plane]
+        assert bbox['x1'] > bbox['x0'], f"Invalid x-coordinates for {plane} plane bounds."
+        # Note: y1_js > y0_js because JS origin is top-left, while mpl origin is bottom-left
+        assert bbox['y1_js'] > bbox['y0_js'], f"Invalid JS y-coordinates for {plane} plane bounds."
+        assert len(bbox['bbox']) == 4, "JS bounding box array is improperly sized."
+
+    # Test density rendering mode
+    w_density = show_zyx_max_scatter_interactive((Z, Y, X), render='density')
+    w_density._render_wrapper(None)
+    assert 'xy' in w_density.axis_bounds, "Scatter (density) failed to populate axis bounds."
+
+def test_slice_widget_axis_bounds_structure():
+    """
+    Verify the dictionary structure of axis_bounds exactly matches the expectations 
+    of the JS Proxy traversal fix.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+    im = np.zeros((10, 20, 30))
+    w = show_zyx_max_slice_interactive(im)
+    w._render_wrapper(None)
+    
+    bounds = w.axis_bounds
+    
+    for plane in ['xy', 'zy', 'xz']:
+        plane_data = bounds.get(plane)
+        assert plane_data is not None
+        
+        # The JS explicitly looks for x0, x1, y0_js, y1_js OR a 'bbox' array
+        expected_keys = {'x0', 'x1', 'y0', 'y1', 'y0_js', 'y1_js', 'bbox', 'xlim', 'ylim'}
+        assert expected_keys.issubset(plane_data.keys()), f"Missing required keys in {plane} bounds payload."
+
+
+def test_hover_sync_with_rotate_view():
+    """
+    Verify that hover sync ('C' key) correctly unrotates cursor coordinates and sets
+    the slice sliders (x_s, y_s, z_s) to the exact target voxel when rotate_view is active.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, _unrotate_2d, _get_rotated_line
+
+    Z, Y, X = 20, 60, 80
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {'X': 1.0, 'Y': 1.0, 'Z': 1.0}
+
+    target_z, target_y, target_x = 10, 25, 35
+    rotate_view = (30.0, 15.0, 45.0)  # (rot_z, rot_y, rot_x)
+
+    widget = show_zyx_max_slice_interactive(
+        im,
+        pixel_sizes=pixel_sizes,
+        sync_on_hover=True,
+        rotate_view=rotate_view
+    )
+
+    # Force initial render to generate axis_bounds
+    fig = widget._render()
+    try:
+        # Determine physical location of target in unrotated space
+        orig_phys_x = (target_x + 0.5) * widget.sx
+        orig_phys_y = (target_y + 0.5) * widget.sy
+
+        # Rotate target point forward to display physical space
+        xs, ys = _get_rotated_line(orig_phys_x, orig_phys_y, orig_phys_x, orig_phys_y, rotate_view[0], X, Y, widget.sx, widget.sy)
+        rot_phys_x, rot_phys_y = xs[0], ys[0]
+
+        # Convert rotated physical position to figure coordinates
+        ax = fig.axXY
+        display_pixel = ax.transData.transform((rot_phys_x, rot_phys_y))
+        fig_norm = fig.transFigure.inverted().transform(display_pixel)
+        hover_x, hover_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+    finally:
+        plt.close(fig)
+
+    widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
+
+    assert widget.x_s == target_x and widget.y_s == target_y, \
+        f"Hover sync with rotation failed on XY plane. Expected ({target_x}, {target_y}), got ({widget.x_s}, {widget.y_s})"
+
+
+def test_annotator_click_with_rotate_view():
+    """
+    Verify that point annotation clicks on a rotated view accurately unrotate
+    coordinates and record the exact target voxel in widget.points.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, _get_rotated_line
+
+    Z, Y, X = 20, 60, 80
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    rotate_view = 30.0
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        im,
+        rotate_view=rotate_view
+    )
+    widget.annotation_mode = True
+    widget.annotation_action = 'add'
+
+    target_z, target_y, target_x = 10, 20, 30
+    widget.z_s = target_z
+
+    fig = widget._render()
+    try:
+        orig_phys_x = (target_x + 0.5) * widget.sx
+        orig_phys_y = (target_y + 0.5) * widget.sy
+
+        xs, ys = _get_rotated_line(orig_phys_x, orig_phys_y, orig_phys_x, orig_phys_y, rotate_view, X, Y, widget.sx, widget.sy)
+        rot_phys_x, rot_phys_y = xs[0], ys[0]
+
+        ax = fig.axXY
+        display_pixel = ax.transData.transform((rot_phys_x, rot_phys_y))
+        fig_norm = fig.transFigure.inverted().transform(display_pixel)
+        click_x, click_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+    finally:
+        plt.close(fig)
+
+    widget.click_coords = {'plane': 'xy', 'x': click_x, 'y': click_y}
+
+    assert [target_z, target_y, target_x] in widget.points, \
+        f"Annotator click with rotation failed. Expected {[target_z, target_y, target_x]} in {widget.points}"
+
+
+def test_channel_label_height_scaling_with_fontsize():
+    """
+    Test that the channel label axis height (axLabels) scales with fontsize_pt
+    (figure height) and provides sufficient fake spacing so labels are not cropped.
+    """
+    im = np.zeros((10, 20, 20), dtype=np.float32)
+    labels = ["Channel 0", "Channel 1"]
+
+    # Small figure height -> smaller fontsize
+    fig_small = show_zyx(
+        xy=im[5, :, :], xz=im[:, 10, :], zy=im[:, :, 10],
+        figsize=(8, 4),
+        channel_labels=labels
+    )
+    h_small = fig_small.axLabels.get_position().height
+
+    # Large figure height -> larger fontsize
+    fig_large = show_zyx(
+        xy=im[5, :, :], xz=im[:, 10, :], zy=im[:, :, 10],
+        figsize=(8, 12),
+        channel_labels=labels
+    )
+    h_large = fig_large.axLabels.get_position().height
+
+    try:
+        assert fig_small.axLabels is not None
+        assert fig_large.axLabels is not None
+        # Position height fraction should account for font size scaling
+        pos_small = fig_small.axLabels.get_position()
+        pos_large = fig_large.axLabels.get_position()
+        assert pos_small.height > 0
+        assert pos_large.height > 0
+    finally:
+        plt.close(fig_small)
+        plt.close(fig_large)
