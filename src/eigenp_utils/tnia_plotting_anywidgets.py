@@ -362,7 +362,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     row2_h = h_xz * pz
     fig_h_in = figH
     fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
-    label_row_h = (row1_h + row2_h) * (0.05 + 0.003 * fontsize_pt) if channel_labels is not None else 0.0
+    label_row_h = (row1_h + row2_h) * (0.2 + 0.01 * fontsize_pt) if channel_labels is not None else 0.0
 
     margin_in = 0.05
     avail_w_in = figW - gap_in - 2.0 * margin_in
