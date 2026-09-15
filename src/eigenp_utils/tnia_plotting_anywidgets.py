@@ -360,7 +360,9 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     col2_w = w_zy * pz
     row1_h = max(ydim * py, h_zy * py)
     row2_h = h_xz * pz
-    label_row_h = (row1_h + row2_h) * 0.05 if channel_labels is not None else 0.0
+    fig_h_in = figH
+    fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
+    label_row_h = (row1_h + row2_h) * (0.05 + 0.003 * fontsize_pt) if channel_labels is not None else 0.0
 
     margin_in = 0.05
     avail_w_in = figW - gap_in - 2.0 * margin_in
@@ -414,8 +416,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         for spine in axLabels.spines.values():
             spine.set_visible(False)
 
-        fig_h_in = figH
-        fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
         bar_linewidth = max(1.0, fontsize_pt * 0.15)
         axLabels.plot([0, 1], [0, 0], transform=axLabels.transAxes, color=(0.85, 0.85, 0.85), linewidth=bar_linewidth, clip_on=False)
 
