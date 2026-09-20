@@ -1162,6 +1162,13 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     y_t = traitlets.Int(1).tag(sync=True)
     z_t = traitlets.Int(1).tag(sync=True)
 
+    x_start = traitlets.Int(0).tag(sync=True)
+    x_end = traitlets.Int(1).tag(sync=True)
+    y_start = traitlets.Int(0).tag(sync=True)
+    y_end = traitlets.Int(1).tag(sync=True)
+    z_start = traitlets.Int(0).tag(sync=True)
+    z_end = traitlets.Int(1).tag(sync=True)
+
     sx = traitlets.Float(1.0).tag(sync=True)
     sy = traitlets.Float(1.0).tag(sync=True)
     sz = traitlets.Float(1.0).tag(sync=True)
@@ -1223,10 +1230,14 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     def _init_observers(self):
         # Observe thickness changes to update position bounds
-        self.observe(self._update_bounds, names=['x_t', 'y_t', 'z_t'])
+        self.observe(self._update_bounds, names=['x_t', 'y_t', 'z_t', 'x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end'])
+
+        # Sync handlers between (x_s, x_t) and (x_start, x_end)
+        self.observe(self._on_st_changed, names=['x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t'])
+        self.observe(self._on_start_end_changed, names=['x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end'])
 
         # Observe all parameters to update plot
-        self.observe(self._render_wrapper, names=['x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t'])
+        self.observe(self._render_wrapper, names=['x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t', 'x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end'])
 
         # Observe channel parameters
         self.observe(self._render_wrapper, names=['vmin_list', 'vmax_list', 'gamma_list', 'opacity_list'])
@@ -1243,11 +1254,95 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         # Observe copy params trigger
         self.observe(self._copy_params, names='copy_params_trigger')
 
+        # Sync initial start/end from initial x_s, x_t
+        self._sync_start_end_from_st()
+
         # Initial bounds update
         self._update_bounds(None)
 
         # Initial render
         self._render_wrapper(None)
+
+    def _sync_start_end_from_st(self):
+        if getattr(self, '_syncing_traits', False):
+            return
+        self._syncing_traits = True
+        try:
+            Z, Y, X = self.dims
+            x_s_c = max(0, min(X - 1, self.x_s))
+            y_s_c = max(0, min(Y - 1, self.y_s))
+            z_s_c = max(0, min(Z - 1, self.z_s))
+
+            nx_start = max(0, min(X - 1, x_s_c - self.x_t))
+            nx_end = max(0, min(X - 1, x_s_c + self.x_t))
+            if nx_end < nx_start: nx_end = nx_start
+
+            ny_start = max(0, min(Y - 1, y_s_c - self.y_t))
+            ny_end = max(0, min(Y - 1, y_s_c + self.y_t))
+            if ny_end < ny_start: ny_end = ny_start
+
+            nz_start = max(0, min(Z - 1, z_s_c - self.z_t))
+            nz_end = max(0, min(Z - 1, z_s_c + self.z_t))
+            if nz_end < nz_start: nz_end = nz_start
+
+            with self.hold_trait_notifications():
+                self.x_s = x_s_c
+                self.y_s = y_s_c
+                self.z_s = z_s_c
+                self.x_start = nx_start
+                self.x_end = nx_end
+                self.y_start = ny_start
+                self.y_end = ny_end
+                self.z_start = nz_start
+                self.z_end = nz_end
+        finally:
+            self._syncing_traits = False
+
+    def _on_st_changed(self, change):
+        self._sync_start_end_from_st()
+
+    def _on_start_end_changed(self, change):
+        if getattr(self, '_syncing_traits', False):
+            return
+        self._syncing_traits = True
+        try:
+            Z, Y, X = self.dims
+            nx_start = max(0, min(X - 1, self.x_start))
+            nx_end = max(0, min(X - 1, self.x_end))
+            if nx_end < nx_start: nx_end = nx_start
+
+            ny_start = max(0, min(Y - 1, self.y_start))
+            ny_end = max(0, min(Y - 1, self.y_end))
+            if ny_end < ny_start: ny_end = ny_start
+
+            nz_start = max(0, min(Z - 1, self.z_start))
+            nz_end = max(0, min(Z - 1, self.z_end))
+            if nz_end < nz_start: nz_end = nz_start
+
+            nx_s = (nx_start + nx_end) // 2
+            nx_t = max(0, (nx_end - nx_start) // 2)
+
+            ny_s = (ny_start + ny_end) // 2
+            ny_t = max(0, (ny_end - ny_start) // 2)
+
+            nz_s = (nz_start + nz_end) // 2
+            nz_t = max(0, (nz_end - nz_start) // 2)
+
+            with self.hold_trait_notifications():
+                self.x_start = nx_start
+                self.x_end = nx_end
+                self.y_start = ny_start
+                self.y_end = ny_end
+                self.z_start = nz_start
+                self.z_end = nz_end
+                self.x_s = nx_s
+                self.x_t = nx_t
+                self.y_s = ny_s
+                self.y_t = ny_t
+                self.z_s = nz_s
+                self.z_t = nz_t
+        finally:
+            self._syncing_traits = False
 
     def _update_bounds(self, change):
         # x
@@ -1602,12 +1697,12 @@ class TNIASliceWidget(TNIAWidgetBase):
     def _render(self):
         Z, Y, X = self.dims
 
-        x0 = max(0, self.x_s - self.x_t)
-        x1 = min(X - 1, self.x_s + self.x_t)
-        y0 = max(0, self.y_s - self.y_t)
-        y1 = min(Y - 1, self.y_s + self.y_t)
-        z0 = max(0, self.z_s - self.z_t)
-        z1 = min(Z - 1, self.z_s + self.z_t)
+        x0 = max(0, self.x_start)
+        x1 = min(X - 1, self.x_end)
+        y0 = max(0, self.y_start)
+        y1 = min(Y - 1, self.y_end)
+        z0 = max(0, self.z_start)
+        z1 = min(Z - 1, self.z_end)
 
         if x1 <= x0: x1 = x0 + 1
         if y1 <= y0: y1 = y0 + 1
@@ -1618,9 +1713,9 @@ class TNIASliceWidget(TNIAWidgetBase):
         z_lims = [z0, z1]
 
         clipped = False
-        if x0 > self.x_s - self.x_t or x1 < self.x_s + self.x_t: clipped = True
-        if y0 > self.y_s - self.y_t or y1 < self.y_s + self.y_t: clipped = True
-        if z0 > self.z_s - self.z_t or z1 < self.z_s + self.z_t: clipped = True
+        if x0 > self.x_start or x1 < self.x_end: clipped = True
+        if y0 > self.y_start or y1 < self.y_end: clipped = True
+        if z0 > self.z_start or z1 < self.z_end: clipped = True
 
         if clipped:
             self.warning_msg = "⚠️ Projection clipped to image boundaries"
@@ -2263,25 +2358,21 @@ class TNIAScatterWidget(TNIAWidgetBase):
         opacity_resolved = [float(o) for o in self.opacity_list]
 
         # Translate widget relative coordinates (0..Dim) to data coordinates (min..max)
-        x_c = self.x_s + self.xmin
-        y_c = self.y_s + self.ymin
-        z_c = self.z_s + self.zmin
-
-        x0 = max(self.xmin, x_c - self.x_t)
-        x1 = min(self.xmax, x_c + self.x_t)
-        y0 = max(self.ymin, y_c - self.y_t)
-        y1 = min(self.ymax, y_c + self.y_t)
-        z0 = max(self.zmin, z_c - self.z_t)
-        z1 = min(self.zmax, z_c + self.z_t)
+        x0 = max(self.xmin, self.xmin + self.x_start)
+        x1 = min(self.xmax, self.xmin + self.x_end)
+        y0 = max(self.ymin, self.ymin + self.y_start)
+        y1 = min(self.ymax, self.ymin + self.y_end)
+        z0 = max(self.zmin, self.zmin + self.z_start)
+        z1 = min(self.zmax, self.zmin + self.z_end)
 
         x_lims = (x0, x1)
         y_lims = (y0, y1)
         z_lims = (z0, z1)
 
         clipped = False
-        if x0 > x_c - self.x_t or x1 < x_c + self.x_t: clipped = True
-        if y0 > y_c - self.y_t or y1 < y_c + self.y_t: clipped = True
-        if z0 > z_c - self.z_t or z1 < z_c + self.z_t: clipped = True
+        if x0 > self.xmin + self.x_start or x1 < self.xmin + self.x_end: clipped = True
+        if y0 > self.ymin + self.y_start or y1 < self.ymin + self.y_end: clipped = True
+        if z0 > self.zmin + self.z_start or z1 < self.zmin + self.z_end: clipped = True
 
         if clipped:
             self.warning_msg = "⚠️ Projection clipped to data boundaries"
