@@ -14,19 +14,14 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.16.4"
+__generated_with = "0.24.2"
 app = marimo.App(auto_download=["html"])
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -79,30 +74,16 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
-
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md("""
     # Surface Extraction Demo
 
     Demonstrating `extract_surface` to find the "top" surface of a volumetric object (e.g., cell membrane).
-    """
-    )
+    """)
     return
 
 
@@ -114,9 +95,10 @@ def _():
     from eigenp_utils.io import download_file
     from eigenp_utils.surface_extraction import extract_surface
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+
     return (
-        extract_surface,
         download_file,
+        extract_surface,
         imread,
         np,
         plt,
@@ -145,7 +127,7 @@ def _(imread):
 def _(cells, membrane, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
-    return (nuclei,)
+    return
 
 
 @app.cell
@@ -174,7 +156,7 @@ def _(roi, show_zyx_max_slice_interactive, surface_mask):
 
 
 @app.cell
-def _(plt, roi, surface_mask):
+def _(np, plt, roi, surface_mask):
     # Visualize: Show a side view (Z-X projection or similar)
     # Or just overlay on a slice where the surface is present.
 
@@ -196,7 +178,7 @@ def _(plt, roi, surface_mask):
 
     fig.tight_layout()
     fig
-    return ax, fig, mask_proj, overlay, roi_proj
+    return
 
 
 if __name__ == "__main__":

@@ -13,19 +13,14 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.16.4"
+__generated_with = "0.24.2"
 app = marimo.App(auto_download=["html"])
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -78,30 +73,16 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
-
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md("""
     # CLAHE Demo
 
     Demonstrating `_my_clahe_` from `eigenp_utils.clahe_equalize_adapthist`.
-    """
-    )
+    """)
     return
 
 
@@ -113,14 +94,8 @@ def _():
     from eigenp_utils.io import download_file
     from eigenp_utils.clahe_equalize_adapthist import _my_clahe_
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
-    return (
-        _my_clahe_,
-        download_file,
-        imread,
-        np,
-        plt,
-        show_zyx_max_slice_interactive,
-    )
+
+    return download_file, imread, plt, show_zyx_max_slice_interactive
 
 
 @app.cell
@@ -145,7 +120,7 @@ def _(cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
     show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
-    return membrane, nuclei
+    return
 
 
 @app.cell
@@ -159,7 +134,7 @@ def _(mo):
 
 
 @app.cell
-def _(_my_clahe_, clip_slider, kernel_size_slider, membrane_slice, nbins_slider):
+def _(clip_slider, kernel_size_slider, membrane_slice, nbins_slider):
     clahe_img = _my_clahe_(
         membrane_slice,
         clip_limit=clip_slider.value,
@@ -181,7 +156,7 @@ def _(clahe_img, membrane_slice, plt):
     axes[1].axis('off')
     fig.tight_layout()
     fig
-    return axes, fig
+    return
 
 
 if __name__ == "__main__":

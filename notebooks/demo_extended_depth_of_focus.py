@@ -14,19 +14,14 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.16.4"
+__generated_with = "0.24.2"
 app = marimo.App(auto_download=["html"])
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -79,30 +74,16 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
-
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md("""
     # Extended Depth of Focus (EDOF) Demo
 
     Demonstrates `best_focus_image` which fuses a Z-stack into a single in-focus image using a patch-based sharpness metric.
-    """
-    )
+    """)
     return
 
 
@@ -114,6 +95,7 @@ def _():
     from eigenp_utils.io import download_file
     from eigenp_utils.extended_depth_of_focus import best_focus_image
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+
     return (
         best_focus_image,
         download_file,
@@ -145,7 +127,7 @@ def _(cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
     show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
-    return membrane, nuclei
+    return (membrane,)
 
 
 @app.cell
@@ -166,7 +148,6 @@ def _(best_focus_image, membrane_stack, patch_size_slider):
     # Standard max projection for comparison
     max_proj = membrane_stack.max(axis=0)
     return edof_img, height_map, max_proj
-
 
 
 @app.cell
@@ -228,10 +209,10 @@ def _(membrane, np, patch_size_slider):
             # Calculate start and end indices for the patch
             y_start = i * _PATCH_SIZE
             y_end = y_start + _PATCH_SIZE
-        
+    
             x_start = j * _PATCH_SIZE
             x_end = x_start + _PATCH_SIZE
-        
+    
             # Extract the patch
             patch = slice_img[y_start:y_end, x_start:x_end]
 
@@ -239,10 +220,9 @@ def _(membrane, np, patch_size_slider):
             # Note: If slice_img is 2D, axis=(1, 2) will throw an error. 
             # For a 2D patch, use np.std(patch).
             std_values = np.std(patch)
-        
+    
             # Store result
             std_grid[i, j] = std_values
-
 
     return lap, mean_energy, slice_img, std_grid
 
@@ -283,4 +263,3 @@ def _(lap, mean_energy, plt, slice_img, std_grid):
 
 if __name__ == "__main__":
     app.run()
-

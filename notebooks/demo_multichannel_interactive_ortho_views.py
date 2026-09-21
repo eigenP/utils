@@ -13,19 +13,16 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.20.4"
+__generated_with = "0.24.2"
 app = marimo.App(auto_download=["html"])
+
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
+
 
 @app.cell(hide_code=True)
 async def _(mo):
@@ -76,30 +73,18 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
+    return
 
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-        # Multichannel Interactive Orthogonal Views
+    mo.md(r"""
+    # Multichannel Interactive Orthogonal Views
 
-        Demonstrating the interactive slice and point annotator widgets on multichannel 3D datasets.
-        """
-    )
+    Demonstrating the interactive slice and point annotator widgets on multichannel 3D datasets.
+    """)
     return
+
 
 @app.cell
 def _():
@@ -125,18 +110,23 @@ def _():
     # Extract channels and cast to float to prevent clipping/overflow issues in blending
     nuclei = cells[:, 1, :, :].astype(float)
     membrane = cells[:, 0, :, :].astype(float)
-    return cells, membrane, nuclei, np, show_zyx_max_slice_interactive, show_zyx_max_slice_interactive_point_annotator
+    return (
+        membrane,
+        nuclei,
+        show_zyx_max_slice_interactive,
+        show_zyx_max_slice_interactive_point_annotator,
+    )
+
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-        ## Interactive 3D Maximum Intensity Projection & Slicing
+    mo.md(r"""
+    ## Interactive 3D Maximum Intensity Projection & Slicing
 
-        You can use the sliders below to navigate the 3D volume along any axis. The `Thickness` sliders control the maximum intensity projection slab size, while `Position` navigates the slab center.
-        """
-    )
+    You can use the sliders below to navigate the 3D volume along any axis. The `Thickness` sliders control the maximum intensity projection slab size, while `Position` navigates the slab center.
+    """)
     return
+
 
 @app.cell
 def _(membrane, nuclei, show_zyx_max_slice_interactive):
@@ -151,21 +141,22 @@ def _(membrane, nuclei, show_zyx_max_slice_interactive):
     )
     return (viewer,)
 
+
 @app.cell
 def _(viewer):
     viewer
     return
 
+
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-        ## Point Annotator Widget
+    mo.md(r"""
+    ## Point Annotator Widget
 
-        Toggle the "ANNOTATION" checkbox to start adding or deleting points. Points added are persistent and sync directly back to the `widget.points` list in Python.
-        """
-    )
+    Toggle the "ANNOTATION" checkbox to start adding or deleting points. Points added are persistent and sync directly back to the `widget.points` list in Python.
+    """)
     return
+
 
 @app.cell
 def _(membrane, nuclei, show_zyx_max_slice_interactive_point_annotator):
@@ -181,10 +172,12 @@ def _(membrane, nuclei, show_zyx_max_slice_interactive_point_annotator):
     )
     return (annotator,)
 
+
 @app.cell
 def _(annotator):
     annotator
     return
+
 
 if __name__ == "__main__":
     app.run()

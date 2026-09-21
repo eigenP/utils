@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.2"
+__generated_with = "0.24.2"
 app = marimo.App(width="full")
 
 
@@ -78,7 +78,7 @@ def _(apply_basic_shading, fit_basic_shading, mo, np, plt, skimage):
     axes[4].axis('off')
 
     plot = mo.as_html(fig)
-    return (cells3d, plot)
+    return cells3d, plot
 
 
 @app.cell

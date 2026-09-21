@@ -13,13 +13,16 @@
 
 import marimo
 
-__generated_with = "0.16.4"
+__generated_with = "0.24.2"
 app = marimo.App(width="medium")
+
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
+
 
 @app.cell(hide_code=True)
 async def _(mo):
@@ -70,30 +73,18 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
+    return
 
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        # Stats Utilities Demo
+    mo.md("""
+    # Stats Utilities Demo
 
-        This notebook demonstrates the robust statistical utilities from `eigenp_utils.stats` using the classic **Iris dataset**.
-        """
-    )
+    This notebook demonstrates the robust statistical utilities from `eigenp_utils.stats` using the classic **Iris dataset**.
+    """)
     return
+
 
 @app.cell
 def _():
@@ -120,34 +111,30 @@ def _():
     # Inject an artificial extreme outlier to demonstrate robustness
     df_outlier = df_iris.copy()
     df_outlier.loc[0, 'sepal length (cm)'] = 100.0 # Extreme outlier
-
     return (
         add_stat_annotations,
         bootstrap_ci,
         cohens_d,
-        df_iris,
         df_outlier,
-        load_iris,
         np,
-        pd,
         plt,
         remove_outliers,
         sns,
         summary_stats,
     )
 
+
 @app.cell
-def _(mo, df_outlier):
-    mo.md(
-        f"""
-        ### 1. Robust Outlier Removal
+def _(mo):
+    mo.md(f"""
+    ### 1. Robust Outlier Removal
 
-        We've taken the iris dataset and explicitly modified the first row to have an artificial extreme outlier (`sepal length (cm) = 100.0`).
+    We've taken the iris dataset and explicitly modified the first row to have an artificial extreme outlier (`sepal length (cm) = 100.0`).
 
-        Using `remove_outliers(method='robust_zscore')`, which uses Median Absolute Deviation (MAD), the function correctly filters out the extreme value without being skewed by it (which standard variance/Z-scores would be).
-        """
-    )
+    Using `remove_outliers(method='robust_zscore')`, which uses Median Absolute Deviation (MAD), the function correctly filters out the extreme value without being skewed by it (which standard variance/Z-scores would be).
+    """)
     return
+
 
 @app.cell
 def _(df_outlier, remove_outliers):
@@ -158,37 +145,36 @@ def _(df_outlier, remove_outliers):
 
     print(f"Removed {num_outliers_removed} outlier(s).")
     print(f"Max 'sepal length (cm)' after cleaning: {max_val_clean}")
+    return (df_clean,)
 
-    return df_clean, num_outliers_removed, max_val_clean
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ### 2. Summary Statistics
+    mo.md("""
+    ### 2. Summary Statistics
 
-        Using `summary_stats`, we can quickly generate a comprehensive table of aggregations (mean, median, standard error of the mean, etc.) for any numeric column grouped by a categorical variable.
-        """
-    )
+    Using `summary_stats`, we can quickly generate a comprehensive table of aggregations (mean, median, standard error of the mean, etc.) for any numeric column grouped by a categorical variable.
+    """)
     return
+
 
 @app.cell
 def _(df_clean, summary_stats):
     stats_df = summary_stats(df_clean, group_by='species', value_col='sepal length (cm)')
     stats_df
-    return stats_df,
+    return
+
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ### 3. Cohen's d (Effect Size)
+    mo.md("""
+    ### 3. Cohen's d (Effect Size)
 
-        We calculate Cohen's d to quantify the effect size between 'setosa' and 'versicolor' sepal lengths.
-        By default, `cohens_d(correction=True)` uses Hedges' exact correction factor via log-gamma approximation, yielding an unbiased estimate (Hedges' g).
-        """
-    )
+    We calculate Cohen's d to quantify the effect size between 'setosa' and 'versicolor' sepal lengths.
+    By default, `cohens_d(correction=True)` uses Hedges' exact correction factor via log-gamma approximation, yielding an unbiased estimate (Hedges' g).
+    """)
     return
+
 
 @app.cell
 def _(cohens_d, df_clean):
@@ -197,20 +183,19 @@ def _(cohens_d, df_clean):
 
     d_value = cohens_d(setosa_vals, versicolor_vals, correction=True)
     print(f"Cohen's d (Hedges' g) between Setosa and Versicolor sepal length: {d_value:.3f}")
+    return
 
-    return d_value, setosa_vals, versicolor_vals
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ### 4. Bootstrap Confidence Intervals
+    mo.md("""
+    ### 4. Bootstrap Confidence Intervals
 
-        `bootstrap_ci` provides robust confidence intervals. Here we compute the 95% Bias-Corrected and Accelerated (BCa) bootstrap interval for the mean `sepal width (cm)` of the virginica species.
-        The BCa method correctly handles median bias and skewness in the underlying distribution.
-        """
-    )
+    `bootstrap_ci` provides robust confidence intervals. Here we compute the 95% Bias-Corrected and Accelerated (BCa) bootstrap interval for the mean `sepal width (cm)` of the virginica species.
+    The BCa method correctly handles median bias and skewness in the underlying distribution.
+    """)
     return
+
 
 @app.cell
 def _(bootstrap_ci, df_clean, np):
@@ -228,19 +213,18 @@ def _(bootstrap_ci, df_clean, np):
 
     print(f"Virginica sepal width mean: {mean_val:.3f}")
     print(f"95% BCa Confidence Interval: [{ci_lower:.3f}, {ci_upper:.3f}]")
+    return
 
-    return ci_lower, ci_upper, mean_val, virginica_width
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ### 5. Statistical Annotations on Plots
+    mo.md("""
+    ### 5. Statistical Annotations on Plots
 
-        `add_stat_annotations` makes it easy to compute and render significance tests (e.g., Welch's t-test with Holm-Bonferroni correction) directly onto seaborn plots.
-        """
-    )
+    `add_stat_annotations` makes it easy to compute and render significance tests (e.g., Welch's t-test with Holm-Bonferroni correction) directly onto seaborn plots.
+    """)
     return
+
 
 @app.cell
 def _(add_stat_annotations, df_clean, plt, sns):
@@ -269,8 +253,8 @@ def _(add_stat_annotations, df_clean, plt, sns):
     ax.set_title("Petal Length by Species with Significance Annotations")
     fig.tight_layout()
     fig
+    return
 
-    return ax, fig, pairs
 
 if __name__ == "__main__":
     app.run()

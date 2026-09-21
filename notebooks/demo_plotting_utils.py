@@ -11,19 +11,14 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.16.4"
+__generated_with = "0.24.2"
 app = marimo.App(auto_download=["html"])
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -76,30 +71,16 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
-
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md("""
     # Plotting Utils Demo
 
     Demonstrates `hist_imshow` and `color_coded_projection`.
-    """
-    )
+    """)
     return
 
 
@@ -117,16 +98,7 @@ def _():
 
     # Try to set style (might fail if files missing in checkout, but good to call)
     set_plotting_style()
-
-    return (
-        color_coded_projection,
-        download_file,
-        hist_imshow,
-        imread,
-        np,
-        plt,
-        set_plotting_style,
-    )
+    return color_coded_projection, download_file, hist_imshow, imread, plt
 
 
 @app.cell
@@ -143,7 +115,7 @@ def _(imread):
     # The function docs say "Normalize ... if frame_max > frame_min" internally.
     stack = cells[:, 1, :, :].astype(float)
     stack = (stack - stack.min()) / (stack.max() - stack.min())
-    return cells, stack
+    return (stack,)
 
 
 @app.cell
@@ -158,7 +130,7 @@ def _(mo):
 
 
 @app.cell
-def _(color_coded_projection, cmap_dropdown, stack):
+def _(cmap_dropdown, color_coded_projection, stack):
     proj_img = color_coded_projection(stack, color_map=cmap_dropdown.value)
     return (proj_img,)
 
@@ -170,12 +142,14 @@ def _(plt, proj_img):
     ax_p.set_title("Color Coded Projection (Time/Z)")
     ax_p.axis('off')
     fig_p
-    return ax_p, fig_p
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md("## Histogram + Image (`hist_imshow`)")
+    mo.md("""
+    ## Histogram + Image (`hist_imshow`)
+    """)
     return
 
 
@@ -184,7 +158,7 @@ def _(hist_imshow, stack):
     # Just pass the 3D stack, it should slice middle automatically
     _res = hist_imshow(stack, bins=100)
     _res['fig']
-    return (_res,)
+    return
 
 
 if __name__ == "__main__":

@@ -13,30 +13,26 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.20.4"
+__generated_with = "0.24.2"
 app = marimo.App()
+
 
 @app.cell
 def _():
     import marimo as mo
-    return mo,
+
+    return (mo,)
+
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-        # PaCMAP Single Cell Embedding
+    mo.md(r"""
+    # PaCMAP Single Cell Embedding
 
-        Demonstrating the `tl_pacmap` integration with Scanpy.
-        """
-    )
+    Demonstrating the `tl_pacmap` integration with Scanpy.
+    """)
     return
+
 
 @app.cell
 def _():
@@ -47,7 +43,8 @@ def _():
     # Load PBMC3k
     adata = sc.datasets.pbmc3k_processed()
     sc.pp.neighbors(adata)
-    return adata, sc, plt, tl_pacmap
+    return adata, plt, sc, tl_pacmap
+
 
 @app.cell
 def _(mo):
@@ -59,13 +56,15 @@ def _(mo):
     run_btn = mo.ui.run_button(label="Run PaCMAP")
     return init_dropdown, run_btn
 
+
 @app.cell
-def _(mo, init_dropdown, run_btn):
+def _(init_dropdown, mo, run_btn):
     mo.vstack([init_dropdown, run_btn])
     return
 
+
 @app.cell
-def _(adata, init_dropdown, run_btn, sc, tl_pacmap, plt, mo):
+def _(adata, init_dropdown, mo, plt, run_btn, sc, tl_pacmap):
     if run_btn.value:
         if init_dropdown.value == 'paga':
             sc.tl.paga(adata, groups='louvain')
@@ -81,6 +80,7 @@ def _(adata, init_dropdown, run_btn, sc, tl_pacmap, plt, mo):
 
     _res
     return
+
 
 if __name__ == "__main__":
     app.run()
