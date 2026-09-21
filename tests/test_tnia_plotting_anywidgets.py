@@ -1,4 +1,5 @@
 import sys
+import textwrap
 import warnings
 
 from matplotlib.colors import to_rgb
@@ -492,12 +493,20 @@ def test_rotation_scatter_interactive():
 # =========================================
 # Source: test_marimo_update.py
 # =========================================
-def test_marimo_update():
-    """Test that marimo update works as expected."""
-    import marimo
-    import pathlib
+def test_marimo_update(tmp_path):
+    """Verify the reference marimo app snippet stays valid and up to date.
 
-    app_code = """
+    Strategy: write the snippet to a pytest ``tmp_path`` scratch file (never the
+    repository working tree), then compile it to check it is syntactically valid
+    Python and inspect its source for the current keyword spelling.
+
+    Expected outcome: the file is created under ``tmp_path``, compiles without a
+    ``SyntaxError``, and uses the ``colormap`` keyword rather than the deprecated
+    ``colors`` alias.
+    """
+    pytest.importorskip("marimo")
+
+    app_code = textwrap.dedent("""
     import marimo as mo
 
     app = mo.App()
@@ -527,9 +536,16 @@ def test_marimo_update():
 
     if __name__ == "__main__":
         app.run()
-    """
-    with open("marimo_app.py", "w") as f:
-        f.write(app_code)
+    """)
+
+    app_path = tmp_path / "marimo_app.py"
+    app_path.write_text(app_code)
+
+    written = app_path.read_text()
+    assert written == app_code
+    compile(written, str(app_path), "exec")
+    assert "colormap=" in written
+    assert "colors=" not in written
 
 # =========================================
 # Source: test_tnia_figsize_scale.py
