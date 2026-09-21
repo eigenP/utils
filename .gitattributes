@@ -1,0 +1,10 @@
+# Normalize line endings: store and check out every text file with LF.
+#
+# Without this, a checkout performed by Windows git -- for example an agent
+# worktree created under \\wsl.localhost\... -- rewrites all tracked files to
+# CRLF. That produces a diff touching the entire repository and buries the
+# real change in the noise.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending or diff converted.
+*.ttf binary
