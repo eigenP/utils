@@ -253,7 +253,7 @@ def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projec
     return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, gap_in=1.0/16.0):
+def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -362,13 +362,16 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     row2_h = h_xz * pz
     fig_h_in = figH
     fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
-    label_row_h = (row1_h + row2_h) * (0.2 + 0.01 * fontsize_pt) if channel_labels is not None else 0.0
+    if channel_label_fontsize_pt is None:
+        channel_label_fontsize_pt = fontsize_pt
+
+    hl_in = (0.10 + (channel_label_fontsize_pt / 72.0)) if channel_labels is not None else 0.0
 
     margin_in = 0.05
     avail_w_in = figW - gap_in - 2.0 * margin_in
-    total_unscaled_h = row1_h + row2_h + (label_row_h if channel_labels is not None else 0.0)
     num_v_gaps = 2 if channel_labels is not None else 1
-    avail_h_in = figH - num_v_gaps * gap_in - 2.0 * margin_in
+    avail_h_in = figH - num_v_gaps * gap_in - 2.0 * margin_in - hl_in
+    total_unscaled_h = row1_h + row2_h
 
     scale = min(avail_w_in / max(col1_w + col2_w, 1e-6), avail_h_in / max(total_unscaled_h, 1e-6))
 
@@ -376,7 +379,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     w2_in = col2_w * scale
     h1_in = row1_h * scale
     h2_in = row2_h * scale
-    hl_in = label_row_h * scale if channel_labels is not None else 0.0
 
     block_w_in = w1_in + gap_in + w2_in
     block_h_in = h1_in + gap_in + h2_in + (hl_in + gap_in if channel_labels is not None else 0.0)
@@ -416,7 +418,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         for spine in axLabels.spines.values():
             spine.set_visible(False)
 
-        bar_linewidth = max(1.0, fontsize_pt * 0.15)
+        bar_linewidth = max(1.0, channel_label_fontsize_pt * 0.15)
         axLabels.plot([0, 1], [0, 0], transform=axLabels.transAxes, color=(0.85, 0.85, 0.85), linewidth=bar_linewidth, clip_on=False)
 
         n_labels = len(channel_labels)
@@ -441,7 +443,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             text_areas = []
             for i, label in enumerate(channel_labels):
                 GUI_CHANNEL_COLOR = get_gui_channel_color(color_list[i])
-                ta = TextArea(label, textprops=dict(color=GUI_CHANNEL_COLOR, fontsize=fontsize_pt, fontweight='bold'))
+                ta = TextArea(label, textprops=dict(color=GUI_CHANNEL_COLOR, fontsize=channel_label_fontsize_pt, fontweight='bold'))
                 text_areas.append(ta)
 
             packer = HPacker(children=text_areas, align="center", pad=0, sep=10)
@@ -538,7 +540,7 @@ def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, fi
             ha='center', va='center', color='gray', fontsize=fontsize_pt)
 
 ### New function
-def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None):
+def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -571,11 +573,11 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt)
 
 
 ### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -609,7 +611,7 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
         projection_x = np.flip(np.rot90(projector(image_to_show[:, :, x_slices], axis=2), 1), 0)
         projection_z = projector(image_to_show[z_slices, :, :], axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt)
 
 
 
@@ -1538,10 +1540,11 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
-                 show_crosshair=True, sync_on_hover=False, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=False, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
 
         self.rotate_view = rotate_view
         self.channel_labels_input = channel_labels
+        self.channel_label_fontsize_pt = channel_label_fontsize_pt
         # Handle 2D images gracefully by adding a Z dimension of 1
         if isinstance(im, list):
             if im[0].ndim == 2:
@@ -1800,7 +1803,8 @@ class TNIASliceWidget(TNIAWidgetBase):
             im_curr, x_lims, y_lims, z_lims,
             pixel_sizes=pass_pixel_sizes, figsize=self.figsize, colormap=colors_curr,
             vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, opacity=opacity_curr,
-            rotate_view=self.rotate_view, channel_labels=channel_labels_curr
+            rotate_view=self.rotate_view, channel_labels=channel_labels_curr,
+            channel_label_fontsize_pt=self.channel_label_fontsize_pt
         )
 
         # Crosshairs logic (copied from original interactive wrapper)
@@ -2138,8 +2142,9 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
         self.rotate_view = rotate_view
+        self.channel_label_fontsize_pt = channel_label_fontsize_pt
         if colors is not None:
             warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
             if colormap is None:
@@ -2304,7 +2309,10 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.gamma_list = _to_list(gamma, self.C, 1.0)
         self.opacity_list = _to_list(opacity, self.C, 1.0)
 
-        self.channel_names = [f"Channel {i}" for i in range(self.C)]
+        if channel_labels is not None:
+            self.channel_names = _to_list(channel_labels, self.C, "Channel")
+        else:
+            self.channel_names = [f"Channel {i}" for i in range(self.C)]
         self.channel_dtypes = ["float"] * self.C
         GUI_CHANNEL_COLORS = [get_gui_channel_color(matplotlib.colors.to_hex(c)) for c in self.colors_rgb]
         self.channel_colors = GUI_CHANNEL_COLORS
@@ -2459,7 +2467,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 xy_rgb, xz_rgb, zy_rgb,
                 pixel_sizes=pass_pixel_sizes, figsize=self.figsize, colormap=None,
                 vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=opacity_resolved, subplot_bg=self.subplot_bg,
-                rotate_view=self.rotate_view
+                rotate_view=self.rotate_view, channel_labels=self.channel_names if self.channel_labels_input is not None else None,
+                channel_label_fontsize_pt=self.channel_label_fontsize_pt
             )
 
             fig.patch.set_alpha(0.0) # transparent figure bg
@@ -2578,8 +2587,18 @@ class TNIAScatterWidget(TNIAWidgetBase):
             gap_in = 1.0 / 16.0
             margin_in = 0.05
 
+            fontsize_pt = max(10, min(24, figH * 72 * 0.035))
+            if self.channel_label_fontsize_pt is not None:
+                channel_label_fontsize_pt = self.channel_label_fontsize_pt
+            else:
+                channel_label_fontsize_pt = fontsize_pt
+
+            channel_labels = self.channel_names if self.channel_labels_input is not None else None
+            hl_in = (0.10 + (channel_label_fontsize_pt / 72.0)) if channel_labels is not None else 0.0
+            num_v_gaps = 2 if channel_labels is not None else 1
+
             avail_w_in = figW - gap_in - 2.0 * margin_in
-            avail_h_in = figH - gap_in - 2.0 * margin_in
+            avail_h_in = figH - num_v_gaps * gap_in - 2.0 * margin_in - hl_in
 
             scale = min(avail_w_in / max(col1_w + col2_w, 1e-6), avail_h_in / max(row1_h + row2_h, 1e-6))
 
@@ -2589,7 +2608,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
             h2_in = row2_h * scale
 
             block_w_in = w1_in + gap_in + w2_in
-            block_h_in = h1_in + gap_in + h2_in
+            block_h_in = h1_in + gap_in + h2_in + (hl_in + gap_in if channel_labels is not None else 0.0)
 
             left_margin_in = (figW - block_w_in) / 2.0
             bottom_margin_in = (figH - block_h_in) / 2.0
@@ -2606,22 +2625,62 @@ class TNIAScatterWidget(TNIAWidgetBase):
             h2_frac = h2_in / figH
             gap_h_frac = gap_in / figH
             h1_frac = h1_in / figH
+            hl_frac = hl_in / figH
 
             y_row2 = y0_frac
             y_row1 = y0_frac + h2_frac + gap_h_frac
 
             fig = Figure(figsize=self.figsize, facecolor='none') if not plt.get_fignums() else plt.figure(figsize=self.figsize, facecolor='none')
 
-            axXY = fig.add_axes([x_col1, y_row1, w1_frac, h1_frac])
-            axZY = fig.add_axes([x_col2, y_row1, w2_frac, h1_frac])
-            axXZ = fig.add_axes([x_col1, y_row2, w1_frac, h2_frac])
-            axBar = fig.add_axes([x_col2, y_row2, w2_frac, h2_frac])
+            axLabels = None
+            if channel_labels is not None:
+                y_labels = y_row1 + h1_frac + gap_h_frac
+                axLabels = fig.add_axes([x_col1, y_labels, w1_frac, hl_frac])
+                axXY = fig.add_axes([x_col1, y_row1, w1_frac, h1_frac])
+                axZY = fig.add_axes([x_col2, y_row1, w2_frac, h1_frac])
+                axXZ = fig.add_axes([x_col1, y_row2, w1_frac, h2_frac])
+                axBar = fig.add_axes([x_col2, y_row2, w2_frac, h2_frac])
+
+                axLabels.patch.set_visible(False)
+                axLabels.set_xticks([])
+                axLabels.set_yticks([])
+                for spine in axLabels.spines.values():
+                    spine.set_visible(False)
+
+                bar_linewidth = max(1.0, channel_label_fontsize_pt * 0.15)
+                axLabels.plot([0, 1], [0, 0], transform=axLabels.transAxes, color=(0.85, 0.85, 0.85), linewidth=bar_linewidth, clip_on=False)
+
+                n_labels = len(channel_labels)
+                if n_labels > 0:
+                    color_list = [resolve_color(c) for c in self.colors_use]
+                    if len(color_list) < n_labels:
+                        color_list = color_list * (n_labels // len(color_list) + 1)
+
+                    from matplotlib.offsetbox import TextArea, HPacker, AnchoredOffsetbox
+
+                    text_areas = []
+                    for i, label in enumerate(channel_labels):
+                        GUI_CHANNEL_COLOR = get_gui_channel_color(color_list[i])
+                        ta = TextArea(label, textprops=dict(color=GUI_CHANNEL_COLOR, fontsize=channel_label_fontsize_pt, fontweight='bold'))
+                        text_areas.append(ta)
+
+                    packer = HPacker(children=text_areas, align="center", pad=0, sep=10)
+                    anchored_box = AnchoredOffsetbox(
+                        loc='lower center', child=packer, pad=0.0, frameon=False, borderpad=0.0,
+                        bbox_to_anchor=(0.5, 0.2), bbox_transform=axLabels.transAxes
+                    )
+                    axLabels.add_artist(anchored_box)
+            else:
+                axXY = fig.add_axes([x_col1, y_row1, w1_frac, h1_frac])
+                axZY = fig.add_axes([x_col2, y_row1, w2_frac, h1_frac])
+                axXZ = fig.add_axes([x_col1, y_row2, w1_frac, h2_frac])
+                axBar = fig.add_axes([x_col2, y_row2, w2_frac, h2_frac])
 
             fig.axXY = axXY
             fig.axZY = axZY
             fig.axXZ = axXZ
             fig.axBar = axBar
-            fig.axLabels = None
+            fig.axLabels = axLabels
             
             for ax in (axXY, axZY, axXZ, axBar):
                 if ax is not axBar and self.subplot_bg is not None:
@@ -2766,7 +2825,7 @@ def show_zyx_max_slice_interactive(
     colors=None, opacity=None,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
-    rotate_view=None, channel_labels=None,
+    rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
 ):
     """
     Interactive 3D slice viewer using AnyWidget.
@@ -2862,7 +2921,8 @@ def show_zyx_max_slice_interactive(
     w = TNIASliceWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
+        channel_label_fontsize_pt=channel_label_fontsize_pt
     )
     return w
 
@@ -2877,7 +2937,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     point_size_scale=0.01,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
-    rotate_view=None, channel_labels=None,
+    rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
 ):
     """
     Interactive 3D slice viewer with point annotation using AnyWidget.
@@ -2965,7 +3025,8 @@ def show_zyx_max_slice_interactive_point_annotator(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         point_size_scale=point_size_scale,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels
+        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
+        channel_label_fontsize_pt=channel_label_fontsize_pt
     )
     return w
 
@@ -2983,7 +3044,7 @@ def show_zyx_max_scatter_interactive(
     subplot_bg='black',
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
-    rotate_view=None, channel_labels=None,
+    rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
 ):
     """
     Shows interactive sliders for XY, XZ, and YZ projection of 3D point coordinates.
@@ -3121,7 +3182,7 @@ def show_zyx_max_scatter_interactive(
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         subplot_bg=subplot_bg,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t),
-        rotate_view=rotate_view, channel_labels=channel_labels
+        rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt
     )
     w.X_arr_phys = w.X_arr * px
     w.Y_arr_phys = w.Y_arr * py
