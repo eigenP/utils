@@ -11,3 +11,8 @@ data/
 *.h5ad
 *.tif
 ignored_tmp/
+
+# Per-developer Claude Code state; shared config (.claude/settings.json,
+# skills, commands) stays tracked.
+.claude/settings.local.json
+.claude/worktrees/
