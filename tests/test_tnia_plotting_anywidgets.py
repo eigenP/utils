@@ -1250,3 +1250,65 @@ def test_single_slider_start_end_sync_and_translate():
     w.x_t = 10
     assert w.x_start == 30
     assert w.x_end == 50
+
+
+def test_channel_label_fontsize_pt_kwarg_and_anisotropic_height():
+    """
+    Verify that channel_label_fontsize_pt controls label font size and physical height of axLabels,
+    and that axLabels physical height is independent of image anisotropy and aspect ratios.
+    """
+    # 1. Test custom channel_label_fontsize_pt in show_zyx
+    im_aniso = np.zeros((5, 10, 500), dtype=np.float32) # highly anisotropic image
+    figsize = (10, 8)
+    labels = ["Ch0", "Ch1"]
+    fontsize_pt = 18.0
+
+    fig = show_zyx(
+        xy=im_aniso[2, :, :], xz=im_aniso[:, 5, :], zy=np.flip(np.rot90(im_aniso[:, :, 250], 1), 0),
+        pixel_sizes={'X': 1.0, 'Y': 1.0, 'Z': 1.0},
+        figsize=figsize,
+        channel_labels=labels,
+        channel_label_fontsize_pt=fontsize_pt
+    )
+
+    try:
+        assert fig.axLabels is not None
+        pos_labels = fig.axLabels.get_position()
+        labels_h_in = pos_labels.height * figsize[1]
+        expected_hl_in = 0.10 + (fontsize_pt / 72.0) # 0.10 + 0.25 = 0.35 in
+        np.testing.assert_allclose(labels_h_in, expected_hl_in, atol=1e-5)
+    finally:
+        plt.close(fig)
+
+    # 2. Test propagation through interactive widgets and show_zyx_max_slice_interactive
+    w = show_zyx_max_slice_interactive(
+        im_aniso, channel_labels=labels, channel_label_fontsize_pt=20.0, figsize=(10, 8)
+    )
+    assert w.channel_label_fontsize_pt == 20.0
+    fig_w = w._render()
+    try:
+        assert fig_w.axLabels is not None
+        pos_labels_w = fig_w.axLabels.get_position()
+        labels_h_in_w = pos_labels_w.height * 8.0
+        expected_hl_in_w = 0.10 + (20.0 / 72.0)
+        np.testing.assert_allclose(labels_h_in_w, expected_hl_in_w, atol=1e-5)
+    finally:
+        plt.close(fig_w)
+
+    # 3. Test propagation through show_zyx_max_scatter_interactive
+    pts_X = np.random.rand(50) * 100
+    pts_Y = np.random.rand(50) * 10
+    pts_Z = np.random.rand(50) * 2
+    w_sc = show_zyx_max_scatter_interactive(
+        (pts_X, pts_Y, pts_Z), channel_labels=labels, channel_label_fontsize_pt=14.0, figsize=(10, 8)
+    )
+    assert w_sc.channel_label_fontsize_pt == 14.0
+    fig_sc = w_sc._render()
+    try:
+        assert fig_sc.axLabels is not None
+        pos_labels_sc = fig_sc.axLabels.get_position()
+        labels_h_in_sc = pos_labels_sc.height * 8.0
+        expected_hl_in_sc = 0.10 + (14.0 / 72.0)
+        np.testing.assert_allclose(labels_h_in_sc, expected_hl_in_sc, atol=1e-5)
+    finally:
+        plt.close(fig_sc)
