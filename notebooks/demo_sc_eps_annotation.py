@@ -14,30 +14,26 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.20.4"
+__generated_with = "0.24.2"
 app = marimo.App()
+
 
 @app.cell
 def _():
     import marimo as mo
-    return mo,
+
+    return (mo,)
+
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-        # Cell Annotation & EPS (Empirical Probability of Superiority)
+    mo.md(r"""
+    # Cell Annotation & EPS (Empirical Probability of Superiority)
 
-        Demonstrating `annotate_clusters_by_markers`, multiresolution clustering (`sweep_leiden`), and multiresolution trees.
-        """
-    )
+    Demonstrating `annotate_clusters_by_markers`, multiresolution clustering (`sweep_leiden`), and multiresolution trees.
+    """)
     return
+
 
 @app.cell
 def _():
@@ -55,15 +51,27 @@ def _():
     adata = sc.datasets.pbmc3k_processed()
     sc.pp.neighbors(adata)
     tl_pacmap(adata, init='pca')
-    return adata, sc, plt, tl_pacmap, annotate_clusters_by_markers, sweep_leiden, multiscale_coarsening, plot_multiresolution_tree
+    return (
+        adata,
+        annotate_clusters_by_markers,
+        multiscale_coarsening,
+        plot_multiresolution_tree,
+        plt,
+        sc,
+        sweep_leiden,
+    )
+
 
 @app.cell
 def _(mo):
-    mo.md("## Cell Annotation via EPS")
+    mo.md("""
+    ## Cell Annotation via EPS
+    """)
     return
 
+
 @app.cell
-def _(adata, annotate_clusters_by_markers, sc, plt, mo):
+def _(adata, annotate_clusters_by_markers, mo, plt, sc):
     # Marker dictionary
     markers = {
         'B cells': ['CD79A', 'MS4A1'],
@@ -91,21 +99,33 @@ def _(adata, annotate_clusters_by_markers, sc, plt, mo):
         mo.ui.table(df_annot),
         _fig
     ])
-    return df_annot, markers, _fig
+    return
+
 
 @app.cell
 def _(mo):
-    mo.md("## Sweep Leiden & Multiscale Coarsening Tree")
+    mo.md("""
+    ## Sweep Leiden & Multiscale Coarsening Tree
+    """)
     return
+
 
 @app.cell
 def _(mo):
     run_sweep_btn = mo.ui.run_button(label="Sweep Leiden & Plot Tree")
     run_sweep_btn
-    return run_sweep_btn,
+    return (run_sweep_btn,)
+
 
 @app.cell
-def _(adata, run_sweep_btn, sweep_leiden, multiscale_coarsening, plot_multiresolution_tree, plt, mo):
+def _(
+    adata,
+    mo,
+    multiscale_coarsening,
+    plot_multiresolution_tree,
+    run_sweep_btn,
+    sweep_leiden,
+):
     if run_sweep_btn.value:
         with mo.status.spinner("Sweeping Leiden..."):
             resolutions = [0.1, 0.3, 0.5, 0.8, 1.2]
@@ -127,6 +147,7 @@ def _(adata, run_sweep_btn, sweep_leiden, multiscale_coarsening, plot_multiresol
         _res = mo.md("Click to sweep leiden and plot.")
     _res
     return
+
 
 if __name__ == "__main__":
     app.run()

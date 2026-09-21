@@ -15,30 +15,26 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.20.4"
+__generated_with = "0.24.2"
 app = marimo.App()
+
 
 @app.cell
 def _():
     import marimo as mo
-    return mo,
+
+    return (mo,)
+
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
-        # Moran's I & Archetype Analysis
+    mo.md(r"""
+    # Moran's I & Archetype Analysis
 
-        Demonstrating `morans_i_all_fast` and `find_expression_archetypes`.
-        """
-    )
+    Demonstrating `morans_i_all_fast` and `find_expression_archetypes`.
+    """)
     return
+
 
 @app.cell
 def _():
@@ -55,16 +51,24 @@ def _():
     adata = sc.datasets.pbmc3k_processed()
     sc.pp.neighbors(adata)
     tl_pacmap(adata, init='pca')
-    return adata, sc, plt, tl_pacmap, morans_i_all_fast, find_expression_archetypes, plot_archetype_assignments
+    return (
+        adata,
+        find_expression_archetypes,
+        morans_i_all_fast,
+        plot_archetype_assignments,
+        plt,
+    )
+
 
 @app.cell
 def _(mo):
     run_moran_btn = mo.ui.run_button(label="Compute Moran's I")
     run_moran_btn
-    return run_moran_btn,
+    return (run_moran_btn,)
+
 
 @app.cell
-def _(adata, run_moran_btn, morans_i_all_fast, mo):
+def _(adata, mo, morans_i_all_fast, run_moran_btn):
     if run_moran_btn.value:
         with mo.status.spinner("Computing Moran's I..."):
             mi_results = morans_i_all_fast(adata)
@@ -73,7 +77,8 @@ def _(adata, run_moran_btn, morans_i_all_fast, mo):
         mi_results = None
         _res = mo.md("Click to compute Moran's I.")
     _res
-    return mi_results,
+    return (mi_results,)
+
 
 @app.cell
 def _(mo):
@@ -81,13 +86,24 @@ def _(mo):
     run_arch_btn = mo.ui.run_button(label="Find Archetypes")
     return num_arch_slider, run_arch_btn
 
+
 @app.cell
 def _(mo, num_arch_slider, run_arch_btn):
     mo.vstack([num_arch_slider, run_arch_btn])
     return
 
+
 @app.cell
-def _(adata, mi_results, num_arch_slider, run_arch_btn, find_expression_archetypes, plot_archetype_assignments, plt, mo):
+def _(
+    adata,
+    find_expression_archetypes,
+    mi_results,
+    mo,
+    num_arch_slider,
+    plot_archetype_assignments,
+    plt,
+    run_arch_btn,
+):
     if run_arch_btn.value:
         if mi_results is None:
             _res = mo.md("Please run Moran's I first!")
@@ -108,6 +124,7 @@ def _(adata, mi_results, num_arch_slider, run_arch_btn, find_expression_archetyp
 
     _res
     return
+
 
 if __name__ == "__main__":
     app.run()

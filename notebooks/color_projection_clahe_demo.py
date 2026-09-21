@@ -11,19 +11,14 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.16.4"
+__generated_with = "0.24.2"
 app = marimo.App(auto_download=["html"])
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -76,25 +71,12 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
-
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md("""
     # Color-coded projection and CLAHE demo
 
     This notebook demonstrates how to use the
@@ -108,8 +90,7 @@ def _(mo):
     Use the controls below to explore different color mappings for the
     projection and adjust the CLAHE clip limit to see its effect on the
     enhanced slice.
-    """
-    )
+    """)
     return
 
 
@@ -122,14 +103,8 @@ def _():
     from eigenp_utils.clahe_equalize_adapthist import _my_clahe_
     from eigenp_utils.color_coded_projection import color_coded_projection
     from eigenp_utils.io import download_file
-    return (
-        _my_clahe_,
-        color_coded_projection,
-        download_file,
-        imread,
-        np,
-        plt,
-    )
+
+    return color_coded_projection, download_file, imread, np, plt
 
 
 @app.cell
@@ -178,7 +153,7 @@ def _(imread):
     cells = imread("./cells3d.tif")
     # Select the membrane channel (index 1)
     membrane_stack = cells[:, 1, :, :]
-    return cells, membrane_stack
+    return (membrane_stack,)
 
 
 @app.cell

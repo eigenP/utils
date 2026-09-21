@@ -9,19 +9,14 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.16.4"
+__generated_with = "0.24.2"
 app = marimo.App(auto_download=["html"])
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -74,30 +69,16 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
-
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md("""
     # Dimensionality Parser Demo
 
     Demonstrates the `dimensionality_parser` decorator which allows functions written for lower dimensions (e.g., 2D or 3D) to automatically iterate over higher dimensions (e.g., Time, Channel, Z).
-    """
-    )
+    """)
     return
 
 
@@ -105,6 +86,7 @@ def _(mo):
 def _():
     import numpy as np
     from eigenp_utils.dimensionality_parser import dimensionality_parser
+
     return dimensionality_parser, np
 
 
@@ -147,7 +129,7 @@ def _(dimensionality_parser, input_shape_text, mo, np, target_dims_input):
         output_msg = f"**Error**: {str(e)}"
 
     mo.md(output_msg)
-    return dummy_data, output_msg, process_slice, result, shape, target_dims
+    return
 
 
 if __name__ == "__main__":

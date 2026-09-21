@@ -14,19 +14,14 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.16.4"
+__generated_with = "0.24.2"
 app = marimo.App(auto_download=["html"])
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -79,33 +74,19 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
-
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md("""
     # Intensity Rescaling Demo
 
     Showcasing:
     * `contrast_stretching`
     * `adjust_brightness_per_slice` (correcting Z-decay)
     * `normalize_image`
-    """
-    )
+    """)
     return
 
 
@@ -121,12 +102,12 @@ def _():
         normalize_image
     )
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+
     return (
         adjust_brightness_per_slice,
         contrast_stretching,
         download_file,
         imread,
-        normalize_image,
         np,
         plt,
         show_zyx_max_slice_interactive,
@@ -149,7 +130,7 @@ def _(imread, np):
     # Simulate Z-decay (bleaching)
     z_decay = np.linspace(1.0, 0.3, stack.shape[0])
     decayed_stack = stack * z_decay[:, None, None]
-    return cells, decayed_stack, stack, z_decay
+    return cells, decayed_stack
 
 
 @app.cell
@@ -157,7 +138,7 @@ def _(cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
     show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
-    return membrane, nuclei
+    return
 
 
 @app.cell
@@ -192,7 +173,7 @@ def _(mid_slice, plt, stretched):
     ax_cs[1].set_title("Stretched")
     fig_cs.tight_layout()
     fig_cs
-    return ax_cs, fig_cs
+    return
 
 
 @app.cell
@@ -211,11 +192,16 @@ def _(mo):
     )
 
     mo.vstack([fit_dropdown, correction_method])
-    return (fit_dropdown, correction_method)
+    return correction_method, fit_dropdown
 
 
 @app.cell
-def _(adjust_brightness_per_slice, correction_method, decayed_stack, fit_dropdown):
+def _(
+    adjust_brightness_per_slice,
+    correction_method,
+    decayed_stack,
+    fit_dropdown,
+):
     corrected_stack = adjust_brightness_per_slice(
         decayed_stack,
         gamma_fit_func=fit_dropdown.value,
@@ -245,7 +231,7 @@ def _(corrected_stack, decayed_stack, np, plt):
     ax_z.legend()
     ax_z.set_title("Intensity Profile Along Z")
     fig_z
-    return ax_z, fig_z, means_corrected, means_original
+    return
 
 
 if __name__ == "__main__":

@@ -16,19 +16,14 @@
 
 import marimo
 
-# TODO: Plan B - Fix "Markdown cell should be dedented for better readability"
-# Marimo check complains about markdown indentation inside mo.md().
-# Need to use `marimo edit` to generate a markdown cell, inspect the exact string literal format
-# (e.g., whether it uses `r"""`, `"""`, no leading spaces, or specific spacing),
-# and apply that exact structure via an automated script.
-
-__generated_with = "0.16.4"
+__generated_with = "0.24.2"
 app = marimo.App(auto_download=["html"])
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -81,30 +76,16 @@ async def _(mo):
 
     import eigenp_utils
     print("eigenp_utils imported from:", eigenp_utils.__file__)
-
-    return (
-        GIT_URL,
-        OWNER,
-        REF,
-        REPO,
-        eigenp_utils,
-        in_wasm,
-        install_github,
-        install_local,
-        res,
-        sys,
-    )
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    mo.md("""
     # Registration / Drift Correction Demo
 
     Demonstrates `estimate_drift_2D` and `apply_drift_correction_2D` on a synthetically drifted stack.
-    """
-    )
+    """)
     return
 
 
@@ -120,10 +101,10 @@ def _():
         apply_drift_correction_2D
     )
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+
     return (
         apply_drift_correction_2D,
         download_file,
-        estimate_drift_2D,
         imread,
         np,
         plt,
@@ -160,16 +141,7 @@ def _(imread, np, shift):
 
         drifted_stack[t] = shift(original_stack[t], shift=(current_dy, current_dx), mode='constant')
         true_drifts.append((current_dy, current_dx))
-
-    return (
-        cells,
-        current_dx,
-        current_dy,
-        drifted_stack,
-        original_stack,
-        t,
-        true_drifts,
-    )
+    return cells, drifted_stack
 
 
 @app.cell
@@ -177,7 +149,7 @@ def _(cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
     show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
-    return membrane, nuclei
+    return
 
 
 @app.cell
@@ -219,7 +191,7 @@ def _(corrected_stack, drifted_stack, plt):
 
     fig.tight_layout()
     fig
-    return axes, fig
+    return
 
 
 if __name__ == "__main__":
