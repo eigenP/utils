@@ -15,11 +15,11 @@ For specialized tasks, agents should refer to these files to channel specific ex
 - **`bolt.md`**: The "Bolt" persona. Provides guidance on development velocity and overarching architectural patterns.
 
 ## Testing
-- Use `pytest` for running tests located in the `tests/` folder.
-- CI runs `pytest` after installing the package with `pip install .`. Ensure tests pass locally using the same command.
+- Use `uv run pytest tests/` for running tests located in the `tests/` folder.
+- Ensure all tests pass locally before submission.
 
 ## Dependencies
-- Development requirements are listed in `requirements-dev.txt` which installs the package in editable mode and includes `numpy` and `pytest`.
+- Install development dependencies using `uv venv && source .venv/bin/activate && uv pip install -e ".[all,dev]"` (or `uv run`).
 - **Inline Script Metadata (PEP 723):**
     - Moving forward, we use inline script metadata to define dependencies for each individual source file in `src/eigenp_utils/`.
     - Core dependencies (like `numpy`, `scipy`) are still listed in `pyproject.toml`, but specialized or file-specific dependencies should be declared in the file header.
