@@ -51,102 +51,251 @@ export default {
       return null;
     }
 
-    function createSlider(label, traitName, minTrait, maxTrait, scaleTrait) {
+    function createRangeSlider(label, startTrait, endTrait, maxTrait, scaleTrait) {
       const container = document.createElement("div");
       container.style.display = "flex";
-      container.style.flexDirection = "column";  
-      container.style.alignItems = "flex-start";
+      container.style.flexDirection = "column";
       container.style.gap = "4px";
-      container.style.minWidth = "80px";
+      container.style.minWidth = "180px";
       container.style.flex = "1";
+
+      const topRow = document.createElement("div");
+      topRow.style.display = "flex";
+      topRow.style.justifyContent = "space-between";
+      topRow.style.alignItems = "center";
 
       const labelEl = document.createElement("label");
       labelEl.textContent = label;
       labelEl.style.fontSize = "12px";
+      labelEl.style.fontWeight = "bold";
 
-      const controlRow = document.createElement("div");
-      controlRow.style.display = "flex";
-      controlRow.style.alignItems = "center";
-      controlRow.style.gap = "4px";
-      controlRow.style.width = "100%";
+      const inputsRow = document.createElement("div");
+      inputsRow.style.display = "flex";
+      inputsRow.style.alignItems = "center";
+      inputsRow.style.gap = "2px";
 
-      const slider = document.createElement("input");
-      slider.type = "range";
-      slider.style.width = "100%";
+      const startInput = document.createElement("input");
+      startInput.type = "number";
+      startInput.style.width = "48px";
+      startInput.style.fontSize = "11px";
 
-      const numberInput = document.createElement("input");
-      numberInput.type = "number";
-      numberInput.style.width = "60px";
-      numberInput.style.fontSize = "12px";
+      const sep = document.createElement("span");
+      sep.textContent = "-";
+      sep.style.fontSize = "11px";
+
+      const endInput = document.createElement("input");
+      endInput.type = "number";
+      endInput.style.width = "48px";
+      endInput.style.fontSize = "11px";
+
+      inputsRow.appendChild(startInput);
+      inputsRow.appendChild(sep);
+      inputsRow.appendChild(endInput);
+
+      topRow.appendChild(labelEl);
+      topRow.appendChild(inputsRow);
+
+      const trackContainer = document.createElement("div");
+      trackContainer.style.position = "relative";
+      trackContainer.style.height = "24px";
+      trackContainer.style.width = "100%";
+      trackContainer.style.display = "flex";
+      trackContainer.style.alignItems = "center";
+      trackContainer.style.userSelect = "none";
+      trackContainer.style.touchAction = "none";
+
+      const trackBg = document.createElement("div");
+      trackBg.style.position = "absolute";
+      trackBg.style.left = "0";
+      trackBg.style.right = "0";
+      trackBg.style.height = "6px";
+      trackBg.style.backgroundColor = "#e0e0e0";
+      trackBg.style.borderRadius = "3px";
+      trackBg.style.pointerEvents = "none";
+
+      const rangeBar = document.createElement("div");
+      rangeBar.style.position = "absolute";
+      rangeBar.style.height = "6px";
+      rangeBar.style.backgroundColor = "#80b3ff";
+      rangeBar.style.borderRadius = "3px";
+      rangeBar.style.pointerEvents = "none";
+
+      function createThumb(title, color, cursor, zIndex) {
+        const thumb = document.createElement("div");
+        thumb.style.position = "absolute";
+        thumb.style.width = "14px";
+        thumb.style.height = "14px";
+        thumb.style.borderRadius = "50%";
+        thumb.style.backgroundColor = color;
+        thumb.style.border = "2px solid #ffffff";
+        thumb.style.boxShadow = "0 1px 3px rgba(0,0,0,0.4)";
+        thumb.style.cursor = cursor;
+        thumb.style.zIndex = zIndex;
+        thumb.style.transform = "translate(-50%, -50%)";
+        thumb.style.top = "50%";
+        thumb.title = title;
+        return thumb;
+      }
+
+      const startThumb = createThumb("Start", "#d0d0d0", "ew-resize", "2");
+      const middleThumb = createThumb("Translate Range", "#000000", "grab", "3");
+      const endThumb = createThumb("End", "#d0d0d0", "ew-resize", "2");
+
+      trackContainer.appendChild(trackBg);
+      trackContainer.appendChild(rangeBar);
+      trackContainer.appendChild(startThumb);
+      trackContainer.appendChild(middleThumb);
+      trackContainer.appendChild(endThumb);
+
+      container.appendChild(topRow);
+      container.appendChild(trackContainer);
+
+      function getValFromX(clientX) {
+        const rect = trackContainer.getBoundingClientRect();
+        if (rect.width <= 0) return 0;
+        const maxVal = model.get(maxTrait) || 1;
+        const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        return Math.round(frac * maxVal);
+      }
 
       function update() {
-        const val = model.get(traitName);
-        const min = model.get(minTrait) || 1;
-        const max = model.get(maxTrait);
+        const startVal = model.get(startTrait) || 0;
+        const endVal = model.get(endTrait) || 0;
+        const maxVal = model.get(maxTrait) || 1;
         const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
 
-        slider.min = min;
-        slider.max = max;
-        slider.value = val;
+        const startPct = Math.max(0, Math.min(100, (startVal / maxVal) * 100));
+        const endPct = Math.max(0, Math.min(100, (endVal / maxVal) * 100));
+        const midVal = (startVal + endVal) / 2;
+        const midPct = Math.max(0, Math.min(100, (midVal / maxVal) * 100));
 
-        const displayVal = val * scale;
+        startThumb.style.left = `${startPct}%`;
+        endThumb.style.left = `${endPct}%`;
+        middleThumb.style.left = `${midPct}%`;
+
+        rangeBar.style.left = `${startPct}%`;
+        rangeBar.style.width = `${endPct - startPct}%`;
+
         if (scale !== 1.0) {
-          numberInput.value = parseFloat(displayVal.toFixed(2));
-          numberInput.step = "0.01";
+          startInput.value = parseFloat((startVal * scale).toFixed(2));
+          endInput.value = parseFloat((endVal * scale).toFixed(2));
+          startInput.step = "0.01";
+          endInput.step = "0.01";
         } else {
-          numberInput.value = val;
-          numberInput.step = "1";
+          startInput.value = startVal;
+          endInput.value = endVal;
+          startInput.step = "1";
         }
       }
 
-      update();
-
-      model.on(`change:${traitName}`, update);
-      model.on(`change:${minTrait}`, update);
+      model.on(`change:${startTrait}`, update);
+      model.on(`change:${endTrait}`, update);
       model.on(`change:${maxTrait}`, update);
       if (scaleTrait) {
         model.on(`change:${scaleTrait}`, update);
       }
-      
-      slider.addEventListener("input", () => {
-        model.set(traitName, parseInt(slider.value));
-        model.save_changes();
+      update();
+
+      function setupDrag(thumb, onDrag, onStart, onEnd) {
+        thumb.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          thumb.setPointerCapture(e.pointerId);
+          if (onStart) onStart();
+
+          const handlePointerMove = (ev) => {
+            onDrag(ev);
+          };
+
+          const handlePointerUp = (ev) => {
+            thumb.releasePointerCapture(ev.pointerId);
+            thumb.removeEventListener("pointermove", handlePointerMove);
+            thumb.removeEventListener("pointerup", handlePointerUp);
+            if (onEnd) onEnd();
+          };
+
+          thumb.addEventListener("pointermove", handlePointerMove);
+          thumb.addEventListener("pointerup", handlePointerUp);
+        });
+      }
+
+      setupDrag(startThumb, (e) => {
+        const endVal = model.get(endTrait) || 0;
+        let newStart = Math.max(0, Math.min(endVal, getValFromX(e.clientX)));
+        if (newStart !== model.get(startTrait)) {
+          model.set(startTrait, newStart);
+          model.save_changes();
+        }
       });
 
-      numberInput.addEventListener("change", () => {
-        const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
-        const min = model.get(minTrait) || 1;
-        const max = model.get(maxTrait);
-        
-        let newIndex = Math.round(parseFloat(numberInput.value) / scale);
-        if (isNaN(newIndex)) {
-          update();
-          return;
+      setupDrag(endThumb, (e) => {
+        const maxVal = model.get(maxTrait) || 1;
+        const startVal = model.get(startTrait) || 0;
+        let newEnd = Math.max(startVal, Math.min(maxVal, getValFromX(e.clientX)));
+        if (newEnd !== model.get(endTrait)) {
+          model.set(endTrait, newEnd);
+          model.save_changes();
         }
+      });
 
-        if (newIndex < min) newIndex = min;
-        if (newIndex > max) newIndex = max;
+      setupDrag(
+        middleThumb,
+        (e) => {
+          const maxVal = model.get(maxTrait) || 1;
+          const startVal = model.get(startTrait) || 0;
+          const endVal = model.get(endTrait) || 0;
+          const span = endVal - startVal;
+          const targetMid = getValFromX(e.clientX);
+          let newStart = Math.round(targetMid - span / 2);
+          let newEnd = newStart + span;
 
-        model.set(traitName, newIndex);
+          if (newStart < 0) {
+            newStart = 0;
+            newEnd = Math.min(maxVal, span);
+          } else if (newEnd > maxVal) {
+            newEnd = maxVal;
+            newStart = Math.max(0, maxVal - span);
+          }
+
+          if (newStart !== model.get(startTrait) || newEnd !== model.get(endTrait)) {
+            model.set(startTrait, newStart);
+            model.set(endTrait, newEnd);
+            model.save_changes();
+          }
+        },
+        () => { middleThumb.style.cursor = "grabbing"; },
+        () => { middleThumb.style.cursor = "grab"; }
+      );
+
+      startInput.addEventListener("change", () => {
+        const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
+        const endVal = model.get(endTrait) || 0;
+        let val = Math.round(parseFloat(startInput.value) / scale);
+        if (isNaN(val)) { update(); return; }
+        val = Math.max(0, Math.min(endVal, val));
+        model.set(startTrait, val);
         model.save_changes();
         update();
       });
 
-      controlRow.appendChild(slider);
-      controlRow.appendChild(numberInput);
-      container.appendChild(labelEl);
-      container.appendChild(controlRow);
+      endInput.addEventListener("change", () => {
+        const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
+        const maxVal = model.get(maxTrait) || 1;
+        const startVal = model.get(startTrait) || 0;
+        let val = Math.round(parseFloat(endInput.value) / scale);
+        if (isNaN(val)) { update(); return; }
+        val = Math.max(startVal, Math.min(maxVal, val));
+        model.set(endTrait, val);
+        model.save_changes();
+        update();
+      });
 
       return container;
     }
 
-    const xThick = createSlider("X Thickness", "x_t", "min_thickness", "x_thick_max", "sx");
-    const yThick = createSlider("Y Thickness", "y_t", "min_thickness", "y_thick_max", "sy");
-    const zThick = createSlider("Z Thickness", "z_t", "min_thickness", "z_thick_max", "sz");
-
-    const xPos = createSlider("X Position", "x_s", "x_min_pos", "x_max_pos", "sx");
-    const yPos = createSlider("Y Position", "y_s", "y_min_pos", "y_max_pos", "sy");
-    const zPos = createSlider("Z Position", "z_s", "z_min_pos", "z_max_pos", "sz");
+    const xRange = createRangeSlider("X Range", "x_start", "x_end", "x_max_pos", "sx");
+    const yRange = createRangeSlider("Y Range", "y_start", "y_end", "y_max_pos", "sy");
+    const zRange = createRangeSlider("Z Range", "z_start", "z_end", "z_max_pos", "sz");
 
     const saveContainer = document.createElement("div");
     saveContainer.style.display = "flex";
@@ -262,23 +411,14 @@ export default {
     controlsDiv.style.flexDirection = "column";
     controlsDiv.style.gap = "10px";
     
-    const thicknessContainer = document.createElement("div");
-    thicknessContainer.style.display = "flex";
-    thicknessContainer.style.gap = "15px";
-    thicknessContainer.style.flexWrap = "wrap";
-    thicknessContainer.style.alignItems = "center";
-    thicknessContainer.appendChild(xThick);
-    thicknessContainer.appendChild(yThick);
-    thicknessContainer.appendChild(zThick);
-
-    const positionContainer = document.createElement("div");
-    positionContainer.style.display = "flex";
-    positionContainer.style.gap = "15px";
-    positionContainer.style.flexWrap = "wrap";
-    positionContainer.style.alignItems = "center";
-    positionContainer.appendChild(xPos);
-    positionContainer.appendChild(yPos);
-    positionContainer.appendChild(zPos);
+    const slidersContainer = document.createElement("div");
+    slidersContainer.style.display = "flex";
+    slidersContainer.style.flexDirection = "column";
+    slidersContainer.style.gap = "10px";
+    slidersContainer.style.width = "100%";
+    slidersContainer.appendChild(xRange);
+    slidersContainer.appendChild(yRange);
+    slidersContainer.appendChild(zRange);
 
     const channelsContainer = document.createElement("div");
     channelsContainer.style.display = "flex";
@@ -650,8 +790,7 @@ export default {
 
     controlsDiv.appendChild(uiTogglesContainer);
     controlsDiv.appendChild(channelsContainer);
-    controlsDiv.appendChild(thicknessContainer);
-    controlsDiv.appendChild(positionContainer);
+    controlsDiv.appendChild(slidersContainer);
     controlsDiv.appendChild(saveContainer);
 
     el.appendChild(controlsDiv);
