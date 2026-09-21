@@ -104,38 +104,48 @@ def robust_standardize(data, axis=None):
     """
     arr = np.asarray(data, dtype=float)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', category=RuntimeWarning)
+    if axis is None:
+        all_nan = np.isnan(arr).all()
+        if all_nan:
+            return arr.copy()
+    else:
+        all_nan = np.isnan(arr).all(axis=axis, keepdims=True)
 
-        # 1. Median and MAD
-        med = np.nanmedian(arr, axis=axis, keepdims=True)
-        mad = np.nanmedian(np.abs(arr - med), axis=axis, keepdims=True)
-        # Asymptotic normal scaling factor for MAD is 1.482602218505602
-        scale = mad * 1.482602218505602
-        loc = med
+    # Temporarily replace all-NaN slices with 0.0 to prevent RuntimeWarnings in nan-functions
+    safe_arr = np.where(all_nan, 0.0, arr)
 
-        # 2. Mean and MeanAD fallback
-        mask_mad_zero = (mad == 0)
-        if np.any(mask_mad_zero):
-            mean = np.nanmean(arr, axis=axis, keepdims=True)
-            mean_ad = np.nanmean(np.abs(arr - mean), axis=axis, keepdims=True)
-            # Asymptotic normal scaling factor for MeanAD is sqrt(pi / 2)
-            scale_mean_ad = mean_ad * np.sqrt(np.pi / 2.0)
+    # 1. Median and MAD
+    med = np.nanmedian(safe_arr, axis=axis, keepdims=True)
+    mad = np.nanmedian(np.abs(safe_arr - med), axis=axis, keepdims=True)
+    # Asymptotic normal scaling factor for MAD is 1.482602218505602
+    scale = mad * 1.482602218505602
+    loc = med
 
-            # 3. Standard deviation fallback
-            mask_mean_ad_zero = (mean_ad == 0)
-            if np.any(mask_mean_ad_zero & mask_mad_zero):
-                std = np.nanstd(arr, axis=axis, keepdims=True)
-                scale_mean_ad = np.where(mask_mean_ad_zero, std, scale_mean_ad)
+    # 2. Mean and MeanAD fallback
+    mask_mad_zero = (mad == 0)
+    if np.any(mask_mad_zero):
+        mean = np.nanmean(safe_arr, axis=axis, keepdims=True)
+        mean_ad = np.nanmean(np.abs(safe_arr - mean), axis=axis, keepdims=True)
+        # Asymptotic normal scaling factor for MeanAD is sqrt(pi / 2)
+        scale_mean_ad = mean_ad * np.sqrt(np.pi / 2.0)
 
-            # Apply fallback where MAD is zero
-            scale = np.where(mask_mad_zero, scale_mean_ad, scale)
-            loc = np.where(mask_mad_zero, mean, loc)
+        # 3. Standard deviation fallback
+        mask_mean_ad_zero = (mean_ad == 0)
+        if np.any(mask_mean_ad_zero & mask_mad_zero):
+            std = np.nanstd(safe_arr, axis=axis, keepdims=True)
+            scale_mean_ad = np.where(mask_mean_ad_zero, std, scale_mean_ad)
 
-        # Avoid division by zero where scale is still exactly 0 (all values identical)
-        safe_scale = np.where(scale == 0, 1.0, scale)
-        z = (arr - loc) / safe_scale
-        z = np.where(scale == 0, 0.0, z)
+        # Apply fallback where MAD is zero
+        scale = np.where(mask_mad_zero, scale_mean_ad, scale)
+        loc = np.where(mask_mad_zero, mean, loc)
+
+    # Avoid division by zero where scale is still exactly 0 (all values identical)
+    safe_scale = np.where(scale == 0, 1.0, scale)
+    z = (arr - loc) / safe_scale
+    z = np.where(scale == 0, 0.0, z)
+
+    # Restore NaNs for all-NaN slices
+    z = np.where(all_nan, np.nan, z)
 
     return z
 
