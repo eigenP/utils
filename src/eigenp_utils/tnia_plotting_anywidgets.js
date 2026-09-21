@@ -137,9 +137,9 @@ export default {
         return thumb;
       }
 
-      const startThumb = createThumb("Start", "#555555", "ew-resize", "2");
-      const middleThumb = createThumb("Translate Range", "#ff8c00", "grab", "3");
-      const endThumb = createThumb("End", "#555555", "ew-resize", "2");
+      const startThumb = createThumb("Start", "#d0d0d0", "ew-resize", "2");
+      const middleThumb = createThumb("Translate Range", "#000000", "grab", "3");
+      const endThumb = createThumb("End", "#d0d0d0", "ew-resize", "2");
 
       trackContainer.appendChild(trackBg);
       trackContainer.appendChild(rangeBar);
@@ -413,9 +413,9 @@ export default {
     
     const slidersContainer = document.createElement("div");
     slidersContainer.style.display = "flex";
-    slidersContainer.style.gap = "15px";
-    slidersContainer.style.flexWrap = "wrap";
-    slidersContainer.style.alignItems = "center";
+    slidersContainer.style.flexDirection = "column";
+    slidersContainer.style.gap = "10px";
+    slidersContainer.style.width = "100%";
     slidersContainer.appendChild(xRange);
     slidersContainer.appendChild(yRange);
     slidersContainer.appendChild(zRange);
