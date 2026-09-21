@@ -1213,3 +1213,40 @@ def test_channel_label_height_scaling_with_fontsize():
     finally:
         plt.close(fig_small)
         plt.close(fig_large)
+
+
+def test_single_slider_start_end_sync_and_translate():
+    """
+    Test that start/end traits sync bidirectionally with center position (x_s, y_s, z_s)
+    and thickness (x_t, y_t, z_t), and that range translation works as expected.
+    """
+    im = np.zeros((20, 40, 60))  # Z, Y, X
+    w = show_zyx_max_slice_interactive(im, slabs_position=(10, 20, 30), slabs_thickness=(2, 4, 6))
+
+    # Initial start / end expected values:
+    # Z: z_s=10, z_t=2 => z_start=8, z_end=12
+    # Y: y_s=20, y_t=4 => y_start=16, y_end=24
+    # X: x_s=30, x_t=6 => x_start=24, x_end=36
+    assert w.z_start == 8 and w.z_end == 12
+    assert w.y_start == 16 and w.y_end == 24
+    assert w.x_start == 24 and w.x_end == 36
+
+    # Test updating x_start/x_end (e.g. user drags start and end thumbs in JS)
+    w.x_start = 10
+    w.x_end = 20
+    # Center x_s should be (10+20)//2 = 15, x_t should be (20-10)//2 = 5
+    assert w.x_s == 15
+    assert w.x_t == 5
+
+    # Test translating the range (dragging middle thumb in JS)
+    # Move range by +10: start=20, end=30
+    w.x_start = 20
+    w.x_end = 30
+    assert w.x_s == 25
+    assert w.x_t == 5
+
+    # Test programmatically updating x_s / x_t updates x_start / x_end
+    w.x_s = 40
+    w.x_t = 10
+    assert w.x_start == 30
+    assert w.x_end == 50
