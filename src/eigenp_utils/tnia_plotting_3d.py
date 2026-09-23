@@ -10,7 +10,6 @@ warnings.warn(
 from .tnia_plotting_anywidgets import (
     is_colormap,
     resolve_color,
-    _norm,
     show_zyx_slice,
     show_zyx_max,
     show_zyx_projection,
@@ -26,7 +25,6 @@ from .tnia_plotting_anywidgets import (
 __all__ = [
     "is_colormap",
     "resolve_color",
-    "_norm",
     "show_zyx_slice",
     "show_zyx_max",
     "show_zyx_projection",
