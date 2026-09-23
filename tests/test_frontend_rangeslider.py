@@ -71,6 +71,10 @@ def static_rangeslider_server():
           }}
         }};
 
+        // Exposed so tests can assert the widget does not accumulate
+        // listeners when it rebuilds parts of its UI.
+        window.listenerCount = (evt) => (listeners[evt] || []).length;
+
         widget.render({{ model: window.mockModel, el: document.getElementById('widget-container') }});
       </script>
     </body>
@@ -119,3 +123,62 @@ def test_frontend_rangeslider_ui(page, static_rangeslider_server):
     assert new_x_start > initial_x_start
     assert new_x_end > initial_x_end
     assert (new_x_end - new_x_start) == (initial_x_end - initial_x_start)
+
+
+def test_frontend_rangeslider_integer_step_on_both_inputs(page, static_rangeslider_server):
+    """Both numeric boxes of a range slider must expose an integer step when unscaled.
+
+    The fixture volume is built without `pixel_sizes`, so every scale trait is
+    1.0 and the boxes hold raw voxel indices. Strategy: read the `step`
+    attribute the widget assigned to each number input. A start box stepping by
+    1 while its end box steps by 0.01 (or carries no step at all) lets the
+    spinner arrows produce fractional slab bounds on one side only, so every
+    box is expected to report a step of exactly "1".
+    """
+    page.goto(static_rangeslider_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+
+    steps = page.evaluate(
+        "() => [...document.querySelectorAll('input[type=number]')].map(i => i.step)"
+    )
+
+    # Three sliders (X, Y, Z), each with a start and an end box.
+    assert len(steps) == 6
+    assert set(steps) == {"1"}
+
+
+def test_frontend_channel_rebuild_does_not_leak_listeners(page, static_rangeslider_server):
+    """Rebuilding the channel rows must not accumulate model listeners.
+
+    `updateChannelsUI` discards and recreates every channel row whenever
+    `channel_names` or `channel_colors` changes. The model exposes no way to
+    unsubscribe, so any listener registered per rebuild survives forever and
+    keeps firing against detached DOM nodes -- a leak that grows without bound
+    as channels are renamed or recoloured. Strategy: drive three rebuilds and
+    assert the per-trait listener counts are unchanged, then confirm the rows
+    that survived are still wired to the model by pushing a new `gamma_list`
+    through and reading it back out of the inputs.
+    """
+    page.goto(static_rangeslider_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+
+    channel_traits = [
+        "vmin_list", "vmax_list", "gamma_list", "opacity_list", "histograms_data",
+    ]
+    before = {t: page.evaluate(f"window.listenerCount('change:{t}')") for t in channel_traits}
+    assert all(count > 0 for count in before.values()), before
+
+    for names in (["Cube", "Circle"], ["Alpha", "Beta"], ["Gamma", "Delta"]):
+        page.evaluate("names => window.mockModel.set('channel_names', names)", names)
+
+    after = {t: page.evaluate(f"window.listenerCount('change:{t}')") for t in channel_traits}
+    assert after == before
+
+    # The rows standing after the last rebuild must still follow the model.
+    page.evaluate("window.mockModel.set('gamma_list', [0.25, 0.75])")
+    gamma_values = page.evaluate(
+        "() => [...document.querySelectorAll('span')]"
+        ".filter(s => s.textContent === 'gamma')"
+        ".map(s => s.nextElementSibling.value)"
+    )
+    assert gamma_values == ["0.25", "0.75"]

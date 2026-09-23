@@ -185,6 +185,7 @@ export default {
           startInput.value = startVal;
           endInput.value = endVal;
           startInput.step = "1";
+          endInput.step = "1";
         }
       }
 
@@ -428,8 +429,18 @@ export default {
     channelsContainer.style.overflowY = "auto";
     channelsContainer.style.maxHeight = "300px";
 
+    // updateChannelsUI() discards the channel rows and rebuilds them from
+    // scratch. The per-row refresh callbacks are collected here instead of
+    // being re-subscribed to the model on every rebuild: the model offers no
+    // way to unsubscribe, so re-subscribing would leave each previous
+    // generation of listeners firing against detached DOM nodes forever.
+    const inputRefreshers = [];   // { trait, fn } - one per channel input box
+    const histogramRedraws = [];  // one per channel histogram canvas
+
     function updateChannelsUI() {
       channelsContainer.innerHTML = "";
+      inputRefreshers.length = 0;
+      histogramRedraws.length = 0;
       const channelNames = model.get("channel_names");
       const channelDtypes = model.get("channel_dtypes");
       const channelColors = model.get("channel_colors");
@@ -478,7 +489,7 @@ export default {
           };
 
           updateInput();
-          model.on(`change:${traitName}`, updateInput);
+          inputRefreshers.push({ trait: traitName, fn: updateInput });
 
           inp.addEventListener("change", () => {
             let val = inp.value.trim();
@@ -585,10 +596,7 @@ export default {
         };
 
         drawHistogram();
-        model.on("change:histograms_data", drawHistogram);
-        model.on("change:vmin_list", drawHistogram);
-        model.on("change:vmax_list", drawHistogram);
-        model.on("change:gamma_list", drawHistogram);
+        histogramRedraws.push(drawHistogram);
 
         channelsContainer.appendChild(chDiv);
       });
@@ -597,6 +605,23 @@ export default {
     updateChannelsUI();
     model.on("change:channel_names", updateChannelsUI);
     model.on("change:channel_colors", updateChannelsUI);
+
+    // Registered once; each fans out to whichever rows currently exist.
+    const refreshInputs = (trait) => {
+      for (const r of inputRefreshers) {
+        if (r.trait === trait) r.fn();
+      }
+    };
+    const redrawHistograms = () => {
+      for (const draw of histogramRedraws) draw();
+    };
+
+    // vmin/vmax/gamma also move the tone curve drawn over the histogram.
+    for (const trait of ["vmin_list", "vmax_list", "gamma_list"]) {
+      model.on(`change:${trait}`, () => { refreshInputs(trait); redrawHistograms(); });
+    }
+    model.on("change:opacity_list", () => refreshInputs("opacity_list"));
+    model.on("change:histograms_data", redrawHistograms);
 
     const uiTogglesContainer = document.createElement("div");
     uiTogglesContainer.style.display = "flex";

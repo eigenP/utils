@@ -614,130 +614,6 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
     return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt)
 
 
-
-
-### New Function
-# def create_multichannel_rgb(xy_list, xz_list, zy_list, vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None, blend='add', soft_clip=True, eps=1e-12):
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-
-    assert isinstance(xy_list, list) and isinstance(xz_list, list) and isinstance(zy_list, list)
-    n = len(xy_list)
-    assert len(xz_list) == n and len(zy_list) == n, "xy/xz/zy must have same number of channels"
-
-    Hxy, Wxy = xy_list[0].shape
-    Hxz, Wxz = xz_list[0].shape
-    Hzy, Wzy = zy_list[0].shape
-
-    xy_rgb = np.zeros((Hxy, Wxy, 3), dtype=np.float32)
-    xz_rgb = np.zeros((Hxz, Wxz, 3), dtype=np.float32)
-    zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
-
-    gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
-    opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
-
-    if colormap is None:
-        if n == 1:
-            colormap = ['white']
-        else:
-            defaults = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
-            colormap = [defaults[i % len(defaults)] for i in range(n)]
-    color_map = [np.asarray(to_rgb(resolve_color(c)), dtype=np.float32) for c in colormap]
-
-    if vmin is None:
-        vmins = [0.0] * n
-    else:
-        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
-
-    if vmax is None:
-        vmaxs = [None] * n
-    else:
-        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
-
-    for i in range(n):
-        if vmins[i] is None:
-            vmins[i] = 0.0
-        else:
-            vmins[i] = float(vmins[i])
-
-        if vmaxs[i] is None:
-            m_xy = float(np.max(xy_list[i]))
-            m_xz = float(np.max(xz_list[i]))
-            m_zy = float(np.max(zy_list[i]))
-            vmaxs[i] = float(max(m_xy, m_xz, m_zy))
-        else:
-            vmaxs[i] = float(vmaxs[i])
-
-    for i in range(n):
-        if not np.isfinite(vmins[i]): vmins[i] = 0.0
-        if not np.isfinite(vmaxs[i]): vmaxs[i] = vmins[i] + 1.0
-        if vmaxs[i] <= vmins[i] + eps:
-            vmaxs[i] = vmins[i] + 1.0
-
-    if blend == 'screen':
-        xy_acc = np.ones_like(xy_rgb)
-        xz_acc = np.ones_like(xz_rgb)
-        zy_acc = np.ones_like(zy_rgb)
-    else:
-        xy_acc = xy_rgb
-        xz_acc = xz_rgb
-        zy_acc = zy_rgb
-
-    def _norm(a, lo, hi, g):
-        out = (a.astype(np.float32, copy=False) - lo) / max(hi - lo, eps)
-        out = np.clip(out, 0.0, 1.0, out=out)
-        if g != 1:
-            out = np.power(out, g, out=out)
-        return out
-
-    for i, (xy, xz, zy) in enumerate(zip(xy_list, xz_list, zy_list)):
-        c = color_map[i]
-        g = gammas[i]
-        o = opacities[i]
-        lo, hi = vmins[i], vmaxs[i]
-
-        c_o = (c * o).astype(np.float32)
-
-        xy_n = _norm(xy, lo, hi, g)[..., None] * c_o
-        xz_n = _norm(xz, lo, hi, g)[..., None] * c_o
-        zy_n = _norm(zy, lo, hi, g)[..., None] * c_o
-
-        if blend == 'screen':
-            xy_acc *= (1.0 - xy_n)
-            xz_acc *= (1.0 - xz_n)
-            zy_acc *= (1.0 - zy_n)
-        elif blend == 'max':
-            xy_acc = np.maximum(xy_acc, xy_n)
-            xz_acc = np.maximum(xz_acc, xz_n)
-            zy_acc = np.maximum(zy_acc, zy_n)
-        else:
-            xy_acc += xy_n
-            xz_acc += xz_n
-            zy_acc += zy_n
-
-    if blend == 'screen':
-        xy_rgb = 1.0 - xy_acc
-        xz_rgb = 1.0 - xz_acc
-        zy_rgb = 1.0 - zy_acc
-    else:
-        xy_rgb = xy_acc
-        xz_rgb = xz_acc
-        zy_rgb = zy_acc
-
-        if blend == 'add':
-            if soft_clip:
-                for rgb in (xy_rgb, xz_rgb, zy_rgb):
-                    m = rgb.max(axis=-1, keepdims=True)
-                    scale = np.maximum(1.0, m)
-                    rgb /= scale
-            xy_rgb = np.clip(xy_rgb, 0.0, 1.0)
-            xz_rgb = np.clip(xz_rgb, 0.0, 1.0)
-            zy_rgb = np.clip(zy_rgb, 0.0, 1.0)
-
-    return xy_rgb, xz_rgb, zy_rgb
-
 def create_multichannel_rgb(
     xy_list, xz_list, zy_list,
     vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None,
@@ -1132,6 +1008,8 @@ def compute_histogram(arr, bins=128, max_samples=1_000_000):
         range_val = (0, 65535)
     elif arr.dtype == bool:
         range_val = (0, 1)
+        # np.histogram would do this conversion itself, but warns about it.
+        arr_clean = arr_clean.astype(np.uint8)
 
     if range_val is not None:
         counts, bin_edges = np.histogram(arr_clean, bins=bins, range=range_val)
@@ -1372,6 +1250,17 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         if self.z_s > hi: self.z_s = hi
 
     def _render_wrapper(self, change):
+        # Skip renders requested from inside a trait-synchronization pass.
+        # Moving one slider writes the paired representation too (e.g. x_start
+        # -> x_s + x_t), and every one of those traits is observed here, so a
+        # single interaction would otherwise rasterize the figure three times.
+        # The trait that started the sync is itself observed by this handler,
+        # so the outer notification still renders exactly once after the sync
+        # has finished. _init_observers() renders explicitly after its initial
+        # sync for the same reason.
+        if getattr(self, '_syncing_traits', False):
+            return
+
         fig = None
         try:
             fig = self._render()
@@ -2500,7 +2389,9 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 w_y = dim_y * self.sy
                 w_z = dim_z * self.sz
 
-                axXY, axZY, axXZ = fig.axes[-4], fig.axes[-3], fig.axes[-2]
+                # Use the named axes show_zyx attached rather than positional
+                # indexing, which shifts when axLabels is added.
+                axXY, axZY, axXZ = fig.axXY, fig.axZY, fig.axXZ
 
                 # XY
                 x0_adj = (x_lims[0] - self.xmin + 0.5) * self.sx
@@ -2543,14 +2434,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             rot_z, rot_y, rot_x = _parse_rotation(self.rotate_view)
 
-            def _rotate_points_2d(px, py, angle_deg, cx, cy):
-                if angle_deg == 0: return px, py
-                theta = np.radians(angle_deg)
-                cos_t = np.cos(theta)
-                sin_t = np.sin(theta)
-                rx = cos_t * (px - cx) - sin_t * (py - cy) + cx
-                ry = sin_t * (px - cx) + cos_t * (py - cy) + cy
-                return rx, ry
+            # Scatter points are rotated with the module-level
+            # _rotate_points_2d (this branch used to carry an identical copy).
 
             cx_data = (self.xmin + self.xmax) / 2.0
             cy_data = (self.ymin + self.ymax) / 2.0

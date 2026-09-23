@@ -19,6 +19,7 @@ from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_slabs, show_zyx
 from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, show_zyx_max_scatter_interactive
 from eigenp_utils.tnia_plotting_anywidgets import show_zyx_slice, show_zyx_max_slabs, create_multichannel_rgb
+from eigenp_utils.tnia_plotting_anywidgets import compute_histogram, show_iso_scatter, IsoScatterWidget
 
 
 
@@ -1328,3 +1329,325 @@ def test_channel_label_fontsize_pt_kwarg_and_anisotropic_height():
         np.testing.assert_allclose(labels_h_in_sc, expected_hl_in_sc, atol=1e-5)
     finally:
         plt.close(fig_sc)
+
+
+# =========================================
+# Render coalescing
+# =========================================
+def _structured_volume(shape=(16, 48, 48)):
+    """A small volume with an off-centre cube, so moving a slab changes the image."""
+    vol = np.zeros(shape, dtype=np.uint8)
+    z, y, x = shape
+    vol[z // 4:z // 2, y // 4:y // 2, x // 4:x // 2] = 255
+    return vol
+
+
+def _count_renders(widget):
+    """Swap widget._render for a counting wrapper; returns the mutable counter."""
+    counter = {"n": 0}
+    inner = widget._render
+
+    def counting_render():
+        counter["n"] += 1
+        return inner()
+
+    widget._render = counting_render
+    return counter
+
+
+def test_widget_construction_renders_figure_once(monkeypatch):
+    """Building an interactive viewer must rasterize its figure exactly once.
+
+    TNIAWidgetBase keeps two representations of every slab -- centre plus
+    half-thickness (`x_s`/`x_t`) and start plus end (`x_start`/`x_end`) -- and
+    observes `_render_wrapper` on all twelve traits. The initial synchronisation
+    in `_init_observers` therefore cascades through most of them. Strategy:
+    count calls to `_render` across construction. Rendering is by far the most
+    expensive step (a full Matplotlib figure plus a PNG encode), so anything
+    above one means the widget is paying for figures it immediately discards.
+    """
+    calls = []
+    original = TNIASliceWidget._render
+
+    def counting_render(self):
+        calls.append(1)
+        return original(self)
+
+    monkeypatch.setattr(TNIASliceWidget, "_render", counting_render)
+
+    w = show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4))
+
+    assert len(calls) == 1
+    assert w.image_data, "the single render must still populate image_data"
+
+
+@pytest.mark.parametrize("trait, value", [
+    ("x_start", 12),
+    ("x_end", 40),
+    ("z_s", 5),
+    ("y_t", 4),
+])
+def test_slab_trait_change_renders_figure_once(trait, value):
+    """Moving one slab control must rasterize the figure exactly once.
+
+    Writing `x_start` makes the widget write back `x_s` and `x_t`, and both of
+    those are observed by `_render_wrapper` too, so a naive implementation
+    renders three times per slider step. Strategy: count `_render` calls for a
+    single trait write, covering both directions of the synchronisation
+    (start/end and centre/thickness). The image is also compared before and
+    after, because coalescing the renders must not swallow the last one and
+    leave a stale picture on screen.
+    """
+    w = show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4))
+    image_before = w.image_data
+    counter = _count_renders(w)
+
+    setattr(w, trait, value)
+
+    assert counter["n"] == 1
+    assert w.image_data != image_before
+
+
+def test_slab_traits_stay_paired_and_in_bounds():
+    """Out-of-range slab writes are clamped, and both representations stay consistent.
+
+    The two slab representations are kept in step by observers that clamp to the
+    volume shape, so an interactive client can push any value without the
+    renderer ever seeing coordinates outside the array. Strategy: write a wildly
+    out-of-range end position and confirm it lands on the last valid index, that
+    centre and half-thickness still describe the same interval, and that no
+    clipping warning is surfaced -- the clamp is supposed to make the warning
+    path unnecessary rather than merely report after the fact.
+    """
+    vol = _structured_volume()
+    Z, Y, X = vol.shape
+    w = show_zyx_max_slice_interactive(vol, figsize=(4, 4))
+
+    w.x_start = 0
+    w.x_end = 10 ** 6
+
+    assert w.x_start == 0
+    assert w.x_end == X - 1
+    assert w.x_s == (w.x_start + w.x_end) // 2
+    assert w.x_t == (w.x_end - w.x_start) // 2
+    assert w.warning_msg == ""
+
+
+# =========================================
+# compute_histogram
+# =========================================
+def test_compute_histogram_empty_and_all_nan_inputs():
+    """Degenerate inputs yield empty payloads rather than raising.
+
+    The histogram is computed once per channel at construction and shipped to
+    the frontend, which skips channels whose counts are empty. Strategy: feed an
+    empty array and an all-NaN float array -- the two ways a channel can carry
+    no usable values -- and require the documented empty payload from both,
+    since a raise here would break widget construction entirely.
+    """
+    assert compute_histogram(np.array([], dtype=np.float32)) == {'counts': [], 'bin_edges': []}
+    all_nan = np.full(10, np.nan, dtype=np.float32)
+    assert compute_histogram(all_nan) == {'counts': [], 'bin_edges': []}
+
+
+@pytest.mark.parametrize("dtype, expected_range", [
+    (np.uint8, (0.0, 255.0)),
+    (np.uint16, (0.0, 65535.0)),
+    (bool, (0.0, 1.0)),
+])
+def test_compute_histogram_spans_full_dtype_range(dtype, expected_range):
+    """Integer and boolean channels bin over the whole dtype range, not the data range.
+
+    The frontend draws the vmin/vmax tone curve against these bin edges, so the
+    edges have to mean the same thing as the vmin/vmax boxes, which are bounded
+    by dtype. Strategy: pass data occupying only a sliver of the dtype range and
+    assert the edges still span the full range -- binning to the data range
+    instead would silently misplace the curve for every dark image.
+    """
+    arr = np.ones((4, 4), dtype=dtype)
+    result = compute_histogram(arr, bins=16)
+
+    assert len(result['counts']) == 16
+    assert (result['bin_edges'][0], result['bin_edges'][-1]) == expected_range
+
+
+def test_compute_histogram_counts_are_log_frequencies():
+    """Counts are log1p-transformed so sparse tails stay visible.
+
+    A fluorescence channel is dominated by background, and on a linear axis the
+    signal bins are invisible next to it. Strategy: invert the transform with
+    expm1 and check the recovered counts sum to the number of input values, and
+    that a heavily populated bin is compressed relative to a sparse one -- this
+    pins the transform itself rather than any particular bin layout.
+    """
+    arr = np.concatenate([np.zeros(1000, dtype=np.uint8), np.full(10, 200, dtype=np.uint8)])
+    result = compute_histogram(arr, bins=16)
+    counts = np.array(result['counts'])
+
+    np.testing.assert_allclose(np.expm1(counts).sum(), arr.size, rtol=1e-6)
+    background, signal = np.expm1(counts).max(), np.expm1(counts)[np.expm1(counts) > 0].min()
+    assert background / signal == pytest.approx(100.0, rel=1e-6)
+    assert counts.max() / counts[counts > 0].min() < 10.0
+
+
+def test_compute_histogram_rescales_subsampled_counts():
+    """Subsampling large channels preserves the overall count magnitude.
+
+    Large volumes are strided down before binning to keep widget construction
+    responsive, which would otherwise shrink every bar by the stride factor and
+    change the shape of the log curve. Strategy: force subsampling with a small
+    max_samples and check the recovered counts still total the full array size.
+    """
+    arr = np.arange(1000, dtype=np.float32)
+    result = compute_histogram(arr, bins=10, max_samples=100)
+
+    np.testing.assert_allclose(np.expm1(result['counts']).sum(), arr.size, rtol=1e-6)
+
+
+def test_compute_histogram_excludes_nans_from_float_channels():
+    """NaNs are dropped from float channels instead of poisoning the bin edges.
+
+    np.histogram propagates NaN into the automatic range, which would collapse
+    every bin edge to NaN and blank the frontend canvas. Strategy: mix NaNs into
+    a finite float channel and assert both the edges stay finite and the
+    recovered counts total only the finite values.
+    """
+    arr = np.array([0.0, 1.0, 2.0, np.nan, np.nan], dtype=np.float32)
+    result = compute_histogram(arr, bins=4)
+
+    assert np.all(np.isfinite(result['bin_edges']))
+    np.testing.assert_allclose(np.expm1(result['counts']).sum(), 3, rtol=1e-6)
+
+
+# =========================================
+# Copy-parameters round trip
+# =========================================
+def test_copy_params_emits_reusable_physical_parameters():
+    """The copy button emits parameters that reproduce the current view.
+
+    Its whole purpose is to let a user tune a view interactively and paste the
+    result into a script, so the emitted text has to be valid keyword arguments
+    in physical units -- the widget works in voxel indices, but the plotting API
+    takes micrometres. Strategy: drive the trigger, evaluate the emitted text as
+    keyword arguments, feed them straight back into the factory, and require the
+    rebuilt widget to land on the same voxel slabs.
+    """
+    vol = _structured_volume()
+    pixel_sizes = {'Z': 2.0, 'Y': 0.5, 'X': 0.5}
+    w = show_zyx_max_slice_interactive(vol, pixel_sizes=pixel_sizes, figsize=(4, 4))
+
+    w.x_s, w.y_s, w.z_s = 20, 16, 6
+    w.x_t, w.y_t, w.z_t = 4, 3, 2
+
+    w.copy_params_trigger += 1
+    params = eval(f"dict({w.copy_params_string})", {"__builtins__": {"dict": dict}}, {})
+
+    # Positions and thicknesses are reported in physical units, (Z, Y, X) order.
+    assert params['slabs_position'] == (6 * 2.0, 16 * 0.5, 20 * 0.5)
+    assert params['slabs_thickness'] == (2 * 2.0, 3 * 0.5, 4 * 0.5)
+    assert len(params['vmin']) == len(params['vmax']) == 1
+    assert len(params['gamma']) == len(params['opacity']) == 1
+
+    rebuilt = show_zyx_max_slice_interactive(vol, pixel_sizes=pixel_sizes, figsize=(4, 4), **params)
+
+    assert (rebuilt.z_s, rebuilt.y_s, rebuilt.x_s) == (w.z_s, w.y_s, w.x_s)
+    assert (rebuilt.z_t, rebuilt.y_t, rebuilt.x_t) == (w.z_t, w.y_t, w.x_t)
+
+
+# =========================================
+# IsoScatterWidget
+# =========================================
+def _iso_points(n=200, seed=0):
+    rng = np.random.default_rng(seed)
+    return rng.random(n) * 50, rng.random(n) * 40, rng.random(n) * 10
+
+
+def test_show_iso_scatter_renders_and_responds_to_camera():
+    """The isometric viewer renders on construction and re-renders when rotated.
+
+    `elev` and `azim` are the widget's only interactive controls, and the whole
+    projection is recomputed in Python, so a missed observer would leave the
+    camera sliders visibly inert. Strategy: check an image exists after
+    construction, then rotate and require the image to actually change.
+    """
+    X, Y, Z = _iso_points()
+    # Default-sized figure: the 3-row layout plus a suptitle does not fit a
+    # small one, and Matplotlib warns that tight_layout gave up.
+    w = show_iso_scatter(X, Y, Z, title="iso")
+
+    assert isinstance(w, IsoScatterWidget)
+    initial = w.image_data
+    assert initial
+
+    w.azim = w.azim + 45.0
+
+    assert w.image_data != initial
+
+
+@pytest.mark.parametrize("color, expect_continuous, expect_categorical", [
+    (None, False, False),
+    ("continuous", True, False),
+    ("categorical", False, True),
+])
+def test_iso_scatter_color_modes(color, expect_continuous, expect_categorical):
+    """Numeric colour arrays map through a colormap; non-numeric ones map per category.
+
+    The two paths diverge early -- continuous data is handed to Matplotlib with
+    a cmap, categorical data is pre-mapped to explicit RGBA -- and choosing
+    wrongly either crashes on string input or renders labels as a meaningless
+    gradient. Strategy: exercise all three inputs (none, numeric, string) and
+    assert both the detected mode and that rendering still succeeds.
+    """
+    X, Y, Z = _iso_points(n=60)
+    if color == "continuous":
+        color_arg = np.linspace(0.0, 1.0, X.size)
+    elif color == "categorical":
+        color_arg = np.array(["a", "b", "c"] * (X.size // 3))
+    else:
+        color_arg = None
+
+    w = show_iso_scatter(X, Y, Z, color=color_arg, figsize=(4, 4))
+
+    assert w.is_continuous is expect_continuous
+    assert w.is_categorical is expect_categorical
+    assert w.image_data
+
+
+def test_iso_scatter_subsamples_above_max_points():
+    """Point counts above max_points are randomly subsampled before rendering.
+
+    Rendering is a Matplotlib 3D scatter recomputed on every camera move, so the
+    cap is what keeps large point clouds usable. Strategy: pass twice the cap and
+    require the retained coordinates and their colours to be trimmed together --
+    trimming positions without colours would silently mis-colour every point.
+    """
+    X, Y, Z = _iso_points(n=400)
+    color = np.arange(X.size, dtype=float)
+
+    w = show_iso_scatter(X, Y, Z, color=color, max_points=200, figsize=(4, 4))
+
+    assert w.X_orig.size == 200
+    assert w.Y_orig.size == 200
+    assert w.Z_orig.size == 200
+    assert w.color.size == 200
+
+
+def test_iso_scatter_handles_empty_input():
+    """An empty point cloud renders a placeholder instead of raising.
+
+    Filtering upstream can legitimately leave nothing to plot, and the widget is
+    often constructed from whatever a selection produced. Strategy: build from
+    empty arrays and require a rendered image plus a figure carrying the
+    placeholder text, since the centroid and radius maths would otherwise divide
+    by an empty reduction.
+    """
+    empty = np.array([], dtype=float)
+    w = show_iso_scatter(empty, empty, empty, figsize=(4, 4))
+
+    assert w.image_data
+
+    fig = w._render()
+    try:
+        assert any("No Data" in t.get_text() for t in fig.texts)
+    finally:
+        plt.close(fig)
