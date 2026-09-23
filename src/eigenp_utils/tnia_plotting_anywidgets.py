@@ -717,7 +717,7 @@ def create_multichannel_rgb(
         zy_acc = zy_rgb
 
     # Helpers
-    def _norm(a, lo, hi, g):
+    def _norm_window(a, lo, hi, g):
         # linear normalize to [0,1] then gamma
         out = (a.astype(np.float32, copy=False) - lo) / max(hi - lo, eps)
         out = np.clip(out, 0.0, 1.0, out=out)
@@ -735,9 +735,9 @@ def create_multichannel_rgb(
         # multiply by color * opacity
         c_o = (c * o).astype(np.float32)
 
-        xy_n = _norm(xy, lo, hi, g)[..., None] * c_o  # (H,W,3)
-        xz_n = _norm(xz, lo, hi, g)[..., None] * c_o
-        zy_n = _norm(zy, lo, hi, g)[..., None] * c_o
+        xy_n = _norm_window(xy, lo, hi, g)[..., None] * c_o  # (H,W,3)
+        xz_n = _norm_window(xz, lo, hi, g)[..., None] * c_o
+        zy_n = _norm_window(zy, lo, hi, g)[..., None] * c_o
 
         if blend == 'screen':
             xy_acc *= (1.0 - xy_n)
@@ -853,7 +853,7 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
         xz_acc = xz_rgb
         zy_acc = zy_rgb
 
-    def _norm(a, lo, hi, g):
+    def _norm_window(a, lo, hi, g):
         out = (a.astype(np.float32, copy=False) - lo) / max(hi - lo, eps)
         out = np.clip(out, 0.0, 1.0, out=out)
         if g != 1:
@@ -866,9 +866,9 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
         o = opacities[i]
         lo, hi = vmins[i], vmaxs[i]
 
-        xy_n = (cmap(_norm(xy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
-        xz_n = (cmap(_norm(xz, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
-        zy_n = (cmap(_norm(zy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
+        xy_n = (cmap(_norm_window(xy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
+        xz_n = (cmap(_norm_window(xz, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
+        zy_n = (cmap(_norm_window(zy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
 
         if blend == 'screen':
             xy_acc *= (1.0 - xy_n)
