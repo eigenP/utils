@@ -22,7 +22,7 @@
 
 ### Single-Cell Analysis
 * **Normalization**: Fast `pflogpf` normalization wrapper leveraging Rust-based PFlog / shifted-CLR approaches.
-* **Feature Selection**: Integration with `triku` (`run_triku`) for biologically meaningful feature selection.
+* **Feature Selection**: Integration with `triku` (`run_triku`) for OT distance based feature selection.
 * **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
 * **Dataset Integration (kkNN)**: Adaptive curvature-based k-nearest neighbors mapping (`kknn_ingest`) to dynamically project metadata and embeddings across references based on local manifold geometry.
 * **Label Classification & Smoothing**: Distance-weighted majority voting or averaging (`kknn_classifier`) to smooth categorical or continuous cell metadata using the kkNN backbone. Graph-based smoothing of expression data (`smooth_expression_on_graph`).
