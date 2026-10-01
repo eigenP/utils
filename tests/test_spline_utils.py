@@ -155,6 +155,22 @@ def test_normalize_vectors():
     assert np.allclose(normalized[0], [0.6, 0.8])
     assert np.allclose(normalized[1], [1.0, 0.0])
 
+def test_normalize_vectors_degenerate():
+    """
+    🔎 Testr: Verify robust normalization of zero-length vectors
+    💡 What: Normalizing a [0, 0] vector should yield [0, 0] without warnings or NaNs.
+    🎯 Why: Avoids division by zero and preserves the zero-length property mathematically.
+    """
+    vectors = np.array([
+        [1.0, 0.0],
+        [0.0, 0.0],
+        [3.0, 4.0]
+    ])
+    normalized = normalize_vectors(vectors)
+
+    assert not np.any(np.isnan(normalized)), "NaNs generated during normalization"
+    assert np.allclose(normalized[1], [0.0, 0.0]), "Zero vector was not correctly preserved"
+
 def test_calculate_spline_length():
     """Test that calculate spline length works as expected."""
     # 2D case, straight line from (0,0) to (3,4), length should be 5

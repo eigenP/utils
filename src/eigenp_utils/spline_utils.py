@@ -234,7 +234,8 @@ def project_onto_plane(vectors, tangent_vectors):
 # Function to normalize vectors to unit length
 def normalize_vectors(vectors):
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    unit_vectors = vectors / norms
+    # matth: Use masked division to avoid NaNs for zero-length vectors
+    unit_vectors = np.divide(vectors, norms, out=np.zeros_like(vectors, dtype=float), where=norms!=0)
     return unit_vectors
 
 def calculate_spline_length(coords, resolution=None):
