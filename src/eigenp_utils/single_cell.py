@@ -3716,21 +3716,23 @@ def annotate_clusters_by_markers(
                 valid_diff = diff[np.isfinite(diff)]
 
                 if valid_diff.size > 1:
-                    np.mean(valid_diff)
-                    np.std(valid_diff, ddof=1)  # Sample std
+                    mu_d = np.mean(valid_diff)
+                    sigma_d = np.std(valid_diff, ddof=1)  # Sample std
 
-                    # matth: Robust Probability of Superiority (Empirical)
-                    # Instead of assuming normality (P = Phi(mu/std)), we compute the
-                    # fraction of cells where Top1 > Top2 directly. This is robust to outliers
-                    # and multimodal distributions (e.g. doublets) which would otherwise skew the mean.
-                    # This is the non-parametric estimator of P(X > Y).
-
-                    # Count ties as 0.5 (standard practice for CLES / Mann-Whitney)
-                    n_total = valid_diff.size
-                    n_pos = np.sum(valid_diff > 0)
-                    n_ties = np.sum(valid_diff == 0)
-
-                    softmax_p = (n_pos + 0.5 * n_ties) / n_total
+                    # matth: Exact Common Language Effect Size
+                    # By modeling the difference distribution parametrically and calculating the exact
+                    # Common Language Effect Size analytically (P(X > Y) = Phi(mu_d / sigma_d)),
+                    # the standard deviation natively scales down the confidence for noisy, low-margin separations.
+                    if sigma_d == 0:
+                        if mu_d > 0:
+                            softmax_p = 1.0
+                        elif mu_d < 0:
+                            softmax_p = 0.0
+                        else:
+                            softmax_p = 0.5
+                    else:
+                        from scipy.stats import norm
+                        softmax_p = norm.cdf(mu_d / sigma_d)
                 else:
                     softmax_p = 0.5  # Not enough data
 
