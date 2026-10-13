@@ -660,17 +660,24 @@ def test_raincloud_auto_dodge():
 
 
 def test_i_series_colormaps_registration():
-    """Verifies that all 5 I Series inverted/dark background colormaps and their aliases are properly registered in Matplotlib colormaps registry and exported from eigenp_utils."""
+    """Verifies that all I Series colormaps and their aliases are properly registered in Matplotlib colormaps registry and exported from eigenp_utils."""
     from eigenp_utils import (
         i_blue,
         i_bordeaux,
         i_forest,
         i_orange,
         i_purple,
+        i_teal,
+        i_rose,
+        i_gold,
+        i_slate,
         I_SERIES_COLORMAPS,
     )
 
-    expected_names = ['I Blue', 'I Bordeaux', 'I Forest', 'I Orange', 'I Purple']
+    expected_names = [
+        'I Blue', 'I Bordeaux', 'I Forest', 'I Orange', 'I Purple',
+        'I Teal', 'I Rose', 'I Gold', 'I Slate'
+    ]
     assert set(I_SERIES_COLORMAPS.keys()) == set(expected_names)
 
     for name in expected_names:
@@ -689,21 +696,26 @@ def test_i_series_colormaps_registration():
     assert i_forest.name == "I Forest"
     assert i_orange.name == "I Orange"
     assert i_purple.name == "I Purple"
+    assert i_teal.name == "I Teal"
+    assert i_rose.name == "I Rose"
+    assert i_gold.name == "I Gold"
+    assert i_slate.name == "I Slate"
 
 
 def test_i_series_colormaps_properties():
-    """Verifies that I Series colormaps start with pure black at value 0.0 (dark background) and peak at white at value 1.0."""
+    """Verifies that I Series colormaps start with pure white at value 0.0 and terminate at their deep saturated shade at value 1.0."""
     from eigenp_utils import I_SERIES_COLORMAPS
 
     for name, cmap in I_SERIES_COLORMAPS.items():
         start_color = cmap(0.0)
         end_color = cmap(1.0)
 
-        # 0.0 should be pure black (R=0, G=0, B=0, A=1)
-        assert np.allclose(start_color[:3], (0.0, 0.0, 0.0), atol=1e-3), f"{name} must start at black for 0.0"
+        # 0.0 should be pure white (R=1, G=1, B=1, A=1)
+        assert np.allclose(start_color[:3], (1.0, 1.0, 1.0), atol=1e-3), f"{name} must start at white for 0.0"
 
-        # 1.0 should be pure white (R=1, G=1, B=1, A=1)
-        assert np.allclose(end_color[:3], (1.0, 1.0, 1.0), atol=1e-3), f"{name} must end at white for 1.0"
+        # 1.0 should NOT be pure white or pure black
+        assert not np.allclose(end_color[:3], (1.0, 1.0, 1.0), atol=1e-2), f"{name} must not end at white for 1.0"
+        assert not np.allclose(end_color[:3], (0.0, 0.0, 0.0), atol=1e-2), f"{name} must not end at black for 1.0"
 
 
 def test_i_series_colormaps_usage():

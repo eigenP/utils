@@ -9,6 +9,10 @@ from .plotting_utils import (
     i_forest,
     i_orange,
     i_purple,
+    i_teal,
+    i_rose,
+    i_gold,
+    i_slate,
     I_SERIES_COLORMAPS,
 )
 
@@ -30,6 +34,10 @@ __all__ = [
     "i_forest",
     "i_orange",
     "i_purple",
+    "i_teal",
+    "i_rose",
+    "i_gold",
+    "i_slate",
     "I_SERIES_COLORMAPS",
     "show_zyx_slice",
     "show_zyx_max",
