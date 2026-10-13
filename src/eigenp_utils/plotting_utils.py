@@ -83,6 +83,36 @@ print("Hint: labels_cmap background is transparent by default. To set it to blac
 print("labels_cmap._init(); labels_cmap._lut[0] = [0, 0, 0, 1]")
 
 
+# --- Initialization: Create I Series (Inverted / Dark Background) Colormaps ---
+i_blue = LinearSegmentedColormap.from_list("I Blue", ['#000000', '#003366', '#0066FF', '#66B2FF', '#FFFFFF'], N=256)
+i_bordeaux = LinearSegmentedColormap.from_list("I Bordeaux", ['#000000', '#4A0014', '#800020', '#C4526E', '#FFFFFF'], N=256)
+i_forest = LinearSegmentedColormap.from_list("I Forest", ['#000000', '#0A3B18', '#228B22', '#72CB72', '#FFFFFF'], N=256)
+i_orange = LinearSegmentedColormap.from_list("I Orange", ['#000000', '#591C00', '#FF7F00', '#FFC266', '#FFFFFF'], N=256)
+i_purple = LinearSegmentedColormap.from_list("I Purple", ['#000000', '#3B003B', '#800080', '#D187D1', '#FFFFFF'], N=256)
+
+I_SERIES_COLORMAPS = {
+    "I Blue": i_blue,
+    "I Bordeaux": i_bordeaux,
+    "I Forest": i_forest,
+    "I Orange": i_orange,
+    "I Purple": i_purple,
+}
+
+for name, cmap in I_SERIES_COLORMAPS.items():
+    # Register under exact name (e.g. 'I Blue')
+    try:
+        mpl_colormaps.register(cmap, name=name, force=True)
+    except AttributeError:
+        plt.register_cmap(name=name, cmap=cmap)
+
+    # Register under alias name (e.g. 'i_blue')
+    alias_name = name.lower().replace(" ", "_")
+    try:
+        mpl_colormaps.register(cmap, name=alias_name, force=True)
+    except AttributeError:
+        plt.register_cmap(name=alias_name, cmap=cmap)
+
+
 def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_kwargs):
     """
     Displays an image and its histogram.

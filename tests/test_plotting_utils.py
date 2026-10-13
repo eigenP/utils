@@ -657,3 +657,64 @@ def test_raincloud_auto_dodge():
     res = raincloud_plot(x='Group', y='Value', hue='Group', data=df)
     assert res['fig'] is not None
     plt.close(res['fig'])
+
+
+def test_i_series_colormaps_registration():
+    """Verifies that all 5 I Series inverted/dark background colormaps and their aliases are properly registered in Matplotlib colormaps registry and exported from eigenp_utils."""
+    from eigenp_utils import (
+        i_blue,
+        i_bordeaux,
+        i_forest,
+        i_orange,
+        i_purple,
+        I_SERIES_COLORMAPS,
+    )
+
+    expected_names = ['I Blue', 'I Bordeaux', 'I Forest', 'I Orange', 'I Purple']
+    assert set(I_SERIES_COLORMAPS.keys()) == set(expected_names)
+
+    for name in expected_names:
+        # Test registration under exact string name in plt and mpl colormaps
+        registered_cmap = plt.get_cmap(name)
+        assert registered_cmap is not None
+        assert registered_cmap.name == name
+
+        # Test alias registration
+        alias = name.lower().replace(" ", "_")
+        alias_cmap = plt.get_cmap(alias)
+        assert alias_cmap is not None
+
+    assert i_blue.name == "I Blue"
+    assert i_bordeaux.name == "I Bordeaux"
+    assert i_forest.name == "I Forest"
+    assert i_orange.name == "I Orange"
+    assert i_purple.name == "I Purple"
+
+
+def test_i_series_colormaps_properties():
+    """Verifies that I Series colormaps start with pure black at value 0.0 (dark background) and peak at white at value 1.0."""
+    from eigenp_utils import I_SERIES_COLORMAPS
+
+    for name, cmap in I_SERIES_COLORMAPS.items():
+        start_color = cmap(0.0)
+        end_color = cmap(1.0)
+
+        # 0.0 should be pure black (R=0, G=0, B=0, A=1)
+        assert np.allclose(start_color[:3], (0.0, 0.0, 0.0), atol=1e-3), f"{name} must start at black for 0.0"
+
+        # 1.0 should be pure white (R=1, G=1, B=1, A=1)
+        assert np.allclose(end_color[:3], (1.0, 1.0, 1.0), atol=1e-3), f"{name} must end at white for 1.0"
+
+
+def test_i_series_colormaps_usage():
+    """Verifies that I Series registered colormaps work seamlessly in plotting functions like hist_imshow and color_coded_projection."""
+    from eigenp_utils import color_coded_projection, hist_imshow
+
+    img_2d = np.random.rand(16, 16)
+    res = hist_imshow(img_2d, cmap='I Blue')
+    assert res["fig"] is not None
+    plt.close(res["fig"])
+
+    img_3d = np.random.rand(3, 16, 16)
+    projection = color_coded_projection(img_3d, color_map='I Bordeaux')
+    assert projection.shape == (16, 16, 3)
