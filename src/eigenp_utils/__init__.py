@@ -4,6 +4,12 @@ from .plotting_utils import (
     color_coded_projection,
     hist_imshow,
     labels_cmap,
+    i_blue,
+    i_bordeaux,
+    i_forest,
+    i_orange,
+    i_purple,
+    I_SERIES_COLORMAPS,
 )
 
 from .tnia_plotting_anywidgets import (
@@ -19,6 +25,12 @@ __all__ = [
     "color_coded_projection",
     "hist_imshow",
     "labels_cmap",
+    "i_blue",
+    "i_bordeaux",
+    "i_forest",
+    "i_orange",
+    "i_purple",
+    "I_SERIES_COLORMAPS",
     "show_zyx_slice",
     "show_zyx_max",
     "show_zyx_projection",
