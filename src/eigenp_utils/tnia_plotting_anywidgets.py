@@ -1081,7 +1081,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     # UI Toggles
     show_crosshair = traitlets.Bool(True).tag(sync=True)
-    sync_on_hover = traitlets.Bool(False).tag(sync=True)
+    sync_on_hover = traitlets.Bool(True).tag(sync=True)
 
     warning_msg = traitlets.Unicode("").tag(sync=True)
 
@@ -1097,7 +1097,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     copy_params_trigger = traitlets.Int(0).tag(sync=True)
     copy_params_string = traitlets.Unicode("").tag(sync=True)
 
-    def __init__(self, X, Y, Z, show_crosshair=True, sync_on_hover=False, **kwargs):
+    def __init__(self, X, Y, Z, show_crosshair=True, sync_on_hover=True, **kwargs):
         super().__init__(**kwargs)
         self.show_crosshair = show_crosshair
         self.sync_on_hover = sync_on_hover
@@ -1429,7 +1429,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
-                 show_crosshair=True, sync_on_hover=False, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=True, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
 
         self.rotate_view = rotate_view
         self.channel_labels_input = channel_labels
@@ -1761,7 +1761,15 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     # Data
     points = traitlets.List().tag(sync=True) # List of [z, y, x] lists
 
-    def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, *args, **kwargs):
+    @property
+    def annotate(self):
+        return self.annotation_mode
+
+    @annotate.setter
+    def annotate(self, value):
+        self.annotation_mode = bool(value)
+
+    def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, annotate=False, *args, **kwargs):
         if colors is not None:
             warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
             if colormap is None:
@@ -1847,6 +1855,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
         # Initialize superclass
         super().__init__(im_list, colormap=colors_list, opacity=opacity_list, *args, **kwargs)
+
+        self.annotation_mode = bool(annotate)
 
         # Override the last channel name
         self.channel_names = self.channel_names[:-1] + ['Annotations']
@@ -2031,7 +2041,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=True, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
         self.rotate_view = rotate_view
         self.channel_label_fontsize_pt = channel_label_fontsize_pt
         if colors is not None:
@@ -2706,7 +2716,7 @@ def show_zyx_max_slice_interactive(
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
-    show_crosshair=True, sync_on_hover=False,
+    show_crosshair=True, sync_on_hover=True,
     colors=None, opacity=None,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
@@ -2817,9 +2827,10 @@ def show_zyx_max_slice_interactive_point_annotator(
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
-    show_crosshair=True, sync_on_hover=False,
+    show_crosshair=True, sync_on_hover=True,
     colors=None, opacity=None,
     point_size_scale=0.01,
+    annotate=False,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
@@ -2909,7 +2920,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     w = TNIAAnnotatorWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
-        point_size_scale=point_size_scale,
+        point_size_scale=point_size_scale, annotate=annotate,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
         channel_label_fontsize_pt=channel_label_fontsize_pt
     )
@@ -2925,7 +2936,7 @@ def show_zyx_max_scatter_interactive(
     colormap=None, colors=None, opacity=None,
     gamma=1, vmin=None, vmax=None,
     figsize=None, figsize_scale=1.0,
-    show_crosshair=True, sync_on_hover=False,
+    show_crosshair=True, sync_on_hover=True,
     subplot_bg='black',
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,

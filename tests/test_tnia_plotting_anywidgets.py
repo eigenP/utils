@@ -410,6 +410,75 @@ def test_tnia_annotator_widget():
     with open("/tmp/test_points.csv", "r") as f:
         print(f.read())
 
+
+def test_sync_on_hover_defaults_to_true():
+    """Test that sync_on_hover defaults to True for all interactive widgets and wrapper functions."""
+    from eigenp_utils.tnia_plotting_anywidgets import (
+        TNIASliceWidget,
+        TNIAScatterWidget,
+        TNIAAnnotatorWidget,
+        show_zyx_max_slice_interactive,
+        show_zyx_max_slice_interactive_point_annotator,
+        show_zyx_max_scatter_interactive,
+    )
+
+    im = np.zeros((10, 20, 30))
+    X, Y, Z = np.random.rand(10), np.random.rand(10), np.random.rand(10)
+
+    # Class instantiations
+    w_slice = TNIASliceWidget(im)
+    assert w_slice.sync_on_hover is True
+
+    w_scatter = TNIAScatterWidget(X, Y, Z)
+    assert w_scatter.sync_on_hover is True
+
+    w_annot = TNIAAnnotatorWidget(im)
+    assert w_annot.sync_on_hover is True
+
+    # Wrapper function instantiations
+    w_fn_slice = show_zyx_max_slice_interactive(im)
+    assert w_fn_slice.sync_on_hover is True
+
+    w_fn_annot = show_zyx_max_slice_interactive_point_annotator(im)
+    assert w_fn_annot.sync_on_hover is True
+
+    w_fn_scatter = show_zyx_max_scatter_interactive((Z, Y, X))
+    assert w_fn_scatter.sync_on_hover is True
+
+
+def test_annotator_annotate_kwarg_and_property():
+    """Test annotate kwarg default, explicit boolean settings, and property getter/setter on TNIAAnnotatorWidget."""
+    from eigenp_utils.tnia_plotting_anywidgets import (
+        TNIAAnnotatorWidget,
+        show_zyx_max_slice_interactive_point_annotator,
+    )
+
+    im = np.zeros((10, 20, 30))
+
+    # Default should be annotate=False (annotation_mode is False)
+    w_default = show_zyx_max_slice_interactive_point_annotator(im)
+    assert w_default.annotation_mode is False
+    assert w_default.annotate is False
+
+    # Explicit annotate=True during wrapper function creation
+    w_active = show_zyx_max_slice_interactive_point_annotator(im, annotate=True)
+    assert w_active.annotation_mode is True
+    assert w_active.annotate is True
+
+    # Direct class instantiation with annotate=True
+    w_class = TNIAAnnotatorWidget(im, annotate=True)
+    assert w_class.annotation_mode is True
+    assert w_class.annotate is True
+
+    # Test programmatically modifying via annotate property
+    w_default.annotate = True
+    assert w_default.annotation_mode is True
+    assert w_default.annotate is True
+
+    w_default.annotate = False
+    assert w_default.annotation_mode is False
+    assert w_default.annotate is False
+
 # =========================================
 # Source: test_tnia_plotting_anywidgets_resolve_color.py
 # =========================================
