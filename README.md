@@ -18,6 +18,7 @@
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers) with rotatable crosshairs, interactive point cloud visualization (`IsoScatterWidget`, `show_iso_scatter`), and 3D point annotation (`TNIAAnnotatorWidget`). Includes thick-slab projections (`show_zyx_max_slabs`, `show_zyx_projection_slabs`) and a one-click UI parameter copy feature for reproducibility.
 * **Interactive 3D Scatter Plots**: Utilities for generating interactive 3D scatter plots with Plotly, including native support for AnnData embeddings (`plotly_scatter_3d`, `plotly_scatter_3d_from_adata_obsm`).
 * **Publication-Ready Plots**: Set global styles including editable SVG text (`set_plotting_style`). `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), pre-KDE outlier filtering, and data subset highlighting. Custom Matplotlib colormap generation via `colormap_maker`, threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`, and colormap truncation/modification (`adjust_colormap`).
+* **Advanced Colormaps**: Includes the "I Series" colormaps (`i_blue`, `i_bordeaux`, `i_forest`, `i_orange`, `i_purple`, `i_teal`, `i_rose`, `i_gold`, `i_slate`) for smooth transitions from white to deep colors, and `labels_cmap` for robust label visualization scaled in CIELAB color space.
 * **Image Projections & Compositing**: Generate histograms over image plots (`hist_imshow`), produce depth color-coded projections (`color_coded_projection`), perform advanced multi-channel color blending (`create_multichannel_rgb`), and visualize intensity transformations (`brightness_diagnostic_plotter`).
 
 ### Single-Cell Analysis
@@ -27,12 +28,14 @@
 * **Dataset Integration (kkNN)**: Adaptive curvature-based k-nearest neighbors mapping (`kknn_ingest`) to dynamically project metadata and embeddings across references based on local manifold geometry.
 * **Label Classification & Smoothing**: Distance-weighted majority voting or averaging (`kknn_classifier`) to smooth categorical or continuous cell metadata using the kkNN backbone. Graph-based smoothing of expression data (`smooth_expression_on_graph`).
 * **Gene Archetypes**: Cluster genes by expression patterns to find dominant archetypes using hierarchical Ward clustering and SVD (`find_expression_archetypes`).
-* **Multiscale Clustering**: Run multi-resolution Leiden clustering and track lineage hierarchies across scales (`multiscale_coarsening`, `plot_clustering_tree`).
+* **Multiscale Clustering**: Run multi-resolution Leiden clustering and track lineage hierarchies across scales (`multiscale_coarsening`, `plot_clustering_tree`), and perform hyperparameter sweeping for clustering and cell type annotation (`sweep_leiden_and_annotate`).
 * **Lineage Coupling**: Compute exact co-occurrence expectations and z-scores analytically using a vectorized hypergeometric log-gamma formulation and the inclusion-exclusion principle (`calculate_lineage_coupling`).
 * **Feature Correlation**: Find highly correlated features with respect to targets, optionally utilizing graph-based diffusion to smooth over the cell-cell graph (`find_correlated_features`).
 * **Spatial Autocorrelation**: Fast Moran's I implementation (`morans_i_all_fast`) that correctly handles general (non-row-standardized) spatial weights.
 * **Dimensionality Reduction**: `tl_pacmap` for PaCMAP embeddings supporting versatile initialization strategies (e.g., PAGA, PCA, random).
 * **Palette Management**: Utilities for transferring color palettes between `AnnData` objects (`carry_palette`).
+* **AnnData I/O Utilities**: Helper functions for importing and exporting AnnData observation metadata (`import_obs_to_adata_from_csv`, `export_obs_from_adata_to_csv`).
+* **Volcano Plots**: Visualize differential expression results with volcano plots for AnnData (`plot_volcano_adata`).
 
 ### Statistical Utilities
 * **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci` (with bias-corrected and accelerated (BCa) bootstrap methods), `summary_stats`, robust outlier removal (`remove_outliers`) supporting Mahalanobis distance, `robust_standardize` with principled hierarchical dispersion fallback (MAD -> MeanAD -> STD) for zero-inflated or heavily tied data, and `add_stat_annotations` for annotating plots with significance markers.
@@ -46,6 +49,10 @@
 
 ### Examples
 * **Notebooks**: The `notebooks/` directory contains Marimo notebooks demonstrating package functionalities, such as using statistical utilities with classic datasets.
+
+### WebAssembly (WASM) & Browser Compatibility
+* **WASM Support**: The package is fully compatible with Pyodide, JupyterLite, and Marimo in WASM mode.
+* **WASM Wheels**: WASM wheels are automatically built via GitHub Actions (`.github/workflows/build-wasm-wheel.yml`), facilitating easy integration into browser-based Python environments.
 
 ## Installation
 
@@ -96,6 +103,17 @@ uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
 ```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+
+## Development & Testing
+
+To run the tests locally, you can use `uv` and `pytest`.
+Headless frontend tests that evaluate `AnyWidget` components require `pytest-playwright`.
+You can install Chromium via Playwright if you don't have it installed on your system.
+
+```bash
+uv run --with '.[all,dev]' --with 'pytest-playwright' playwright install chromium
+uv run --with '.[all,dev]' --with 'pytest-playwright' pytest
+```
 
 ## License
 
