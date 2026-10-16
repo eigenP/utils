@@ -155,6 +155,13 @@ def test_normalize_vectors():
     assert np.allclose(normalized[0], [0.6, 0.8])
     assert np.allclose(normalized[1], [1.0, 0.0])
 
+    # Test zero-length vector
+    normalized_zero_2d = normalize_vectors(np.array([[0.0, 0.0]]))
+    assert np.allclose(normalized_zero_2d, [[0.0, 0.0]])
+
+    normalized_zero_3d = normalize_vectors(np.array([[0.0, 0.0, 0.0]]))
+    assert np.allclose(normalized_zero_3d, [[0.0, 0.0, 0.0]])
+
 def test_calculate_spline_length():
     """Test that calculate spline length works as expected."""
     # 2D case, straight line from (0,0) to (3,4), length should be 5
