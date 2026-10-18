@@ -230,8 +230,8 @@ def _(apply_basic_shading, cells3d_vol, fit_basic_shading, mo, np, plt, run_3d):
     # Fit basic on the list of tiles, computing a shared 3D shading
     res_tiles = fit_basic_shading(degraded_tiles, is_3d=True, get_darkfield=True, fitting_mode='approximate')
 
-    # Apply to the first tile
-    corrected_tile0 = apply_basic_shading(degraded_tiles[0], res_tiles['flatfield'], res_tiles['darkfield'], res_tiles['baseline'])
+    # Apply to the first tile; the fit returns one baseline per tile, so pass tile 0's
+    corrected_tile0 = apply_basic_shading(degraded_tiles[0], res_tiles['flatfield'], res_tiles['darkfield'], res_tiles['baseline'][:1])
 
     mid_z_tile = tile_shape[0] // 2
 
