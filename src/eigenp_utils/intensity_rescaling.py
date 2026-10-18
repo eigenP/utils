@@ -429,6 +429,21 @@ def fit_basic_shading(
     s_s = images.shape[0]
     original_spatial_shape = images.shape[1:]
 
+    if get_darkfield and s_s < 2:
+        # BaSiC models each sample as I_i = B_i * S + D and separates the darkfield D
+        # from the flatfield S only through variation of the baselines B_i across
+        # samples. With a single image/volume any D can be absorbed into S, so the
+        # darkfield is not identifiable (in 'approximate' mode its estimator has no
+        # samples to average and the fit degenerated to NaN after max iterations).
+        warnings.warn(
+            "get_darkfield=True needs at least 2 images (or volumes with is_3d=True): the "
+            "darkfield is not identifiable from a single sample. Fitting the flatfield only; "
+            "the returned darkfield is zero.",
+            UserWarning,
+            stacklevel=2,
+        )
+        get_darkfield = False
+
     target_spatial_shape = tuple([min(d, working_size) if working_size is not None else d for d in original_spatial_shape])
 
     if target_spatial_shape != original_spatial_shape:
@@ -529,7 +544,10 @@ def fit_basic_shading(
 
                 I_B_flat = (S[np.newaxis, ...] * B[(...,) + (np.newaxis,) * S.ndim] + D_R[np.newaxis, ...] + D_Z).reshape(s_s, -1)
 
-                if get_darkfield:
+                # The darkfield estimator below averages over samples with B < 1; if
+                # there are none (e.g. identical samples) this iteration carries no
+                # darkfield information, so keep the current D_R / D_Z.
+                if get_darkfield and np.any(B < 1):
                     validA1coeff_idx = B < 1
                     S_flat = S.reshape(-1)
                     mean_S = np.mean(S)
