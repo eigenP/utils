@@ -8,10 +8,10 @@
 #     "matplotlib",
 #     "scikit-learn",
 #     "anndata",
-#     "scanpy",
-#     "pot",
+#     "scanpy ; sys_platform != 'emscripten'",
+#     "pot ; sys_platform != 'emscripten'",
 #     "wigglystuff",
-#     "eigenp-utils[single-cell] @ git+https://github.com/eigenP/utils.git@main",
+#     "eigenp-utils[single-cell] @ git+https://github.com/eigenP/utils.git@main ; sys_platform != 'emscripten'",
 # ]
 # ///
 
@@ -28,8 +28,39 @@ def _():
     return (mo,)
 
 
+@app.cell(hide_code=True)
+async def _(mo):
+    import sys
+
+    # In the browser (marimo WASM / Pyodide) scanpy and POT have no WebAssembly
+    # builds; the notebook then swaps in numpy/sklearn/HiGHS equivalents.
+    IN_WASM = sys.platform == "emscripten"
+    if IN_WASM:
+        import micropip
+
+        await micropip.install([
+            # micropip needs a wheel from a CORS-enabled host (build-wasm-wheel.yml)
+            "https://raw.githubusercontent.com/eigenP/utils/wasm-wheel/eigenp_utils-0-py3-none-any.whl",
+            "anndata",
+            "wigglystuff",
+            "scikit-learn",
+        ])
+    mo.callout(
+        mo.md(
+            "**Running in the browser (WebAssembly).** scanpy and POT cannot be installed here, so this "
+            "version (1) normalises and runs PCA with numpy/scikit-learn, (2) uses a plain symmetric kNN "
+            "graph instead of scanpy's UMAP connectivities (so `pearson_graph` differs slightly), and "
+            "(3) solves the exact W1 linear programs with SciPy's HiGHS instead of POT (same values, slower). "
+            "Defaults are smaller to keep it interactive. For the full version run it locally "
+            "(`uvx marimo edit --sandbox blog_gene_distances_ot.py`) or on molab."
+        ),
+        kind="info",
+    ) if IN_WASM else None
+    return (IN_WASM,)
+
+
 @app.cell
-def _():
+def _(IN_WASM):
     import time
 
     import numpy as np
@@ -37,8 +68,12 @@ def _():
     import scipy.sparse as sp
     import matplotlib.pyplot as plt
     import anndata as ad
-    import scanpy as sc
-    import ot
+
+    if IN_WASM:
+        sc = ot = None  # no WebAssembly builds; fallbacks are used where they are called
+    else:
+        import scanpy as sc
+        import ot
     from scipy.optimize import linprog
     from scipy.sparse.csgraph import connected_components, laplacian, shortest_path
     from scipy.spatial.distance import pdist, squareform
@@ -396,10 +431,10 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _(IN_WASM, mo):
     seed_num = mo.ui.number(start=0, stop=999, value=0, label="random seed")
-    n_cells_sl = mo.ui.slider(500, 4000, 250, value=2000, label="cells", show_value=True)
-    n_traj_sl = mo.ui.slider(20, 100, 10, value=60, label="trajectory genes", show_value=True)
+    n_cells_sl = mo.ui.slider(500, 4000, 250, value=1000 if IN_WASM else 2000, label="cells", show_value=True)
+    n_traj_sl = mo.ui.slider(20, 100, 10, value=30 if IN_WASM else 60, label="trajectory genes", show_value=True)
     mo.hstack([seed_num, n_cells_sl, n_traj_sl])
     return n_cells_sl, n_traj_sl, seed_num
 
@@ -459,9 +494,17 @@ def _(ad, np, sc):
         adata.var["peak_branch"] = np.r_[gb, gb[twin_parent], gb[perm_parent], -np.ones(n_noise, int)]
         adata.var["peak_t"] = np.r_[gt, gt[twin_parent], gt[perm_parent], np.full(n_noise, np.nan)]
         adata.layers["counts"] = counts.copy()
-        sc.pp.normalize_total(adata, target_sum=1e4)
-        sc.pp.log1p(adata)
-        sc.pp.pca(adata, n_comps=20, random_state=0)
+        if sc is not None:
+            sc.pp.normalize_total(adata, target_sum=1e4)
+            sc.pp.log1p(adata)
+            sc.pp.pca(adata, n_comps=20, random_state=0)
+        else:
+            # WASM: the same three steps with numpy / scikit-learn
+            from sklearn.decomposition import PCA
+
+            lib_size = counts.sum(1, keepdims=True)
+            adata.X = np.log1p(np.divide(counts * 1e4, lib_size, out=np.zeros_like(counts), where=lib_size > 0))
+            adata.obsm["X_pca"] = PCA(n_components=20, random_state=0).fit_transform(adata.X)
         return adata
 
     return simulate_bifurcation, tree_distance
@@ -469,6 +512,7 @@ def _(ad, np, sc):
 
 @app.cell
 def _(
+    IN_WASM,
     ensure_neighbors,
     n_cells_sl,
     n_traj_sl,
@@ -476,7 +520,14 @@ def _(
     simulate_bifurcation,
 ):
     adata = simulate_bifurcation(n_cells=n_cells_sl.value, n_traj=n_traj_sl.value, seed=seed_num.value)
-    ensure_neighbors(adata, n_neighbors=15, use_rep="X_pca")
+    if IN_WASM:
+        # scanpy's UMAP connectivities need numba; use a plain symmetric kNN graph
+        from sklearn.neighbors import kneighbors_graph
+
+        _knn = kneighbors_graph(adata.obsm["X_pca"], n_neighbors=15, mode="connectivity")
+        adata.obsp["connectivities"] = _knn.maximum(_knn.T).tocsr()
+    else:
+        ensure_neighbors(adata, n_neighbors=15, use_rep="X_pca")
     genes_eval = adata.var_names[adata.var["kind"] != "noise"].tolist()
     adata
     return adata, genes_eval
@@ -516,8 +567,8 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    n_meta_sl = mo.ui.slider(50, 400, 25, value=200, label="metacells M", show_value=True)
+def _(IN_WASM, mo):
+    n_meta_sl = mo.ui.slider(50, 400, 25, value=100 if IN_WASM else 200, label="metacells M", show_value=True)
     k_meta_sl = mo.ui.slider(3, 20, 1, value=8, label="metacell kNN k", show_value=True)
     mo.hstack([n_meta_sl, k_meta_sl])
     return k_meta_sl, n_meta_sl
@@ -613,15 +664,42 @@ def _(mo):
 
 
 @app.cell
-def _(np, ot, pdist, squareform):
-    def graph_w1_matrix(P, D):
-        """Exact pairwise W1 between columns of P (each a probability vector) under ground cost D."""
+def _(linprog, np, ot, pdist, sp, squareform):
+    def graph_w1_matrix(P, D, W=None):
+        """
+        Exact pairwise W1 between columns of P (each a probability vector) under ground cost D.
+
+        Without POT (WASM) each entry is the equivalent min-cost-flow (Beckmann) LP on the
+        graph W whose shortest paths define D, solved with HiGHS: exact for a shortest-path
+        metric, with |E| instead of M² variables.
+        """
         g = P.shape[1]
         out = np.zeros((g, g))
+        if ot is not None:
+            def w1(a, b):
+                return ot.emd2(a, b, D)
+        else:
+            Wu = sp.triu(W).tocoo()
+            E = Wu.nnz
+            B = sp.csr_matrix(
+                (np.r_[np.ones(E), -np.ones(E)], (np.r_[Wu.row, Wu.col], np.r_[np.arange(E), np.arange(E)])),
+                shape=(W.shape[0], E),
+            )
+            A_eq, cost = sp.hstack([B, -B]).tocsr(), np.r_[Wu.data, Wu.data]
+
+            def w1(a, b):
+                return linprog(cost, A_eq=A_eq, b_eq=a - b, bounds=(0, None), method="highs").fun
         for i in range(g):
             for j in range(i + 1, g):
-                out[i, j] = out[j, i] = ot.emd2(P[:, i], P[:, j], D)
+                out[i, j] = out[j, i] = w1(P[:, i], P[:, j])
         return out
+
+    def transport_lp(a, b, D):
+        """POT-free exact OT: plan T minimising <T, D> s.t. T1 = a, Tᵀ1 = b, T ≥ 0 (HiGHS). Returns (T, cost)."""
+        n, m = len(a), len(b)
+        A_eq = sp.vstack([sp.kron(sp.eye(n), np.ones((1, m))), sp.kron(np.ones((1, n)), sp.eye(m))])
+        res = linprog(D.ravel(), A_eq=A_eq, b_eq=np.r_[a, b], bounds=(0, None), method="highs")
+        return res.x.reshape(n, m), res.fun
 
     def diffusion_emd_matrix(P, W, n_scales=8, alpha=0.5):
         """
@@ -652,7 +730,7 @@ def _(np, ot, pdist, squareform):
         e2 = -(diag[:, None] + diag[None, :] - 2 * G)  # −(a−b)ᵀ D (a−b)
         return np.sqrt(np.clip(e2, 0, None)), e2
 
-    return diffusion_emd_matrix, energy_matrix, graph_w1_matrix
+    return diffusion_emd_matrix, energy_matrix, graph_w1_matrix, transport_lp
 
 
 @app.cell
@@ -698,7 +776,7 @@ def _(
         secs["pearson_graph"] = time.perf_counter() - _t
 
         _t = time.perf_counter()
-        out["W1_graph"] = graph_w1_matrix(gene_dist, meta["D_geo"])
+        out["W1_graph"] = graph_w1_matrix(gene_dist, meta["D_geo"], W=meta["W"])
         secs["W1_graph"] = time.perf_counter() - _t
 
         _t = time.perf_counter()
@@ -751,10 +829,11 @@ def _(
     ot,
     pd,
     plt,
+    transport_lp,
 ):
     _ia, _ib = genes_eval.index(gene_a_dd.value), genes_eval.index(gene_b_dd.value)
     _a, _b = gene_dist[:, _ia], gene_dist[:, _ib]
-    _plan = ot.emd(_a, _b, meta["D_geo"])
+    _plan = ot.emd(_a, _b, meta["D_geo"]) if ot is not None else transport_lp(_a, _b, meta["D_geo"])[0]
     _xy = meta["centroids"][:, :2]
     _fig, _axes = plt.subplots(1, 2, figsize=(10.5, 4))
     _r, _c = meta["W"].nonzero()
@@ -825,7 +904,7 @@ def _(mo):
 
 
 @app.cell
-def _(gene_dist, linprog, meta, np, ot, sp):
+def _(gene_dist, linprog, meta, np, ot, sp, transport_lp):
     def verify_flow_identities(i=0, j=1):
         W = sp.triu(meta["W"]).tocoo()
         M, E = meta["W"].shape[0], W.nnz
@@ -837,7 +916,11 @@ def _(gene_dist, linprog, meta, np, ot, sp):
         delta = gene_dist[:, i] - gene_dist[:, j]
         # Beckmann LP: J = J⁺ − J⁻, minimise Σ ℓ (J⁺ + J⁻) s.t. B(J⁺ − J⁻) = δ
         lp = linprog(np.r_[ell, ell], A_eq=sp.hstack([B, -B]), b_eq=delta, bounds=(0, None), method="highs")
-        w1_emd = ot.emd2(gene_dist[:, i], gene_dist[:, j], meta["D_geo"])
+        w1_emd = (
+            ot.emd2(gene_dist[:, i], gene_dist[:, j], meta["D_geo"])
+            if ot is not None
+            else transport_lp(gene_dist[:, i], gene_dist[:, j], meta["D_geo"])[1]
+        )
         # Electrical flow: potentials φ = L⁺δ, J_e = (φ_u − φ_v)/ℓ_e
         phi = meta["L_pinv"] @ delta
         J = (phi[W.row] - phi[W.col]) / ell

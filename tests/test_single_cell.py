@@ -2943,3 +2943,63 @@ def test_pflogpf_success():
         assert "pflogpf" not in adata2.layers
     finally:
         del sys.modules["scclr"]
+
+def test_graph_helpers_work_without_scanpy():
+    """single_cell imports and its numpy/scipy graph helpers run without scanpy.
+
+    scanpy (via numba) cannot be installed in the browser (Pyodide / marimo
+    WASM), so single_cell imports it lazily. Strategy: in a fresh interpreter,
+    make any ``scanpy`` import raise, then build a tiny AnnData with a known
+    graph and check:
+      * smooth_expression_on_graph equals the row-normalised (A + I) times X,
+        i.e. a lazy random-walk average, and keeps a constant column constant;
+      * find_correlated_features ranks the target itself first (r = 1);
+      * a scanpy-backed function (ensure_neighbors) raises an ImportError that
+        names scanpy, i.e. the failure is deferred to the call, not the import;
+      * scanpy was never imported.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent("""
+        import sys, importlib.abc
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "scanpy" or name.startswith("scanpy."):
+                    raise ImportError("scanpy blocked for test")
+        sys.meta_path.insert(0, Block())
+
+        import numpy as np, scipy.sparse as sp, anndata
+        from eigenp_utils.single_cell import (
+            ensure_neighbors, find_correlated_features, smooth_expression_on_graph,
+        )
+
+        rng = np.random.default_rng(0)
+        X = rng.random((6, 3))
+        X[:, 2] = 4.0
+        adata = anndata.AnnData(X)
+        adata.var_names = ["a", "b", "c"]
+        rows = np.arange(6)
+        W = sp.csr_matrix((np.ones(12), (np.r_[rows, rows], np.r_[(rows + 1) % 6, (rows - 1) % 6])), shape=(6, 6))
+        adata.obsp["connectivities"] = W
+
+        S = smooth_expression_on_graph(adata, X)
+        A = W.toarray() + np.eye(6)
+        expected = (A / A.sum(1, keepdims=True)) @ X
+        assert np.allclose(S, expected), (S, expected)
+        assert np.allclose(S[:, 2], 4.0)
+
+        res = find_correlated_features(adata, "a", metrics=("pearson",))
+        assert np.isclose(res.loc["a", "pearson"], 1.0)
+
+        try:
+            ensure_neighbors(anndata.AnnData(X))  # no graph yet: must call scanpy
+        except ImportError as e:
+            assert "scanpy" in str(e)
+        else:
+            raise AssertionError("ensure_neighbors should need scanpy")
+        assert "scanpy" not in sys.modules
+    """)
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr[-3000:]

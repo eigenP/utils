@@ -22,8 +22,28 @@ def _(mo):
     return
 
 
+@app.cell(hide_code=True)
+async def _():
+    import sys
+
+    # In the browser (marimo WASM): install the package wheel and the packages
+    # marimo cannot detect from this notebook's own imports
+    IN_WASM = sys.platform == "emscripten"
+    if IN_WASM:
+        import micropip
+
+        await micropip.install([
+            # micropip needs a wheel from a CORS-enabled host (build-wasm-wheel.yml)
+            "https://raw.githubusercontent.com/eigenP/utils/wasm-wheel/eigenp_utils-0-py3-none-any.whl",
+            "scikit-image",
+            "tifffile",
+        ])
+    wasm_ready = True
+    return IN_WASM, wasm_ready
+
+
 @app.cell
-def _():
+def _(wasm_ready):
     import numpy as np
     import skimage.data
     from eigenp_utils.intensity_rescaling import fit_basic_shading, apply_basic_shading
@@ -33,14 +53,16 @@ def _():
 
 
 @app.cell
-def _(apply_basic_shading, fit_basic_shading, mo, np, plt, skimage):
+async def _(apply_basic_shading, fit_basic_shading, mo, np, plt, skimage):
     try:
         cells3d = skimage.data.cells3d()[:, 1, :, :] # DAPI channel
     except Exception:
-        import pooch
+        # e.g. no pooch, or in the browser (WASM). GitLab's API endpoint sends
+        # CORS headers (its /-/raw/ URL does not); same file as cells3d().
         import tifffile
-        url = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
-        file_path = pooch.retrieve(url, known_hash=None)
+        from eigenp_utils.io import download_file_async
+        url = "https://gitlab.com/api/v4/projects/scikit-image%2Fdata/repository/files/cells3d.tif/raw?ref=master"
+        file_path = await download_file_async(url, "./cells3d.tif")
         cells3d = tifffile.imread(file_path)[:, 1, :, :]
 
     sizes = cells3d.shape[1:]
@@ -88,6 +110,30 @@ def _(plot):
 
 
 @app.cell
+def _(IN_WASM, cells3d, mo):
+    # The 3D fits take minutes even natively; in the browser use a downsampled
+    # volume and only run them on demand
+    if IN_WASM:
+        cells3d_vol = cells3d[::2, ::4, ::4]
+        run_3d = mo.ui.run_button(label="Run the 3D sections")
+        _view = mo.callout(
+            mo.vstack([
+                mo.md(
+                    "**Browser (WebAssembly) version:** the 3D fits below are slow here, so they use a "
+                    f"downsampled volume {cells3d_vol.shape} (every 2nd z, every 4th y/x) and run only "
+                    "when you click (expect a few minutes)."
+                ),
+                run_3d,
+            ]),
+            kind="info",
+        )
+    else:
+        cells3d_vol, run_3d, _view = cells3d, None, None
+    _view
+    return cells3d_vol, run_3d
+
+
+@app.cell
 def _(mo):
     mo.md("""
     ## 3D Shading Correction
@@ -98,22 +144,23 @@ def _(mo):
 
 
 @app.cell
-def _(apply_basic_shading, cells3d, fit_basic_shading, mo, np, plt):
-    sizes_3d = cells3d.shape
+def _(apply_basic_shading, cells3d_vol, fit_basic_shading, mo, np, plt, run_3d):
+    mo.stop(run_3d is not None and not run_3d.value)
+    sizes_3d = cells3d_vol.shape
     grid_3d = np.array(np.meshgrid(*[np.linspace(-s // 2 + 1, s // 2, s) for s in sizes_3d], indexing='ij'))
     gradient_3d = np.sum(grid_3d**2, axis=0)
     gradient_3d = 0.5 * (np.max(gradient_3d) - gradient_3d) / np.max(gradient_3d) + 0.5 # 0.5 to 1.0
     darkfield_ground_truth_3d = np.ones(sizes_3d) * 5.0
 
-    degraded_3d = cells3d * gradient_3d + darkfield_ground_truth_3d
+    degraded_3d = cells3d_vol * gradient_3d + darkfield_ground_truth_3d
 
     res_3d = fit_basic_shading(degraded_3d, is_3d=True, get_darkfield=True, fitting_mode='approximate')
     corrected_3d = apply_basic_shading(degraded_3d, res_3d['flatfield'], res_3d['darkfield'], res_3d['baseline'])
 
-    mid_z = cells3d.shape[0] // 2
+    mid_z = cells3d_vol.shape[0] // 2
 
     fig_3d, axes_3d = plt.subplots(1, 5, figsize=(25, 5))
-    axes_3d[0].imshow(cells3d[mid_z], cmap='gray')
+    axes_3d[0].imshow(cells3d_vol[mid_z], cmap='gray')
     axes_3d[0].set_title('Original 3D (mid z-slice)')
     axes_3d[0].axis('off')
 
@@ -154,16 +201,17 @@ def _(mo):
 
 
 @app.cell
-def _(apply_basic_shading, cells3d, fit_basic_shading, mo, np, plt):
-    z, y, x = cells3d.shape
+def _(apply_basic_shading, cells3d_vol, fit_basic_shading, mo, np, plt, run_3d):
+    mo.stop(run_3d is not None and not run_3d.value)
+    z, y, x = cells3d_vol.shape
     y2, x2 = y // 2, x // 2
 
     # 4 spatial quadrants
     tiles = [
-        cells3d[:, :y2, :x2],
-        cells3d[:, :y2, x2:],
-        cells3d[:, y2:, :x2],
-        cells3d[:, y2:, x2:]
+        cells3d_vol[:, :y2, :x2],
+        cells3d_vol[:, :y2, x2:],
+        cells3d_vol[:, y2:, :x2],
+        cells3d_vol[:, y2:, x2:]
     ]
 
     tile_shape = tiles[0].shape

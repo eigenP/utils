@@ -1,14 +1,13 @@
 from __future__ import annotations
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any, Union
+import importlib
 import warnings
 from collections import defaultdict
 from uuid import uuid4
 
 import numpy as np
 import pandas as pd
-import scanpy as sc
 from sklearn.neighbors import NearestNeighbors
-import anndata
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
 from scipy.linalg import svd
@@ -20,6 +19,37 @@ import matplotlib.patheffects as m_fx
 import re
 from .plotting_utils import get_nice_number
 from .stats import robust_standardize
+
+
+
+class _LazyModule:
+    """Import a module on first attribute access.
+
+    scanpy (via numba) has no WebAssembly build, so importing it eagerly would
+    make the whole module unusable in Pyodide / marimo WASM, even for helpers
+    that only need numpy/scipy (e.g. ``smooth_expression_on_graph``). Type
+    annotations are not evaluated (``from __future__ import annotations``).
+    """
+
+    def __init__(self, name: str):
+        self._name = name
+        self._module = None
+
+    def __getattr__(self, attr):
+        if self._module is None:
+            try:
+                self._module = importlib.import_module(self._name)
+            except ImportError as e:
+                raise ImportError(
+                    f"This function needs '{self._name}' (`pip install eigenp-utils[single-cell]`). "
+                    "scanpy cannot be installed in the browser (WASM); run such notebooks "
+                    "locally or on molab instead."
+                ) from e
+        return getattr(self._module, attr)
+
+
+sc = _LazyModule("scanpy")
+anndata = _LazyModule("anndata")
 
 # Try importing third-party libraries that might be installed via the inline dependencies
 try:

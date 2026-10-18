@@ -10,6 +10,11 @@
 #     "eigenp-utils[single-cell] @ git+https://github.com/eigenP/utils.git@main",
 # ]
 # ///
+#
+# Not runnable in the browser (marimo WASM / Pyodide): scanpy, pacmap and their
+# numba dependency have no WebAssembly builds. Run it locally with
+#   uvx marimo edit --sandbox <this file>
+# or on molab (https://molab.marimo.io), which runs a regular Python kernel.
 
 import marimo
 
@@ -22,6 +27,22 @@ def _():
     import marimo as mo
 
     return (mo,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    import sys
+
+    mo.callout(
+        mo.md(
+            "**This notebook cannot run in the browser (WebAssembly).** scanpy, pacmap and their "
+            "numba dependency have no WebAssembly builds. Run it locally with "
+            "`uvx marimo edit --sandbox` on this file, or open it on "
+            "[molab](https://molab.marimo.io), which runs a regular Python kernel."
+        ),
+        kind="warn",
+    ) if sys.platform == "emscripten" else None
+    return
 
 
 @app.cell

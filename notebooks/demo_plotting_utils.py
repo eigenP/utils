@@ -5,7 +5,7 @@
 #     "scikit-image",
 #     "numpy",
 #     "matplotlib",
-#     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main",
+#     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main ; sys_platform != 'emscripten'",
 # ]
 # ///
 
