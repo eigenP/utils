@@ -42,6 +42,20 @@ def _serve_directory(directory):
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
+def _run_coroutine(coro):
+    """Run ``coro`` to completion on a fresh event loop in a worker thread.
+
+    ``asyncio.run`` refuses to start when the calling thread already runs a loop,
+    which pytest-playwright's sync API does for the rest of the session once a
+    frontend test has used it.
+    """
+    import asyncio
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 @pytest.mark.skipif(sys.platform == "emscripten", reason="no sockets / HTTP server in Pyodide")
 def test_download_file_async_native_roundtrip(tmp_path):
     """download_file_async fetches bytes exactly and skips existing files.
@@ -55,7 +69,6 @@ def test_download_file_async_native_roundtrip(tmp_path):
     Expected outcome: the first call writes identical bytes (in a newly created
     sub-directory); the second returns the path without re-downloading.
     """
-    import asyncio
     import os
     from eigenp_utils.io import download_file_async
 
@@ -66,12 +79,12 @@ def test_download_file_async_native_roundtrip(tmp_path):
     server, base = _serve_directory(src)
     try:
         dest = tmp_path / "out" / "blob.bin"
-        result = asyncio.run(download_file_async(f"{base}/blob.bin", dest))
+        result = _run_coroutine(download_file_async(f"{base}/blob.bin", dest))
         assert Path(result) == dest
         assert dest.read_bytes() == payload
 
         dest.write_bytes(b"cached")
-        asyncio.run(download_file_async(f"{base}/blob.bin", dest))
+        _run_coroutine(download_file_async(f"{base}/blob.bin", dest))
         assert dest.read_bytes() == b"cached"
     finally:
         server.shutdown()
