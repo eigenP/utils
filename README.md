@@ -109,15 +109,19 @@ Everything except single-cell analysis runs in [Pyodide](https://pyodide.org), t
 | `stats.add_stat_annotations`, `plotting_utils.plotly_scatter_3d` | `[plotting]` | yes |
 | `single_cell` | `scanpy`, `pacmap`, `leidenalg`, ... (`numba` has no WASM build) | no |
 
-micropip installs only wheels, and only from hosts that send CORS headers, so in a WASM notebook install a built wheel (not a GitHub archive or `git+` URL):
+micropip installs only wheels, and only from hosts that send CORS headers, so a GitHub archive or `git+` URL does not work in the browser. CI publishes the latest `main` build to the `wasm-wheel` branch:
 
 ```python
 import micropip
-await micropip.install("<URL of eigenp_utils-*.whl>")
-await micropip.install("scikit-image")  # only for the image-analysis modules
+await micropip.install([
+    "https://raw.githubusercontent.com/eigenP/utils/wasm-wheel/eigenp_utils-0-py3-none-any.whl",
+    "scikit-image", "tifffile",  # only for the image-analysis modules / reading TIFFs
+])
 ```
 
-`io.download_file` relies on `urllib`/`requests`, which have no socket access in the browser; fetch remote files with `pyodide.http.pyfetch` instead.
+(`eigenp_utils-0-...whl` is a version-independent alias accepted by micropip; pip/uv reject it, so use the versioned file next to it or `git+` natively.)
+
+The browser cannot block on network I/O, so use `await eigenp_utils.io.download_file_async(url, dest)` there (it uses `pyodide.http.pyfetch`; natively it runs `download_file` in a thread). The server must send CORS headers: e.g. for scikit-image's `cells3d`, use GitLab's API endpoint `https://gitlab.com/api/v4/projects/scikit-image%2Fdata/repository/files/cells3d.tif/raw?ref=master` rather than the `/-/raw/` URL.
 
 ## License
 

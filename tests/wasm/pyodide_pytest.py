@@ -1,4 +1,6 @@
-# Executed inside Pyodide by run_pyodide_tests.mjs; WHEEL is injected as a global.
+# Executed inside Pyodide by run_pyodide_tests.mjs, which injects the globals
+# WHEEL, BLOB_URL and BLOB_SHA256.
+import hashlib
 import sys
 
 import micropip
@@ -12,6 +14,17 @@ from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
 assert "skimage" not in sys.modules, "core import must not pull in scikit-image"
 print(f"core import OK: {len(eigenp_utils.__all__)} names exported")
+
+# Browser download path: pyfetch, binary-safe, and caching an existing file
+from pathlib import Path
+from eigenp_utils.io import download_file_async
+
+blob = await download_file_async(BLOB_URL, "/tmp/dl/blob.bin")
+assert hashlib.sha256(Path(blob).read_bytes()).hexdigest() == BLOB_SHA256
+Path(blob).write_bytes(b"cached")
+await download_file_async(BLOB_URL, blob)
+assert Path(blob).read_bytes() == b"cached"
+print("download_file_async (pyfetch) OK")
 
 # 2. Optional extras that have Pyodide builds, then the regular test suite.
 await micropip.install([

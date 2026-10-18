@@ -8,6 +8,9 @@ on:
   release:
     types: [ created ]
 
+permissions:
+  contents: write
+
 jobs:
   build-wheel:
     runs-on: ubuntu-latest
@@ -40,3 +43,27 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: dist/*.whl
+
+      # micropip (marimo WASM / Pyodide) installs only wheels, and only from
+      # hosts that send CORS headers. GitHub archive zips and release assets do
+      # not; raw.githubusercontent.com does. Publish the latest main build to a
+      # single-commit `wasm-wheel` branch so notebooks can install it from:
+      # https://raw.githubusercontent.com/eigenP/utils/wasm-wheel/eigenp_utils-0-py3-none-any.whl
+      # (the `-0-` copy is a version-independent alias of the versioned wheel).
+      - name: Publish wheel to wasm-wheel branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls dist/*.whl)
+          OUT=$(mktemp -d)
+          cp "$WHEEL" "$OUT/"
+          cp "$WHEEL" "$OUT/eigenp_utils-0-py3-none-any.whl"
+          printf 'Built from %s by build-wasm-wheel.yml. Generated; force-pushed on every push to main.\n' "$GITHUB_SHA" > "$OUT/README.md"
+          cd "$OUT"
+          git init -q -b wasm-wheel
+          git add .
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "WASM wheel from $GITHUB_SHA"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:wasm-wheel

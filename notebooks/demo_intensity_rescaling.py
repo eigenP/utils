@@ -41,7 +41,9 @@ async def _(mo):
 
     OWNER, REPO, REF = "eigenP", "utils", "main"
     if in_wasm():
-        GIT_URL = f"eigenp-utils @ https://github.com/{OWNER}/{REPO}/archive/{REF}.zip"
+        # micropip installs wheels only, from CORS-enabled hosts: CI publishes
+        # the latest main build to the wasm-wheel branch (build-wasm-wheel.yml)
+        GIT_URL = f"https://raw.githubusercontent.com/{OWNER}/{REPO}/wasm-wheel/eigenp_utils-0-py3-none-any.whl"
     else:
         GIT_URL = f"git+https://github.com/{OWNER}/{REPO}.git@{REF}"
 
@@ -64,7 +66,8 @@ async def _(mo):
     def install_github():
         if in_wasm():
             import micropip
-            return micropip.install(GIT_URL)
+            # also install imports of dependencies, which marimo cannot detect
+            return micropip.install([GIT_URL, "scikit-image", "tifffile"])
         else:
             install_local(GIT_URL)
 
@@ -95,7 +98,7 @@ def _():
     import matplotlib.pyplot as plt
     import numpy as np
     from skimage.io import imread
-    from eigenp_utils.io import download_file
+    from eigenp_utils.io import download_file_async
     from eigenp_utils.intensity_rescaling import (
         contrast_stretching,
         adjust_brightness_per_slice,
@@ -106,7 +109,7 @@ def _():
     return (
         adjust_brightness_per_slice,
         contrast_stretching,
-        download_file,
+        download_file_async,
         imread,
         np,
         plt,
@@ -115,16 +118,18 @@ def _():
 
 
 @app.cell
-def _(download_file):
-    url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
-    download_file(url_to_fetch, "./cells3d.tif")
-    return
+async def _(download_file_async):
+    # GitLab's API endpoint sends CORS headers (its /-/raw/ URL does not), so this
+    # also works in the browser; same file as skimage.data.cells3d()
+    url_to_fetch = "https://gitlab.com/api/v4/projects/scikit-image%2Fdata/repository/files/cells3d.tif/raw?ref=master"
+    cells_path = await download_file_async(url_to_fetch, "./cells3d.tif")
+    return (cells_path,)
 
 
 @app.cell
-def _(imread, np):
+def _(cells_path, imread, np):
     # Use cells3d membrane
-    cells = imread("./cells3d.tif")
+    cells = imread(cells_path)
     stack = cells[:, 0, :, :]
 
     # Simulate Z-decay (bleaching)

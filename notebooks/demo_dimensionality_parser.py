@@ -36,7 +36,9 @@ async def _(mo):
 
     OWNER, REPO, REF = "eigenP", "utils", "main"
     if in_wasm():
-        GIT_URL = f"eigenp-utils @ https://github.com/{OWNER}/{REPO}/archive/{REF}.zip"
+        # micropip installs wheels only, from CORS-enabled hosts: CI publishes
+        # the latest main build to the wasm-wheel branch (build-wasm-wheel.yml)
+        GIT_URL = f"https://raw.githubusercontent.com/{OWNER}/{REPO}/wasm-wheel/eigenp_utils-0-py3-none-any.whl"
     else:
         GIT_URL = f"git+https://github.com/{OWNER}/{REPO}.git@{REF}"
 

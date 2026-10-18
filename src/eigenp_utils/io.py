@@ -1,8 +1,13 @@
 from pathlib import Path
+import asyncio
 import gzip
 import shutil
+import sys
 import urllib.request
 import warnings
+
+# True inside Pyodide (e.g. marimo WASM notebooks), where there are no sockets
+IN_WASM = sys.platform == "emscripten"
 
 def check_file_before_save(filename, overwrite=False):
     """
@@ -64,10 +69,20 @@ def un_gzip(input_file_path, output=None):
     return output_path
 
 def download_file(url: str, dest: Path, chunk: int = 8192) -> Path:
-    """Download url to dest if it doesn't exist yet; returns dest."""
+    """Download url to dest if it doesn't exist yet; returns dest.
+
+    Blocking, so unavailable in the browser (Pyodide); use
+    ``await download_file_async(url, dest)`` there.
+    """
     dest = Path(dest)
     if dest.exists():
         return dest
+
+    if IN_WASM:
+        raise RuntimeError(
+            "download_file cannot block in the browser (Pyodide / marimo WASM). "
+            "Use `await eigenp_utils.io.download_file_async(url, dest)` instead."
+        )
 
     ensure_directory(dest)
 
@@ -96,4 +111,38 @@ def download_file(url: str, dest: Path, chunk: int = 8192) -> Path:
             )
             raise e
 
+    return dest
+
+
+async def download_file_async(url: str, dest: Path, chunk: int = 8192) -> Path:
+    """Download url to dest if it doesn't exist yet; returns dest.
+
+    Works both natively and in the browser (Pyodide / marimo WASM). In the
+    browser the request goes through ``pyodide.http.pyfetch``, i.e. the
+    browser's ``fetch``, so the server must send CORS headers
+    (``Access-Control-Allow-Origin``). Natively it runs ``download_file`` in a
+    worker thread.
+    """
+    dest = Path(dest)
+    if not IN_WASM:
+        return await asyncio.to_thread(download_file, url, dest, chunk)
+    if dest.exists():
+        return dest
+
+    from pyodide.http import pyfetch
+
+    try:
+        response = await pyfetch(url)
+    except Exception as e:
+        # Browsers report CORS rejections as a bare network error
+        raise OSError(
+            f"Fetching {url} failed in the browser ({e}). The server must allow "
+            "cross-origin requests (send an Access-Control-Allow-Origin header)."
+        ) from e
+    if not response.ok:
+        raise OSError(f"Fetching {url} failed with HTTP {response.status}.")
+
+    ensure_directory(dest)
+    # Write only once the full body has arrived, so a failed download leaves no partial file
+    dest.write_bytes(await response.bytes())
     return dest
