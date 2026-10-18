@@ -42,3 +42,31 @@ jobs:
       
     - name: Run tests with pytest
       run: pytest
+
+  pyodide:
+    # Runs the suite inside Pyodide, the WebAssembly runtime marimo uses for
+    # browser notebooks. Keep the version in step with marimo's bundled Pyodide.
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Build wheel
+      run: |
+        pip install uv
+        uv build --wheel
+
+    - name: Install Pyodide
+      run: npm install --no-save --prefix tests/wasm pyodide@314.0.0
+
+    - name: Run tests in Pyodide
+      run: node tests/wasm/run_pyodide_tests.mjs

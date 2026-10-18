@@ -74,7 +74,7 @@ You can choose to install optional dependencies if you need functionality such a
 
 - `[image-analysis]` - installs `scikit-image`.
 - `[single-cell]` - installs packages like `scanpy`, `pacmap`, `leidenalg`, etc.
-- `[plotting]` - installs `plotly`.
+- `[plotting]` - installs `plotly`, `statannotations` and `statsmodels`.
 - `[all]` - installs all of the optional dependencies above.
 - `[dev]` - installs all dependencies and additional tools for testing (e.g. `pytest`).
 
@@ -96,6 +96,28 @@ uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
 ```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+
+### Browser / WASM (marimo, Pyodide)
+
+Everything except single-cell analysis runs in [Pyodide](https://pyodide.org), the WebAssembly runtime behind marimo's browser notebooks, including the interactive anywidget ortho viewers. CI runs the test suite inside Pyodide (`tests/wasm/`).
+
+| Module(s) | Needs | WASM |
+| --- | --- | --- |
+| `plotting_utils`, `tnia_plotting_anywidgets`, `stats`, `spline_utils`, `io` (file helpers) | core | yes |
+| `image_and_labels_utils`, `intensity_rescaling`, `extended_depth_of_focus`, `maxproj_registration`, `surface_extraction`, `clahe_equalize_adapthist` | `scikit-image` | yes |
+| `image_io` | `xarray`, `tifffile` | yes |
+| `stats.add_stat_annotations`, `plotting_utils.plotly_scatter_3d` | `[plotting]` | yes |
+| `single_cell` | `scanpy`, `pacmap`, `leidenalg`, ... (`numba` has no WASM build) | no |
+
+micropip installs only wheels, and only from hosts that send CORS headers, so in a WASM notebook install a built wheel (not a GitHub archive or `git+` URL):
+
+```python
+import micropip
+await micropip.install("<URL of eigenp_utils-*.whl>")
+await micropip.install("scikit-image")  # only for the image-analysis modules
+```
+
+`io.download_file` relies on `urllib`/`requests`, which have no socket access in the browser; fetch remote files with `pyodide.http.pyfetch` instead.
 
 ## License
 

@@ -16,3 +16,4 @@ ignored_tmp/
 # skills, commands) stays tracked.
 .claude/settings.local.json
 .claude/worktrees/
+node_modules/
