@@ -10,13 +10,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as font_manager
 import matplotlib.colors as mcolors
-from matplotlib.colors import LinearSegmentedColormap, PowerNorm
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, PowerNorm
 from matplotlib import colormaps as mpl_colormaps
 from pathlib import Path
 import pandas as pd
 import itertools
 import math
 import datetime
+import warnings
 from .stats import remove_outliers
 
 # --- Initialization: Load Font and Style ---
@@ -69,8 +70,29 @@ final_colors = [(0, 0, 0, 0)]
 for r, g, b in LABELS_CMAP_COLORS:
     final_colors.append((r, g, b, 1.0))
 
-# Create the new colormap
-labels_cmap = LinearSegmentedColormap.from_list("labels_cmap", final_colors, N=256)
+
+class _LabelsColormap(ListedColormap):
+    """Lookup table whose transparent entry 0 is reserved for background (value 0).
+
+    A normalised value x picks entry ``int(x * N)``, so with more than 256 labels
+    the lowest label ids (x < 1/N) would land on the transparent entry. Any
+    positive value is therefore moved to entry 1 at least.
+    """
+
+    def __call__(self, X, alpha=None, bytes=False):
+        Xa = np.ma.asarray(X)
+        if Xa.dtype.kind == "f":
+            # norm() returns masked arrays: masked (bad) values are left alone
+            low = np.ma.filled((Xa > 0) & (Xa < 1.0 / self.N), False)
+            if np.any(low):
+                Xa = Xa.copy()
+                Xa[low] = 1.0 / self.N
+                X = Xa if np.ndim(X) else Xa.item()
+        return super().__call__(X, alpha=alpha, bytes=bytes)
+
+
+# Create the new colormap (entry i is final_colors[i])
+labels_cmap = _LabelsColormap(final_colors, name="labels_cmap")
 
 try:
     mpl_colormaps.register(labels_cmap, name="labels_cmap", force=True)
@@ -141,7 +163,10 @@ def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_
         The input image. Can be multidimensional, but only a 2D slice (from the middle of any extra
         dimensions) will be displayed.
     bins : int, optional
-        The number of bins to use for the histogram. Default is 256.
+        The number of bins to use for the histogram. Default is 64.
+    gamma : float, optional
+        Display gamma (``PowerNorm``); ``vmin``/``vmax`` passed in ``imshow_kwargs``
+        are applied to that norm.
 
     Returns
     -------
@@ -169,6 +194,8 @@ def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_
     imshow_kwargs.setdefault('origin', 'lower')
     imshow_kwargs.setdefault('cmap', 'gray')
 
+    image = np.asarray(image)
+
     # Ensure image is 2D so that we can plot it
     im_shape = image.shape
     print(f'Image shape: {im_shape}')
@@ -192,8 +219,14 @@ def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_
 
     norm = None
     if gamma != 1:
-        norm = PowerNorm(gamma=gamma)
+        # matplotlib refuses a norm together with vmin/vmax, so hand them to the norm
+        norm = PowerNorm(gamma=gamma, vmin=imshow_kwargs.pop('vmin', None),
+                         vmax=imshow_kwargs.pop('vmax', None))
 
+    dtype = image.dtype
+    if image.dtype == bool:
+        # numpy cannot subtract booleans (needed by hist and by the stats below)
+        image = image.astype(np.uint8)
 
     axes['Image'].imshow(image, norm = norm, interpolation = 'nearest', **imshow_kwargs)
 
@@ -207,7 +240,7 @@ def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_
     mean_val = image.mean()
     stats_msg = f"min:{min_val:.3g} max:{max_val:.3g} mean:{mean_val:.3g}"
     axes['Histogram'].set_xlabel(
-        f' Pixel intensity ({stats_msg}) \n \n shape: {im_shape} \n dtype: {image.dtype}'
+        f' Pixel intensity ({stats_msg}) \n \n shape: {im_shape} \n dtype: {dtype}'
     )
     axes['Histogram'].set_ylabel('Log Frequency')
 
@@ -241,14 +274,20 @@ def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
 
     # Loop through the time dimension and apply the colormap
     for t in range(time_dimension):
-        # Normalize the current frame to the range [0, 1]
-        frame = image[t]
-        frame_min = frame.min()
-        frame_max = frame.max()
-        frame_normalized = (frame - frame_min) / (frame_max - frame_min) if frame_max > frame_min else frame
+        # Normalize the current frame to the range [0, 1], in float: integer
+        # differences overflow (int16 -20000..20000), and NaN pixels count as 0
+        frame = image[t].astype(np.float32)
+        frame_min = np.nanmin(frame) if np.isfinite(frame).any() else 0.0
+        frame_max = np.nanmax(frame) if np.isfinite(frame).any() else 0.0
+        if frame_max > frame_min:
+            frame_normalized = np.nan_to_num((frame - frame_min) / (frame_max - frame_min))
+        else:
+            # A constant frame has no contrast to normalise: keep its value, but
+            # clipped to [0, 1] (a frame of 1000 must not give RGB values of 1000)
+            frame_normalized = np.clip(np.nan_to_num(frame), 0.0, 1.0)
 
         # Get the corresponding color value from the colormap based on the current time index
-        color_value = cmap(t / (time_dimension - 1))[:3]
+        color_value = cmap(t / max(time_dimension - 1, 1))[:3]
 
         # Modulate the color value by the intensity factor and update max projection
         # Optimization: We update rgb_image iteratively to avoid allocating the large (time, y, x, 3) array.
@@ -293,7 +332,7 @@ def raincloud_plot(data,
     ----------
     data : array-like, dict, or pd.DataFrame
         Input data. Can be:
-        - Single array/list.
+        - Single array/list/tuple or pd.Series.
         - List of arrays/lists.
         - Dictionary {label: array}.
         - DataFrame (columns are groups).
@@ -332,7 +371,9 @@ def raincloud_plot(data,
         The threshold multiplier for the outlier method (e.g., number of MADs or IQRs).
     highlight_mask : array-like or pd.Series, optional
         A boolean mask matching the shape/index of the input data. Scatter points where
-        this mask is True will be colored with `highlight_color`.
+        this mask is True will be colored with `highlight_color`. For a DataFrame the
+        mask is per row; for a dict, give a dict of masks; for a list of groups, a list
+        with one mask per group. A mask that cannot be matched raises a warning.
     highlight_color : str, default 'lime'
         The color to use for highlighted scatter points.
 
@@ -520,18 +561,39 @@ def raincloud_plot(data,
     else:
         # Branch B: Legacy Input Processing
         raw_plot_data = [] # List of (label, values)
+        raw_masks = []  # highlight mask per group (None where it cannot be applied)
+
+        def _group_mask(mask, keep, index=None):
+            """Restrict a per-value mask to the values kept after NaN removal."""
+            if mask is None:
+                return None
+            if isinstance(mask, pd.Series) and index is not None:
+                mask = mask.reindex(index).fillna(False)
+            mask = np.asarray(mask, dtype=bool)
+            if mask.shape != keep.shape:
+                return None
+            return mask[keep]
 
         if isinstance(data, pd.DataFrame):
             for col in data.columns:
-                vals = data[col].dropna().values
+                keep = data[col].notna().to_numpy()
+                vals = data[col].to_numpy()[keep]
                 raw_plot_data.append((str(col), vals))
+                raw_masks.append(_group_mask(highlight_mask, keep, data.index))
+        elif isinstance(data, pd.Series):
+            keep = data.notna().to_numpy()
+            vals = data.to_numpy(dtype=float)[keep]
+            label = str(data.name) if data.name is not None else "Data"
+            raw_plot_data.append((label, vals))
+            raw_masks.append(_group_mask(highlight_mask, keep, data.index))
         elif isinstance(data, dict):
+            mask_dict = highlight_mask if isinstance(highlight_mask, dict) else {}
             for label, values in data.items():
-                vals = np.asarray(values)
-                vals = vals[~np.isnan(vals)]
-                raw_plot_data.append((str(label), vals))
-        elif isinstance(data, (list, np.ndarray)):
-            data_arr = np.asarray(data, dtype=object)
+                vals = np.asarray(values, dtype=float)
+                keep = ~np.isnan(vals)
+                raw_plot_data.append((str(label), vals[keep]))
+                raw_masks.append(_group_mask(mask_dict.get(label), keep))
+        elif isinstance(data, (list, tuple, np.ndarray)):
             is_multiple = False
             try:
                 numeric_arr = np.asarray(data, dtype=float)
@@ -543,16 +605,32 @@ def raincloud_plot(data,
                 is_multiple = True
 
             if is_multiple:
+                # One mask per group, given as a list/tuple with one entry per group
+                group_masks = (
+                    list(highlight_mask)
+                    if isinstance(highlight_mask, (list, tuple)) and len(highlight_mask) == len(data)
+                    else [None] * len(data)
+                )
                 for i, d in enumerate(data):
                     vals = np.asarray(d, dtype=float)
-                    vals = vals[~np.isnan(vals)]
-                    raw_plot_data.append((str(i), vals))
+                    keep = ~np.isnan(vals)
+                    raw_plot_data.append((str(i), vals[keep]))
+                    raw_masks.append(_group_mask(group_masks[i], keep))
             else:
                 vals = np.asarray(data, dtype=float)
-                vals = vals[~np.isnan(vals)]
-                raw_plot_data.append(("Data", vals))
+                keep = ~np.isnan(vals)
+                raw_plot_data.append(("Data", vals[keep]))
+                raw_masks.append(_group_mask(highlight_mask, keep))
         else:
             raise ValueError("Unsupported data type")
+
+        if highlight_mask is not None and all(m is None for m in raw_masks):
+            warnings.warn(
+                "highlight_mask could not be matched to the data and is ignored. Give one "
+                "boolean per value (per row for a DataFrame), a dict of masks for dict data, "
+                "or a list with one mask per group for a list of groups.",
+                stacklevel=2,
+            )
 
         # Colors
         n_groups = len(raw_plot_data)
@@ -594,11 +672,9 @@ def raincloud_plot(data,
             colors = list(itertools.islice(itertools.cycle(palette), n_groups))
 
         for i, (label, vals) in enumerate(raw_plot_data):
-            # For legacy inputs, we don't try to map the mask cleanly right now unless it's perfectly matched,
-            # which is hard since NaNs are dropped per column.
             plot_items.append({
                 'values': vals,
-                'mask': None,
+                'mask': raw_masks[i],
                 'position': float(i),
                 'width': width_violin,
                 'color': colors[i],
@@ -614,10 +690,15 @@ def raincloud_plot(data,
         rasterize_scatter = True
 
     # --- 3. Setup Figure/Axes ---
+    # Only a figure created here is laid out; a caller's figure keeps its own layout
     if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
+        fig, ax = plt.subplots(figsize=figsize, layout='tight')
     else:
         fig = ax.figure
+
+    # 'mad' (documented) is the median/MAD robust z-score of remove_outliers
+    if outlier_method == 'mad':
+        outlier_method = 'robust_zscore'
 
     # --- 4. Plotting Loop ---
     for item in plot_items:
@@ -625,6 +706,10 @@ def raincloud_plot(data,
         pos = item['position']
         col = item['color']
         width = item['width']
+
+        if len(vals) == 0:
+            # Empty or all-NaN group: keep its tick, draw nothing
+            continue
 
         # A. Violin
         # Filter outliers for the KDE estimation if requested
@@ -727,7 +812,6 @@ def raincloud_plot(data,
     if title:
         ax.set_title(title)
 
-    plt.tight_layout()
     return {"fig": fig, "axes": ax}
 
 
@@ -870,6 +954,9 @@ def plotly_scatter_3d(data=None, x=None, y=None, z=None, color=None, labels=None
 
     # Handle color
     if c_data is not None:
+        if isinstance(c_data, (list, tuple)):
+            # is_numeric_dtype(list) is always False: test the converted values
+            c_data = pd.Series(c_data)
         if not pd.api.types.is_numeric_dtype(c_data):
              try:
                 # Ensure it's a Series or convert
@@ -1005,26 +1092,30 @@ def plotly_scatter_3d_from_adata_obsm(adata, obsm_key, color_key=None, label_key
 
 def get_nice_number(value):
     """
-    Rounds a number to a 'nice' round number for legends.
-    Examples: 4343 -> 4000, 10858 -> 10000, 21717 -> 20000
+    Rounds a number down to one significant digit, a 'nice' round number for legends.
+    Examples: 4343 -> 4000, 10858 -> 10000, 21717 -> 20000, 0.6 -> 0.6
+
+    Never rounds up, so the result does not exceed `value`. Values of 1 or more
+    return an int, smaller values a float.
     """
     if value == 0: return 0
 
+    sign = -1 if value < 0 else 1
+    magnitude = abs(value)
+
     # Calculate magnitude
-    exponent = math.floor(math.log10(value))
-    fraction = value / (10 ** exponent)
+    exponent = math.floor(math.log10(magnitude))
+    # The small tolerance absorbs binary rounding (0.6 / 0.1 == 5.999...)
+    leading_digit = math.floor(magnitude / (10.0 ** exponent) * (1 + 1e-12))
+    if leading_digit >= 10:
+        leading_digit, exponent = 1, exponent + 1
+    elif leading_digit == 0:
+        exponent -= 1
+        leading_digit = math.floor(magnitude / (10.0 ** exponent) * (1 + 1e-12))
 
-    # Round fraction to nice intervals (1, 2, 5, 10)
-    if fraction < 1.5:
-        nice_fraction = 1
-    elif fraction < 3:
-        nice_fraction = 2
-    elif fraction < 7:
-        nice_fraction = 5
-    else:
-        nice_fraction = 10
-
-    return int(nice_fraction * (10 ** exponent))
+    if exponent >= 0:
+        return sign * int(leading_digit * (10 ** exponent))
+    return sign * round(leading_digit * 10.0 ** exponent, -exponent)
 
 
 def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, scatter_raster_threshold=1e3, editable_text=True, **kwargs):
@@ -1059,7 +1150,8 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
     title = fig._suptitle.get_text() if fig._suptitle else str(filename)
 
     # Initialize metadata with predefined options
-    metadata = kwargs.pop('metadata', {})
+    # Copy: the caller's dict must not keep this figure's title/date
+    metadata = dict(kwargs.pop('metadata', None) or {})
     metadata.setdefault('Creator', 'eigenp')
     metadata.setdefault('Date', datetime.datetime.now().isoformat())
     metadata.setdefault('Title', title)

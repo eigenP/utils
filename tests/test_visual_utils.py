@@ -94,3 +94,56 @@ def test_labels_cmap_diversity():
 
     # The simulated annealing ordered it so adjacent colors are far apart (>18)
     assert min_adj_dist > 18.0, f"Adjacent colors are too similar! Min adjacent distance: {min_adj_dist}"
+
+
+# =========================================
+# Source: scan low-severity regressions (plotting_utils)
+# =========================================
+
+
+def test_labels_cmap_low_ids_stay_opaque_with_many_labels():
+    """With >256 labels the lowest ids must not fall on the transparent entry."""
+    lab = np.zeros((4, 4), int)
+    lab[0, 0] = 1
+    lab[0, 1] = 1000
+    fig, ax = plt.subplots()
+    im = ax.imshow(lab, cmap=labels_cmap, interpolation="nearest")
+    rgba = im.to_rgba(lab)
+    plt.close(fig)
+    assert rgba[1, 1, 3] == 0  # background stays transparent
+    assert rgba[0, 0, 3] == 1  # label 1 is drawn
+    assert rgba[0, 1, 3] == 1
+    # entries are unchanged: labels_cmap(i / 255) is the i-th colour
+    from eigenp_utils.plotting_utils import final_colors
+
+    np.testing.assert_allclose(labels_cmap(np.arange(256) / 255), np.asarray(final_colors))
+
+
+def test_hist_imshow_accepts_bool_lists_and_gamma_with_limits():
+    res = hist_imshow(np.random.default_rng(0).random((16, 16)) > 0.5)
+    assert "bool" in res["axes"]["Histogram"].get_xlabel()
+    hist_imshow([[1, 2], [3, 4]])
+    res = hist_imshow(np.random.default_rng(0).random((8, 8)), gamma=0.5, vmin=0.2, vmax=0.8)
+    norm = res["axes"]["Image"].images[0].norm
+    assert (norm.gamma, norm.vmin, norm.vmax) == (0.5, 0.2, 0.8)
+    plt.close("all")
+
+
+def test_color_coded_projection_stays_in_unit_range_and_handles_int16():
+    rng = np.random.default_rng(0)
+    img = rng.random((4, 8, 8)).astype(np.float32)
+    img[2] = 1000.0  # constant frame
+    assert color_coded_projection(img).max() <= 1.0
+
+    # int16 values -20000..20000: the middle value is half way, not lost to overflow
+    img = np.zeros((3, 1, 3), np.int16)
+    img[:, 0, :] = [-20000, 0, 20000]
+    out = color_coded_projection(img)
+    ref = color_coded_projection(img.astype(np.float64))
+    np.testing.assert_allclose(out, ref, atol=1e-6)
+    assert out[0, 1].max() > 0.4
+
+
+def test_color_coded_projection_single_frame():
+    out = color_coded_projection(np.random.default_rng(0).random((1, 8, 8)))
+    assert out.shape == (8, 8, 3) and np.isfinite(out).all()

@@ -114,11 +114,11 @@ def test_set_plotting_style():
     """Test that set plotting style works as expected."""
     from eigenp_utils.plotting_utils import set_plotting_style
 
-    # Backup original rcParams
-    orig_fonttype = plt.rcParams['svg.fonttype']
-    orig_unicode = plt.rcParams['axes.unicode_minus']
+    before = dict(mpl.rcParams)
 
-    try:
+    # rc_context restores every rcParam the style file sets, not only the ones
+    # asserted below, so later tests see matplotlib's defaults
+    with plt.rc_context():
         # Run the function with default editable_text=True
         set_plotting_style()
 
@@ -133,10 +133,8 @@ def test_set_plotting_style():
         assert plt.rcParams['svg.fonttype'] == 'path'
         assert plt.rcParams['axes.unicode_minus'] == True
 
-    finally:
-        # Restore globally to avoid polluting other tests
-        plt.rcParams['svg.fonttype'] = orig_fonttype
-        plt.rcParams['axes.unicode_minus'] = orig_unicode
+    leaked = {k for k, v in before.items() if mpl.rcParams[k] != v}
+    assert not leaked, f"rcParams leaked out of the test: {sorted(leaked)[:5]}"
 
 def test_savefig_svg_editable_text(tmp_path):
     """Test that savefig svg editable text works as expected."""
@@ -730,3 +728,111 @@ def test_i_series_colormaps_usage():
     img_3d = np.random.rand(3, 16, 16)
     projection = color_coded_projection(img_3d, color_map='I Bordeaux')
     assert projection.shape == (16, 16, 3)
+
+
+# =========================================
+# Source: scan low-severity regressions (plotting_utils)
+# =========================================
+
+
+def _scatter_points(ax, color):
+    rgb = matplotlib.colors.to_rgb(color)
+    return sum(
+        len(c.get_offsets())
+        for c in ax.collections
+        if len(c.get_facecolor()) and np.allclose(c.get_facecolor()[0][:3], rgb)
+    )
+
+
+def test_raincloud_accepts_series_and_tuple():
+    values = np.random.default_rng(0).normal(size=20)
+    res = raincloud_plot(pd.Series(values, name="speed"))
+    assert [t.get_text() for t in res["axes"].get_xticklabels()] == ["speed"]
+    raincloud_plot(tuple(values))
+    plt.close("all")
+
+
+def test_raincloud_highlight_mask_for_arrays_and_dataframe_columns():
+    a = np.random.default_rng(0).normal(size=50)
+    a[3] = np.nan  # dropped value: the mask must stay aligned
+    expected = int(np.nansum(a > 1))
+
+    res = raincloud_plot(a, highlight_mask=a > 1, highlight_color="lime")
+    assert _scatter_points(res["axes"], "lime") == expected
+
+    res = raincloud_plot(pd.DataFrame({"v": a}), highlight_mask=a > 1, highlight_color="lime")
+    assert _scatter_points(res["axes"], "lime") == expected
+
+    with pytest.warns(UserWarning, match="highlight_mask"):
+        raincloud_plot([a, a], highlight_mask=a > 1)
+    plt.close("all")
+
+
+def test_raincloud_mad_outlier_method_matches_robust_zscore():
+    rng = np.random.default_rng(0)
+    data = [np.r_[rng.normal(size=30), 25.0], rng.normal(size=30)]
+    mad = raincloud_plot(data, outlier_method="mad")["axes"]
+    rz = raincloud_plot(data, outlier_method="robust_zscore")["axes"]
+
+    def violin_vertices(ax):
+        return [c.get_paths()[0].vertices for c in ax.collections if type(c).__name__ == "FillBetweenPolyCollection" or type(c).__name__ == "PolyCollection"]
+
+    v_mad, v_rz = violin_vertices(mad), violin_vertices(rz)
+    assert len(v_mad) == 2
+    for a, b in zip(v_mad, v_rz):
+        np.testing.assert_allclose(a, b)
+    plt.close("all")
+
+
+def test_raincloud_empty_group_keeps_its_tick():
+    res = raincloud_plot({"a": [1.0, 2.0, 3.0], "b": [np.nan, np.nan]})
+    assert [t.get_text() for t in res["axes"].get_xticklabels()] == ["a", "b"]
+    res = raincloud_plot(pd.DataFrame({"a": np.arange(10.0), "b": [np.nan] * 10}))
+    assert [t.get_text() for t in res["axes"].get_xticklabels()] == ["a", "b"]
+    plt.close("all")
+
+
+def test_raincloud_leaves_callers_figure_and_pyplot_alone():
+    from matplotlib.figure import Figure
+
+    plt.close("all")
+    data = [np.random.default_rng(0).normal(size=20)]
+    fig = Figure()
+    raincloud_plot(data, ax=fig.subplots())
+    assert plt.get_fignums() == []  # no stray pyplot figure
+
+    fig1, ax1 = plt.subplots(layout="constrained")
+    fig2, _ = plt.subplots()
+    raincloud_plot(data, ax=ax1)
+    assert type(fig1.get_layout_engine()).__name__ == "ConstrainedLayoutEngine"
+    assert fig2.get_layout_engine() is None
+    plt.close("all")
+
+
+def test_plotly_scatter_3d_numeric_list_color_kept():
+    pytest.importorskip("plotly")
+    from eigenp_utils.plotting_utils import plotly_scatter_3d
+
+    fig = plotly_scatter_3d(x=[0, 1, 2], y=[0, 1, 2], z=[0, 1, 2], color=[0.1, 0.5, 100.0])
+    np.testing.assert_allclose(np.asarray(fig.data[0].marker.color, dtype=float), [0.1, 0.5, 100.0])
+    fig = plotly_scatter_3d(x=[0, 1, 2], y=[0, 1, 2], z=[0, 1, 2], color=["b", "a", "b"])
+    assert list(fig.data[0].marker.color) == [1, 0, 1]  # categories still become codes
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(4343, 4000), (10858, 10000), (21717, 20000), (3000, 3000), (999, 900), (1, 1), (0.6, 0.6), (0.0042, 0.004), (-37, -30)],
+)
+def test_get_nice_number_rounds_down_to_one_significant_digit(value, expected):
+    from eigenp_utils.plotting_utils import get_nice_number
+
+    assert get_nice_number(value) == pytest.approx(expected)
+    assert abs(get_nice_number(value)) <= abs(value)
+
+
+def test_savefig_svg_does_not_mutate_metadata(tmp_path):
+    md = {"Creator": "me"}
+    fig, ax = plt.subplots()
+    savefig_svg(tmp_path / "x", metadata=md)
+    plt.close(fig)
+    assert md == {"Creator": "me"}
