@@ -522,10 +522,13 @@ export default {
         if (dtype.includes("uint8")) dtypeMax = 255;
         else if (dtype.includes("uint16")) dtypeMax = 65535;
         else if (dtype.includes("float")) isFloatDtype = true;
+        // Only unsigned and boolean data cannot go below 0 (int16 etc. can).
+        const dtypeMin = (dtype.startsWith("uint") || dtype === "bool") ? 0 : undefined;
 
-        chDiv.appendChild(createNumberInput("vmin", "vmin_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
-        chDiv.appendChild(createNumberInput("vmax", "vmax_list", isFloatDtype, isFloatDtype ? undefined : 0, dtypeMax, true));
-        chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0, 2.0, false));
+        chDiv.appendChild(createNumberInput("vmin", "vmin_list", isFloatDtype, dtypeMin, dtypeMax, true));
+        chDiv.appendChild(createNumberInput("vmax", "vmax_list", isFloatDtype, dtypeMin, dtypeMax, true));
+        // gamma 0 maps every pixel to full intensity; keep it strictly positive.
+        chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0.05, 2.0, false));
         chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
 
         const histCanvas = document.createElement("canvas");

@@ -22,7 +22,7 @@ def __():
 
     widget = show_zyx_max_slice_interactive(
         [membrane, nuclei],
-        colors=['magma', 'viridis']
+        colormap=['magma', 'viridis']
     )
     return widget,
 
