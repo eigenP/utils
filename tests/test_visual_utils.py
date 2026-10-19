@@ -147,3 +147,19 @@ def test_color_coded_projection_stays_in_unit_range_and_handles_int16():
 def test_color_coded_projection_single_frame():
     out = color_coded_projection(np.random.default_rng(0).random((1, 8, 8)))
     assert out.shape == (8, 8, 3) and np.isfinite(out).all()
+
+
+def test_brightness_diagnostic_plotter_object_oriented():
+    """The plotter draws on its own (or the given) axes, never on the current pyplot axes."""
+    from eigenp_utils.plotting_utils import brightness_diagnostic_plotter
+
+    diag = {'x_data': np.arange(5), 'y_data_norm': np.linspace(1, 0.5, 5),
+            'y_fit_norm': np.linspace(1, 0.5, 5), 'gamma_fit_func': 'exponential'}
+    current_fig, current_ax = plt.subplots()
+    fig = brightness_diagnostic_plotter(diag)
+    assert fig is not current_fig and len(current_ax.lines) == 0
+    assert len(fig.axes[0].lines) == 2
+
+    target_fig, target_ax = plt.subplots()
+    assert brightness_diagnostic_plotter(diag, ax=target_ax) is target_fig
+    assert len(target_ax.lines) == 2 and target_ax.get_title() == 'Z-axis Intensity Decay Fit'

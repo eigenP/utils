@@ -62,11 +62,24 @@ async def _(mo):
 
         subprocess.check_call([sys.executable, "-m", "pip", "install", url])
 
+    def local_checkout():
+        # A source checkout or editable install (code outside site-packages) is a
+        # developer's working copy: never replace it with GitHub main. Setting
+        # EIGENP_UTILS_NO_INSTALL also skips the install.
+        import importlib.util, os
+        if os.environ.get("EIGENP_UTILS_NO_INSTALL"):
+            return True
+        spec = importlib.util.find_spec("eigenp_utils")
+        origin = (spec.origin or "") if spec is not None else ""
+        return bool(origin) and not any(d in origin for d in ("site-packages", "dist-packages"))
+
     def install_github():
         if in_wasm():
             import micropip
             # also install imports of dependencies, which marimo cannot detect
             return micropip.install([GIT_URL, "scikit-image", "tifffile"])
+        elif local_checkout():
+            print("Using the local eigenp_utils checkout; not installing from GitHub.")
         else:
             install_local(GIT_URL)
 

@@ -82,12 +82,10 @@ def test_windowed_slice_projection_average():
 
     thick = windowed_slice_projection(img, window_size=3, axis=0, operation='average')
 
-    # average of 3 values of 3 is 3, except boundaries which are padded with 0
-    # boundary 0: (0 + 3 + 3) / 3 = 2
-    # middle: (3 + 3 + 3) / 3 = 3
-
+    # average of 3 values of 3 is 3; edge windows average only the slices inside the
+    # volume (boundary 0: (3 + 3) / 2 = 3), so the padding does not dim them
     assert np.allclose(thick[2, :, :], 3)
-    assert np.allclose(thick[0, :, :], 2)
+    assert np.allclose(thick[0, :, :], 3)
 
 def test_optimized_entire_labels_touching_mask():
     """Test that optimized entire labels touching mask works as expected."""
@@ -902,3 +900,20 @@ def test_optimized_entire_labels_touching_mask_anisotropic_distance():
     # negative control: with isotropic pixels the label 3 slices away is within 5 µm
     iso = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
     assert optimized_entire_labels_touching_mask(below, mask, distance=5.0, pixel_sizes=iso).max() == 1
+
+
+def test_windowed_slice_projection_average_does_not_dim_edges():
+    """'average' divides each window by the slices inside the volume, so a constant stack
+    stays constant (edge windows used to include zero padding: the first slice of a
+    constant 1.0 stack read 6/11 with window 11)."""
+    from eigenp_utils.image_and_labels_utils import windowed_slice_projection
+
+    iso = {'Z': 1, 'Y': 1, 'X': 1}
+    stack = np.ones((12, 4, 4), dtype=np.float32)
+    out = windowed_slice_projection(stack, window_size=11, operation='average', pixel_sizes=iso)
+    np.testing.assert_allclose(out, 1.0)
+    # interior windows still average over the full window; the first one over 3 slices
+    ramp = np.arange(30, dtype=float)[:, None, None] * np.ones((1, 2, 2))
+    out = windowed_slice_projection(ramp, window_size=5, operation='average', pixel_sizes=iso)
+    np.testing.assert_allclose(out[2:-2, 0, 0], ramp[2:-2, 0, 0])
+    np.testing.assert_allclose(out[0, 0, 0], np.mean([0, 1, 2]))

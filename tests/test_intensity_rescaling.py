@@ -824,3 +824,11 @@ def test_apply_basic_shading_rounds_and_keeps_baseline_sign():
     out = apply_basic_shading(np.full((3, 4, 4), 100, np.uint16), np.ones((4, 4)), baseline=np.array([90.0, 100, 110]))
     assert out.dtype == np.float32
     np.testing.assert_allclose(out[:, 0, 0], [10, 0, -10])
+
+
+def test_contrast_stretching_float_with_negative_low_percentile_stays_in_unit_range():
+    """A float image whose low percentile is negative maps to [0, 1], not [-1, 1]
+    (skimage's out_range='dtype' picks the signed range when in_range min < 0)."""
+    img = np.linspace(-1, 9, 1000, dtype=np.float32).reshape(10, 100)
+    out = contrast_stretching(img)
+    assert out.min() == 0.0 and out.max() == 1.0

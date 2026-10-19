@@ -15,7 +15,9 @@ For specialized tasks, agents should refer to these files to channel specific ex
 - **`bolt.md`**: The "Bolt" persona. Provides guidance on development velocity and overarching architectural patterns.
 
 ## Testing
-- Use `uv run pytest tests/` for running tests located in the `tests/` folder.
+- Install the test dependencies once: `uv sync --all-extras` (the `dev` extra includes pytest and pytest-playwright), then `uv run playwright install chromium` for the browser tests in `tests/test_frontend_*.py`.
+- Run the suite with `uv run pytest tests/`. Without pytest-playwright or a browser the frontend tests are skipped locally; in CI (`CI=true`) they error instead.
+- The Pyodide (WASM) suite: `uv build --wheel`, `npm install --no-save --prefix tests/wasm pyodide@314.0.0`, then `node tests/wasm/run_pyodide_tests.mjs` (see the `pyodide` job in `.github/workflows/ci.yml`).
 - Ensure all tests pass locally before submission.
 
 ## Dependencies
