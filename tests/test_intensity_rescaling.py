@@ -573,3 +573,82 @@ if __name__ == "__main__":
         print("Linear test passed.")
     except Exception as e:
         print(f"Test failed: {e}")
+
+
+def _radial_gradient(sizes):
+    grid = np.array(np.meshgrid(*[np.linspace(-s // 2 + 1, s // 2, s) for s in sizes], indexing='ij'))
+    gradient = np.sum(grid**2, axis=0)
+    return 0.01 * (np.max(gradient) - gradient) + 10
+
+
+@pytest.mark.parametrize("sizes, is_3d", [((8, 64, 64), True), ((64, 64), False)])
+def test_basic_single_sample_darkfield_is_unidentifiable(sizes, is_3d):
+    """With one image/volume, get_darkfield=True falls back to a flatfield-only fit.
+
+    BaSiC (I_i = B_i * S + D) separates the darkfield from the flatfield only
+    through variation of the baselines B_i across samples, so a single sample
+    cannot identify D. Previously the 'approximate' darkfield estimator averaged
+    over an empty set of samples, emitting "Mean of empty slice" RuntimeWarnings
+    every iteration, never converging (NaN residual) and returning all-NaN
+    results after max_iterations x max_reweight_iterations.
+
+    Strategy: fit a single Poisson volume (3D) / image (2D) with a known radial
+    flatfield. Expected outcome: exactly one UserWarning explaining the
+    fallback, no RuntimeWarning, finite outputs, a zero darkfield, results
+    identical to get_darkfield=False (the darkfield path is skipped, not
+    approximated), and the flatfield still recovered (positive control that the
+    fit itself works). Accuracy uses correlation and mean absolute error rather
+    than max error, which over 4096 pixels of one Poisson(~10) image is
+    dominated by noise; across seeds corr is ~0.99 (3D) / ~0.86 (2D) against
+    ~0.02 for a permuted truth, and MAE <= 0.09.
+    """
+    import warnings
+
+    rng = np.random.default_rng(0)
+    gradient = _radial_gradient(sizes)
+    image = rng.poisson(lam=gradient.astype(int)).astype(float)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = fit_basic_shading(image, is_3d=is_3d, get_darkfield=True, fitting_mode='approximate')
+
+    user = [w for w in caught if issubclass(w.category, UserWarning) and "not identifiable" in str(w.message)]
+    runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert len(user) == 1
+    assert runtime == [], [str(w.message) for w in runtime]
+
+    for key in ("flatfield", "darkfield", "baseline"):
+        assert np.all(np.isfinite(res[key])), key
+    assert np.all(res["darkfield"] == 0)
+
+    ref = fit_basic_shading(image, is_3d=is_3d, get_darkfield=False, fitting_mode='approximate')
+    for key in ("flatfield", "darkfield", "baseline"):
+        np.testing.assert_array_equal(res[key], ref[key])
+
+    truth = gradient / np.mean(gradient)
+    assert np.corrcoef(res["flatfield"].ravel(), truth.ravel())[0, 1] > 0.75
+    assert np.mean(np.abs(res["flatfield"] - truth)) < 0.15
+
+
+def test_basic_identical_samples_darkfield_stays_finite():
+    """Identical samples carry no darkfield information but must not produce NaNs.
+
+    With N >= 2 identical images every baseline B_i is (numerically) 1, so the
+    darkfield estimator's sample set {B_i < 1} may be empty. Strategy: fit three
+    copies of one image with get_darkfield=True. Expected outcome: no
+    RuntimeWarning and finite flatfield, darkfield and baseline, whichever way
+    floating-point rounding decides the B_i < 1 test.
+    """
+    import warnings
+
+    rng = np.random.default_rng(1)
+    image = rng.poisson(lam=_radial_gradient((64, 64)).astype(int)).astype(float)
+    images = np.stack([image] * 3)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = fit_basic_shading(images, is_3d=False, get_darkfield=True, fitting_mode='approximate')
+
+    assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
+    for key in ("flatfield", "darkfield", "baseline"):
+        assert np.all(np.isfinite(res[key])), key
