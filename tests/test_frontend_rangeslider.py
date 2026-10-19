@@ -182,3 +182,31 @@ def test_frontend_channel_rebuild_does_not_leak_listeners(page, static_rangeslid
         ".map(s => s.nextElementSibling.value)"
     )
     assert gamma_values == ["0.25", "0.75"]
+
+
+def test_frontend_channel_inputs_allow_negative_signed_limits_and_positive_gamma(page, static_rangeslider_server):
+    """Signed-integer channels accept a negative vmin, unsigned ones are clamped at 0,
+    and gamma is clamped to a small positive value (gamma 0 floods the panel)."""
+    page.goto(static_rangeslider_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+
+    # Rebuild the channel rows as an int16 and a uint8 channel
+    page.evaluate("window.mockModel.state.channel_dtypes = ['int16', 'uint8']")
+    page.evaluate("window.mockModel.set('channel_names', ['Signed', 'Unsigned'])")
+
+    def type_into(label, index, text):
+        page.evaluate(
+            """([label, index, text]) => {
+                const inp = [...document.querySelectorAll('span')]
+                    .filter(s => s.textContent === label)[index].nextElementSibling;
+                inp.value = text;
+                inp.dispatchEvent(new Event('change'));
+            }""",
+            [label, index, text],
+        )
+
+    type_into("vmin", 0, "-300")
+    type_into("vmin", 1, "-300")
+    type_into("gamma", 0, "0")
+    assert page.evaluate("window.mockModel.get('vmin_list')") == [-300, 0]
+    assert page.evaluate("window.mockModel.get('gamma_list')")[0] == 0.05

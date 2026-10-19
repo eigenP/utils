@@ -24,21 +24,58 @@ def _safe_float(v):
         raise ValueError(f"Could not convert {v} to float")
 
 def _parse_zyx_tuple_or_dict(val, default_val=None):
+    """
+    Parse a (Z, Y, X) tuple/list or a {'Z', 'Y', 'X'} dict into three floats.
+
+    Missing or None entries (e.g. an uncalibrated axis from
+    ``image_io.get_tiff_voxel_size``) become ``default_val``; a warning names
+    the axis when a non-None default is substituted.
+    """
     if val is None:
         return (default_val, default_val, default_val)
     if isinstance(val, dict):
-        return (_safe_float(val.get('Z', default_val)),
-                _safe_float(val.get('Y', default_val)),
-                _safe_float(val.get('X', default_val)))
+        raw = (val.get('Z'), val.get('Y'), val.get('X'))
+    else:
+        try:
+            raw = tuple(val)
+        except TypeError:
+            raw = ()
+        if len(raw) != 3:
+            raise ValueError(f"Expected dict with 'Z','Y','X' keys or a 3-element tuple/list, got {val}")
 
-    try:
-        val_list = list(val)
-        if len(val_list) == 3:
-            return (_safe_float(val_list[0]), _safe_float(val_list[1]), _safe_float(val_list[2]))
-    except TypeError:
-        pass
+    out = []
+    for axis, v in zip('ZYX', raw):
+        if v is None:
+            if default_val is not None:
+                warnings.warn(
+                    f"No value for axis {axis} in {val!r}; using {default_val}.",
+                    UserWarning, stacklevel=3,
+                )
+            out.append(default_val)
+        else:
+            out.append(_safe_float(v))
+    return tuple(out)
 
-    raise ValueError(f"Expected dict with 'Z','Y','X' keys or a 3-element tuple/list, got {val}")
+
+# Length units of a pixel-size dict ('unit' key, e.g. from image_io) -> factor to µm
+_UNIT_TO_UM = {
+    'µm': 1.0, 'μm': 1.0, 'um': 1.0, 'micron': 1.0, 'microns': 1.0,
+    'micrometer': 1.0, 'micrometre': 1.0, '\\u00b5m': 1.0,
+    'nm': 1e-3, 'nanometer': 1e-3, 'nanometre': 1e-3,
+    'mm': 1e3, 'millimeter': 1e3, 'millimetre': 1e3,
+    'cm': 1e4, 'centimeter': 1e4, 'centimetre': 1e4,
+    'm': 1e6, 'meter': 1e6, 'metre': 1e6,
+    'inch': 25400.0, 'in': 25400.0,
+}
+
+
+def _length_unit(pixel_sizes):
+    """The 'unit' of a pixel-size dict, or None."""
+    if isinstance(pixel_sizes, dict):
+        unit = pixel_sizes.get('unit')
+        if isinstance(unit, str) and unit.strip():
+            return unit.strip()
+    return None
 
 import anywidget
 import traitlets
@@ -47,13 +84,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import io
 import base64
-import importlib.resources as ir
 from matplotlib import gridspec
 
 from scipy import ndimage as ndi
 from matplotlib.colors import PowerNorm, to_rgb, LinearSegmentedColormap
 import matplotlib.colors as mcolors
 from matplotlib.figure import Figure
+
+# The widget assets sit next to this module; resolving them from __file__ (not
+# importlib.resources("eigenp_utils")) also works when the file runs standalone.
+_ASSET_DIR = pathlib.Path(__file__).resolve().parent
 
 
 class _PanelRotation:
@@ -354,7 +394,7 @@ def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None
         if colormap is None:
             colormap = colors
 
-    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = colors, opacity = opacity)
+    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity)
 
 
 def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
@@ -376,7 +416,7 @@ def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projec
     projection_x = np.flip(np.rot90(projector(image_to_show, axis=2), 1), 0)
     projection_z = projector(image_to_show, axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
 def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None):
@@ -625,7 +665,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
     fig.patch.set_alpha(0.0)  # set transparent bgnd
 
-    _add_scale_bar(axXY, axBar, xy_w, both_given, figsize)
+    _add_scale_bar(axXY, axBar, xy_w, both_given, figsize, unit=_length_unit(pixel_sizes))
 
     fig.axXY = axXY
     fig.axZY = axZY
@@ -636,7 +676,18 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     fig.canvas.draw()
     return fig
 
-def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, figsize):
+def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, figsize, unit=None):
+    # ``ax_physical_width_um`` is in the units of the pixel sizes: ``unit``
+    # (a pixel-size dict's 'unit'; µm when None). Known length units are
+    # converted so the bar is labelled in µm; an unknown unit is shown as is.
+    unit_label = 'µm'
+    if unit is not None:
+        factor = _UNIT_TO_UM.get(unit.lower())
+        if factor is None:
+            unit_label = unit
+        else:
+            ax_physical_width_um = ax_physical_width_um * factor
+
     # a small utility to pick the largest "nice" number ≤ target
     target = ax_physical_width_um * 0.2
 
@@ -670,7 +721,7 @@ def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, fi
     ax_line.hlines(y_line, x0, x1, transform=ax_line.transAxes, linewidth=linewidth, color='white', clip_on=False)
 
     if pixel_sizes_given:
-        text_label = f"{int(bar_um)} µm" if bar_um >= 1 else f"{bar_um:.2g} µm"
+        text_label = f"{int(bar_um)} {unit_label}" if bar_um >= 1 else f"{bar_um:.2g} {unit_label}"
     else:
         text_label = "`pixel_sizes`"
 
@@ -712,7 +763,7 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt)
 
 
 ### New function
@@ -750,7 +801,35 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
         projection_x = np.flip(np.rot90(projector(image_to_show[:, :, x_slices], axis=2), 1), 0)
         projection_z = projector(image_to_show[z_slices, :, :], axis=0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=colors, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt)
+
+
+def _finite_min(*arrays):
+    """Smallest finite value over several arrays (None if there is none)."""
+    best = None
+    for a in arrays:
+        a = np.asarray(a)
+        if a.size == 0:
+            continue
+        if np.issubdtype(a.dtype, np.floating):
+            a = a[np.isfinite(a)]
+            if a.size == 0:
+                continue
+        m = float(a.min())
+        best = m if best is None else min(best, m)
+    return best
+
+
+def _default_vmin(*arrays):
+    """0 (fluorescence convention), or the data minimum if the data go below 0."""
+    m = _finite_min(*arrays)
+    return 0.0 if m is None else min(0.0, m)
+
+
+def _check_gammas(gammas):
+    for g in gammas:
+        if g is not None and not float(g) > 0:
+            raise ValueError(f"gamma must be > 0, got {g}")
 
 
 def _finite_max(*arrays):
@@ -784,8 +863,9 @@ def create_multichannel_rgb(
     xy_list, xz_list, zy_list : list[np.ndarray]
         One 2D array per channel for each orientation.
     vmin, vmax : float | list[float] | None
-        Per-channel input range. If None, auto-computed from data (per-channel,
-        across XY/XZ/ZY). Scalars are broadcast to all channels.
+        Per-channel input range. If None, computed per channel across XY/XZ/ZY:
+        vmin is 0, or the data minimum when the channel has negative values;
+        vmax is the largest finite value. Scalars are broadcast to all channels.
     gamma : float | list[float]
         Power gamma applied AFTER linear [0,1] normalization (1 = linear).
     colors : list[str | tuple]
@@ -817,6 +897,7 @@ def create_multichannel_rgb(
 
     # Broadcast params
     gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+    _check_gammas(gammas)
     opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
 
     colormap = _channel_colormaps(colormap, n)
@@ -825,7 +906,7 @@ def create_multichannel_rgb(
     # Determine per-channel vmin/vmax if not provided
     # vmin/vmax can be None, or a list containing floats and/or Nones
     if vmin is None:
-        vmins = [0.0] * n
+        vmins = [None] * n
     else:
         vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
 
@@ -836,7 +917,7 @@ def create_multichannel_rgb(
 
     for i in range(n):
         if vmins[i] is None:
-            vmins[i] = 0.0
+            vmins[i] = _default_vmin(xy_list[i], xz_list[i], zy_list[i])
         else:
             vmins[i] = float(vmins[i])
 
@@ -947,6 +1028,7 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
     zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
 
     gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+    _check_gammas(gammas)
     opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
 
     colormap = _channel_colormaps(colormap, n)
@@ -959,7 +1041,7 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
             cmap_list.append(black_to(resolve_color(c)))
 
     if vmin is None:
-        vmins = [0.0] * n
+        vmins = [None] * n
     else:
         vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
 
@@ -970,7 +1052,7 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
 
     for i in range(n):
         if vmins[i] is None:
-            vmins[i] = 0.0
+            vmins[i] = _default_vmin(xy_list[i], xz_list[i], zy_list[i])
         else:
             vmins[i] = float(vmins[i])
 
@@ -1195,8 +1277,8 @@ def _draw_slab_crosshairs(axes, geoms, x_edges, y_edges, z_edges, widths, origin
 
 
 class TNIAWidgetBase(anywidget.AnyWidget):
-    _esm = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.js").read_text()
-    _css = ir.files("eigenp_utils").joinpath("tnia_plotting_anywidgets.css").read_text()
+    _esm = _ASSET_DIR.joinpath("tnia_plotting_anywidgets.js").read_text()
+    _css = _ASSET_DIR.joinpath("tnia_plotting_anywidgets.css").read_text()
 
 
     # Data traits
@@ -1430,6 +1512,14 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         if getattr(self, '_syncing_traits', False):
             return
 
+        # Traits set in one message (a middle-thumb drag sets x_start and x_end;
+        # hover sync sets x_s and y_s) notify one at a time after all of them
+        # are set, so the second notification would render the same state again.
+        if change is not None and getattr(change, 'name', None) in self._RENDER_STATE_TRAITS:
+            if self._render_state() == getattr(self, '_last_render_state', None):
+                return
+        self._last_render_state = self._render_state()
+
         fig = None
         try:
             fig = self._render()
@@ -1467,11 +1557,24 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                     }
 
                 buf = io.BytesIO()
-                fig.savefig(buf, format='png')
+                # The PNG must show the whole figure frame that axis_bounds were
+                # computed in, whatever the user's savefig rcParams (e.g. 'tight').
+                with matplotlib.rc_context({'savefig.bbox': 'standard'}):
+                    fig.savefig(buf, format='png')
                 self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
         finally:
             if fig is not None:
                 plt.close(fig)
+    # Traits whose values fully describe what the slab/channel observers render.
+    _RENDER_STATE_TRAITS = (
+        'x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t',
+        'x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end',
+        'vmin_list', 'vmax_list', 'gamma_list', 'opacity_list', 'show_crosshair',
+    )
+
+    def _render_state(self):
+        return tuple(repr(getattr(self, name)) for name in self._RENDER_STATE_TRAITS)
+
     def _handle_hover_sync(self, change):
         if not self.sync_on_hover:
             return
@@ -1641,6 +1744,7 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.im_orig = im
 
         self._pixel_sizes_given = pixel_sizes is not None
+        self._length_unit = _length_unit(pixel_sizes)
 
         self.figsize = figsize
         self.colormap = colormap
@@ -1704,13 +1808,8 @@ class TNIASliceWidget(TNIAWidgetBase):
                 if x is not None:
                     res.append(float(x))
                 else:
-                    if isinstance(im_orig, list):
-                        m = float(np.nanmax(im_orig[i]))
-                    else:
-                        m = float(np.nanmax(im_orig))
-                    if np.isnan(m):
-                        m = 1.0
-                    res.append(m)
+                    m = _finite_max(im_orig[i] if isinstance(im_orig, list) else im_orig)
+                    res.append(1.0 if m is None else m)
             return res
 
         self.vmin_list = _resolve_vmin(vmin, self.num_channels)
@@ -1855,7 +1954,10 @@ class TNIASliceWidget(TNIAWidgetBase):
                 channel_labels_curr = [_get_name(c) for c in colors_curr] if isinstance(colors_curr, list) else [_get_name(colors_curr)]
 
         # Pass pixel_sizes directly to trigger scale bar logic
-        pass_pixel_sizes = (self.sz, self.sy, self.sx) if getattr(self, '_pixel_sizes_given', False) else None
+        pass_pixel_sizes = None
+        if getattr(self, '_pixel_sizes_given', False):
+            pass_pixel_sizes = {'Z': self.sz, 'Y': self.sy, 'X': self.sx,
+                                'unit': getattr(self, '_length_unit', None)}
 
         # show_zyx_max_slabs returns a Figure
         fig = show_zyx_max_slabs(
@@ -2154,9 +2256,47 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             y1 = min(Y, py + s_xy + 1)
             x0 = max(0, px - s_xy)
             x1 = min(X, px + s_xy + 1)
+            if z1 <= z0 or y1 <= y0 or x1 <= x0:
+                continue  # marker box entirely outside the volume
             self._annot_img[z0:z1, y0:y1, x0:x1] = 255
 
         self._render_wrapper(change)
+
+def _int_bounds(a):
+    """(floor(min), ceil(max)) of a coordinate array; (0, 0) when it is empty."""
+    if len(a) == 0:
+        return 0.0, 0.0
+    return float(np.floor(np.min(a))), float(np.ceil(np.max(a)))
+
+
+def _finite_points(X, Y, Z, channels=None):
+    """
+    Drop points with a non-finite coordinate (with a warning), together with
+    their per-point channel values; index-list channels are re-indexed.
+    """
+    X, Y, Z = (np.asarray(a).reshape(-1) for a in (X, Y, Z))
+    if not (len(X) == len(Y) == len(Z)):
+        raise ValueError(f"X, Y and Z must have the same length, got {len(X)}, {len(Y)}, {len(Z)}")
+    keep = np.isfinite(X.astype(float)) & np.isfinite(Y.astype(float)) & np.isfinite(Z.astype(float))
+    if keep.all():
+        return X, Y, Z, channels
+    n_drop = int((~keep).sum())
+    warnings.warn(f"Dropping {n_drop} of {len(X)} points with non-finite coordinates.",
+                  UserWarning, stacklevel=3)
+    N = len(X)
+    new_index = np.cumsum(keep) - 1
+
+    if channels is not None:
+        if isinstance(channels, (list, tuple)):
+            arrs = [np.asarray(a) for a in channels]
+            if all(len(a) == N for a in arrs) and any(np.issubdtype(a.dtype, np.floating) for a in arrs):
+                channels = [a[keep] for a in arrs]  # one value per point and channel
+            else:
+                channels = [new_index[ix[keep[ix]]] for ix in (np.asarray(i, dtype=int) for i in arrs)]
+        else:
+            channels = np.asarray(channels)[keep]
+    return X[keep], Y[keep], Z[keep], channels
+
 
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
@@ -2169,14 +2309,13 @@ class TNIAScatterWidget(TNIAWidgetBase):
             if colormap is None:
                 colormap = colors
 
-        self.X_arr = np.asarray(X_arr)
-        self.Y_arr = np.asarray(Y_arr)
-        self.Z_arr = np.asarray(Z_arr)
+        X_arr, Y_arr, Z_arr, channels = _finite_points(X_arr, Y_arr, Z_arr, channels)
+        self.X_arr = X_arr
+        self.Y_arr = Y_arr
+        self.Z_arr = Z_arr
 
         # Compute bounds for init
-        xmin, xmax = float(np.floor(self.X_arr.min())), float(np.ceil(self.X_arr.max()))
-        ymin, ymax = float(np.floor(self.Y_arr.min())), float(np.ceil(self.Y_arr.max()))
-        zmin, zmax = float(np.floor(self.Z_arr.min())), float(np.ceil(self.Z_arr.max()))
+        (xmin, xmax), (ymin, ymax), (zmin, zmax) = (_int_bounds(a) for a in (X_arr, Y_arr, Z_arr))
 
         X_dim = int(np.ceil(xmax - xmin + 1))
         Y_dim = int(np.ceil(ymax - ymin + 1))
@@ -2186,6 +2325,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
         self.channels = channels
         self._pixel_sizes_given = pixel_sizes is not None
+        self._length_unit = _length_unit(pixel_sizes)
         pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
         self.sx = px
         self.sy = py
@@ -2326,15 +2466,12 @@ class TNIAScatterWidget(TNIAWidgetBase):
                     res.append(float(x))
                 else:
                     if mode == 'cont_single':
-                        m = float(np.nanmax(cont_single))
+                        m = _finite_max(cont_single)
                     elif mode == 'cont_multi':
-                        m = float(np.nanmax(cont_multi[:, i]))
+                        m = _finite_max(cont_multi[:, i])
                     else:
                         m = 1.0
-
-                    if np.isnan(m):
-                        m = 1.0
-                    res.append(m)
+                    res.append(1.0 if m is None else m)
             return res
 
         self.vmin_list = _resolve_vmin(vmin, self.C)
@@ -2391,6 +2528,19 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
         # Initialize observers and render
         self._init_observers()
+
+    def _copy_params(self, change):
+        """
+        Like the base class, but slabs in the units ``show_zyx_max_scatter_interactive``
+        takes: positions in data coordinates (index + data minimum), thicknesses in
+        data units (one index is one data unit).
+        """
+        super()._copy_params(change)
+        lines = self.copy_params_string.split("\n")
+        lines[0] = (f"slabs_position=({self.z_s + self.zmin}, {self.y_s + self.ymin}, "
+                    f"{self.x_s + self.xmin}),")
+        lines[1] = f"slabs_thickness=({self.z_t}, {self.y_t}, {self.x_t}),"
+        self.copy_params_string = "\n".join(lines)
 
     def _label_colors(self):
         """Colour of each channel as drawn (used for the channel labels)."""
@@ -2558,7 +2708,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
             bxs, bys, bzs = self._bin_phys
             fig = show_zyx(
                 xy_rgb, xz_rgb, zy_rgb,
-                pixel_sizes=(bzs, bys, bxs), pixel_sizes_given=self._pixel_sizes_given,
+                pixel_sizes={'Z': bzs, 'Y': bys, 'X': bxs, 'unit': self._length_unit},
+                pixel_sizes_given=self._pixel_sizes_given,
                 figsize=self.figsize, colormap=None,
                 vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=self.subplot_bg,
                 rotate_view=self.rotate_view, channel_labels=channel_labels,
@@ -2782,7 +2933,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Scale bar (kept opaque), measured against the drawn XY width
             fig.patch.set_alpha(1.0)
-            _add_scale_bar(axXY, axBar, w_x_xy, self._pixel_sizes_given, (figW, figH))
+            _add_scale_bar(axXY, axBar, w_x_xy, self._pixel_sizes_given, (figW, figH), unit=self._length_unit)
 
             # FORCE MATPLOTLIB TRANSFORMS BEFORE RETURN <<<
             fig.canvas.draw()
@@ -2816,9 +2967,8 @@ def show_zyx_max_slice_interactive(
         For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
 
     Notes:
-        - When `vmax` is not explicitly provided, it defaults to the 99.9th percentile for float arrays,
-          and `np.max` for all integer and boolean arrays to prevent clipping. `vmin` defaults to 0 or
-          its current minimum behavior.
+        - When `vmax` is not explicitly provided, it defaults to the largest finite value of each
+          channel (1.0 for an all-NaN channel); `vmin` defaults to 0.
         - Interactive widgets compute a 128-bin histogram per channel in the Python backend (excluding NaNs for floats)
           and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
           underneath the channel controls, overlaid with a curve reflecting the current `vmin`, `vmax`, and `gamma` settings.
@@ -3037,9 +3187,8 @@ def show_zyx_max_scatter_interactive(
         - When hiding axes to maintain custom subplot backgrounds (e.g. `subplot_bg`), the code
           manually hides ticks and spines instead of using `ax.axis('off')`, as `ax.axis('off')`
           inadvertently disables the background patch in matplotlib.
-        - When `vmax` is not explicitly provided, it defaults to the 99.9th percentile for float arrays,
-          and `np.max` for all integer and boolean arrays to prevent clipping. `vmin` defaults to 0 or
-          its current minimum behavior.
+        - When `vmax` is not explicitly provided, it defaults to the largest finite value of each
+          channel (1.0 for an all-NaN channel); `vmin` defaults to 0.
         - The function dynamically determines its rendering mode: if `render=None`, it defaults to
           `'points'` for point counts under 10,000, and `'density'` for larger datasets to optimize interactive performance.
     """
@@ -3093,6 +3242,8 @@ def show_zyx_max_scatter_interactive(
         else:
             raise ValueError("points must be an array of shape (N, 3) representing (Z, Y, X) or a tuple/list of 3 arrays (Z, Y, X).")
 
+    X, Y, Z, channels = _finite_points(X, Y, Z, channels)
+
     if render is None:
         if len(X) < 10000:
             render = 'points'
@@ -3100,9 +3251,7 @@ def show_zyx_max_scatter_interactive(
             render = 'density'
 
 
-    xmin, xmax = float(np.floor(X.min())), float(np.ceil(X.max()))
-    ymin, ymax = float(np.floor(Y.min())), float(np.ceil(Y.max()))
-    zmin, zmax = float(np.floor(Z.min())), float(np.ceil(Z.max()))
+    (xmin, xmax), (ymin, ymax), (zmin, zmax) = (_int_bounds(a) for a in (X, Y, Z))
 
     XN = xmax - xmin + 1
     YN = ymax - ymin + 1
@@ -3171,7 +3320,7 @@ def show_zyx_max_scatter_interactive(
     return w
 
 class IsoScatterWidget(anywidget.AnyWidget):
-    _esm = ir.files("eigenp_utils").joinpath("iso_scatter.js").read_text()
+    _esm = _ASSET_DIR.joinpath("iso_scatter.js").read_text()
 
     image_data = traitlets.Unicode().tag(sync=True)
     elev = traitlets.Float(30).tag(sync=True)
@@ -3181,7 +3330,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
 
     def __init__(self, X, Y, Z, color=None, sxy=1, sz=1, figsize=(12, 10),
                  point_size=5, alpha=0.6, cmap='viridis', max_points=10000,
-                 title=None, pixel_sizes=None, channel_labels=None):
+                 title=None, pixel_sizes=None, channel_labels=None, seed=0):
         super().__init__()
 
         # Store ORIGINAL Data
@@ -3220,7 +3369,8 @@ class IsoScatterWidget(anywidget.AnyWidget):
 
         # Subsample if needed
         if len(self.X_orig) > max_points:
-            idx = np.random.choice(len(self.X_orig), max_points, replace=False)
+            # Local generator: reproducible, and the caller's global stream is untouched
+            idx = np.random.default_rng(seed).choice(len(self.X_orig), max_points, replace=False)
             self.X_orig = self.X_orig[idx]
             self.Y_orig = self.Y_orig[idx]
             self.Z_orig = self.Z_orig[idx]
@@ -3455,6 +3605,7 @@ def show_iso_scatter(
     max_points=10000,
     title=None,
     pixel_sizes=None,
+    seed=0,
 ):
     """
     Displays an interactive isometric scatter plot widget.
@@ -3482,6 +3633,8 @@ def show_iso_scatter(
         Maximum number of points to render (random subsampling applied if exceeded).
     title : str, optional
         Plot title.
+    seed : int or None
+        Seed of the subsampling (default 0, reproducible; None for a fresh draw).
     """
     return IsoScatterWidget(
         X, Y, Z,
@@ -3495,4 +3648,5 @@ def show_iso_scatter(
         max_points=max_points,
         title=title,
         pixel_sizes=pixel_sizes,
+        seed=seed,
     )

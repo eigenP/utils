@@ -291,18 +291,23 @@ def test_scale_bar_logic(shape, pixel_sizes, expected_text):
     w_slice_scaled = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes, figsize=(5,5), figsize_scale=2.0)
     fig_slice_scaled = w_slice_scaled._render()
 
+    def _bar_linewidth(fig):
+        widths = [c.get_linewidth()[0] for ax in fig.axes for c in ax.collections
+                  if len(c.get_linewidth())]
+        return max(widths) if widths else None
+
     font_size_scaled = None
-    linewidth_scaled = None
     for ax in fig_slice_scaled.axes:
         for txt in ax.texts:
             if expected_text in txt.get_text():
                 font_size_scaled = txt.get_fontsize()
-        for collection in ax.collections:
-            if collection.get_linewidth():
-                linewidth_scaled = collection.get_linewidth()[0]
+    linewidth_unscaled = _bar_linewidth(fig_slice)
+    linewidth_scaled = _bar_linewidth(fig_slice_scaled)
 
     assert font_size_scaled is not None
     assert font_size_scaled > font_size_unscaled
+    assert linewidth_unscaled is not None and linewidth_scaled is not None
+    assert linewidth_scaled > linewidth_unscaled
 
 def test_parse_zyx_tuple_or_dict_various_types():
     """Test that parse zyx tuple or dict various types works as expected."""
@@ -393,22 +398,21 @@ def test_interactive_channel_labels():
 # =========================================
 # Source: test_tnia_annotator_widget.py
 # =========================================
-def test_tnia_annotator_widget():
-    """Test that tnia annotator widget works as expected."""
+def test_tnia_annotator_widget(tmp_path, monkeypatch):
+    """The annotator writes its points as a z,y,x CSV (with $VAR expansion in the name)."""
     from eigenp_utils.tnia_plotting_anywidgets import TNIAAnnotatorWidget
-    import numpy as np
-    import os
 
-    os.environ['TEST_DIR'] = '/tmp'
+    monkeypatch.setenv('TEST_DIR', str(tmp_path))
 
     im = np.random.randint(0, 255, (10, 10, 10), dtype=np.uint8)
     w = TNIAAnnotatorWidget(im)
-    w.points = [[5, 5, 5], [6, 6, 6]]
+    w.points = [[5, 4, 3], [6, 7, 8]]
     w.save_csv_filename = "$TEST_DIR/test_points.csv"
     w._save_csv(None)
 
-    with open("/tmp/test_points.csv", "r") as f:
-        print(f.read())
+    out = tmp_path / "test_points.csv"
+    assert out.exists()
+    assert out.read_text() == "z,y,x\n5,4,3\n6,7,8\n"
 
 
 def test_sync_on_hover_defaults_to_true():
@@ -622,6 +626,32 @@ def test_marimo_update(tmp_path):
     import eigenp_utils.tnia_plotting_anywidgets as tpa
     assert "colormap" in inspect.signature(tpa.show_zyx_max_slice_interactive).parameters
 
+
+def test_marimo_app_file_uses_existing_api():
+    """tests/marimo_app.py only imports existing eigenp_utils names and passes keywords
+    those functions accept (no deprecated ``colors=``)."""
+    import ast
+    import importlib
+    import inspect
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parent / "marimo_app.py").read_text())
+    imported = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("eigenp_utils"):
+            mod = importlib.import_module(node.module)
+            for alias in node.names:
+                assert hasattr(mod, alias.name), f"{node.module}.{alias.name} does not exist"
+                imported[alias.asname or alias.name] = getattr(mod, alias.name)
+    assert imported
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in imported:
+            params = inspect.signature(imported[node.func.id]).parameters
+            for kw in node.keywords:
+                assert kw.arg in params, f"{node.func.id}() has no keyword {kw.arg!r}"
+                assert kw.arg != "colors", "use colormap=, not the deprecated colors="
+
 # =========================================
 # Source: test_tnia_figsize_scale.py
 # =========================================
@@ -634,9 +664,8 @@ def test_tnia_figsize_scale():
     widget1 = show_zyx_max_slice_interactive(im, figsize_scale=1)
     widget2 = show_zyx_max_slice_interactive(im, figsize_scale=2)
     widget3 = show_zyx_max_slice_interactive(im, figsize_scale=10)
-    print(widget1.figsize)
-    print(widget2.figsize)
-    print(widget3.figsize)
+    assert np.allclose(np.array(widget2.figsize), 2 * np.array(widget1.figsize))
+    assert np.allclose(np.array(widget3.figsize), 10 * np.array(widget1.figsize))
 
 # =========================================
 # Source: test_tnia_plotting_anywidgets_3d_logic.py
@@ -650,11 +679,12 @@ matplotlib.use("Agg")
 def test_show_zyx_slice_returns_correct_slices():
     """Test that show zyx slice returns correct slices works as expected."""
     arr = np.arange(4 * 3 * 2).reshape(4, 3, 2)
-    fig = show_zyx_slice(arr, x=1, y=1, z=2, use_plt=False)
+    # x, y and z all differ, so swapping any two indices changes a panel
+    fig = show_zyx_slice(arr, x=0, y=2, z=3, use_plt=False)
     assert isinstance(fig, Figure)
-    xy_expected = arr[2, :, :]
-    xz_expected = arr[:, 1, :]
-    zy_expected = np.flip(np.rot90(arr[:, :, 1], 1), 0)
+    xy_expected = arr[3, :, :]
+    xz_expected = arr[:, 2, :]
+    zy_expected = np.flip(np.rot90(arr[:, :, 0], 1), 0)
     xy_img = fig.axes[0].images[0].get_array()
     zy_img = fig.axes[1].images[0].get_array()
     xz_img = fig.axes[2].images[0].get_array()
@@ -1301,6 +1331,12 @@ def test_channel_label_height_scaling_with_fontsize():
         pos_large = fig_large.axLabels.get_position()
         assert pos_small.height > 0
         assert pos_large.height > 0
+        # Label height in inches is 0.10 + fontsize/72, with fontsize growing with figH
+        h_small_in, h_large_in = h_small * 4, h_large * 12
+        for h_in, figH in ((h_small_in, 4), (h_large_in, 12)):
+            fontsize = max(10, min(24, figH * 72 * 0.035))
+            assert h_in == pytest.approx(0.10 + fontsize / 72.0, rel=1e-6)
+        assert h_large_in > h_small_in
     finally:
         plt.close(fig_small)
         plt.close(fig_large)
@@ -2276,3 +2312,240 @@ def test_iso_scatter_uses_pixel_sizes_for_radius_and_y():
         assert w2.max_radius >= np.abs(pts).max()
     finally:
         plt.close(fig)
+
+
+# =========================================
+# Source: remaining low-severity scan findings (widgets)
+# =========================================
+
+
+def test_pixel_size_dict_with_missing_axis_falls_back_to_one():
+    """An uncalibrated axis (None, as image_io reports it) is treated as 1.0 with a warning."""
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max, _parse_zyx_tuple_or_dict
+
+    ps = {'X': 0.5, 'Y': 0.5, 'Z': None, 'unit': 'micron'}
+    with pytest.warns(UserWarning, match="axis Z"):
+        assert _parse_zyx_tuple_or_dict(ps, default_val=1.0) == (1.0, 0.5, 0.5)
+    # Slab defaults stay None without a warning
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert _parse_zyx_tuple_or_dict({'Z': None, 'Y': 2, 'X': None}) == (None, 2.0, None)
+
+    im = np.random.default_rng(0).random((6, 20, 30))
+    with pytest.warns(UserWarning, match="axis Z"):
+        fig = show_zyx_max(im, pixel_sizes=ps)
+    plt.close(fig)
+    with pytest.warns(UserWarning, match="axis Z"):
+        w = show_zyx_max_slice_interactive(im, pixel_sizes=ps)
+    assert w.sz == 1.0 and w.image_data
+    pts = (np.array([0, 5.0]), np.array([0, 19.0]), np.array([0, 29.0]))
+    with pytest.warns(UserWarning, match="axis Z"):
+        w2 = show_zyx_max_scatter_interactive(pts, pixel_sizes=ps)
+    assert w2.sz == 1.0 and w2.image_data
+
+
+@pytest.mark.parametrize("fn_name", ["show_zyx_max", "show_zyx_max_slabs"])
+def test_deprecated_colors_warns_once(fn_name):
+    import eigenp_utils.tnia_plotting_anywidgets as tpa
+
+    im = np.random.default_rng(0).random((4, 8, 8))
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        fig = getattr(tpa, fn_name)(im, colors='red')
+    plt.close(fig)
+    dep = [r for r in rec if issubclass(r.category, DeprecationWarning) and "'colors'" in str(r.message)]
+    assert len(dep) == 1
+    assert dep[0].filename == __file__  # points at the caller
+
+
+@pytest.mark.parametrize("unit, size, expected", [
+    ('cm', 5e-5, '20 µm'),       # 256 px * 0.5 µm stored in cm
+    ('nm', 500.0, '20 µm'),
+    ('micron', 0.5, '20 µm'),
+    ('\\u00B5m', 0.5, '20 µm'),  # ImageJ's escaped micro sign
+    ('pixel', 1.0, '50 pixel'),  # unknown unit: shown as given
+])
+def test_scale_bar_uses_pixel_size_unit(unit, size, expected):
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max
+
+    im = np.zeros((4, 256, 256))
+    ps = {'Z': size, 'Y': size, 'X': size, 'unit': unit}
+    fig = show_zyx_max(im, pixel_sizes=ps)
+    try:
+        assert expected in [t.get_text() for ax in fig.axes for t in ax.texts]
+    finally:
+        plt.close(fig)
+
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=ps)
+    fig = w._render()
+    try:
+        assert expected in [t.get_text() for ax in fig.axes for t in ax.texts]
+    finally:
+        plt.close(fig)
+
+    pts = (np.array([0, 3.0]), np.array([0, 255.0]), np.array([0, 255.0]))
+    for render in ('points', 'density'):
+        w = show_zyx_max_scatter_interactive(pts, pixel_sizes=ps, render=render)
+        fig = w._render()
+        try:
+            assert expected in [t.get_text() for ax in fig.axes for t in ax.texts], render
+        finally:
+            plt.close(fig)
+
+
+def test_multichannel_default_vmin_shows_negative_channels():
+    """vmin=None is 0 for non-negative data and the data minimum for negative data."""
+    from eigenp_utils.tnia_plotting_anywidgets import create_multichannel_rgb_cmap
+
+    rng = np.random.default_rng(0)
+    neg = rng.uniform(-5, -1, (8, 8))
+    pos = rng.uniform(0, 10, (8, 8))
+    for fn in (create_multichannel_rgb, create_multichannel_rgb_cmap):
+        xy, _, _ = fn([neg, pos], [neg, pos], [neg, pos], colormap=['red', 'blue'], blend='max')
+        red = xy[..., 0]
+        assert red.max() > 0.5 and np.ptp(red) > 0.5
+        # the non-negative channel keeps vmin = 0: its brightest pixel is full blue
+        assert xy[..., 2].max() == pytest.approx(1.0, abs=1e-2)
+        with pytest.raises(ValueError, match="gamma"):
+            fn([neg, pos], [neg, pos], [neg, pos], gamma=[1, 0])
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide")
+def test_widget_module_runs_without_installed_package(tmp_path):
+    """The module (with its .js/.css next to it) imports when eigenp_utils itself is
+    not importable, e.g. `uv run tnia_plotting_anywidgets.py` with its PEP 723 deps."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    import eigenp_utils.tnia_plotting_anywidgets as tpa
+
+    src = Path(tpa.__file__).parent
+    for name in ("tnia_plotting_anywidgets.py", "tnia_plotting_anywidgets.js",
+                 "tnia_plotting_anywidgets.css", "iso_scatter.js"):
+        shutil.copy(src / name, tmp_path / name)
+    code = textwrap.dedent(f"""
+        import sys, runpy, importlib.abc
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "eigenp_utils" or name.startswith("eigenp_utils."):
+                    raise ModuleNotFoundError(name)
+        sys.meta_path.insert(0, Block())
+        ns = runpy.run_path({str(tmp_path / 'tnia_plotting_anywidgets.py')!r})
+        assert "TNIASliceWidget" in ns and ns["TNIAWidgetBase"]._esm
+        print("ok")
+    """)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env={"MPLBACKEND": "Agg", "PATH": ""})
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip().endswith("ok")
+
+
+def test_one_render_per_multi_trait_update():
+    """A middle-thumb drag (x_start and x_end in one message) and a 'C' hover sync
+    (x_s and y_s) each rasterise the figure once."""
+    im = np.random.default_rng(0).random((10, 40, 50))
+    w = show_zyx_max_slice_interactive(im)
+    calls = []
+    orig = w._render
+    w._render = lambda: (calls.append(1), orig())[1]
+
+    with w.hold_trait_notifications():  # how ipywidgets applies one comm message
+        w.x_start, w.x_end = w.x_start + 3, w.x_end + 3
+    assert len(calls) == 1
+
+    calls.clear()
+    info = w.axis_bounds['xy']
+    w.hover_coords = {'plane': 'xy', 'x': info['x0'] + 0.3 * (info['x1'] - info['x0']),
+                      'y': info['y0_js'] + 0.6 * (info['y1_js'] - info['y0_js']), 't': 1}
+    assert len(calls) == 1
+
+    calls.clear()
+    w.vmax_list = [0.5]  # any real change still renders
+    assert len(calls) == 1
+
+
+def test_widget_png_ignores_tight_savefig_rcparam():
+    """axis_bounds are figure fractions, so the PNG must show the whole figure frame."""
+    import base64
+    import io
+    import matplotlib.image as mpimg
+
+    im = np.random.default_rng(0).random((10, 40, 50))
+    sizes = {}
+    for bbox in ('standard', 'tight'):
+        with matplotlib.rc_context({'savefig.bbox': bbox}):
+            w = show_zyx_max_slice_interactive(im, figsize=(8, 6))
+        sizes[bbox] = mpimg.imread(io.BytesIO(base64.b64decode(w.image_data))).shape[:2]
+    assert sizes['tight'] == sizes['standard']
+
+
+def test_scatter_copy_params_round_trip():
+    rng = np.random.default_rng(0)
+    X = rng.uniform(500, 600, 400)
+    Y = rng.uniform(0, 50, 400)
+    Z = rng.uniform(20, 40, 400)
+    w = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(2, 0.5, 0.5))
+    w.x_start, w.x_end = 44, 56
+    w.z_start, w.z_end = 6, 14
+    w._copy_params(None)
+    kwargs = {}
+    for line in w.copy_params_string.splitlines():
+        key, val = line.rstrip(',').split('=', 1)
+        if key.startswith('slabs_'):
+            kwargs[key] = eval(val)
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(2, 0.5, 0.5), **kwargs)
+    for a in ('x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end'):
+        assert getattr(w2, a) == getattr(w, a), a
+
+
+def test_annotator_point_outside_volume_paints_nothing():
+    from eigenp_utils.tnia_plotting_anywidgets import TNIAAnnotatorWidget
+
+    w = TNIAAnnotatorWidget(np.zeros((20, 64, 64), dtype=np.uint8))
+    w.add_point(10, 30, 30)
+    inside = int((w._annot_img > 0).sum())
+    assert inside > 0
+    w.add_point(-5, 30, 30)
+    w.add_point(10, 80, 30)
+    assert int((w._annot_img > 0).sum()) == inside
+
+
+def test_scatter_widget_drops_nonfinite_points_and_accepts_empty_input():
+    rng = np.random.default_rng(0)
+    X, Y, Z = rng.uniform(0, 50, 30), rng.uniform(0, 50, 30), rng.uniform(0, 10, 30)
+    vals = rng.random(30)
+    X[3] = np.nan
+    Z[7] = np.inf
+    with pytest.warns(UserWarning, match="Dropping 2 of 30"):
+        w = show_zyx_max_scatter_interactive((Z, Y, X), channels=vals)
+    assert w.N == 28 and len(w.cont_single) == 28
+    assert w.cont_single[3] == vals[4] and w.image_data
+
+    # index-list channels are re-indexed to the kept points
+    with pytest.warns(UserWarning):
+        w = show_zyx_max_scatter_interactive((Z, Y, X), channels=[np.array([0, 3, 4]), np.array([7, 8])])
+    assert [list(ix) for ix in w.idx_lists] == [[0, 3], [6]]
+
+    for render in ('points', 'density'):
+        w = show_zyx_max_scatter_interactive((np.array([]), np.array([]), np.array([])), render=render)
+        assert w.image_data
+
+
+def test_default_vmax_of_all_nan_channel_does_not_warn():
+    im = np.random.default_rng(0).random((4, 8, 8))
+    nan = np.full_like(im, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        w = show_zyx_max_slice_interactive([im, nan])
+    assert w.vmax_list[1] == 1.0
+
+
+def test_iso_scatter_subsampling_is_seeded_and_leaves_global_rng_alone():
+    rng = np.random.default_rng(0)
+    X, Y, Z = rng.random(20000), rng.random(20000), rng.random(20000)
+    np.random.seed(42)
+    w1 = show_iso_scatter(X, Y, Z)
+    assert np.random.rand() == np.random.RandomState(42).rand()
+    w2 = show_iso_scatter(X, Y, Z)
+    assert np.array_equal(w1.X_orig, w2.X_orig)
+
