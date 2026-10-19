@@ -95,10 +95,11 @@ def _():
     import numpy as np
     from skimage.io import imread
     from eigenp_utils.io import download_file_async
-    from eigenp_utils.clahe_equalize_adapthist import _my_clahe_
+    # marimo keeps names starting with "_" private to their cell: alias it
+    from eigenp_utils.clahe_equalize_adapthist import _my_clahe_ as my_clahe
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
-    return download_file_async, imread, plt, show_zyx_max_slice_interactive
+    return download_file_async, imread, my_clahe, plt, show_zyx_max_slice_interactive
 
 
 @app.cell
@@ -139,8 +140,8 @@ def _(mo):
 
 
 @app.cell
-def _(clip_slider, kernel_size_slider, membrane_slice, nbins_slider):
-    clahe_img = _my_clahe_(
+def _(clip_slider, kernel_size_slider, membrane_slice, my_clahe, nbins_slider):
+    clahe_img = my_clahe(
         membrane_slice,
         clip_limit=clip_slider.value,
         nbins=nbins_slider.value,

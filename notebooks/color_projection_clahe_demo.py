@@ -103,11 +103,12 @@ def _():
     import numpy as np
     from skimage.io import imread
 
-    from eigenp_utils.clahe_equalize_adapthist import _my_clahe_
-    from eigenp_utils.color_coded_projection import color_coded_projection
+    # marimo keeps names starting with "_" private to their cell: alias it
+    from eigenp_utils.clahe_equalize_adapthist import _my_clahe_ as my_clahe
+    from eigenp_utils.plotting_utils import color_coded_projection
     from eigenp_utils.io import download_file_async
 
-    return color_coded_projection, download_file_async, imread, np, plt
+    return color_coded_projection, download_file_async, imread, my_clahe, np, plt
 
 
 @app.cell
@@ -200,8 +201,8 @@ def _(membrane_stack):
 
 
 @app.cell
-def _(clahe_clip_slider, original_slice):
-    clahe_slice = _my_clahe_(
+def _(clahe_clip_slider, my_clahe, original_slice):
+    clahe_slice = my_clahe(
         original_slice,
         clip_limit=float(clahe_clip_slider.value),
         nbins=256,
