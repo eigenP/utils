@@ -1045,3 +1045,110 @@ class TestDriftCorrectionAccuracy(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# =========================================
+# Regression tests: scan batch 5
+# =========================================
+
+from scipy.ndimage import gaussian_filter as _gaussian_filter
+from scipy.signal import windows as _windows
+from eigenp_utils.maxproj_registration import estimate_shift_1d_iterative, compute_drift_trajectory
+
+
+def _two_peak_profile(n=200):
+    x = np.arange(n)
+    return np.exp(-0.5 * ((x - 80) / 4) ** 2) * 1000 + np.exp(-0.5 * ((x - 130) / 6) ** 2) * 600
+
+
+def _blob_scene(H=160, W=160, n=12, seed=3, sigma=2.5):
+    r = np.random.default_rng(seed)
+    img = np.zeros((H, W))
+    for _ in range(n):
+        img[int(r.uniform(30, H - 30)), int(r.uniform(30, W - 30))] = 1
+    img = _gaussian_filter(img, sigma)
+    return img / img.max()
+
+
+@pytest.mark.parametrize("baseline", [0.0, 500.0, 5000.0])
+def test_shift_estimate_independent_of_background_offset(baseline):
+    """A constant offset times the window anchored the correlation at zero shift (+6.7 -> 0.0)."""
+    prof = _two_peak_profile()
+    win = _windows.tukey(prof.size, alpha=0.1)
+    mov = shift(prof, 6.7, order=3, mode='nearest')
+    est = estimate_shift_1d_iterative(prof + baseline, mov + baseline, win)
+    assert est == pytest.approx(-6.7, abs=0.05)
+    # Negative control: identical profiles on the same pedestal have zero shift
+    assert abs(estimate_shift_1d_iterative(prof + baseline, prof + baseline, win)) < 1e-3
+
+
+def test_drift_correction_with_camera_offset():
+    """A camera offset pulled the cumulative drift towards zero (2.3 px off, noise-free)."""
+    T, step = 6, np.array([1.5, -2.0])
+    truth = -step[None, :] * np.arange(T)[:, None]
+
+    # Noise-free, smooth objects: the estimate must not depend on the offset
+    base = _blob_scene(sigma=6.0)
+    for offset in (0, 1000):
+        video = np.stack([shift(base, step * t, order=3, mode='nearest') * 300 + offset for t in range(T)]).astype(np.float32)
+        _, table = apply_drift_correction(video)
+        assert np.abs(table[['cum_dy', 'cum_dx']].to_numpy() - truth).max() < 0.1, offset
+
+    # Camera-like uint16 Poisson counts on an offset (main: 3.0-3.7 px off)
+    base = _blob_scene()
+    for seed in range(3):
+        frames = np.stack([shift(base, step * t, order=3, mode='nearest') * 200 + 1000 for t in range(T)])
+        video = np.random.default_rng(seed).poisson(np.clip(frames, 0, None)).astype(np.uint16)
+        _, table = apply_drift_correction(video)
+        assert np.abs(table[['cum_dy', 'cum_dx']].to_numpy() - truth).max() < 1.0, seed
+
+    # Negative control: a static scene on an offset stays at zero drift
+    static = np.stack([base * 300 + 1000] * 4).astype(np.float32)
+    _, table = apply_drift_correction(static)
+    assert np.abs(table[['cum_dy', 'cum_dx']].to_numpy()).max() < 0.05
+
+
+def test_estimate_drift_with_camera_offset():
+    """estimate_drift read a 4 px shift as -0.1 px on an offset of 1000."""
+    base = _blob_scene(sigma=6.0)
+    f1 = base * 300
+    f2 = shift(base, (4.0, -3.0), order=3, mode='nearest') * 300
+    # Returns the correction (-dx, -dy) for the moving frame
+    for offset in (0, 1000):
+        np.testing.assert_allclose(estimate_drift(f1 + offset, f2 + offset), [3.0, -4.0], atol=0.1)
+
+
+def test_zero_shift_accepts_numpy_integers():
+    a = np.arange(12).reshape(3, 4)
+    expected = zero_shift_multi_dimensional(a, shifts=(1, 0))
+    np.testing.assert_array_equal(zero_shift_multi_dimensional(a, shifts=(np.int64(1), 0)), expected)
+    np.testing.assert_array_equal(zero_shift_multi_dimensional(a, shifts=np.array([1, 0])), expected)
+    np.testing.assert_array_equal(zero_shift_multi_dimensional(a, shifts=np.int64(1)), zero_shift_multi_dimensional(a, shifts=1))
+
+
+def test_compute_drift_trajectory_defaults_and_short_axes():
+    prof = _two_peak_profile()
+    projs = np.stack([shift(prof, 0.5 * t, order=3, mode='nearest') for t in range(5)])
+    # windows=None is the documented default
+    table = compute_drift_trajectory([projs])
+    np.testing.assert_allclose(table['dx'].to_numpy()[1:], -0.5, atol=0.05)
+    # A short axis (limit // 5 == 0) used to zero every step
+    table_short = compute_drift_trajectory([projs], shape_limit=(4,))
+    np.testing.assert_allclose(table_short['dx'].to_numpy()[1:], -0.5, atol=0.05)
+    # Steps larger than the limit are still rejected as outliers
+    table_jump = compute_drift_trajectory([np.stack([prof, shift(prof, 7.0, order=3, mode='nearest')])], shape_limit=(30,))
+    assert table_jump['dx'].iloc[1] == 0.0
+
+
+def test_subpixel_correction_rounds_integer_output():
+    """Storing the interpolated float frame in uint16 truncated it (mean bias ~ -0.5 DN)."""
+    base = _blob_scene(H=96, W=96, n=8)
+    rng = np.random.default_rng(0)
+    video = np.stack([rng.poisson(shift(base, (0.37 * t, -0.61 * t), order=3, mode='nearest') * 300 + 100) for t in range(4)]).astype(np.uint16)
+    corrected, table = apply_drift_correction(video, method='subpixel')
+    t = 3
+    expected = shift(video[t].astype(np.float32), (table.loc[t, 'cum_dy'], table.loc[t, 'cum_dx']), order=3, mode='constant', cval=video.min())
+    diff = corrected[t].astype(np.float64) - expected
+    inner = diff[10:-10, 10:-10]
+    assert abs(inner.mean()) < 0.05
+    assert np.abs(inner).max() <= 0.5 + 1e-3

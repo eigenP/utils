@@ -1,3 +1,4 @@
+import inspect
 import warnings
 from itertools import product
 from typing import Optional, Tuple, Dict, List, Union
@@ -7,25 +8,39 @@ import scipy.ndimage as ndi
 from scipy.ndimage import uniform_filter, map_coordinates
 from scipy import ndimage
 from scipy.spatial import KDTree
-from skimage import filters, feature, segmentation
-from skimage.transform import resize
-import scipy.ndimage as ndi
-from itertools import product
-from typing import Optional, Tuple, Dict, List, Union
 from collections.abc import Iterable
 from scipy.interpolate import RegularGridInterpolator
 from skimage import filters, feature, segmentation
 from skimage.segmentation import expand_labels
 
 
-def _ensure_pixel_size_array(pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None) -> np.ndarray:
-    """Helper to convert dict or list to [Z, Y, X] numpy array."""
-    if pixel_sizes is None:
-        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
-        return np.array([1.0, 1.0, 1.0], dtype=np.float64)
+def _pixel_sizes_to_spacing(pixel_sizes, ndim: int, stacklevel: int = 2) -> tuple[float, ...]:
+    """
+    Per-axis spacing (the last `ndim` of Z, Y, X) from a dict or a sequence.
+
+    Readers return None for axes without calibration (e.g. {'Z': None} for an
+    ImageJ stack without spacing); those fall back to 1.0 with a UserWarning
+    naming the axis. Non-finite or non-positive sizes raise ValueError.
+    `stacklevel` is the one the calling function would use for its own warnings.
+    """
+    keys = ('Z', 'Y', 'X')[-ndim:]
     if isinstance(pixel_sizes, dict):
-        return np.array([pixel_sizes.get('Z', 1.0), pixel_sizes.get('Y', 1.0), pixel_sizes.get('X', 1.0)], dtype=np.float64)
-    return np.array(pixel_sizes, dtype=np.float64)
+        values = [pixel_sizes.get(k, 1.0) for k in keys]
+    else:
+        values = list(pixel_sizes)
+        if len(values) != ndim:
+            raise ValueError(f"pixel_sizes has {len(values)} entries, expected {ndim} ({', '.join(keys)}).")
+
+    missing = [k for k, v in zip(keys, values) if v is None]
+    if missing:
+        warnings.warn(
+            f"pixel_sizes has no value for axis {', '.join(missing)}; using 1.0 for it.",
+            UserWarning, stacklevel=stacklevel + 1
+        )
+    spacing = tuple(1.0 if v is None else float(v) for v in values)
+    if not all(np.isfinite(s) and s > 0 for s in spacing):
+        raise ValueError(f"pixel_sizes must be finite and positive, got {dict(zip(keys, spacing))}.")
+    return spacing
 
 
 def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pixel_sizes=None):
@@ -39,7 +54,12 @@ def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pi
     - outline_sigma: Sigma for the Gaussian blur used to create the watershed outline. Can be scalar or tuple.
             If `pixel_sizes` is provided, this is assumed to be in physical units.
     - spacing: Deprecated. Use `pixel_sizes` instead.
-    - pixel_sizes: Optional dict mapping dimension to pixel size, e.g., {'Z': 1.0, 'Y': 0.5, 'X': 0.5}.
+    - pixel_sizes: Optional dict mapping dimension to pixel size, e.g., {'Z': 1.0, 'Y': 0.5, 'X': 0.5},
+            or a per-axis sequence in (Z)YX order.
+
+    Seeds are local maxima of the spot-blurred image at least 3 pixels of the finest
+    axis apart (Chebyshev distance in physical units), so coarser axes such as Z use
+    proportionally fewer pixels. Seeds on the image border are kept.
 
     Returns:
     - labels: Segmented labeled mask.
@@ -49,7 +69,10 @@ def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pi
         if pixel_sizes is None:
             pixel_sizes = spacing
 
-    dim_keys = ['Z', 'Y', 'X'] if image.ndim == 3 else ['Y', 'X']
+    if pixel_sizes is not None:
+        sp = _pixel_sizes_to_spacing(pixel_sizes, image.ndim)
+    else:
+        sp = (1.0,) * image.ndim
 
     # Convert sigmas into tuples per axis, scaling by pixel size if provided
     def _process_sigma(sigma_val):
@@ -57,7 +80,7 @@ def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pi
             sigma_val = [sigma_val] * image.ndim
 
         if pixel_sizes is not None:
-            sigma_val = [s / pixel_sizes.get(dim, 1.0) for s, dim in zip(sigma_val, dim_keys)]
+            sigma_val = [s / s_ax for s, s_ax in zip(sigma_val, sp)]
 
         return tuple(sigma_val)
 
@@ -68,8 +91,25 @@ def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pi
     blurred_spot = filters.gaussian(image, sigma=spot_sigma_tuple)
 
     # Step 2: Detect local maxima (spots)
-    # TODO: consider scaling min_distance based on pixel sizes
-    local_maxi = feature.peak_local_max(blurred_spot, min_distance=3, labels=None)
+    # min_distance is 3 px of the finest axis, in physical units. With isotropic pixels
+    # this is exactly peak_local_max(min_distance=3) (7^n box, Chebyshev spacing >= 3).
+    # exclude_border=False: the default (= min_distance) drops every seed within 3 px of
+    # a face, so nuclei touching the border, and all nuclei of a thin stack, got no label.
+    min_dist_um = 3 * min(sp)
+    footprint = np.ones(tuple(2 * max(1, int(round(min_dist_um / s))) + 1 for s in sp), dtype=bool)
+    local_maxi = feature.peak_local_max(blurred_spot, footprint=footprint, exclude_border=False)
+    if len(local_maxi) > 1:
+        # Greedy suppression in descending intensity (peak_local_max returns that order)
+        tree = KDTree(local_maxi * np.asarray(sp))
+        neighbours = tree.query_ball_point(local_maxi * np.asarray(sp), r=min_dist_um, p=np.inf)
+        keep = np.ones(len(local_maxi), dtype=bool)
+        for i, nbrs in enumerate(neighbours):
+            if not keep[i]:
+                continue
+            for j in nbrs:
+                if j != i and np.max(np.abs((local_maxi[j] - local_maxi[i]) * sp)) < min_dist_um:
+                    keep[j] = False
+        local_maxi = local_maxi[keep]
 
     # local_maxi contains the coordinates of the peaks
     peaks = np.zeros_like(blurred_spot, dtype=bool)
@@ -108,12 +148,14 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
     Returns:
         np.ndarray: An image array with the thick z-slice operation applied.
     """
+    if operation not in ('max', 'average'):
+        raise ValueError(f"operation must be 'max' or 'average', got {operation!r}.")
+
     if pixel_sizes is None:
         warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
 
     if pixel_sizes is not None:
-        dim_keys = ['Z', 'Y', 'X']
-        pixel_size_axis = pixel_sizes.get(dim_keys[axis], 1.0)
+        pixel_size_axis = _pixel_sizes_to_spacing(pixel_sizes, nuclei_image.ndim)[axis]
         window_size = int(round(window_size / pixel_size_axis))
     else:
         window_size = int(window_size)
@@ -128,10 +170,12 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
     # Calculate the margin to adjust the slicing
     margin = window_size // 2
 
-    # Pad the image along the specified axis
+    # Pad the image along the specified axis. For 'max', pad with the image minimum so
+    # padding never wins over real (possibly negative) values at the edges.
     pad_width = [(0, 0)] * nuclei_image.ndim
     pad_width[axis] = (margin, margin)
-    padded_image = np.pad(nuclei_image, pad_width=pad_width, mode='constant', constant_values=0)
+    pad_value = np.min(nuclei_image) if operation == 'max' else 0
+    padded_image = np.pad(nuclei_image, pad_width=pad_width, mode='constant', constant_values=pad_value)
 
     # Initialize output image with zeros of the appropriate data type for the operation
     if operation == 'max':
@@ -176,17 +220,15 @@ def optimized_entire_labels_touching_mask(labels_data, mask, distance=10, pixel_
 
     # Expand labels
     if pixel_sizes is not None:
-        dim_keys = ['Z', 'Y', 'X'] if labels_data.ndim == 3 else ['Y', 'X']
-        spacing = tuple(pixel_sizes.get(dim, 1.0) for dim in dim_keys)
-        try:
-            dilated_labels_data = expand_labels(labels_data, distance=distance, spacing=spacing)
-        except TypeError:
+        spacing = _pixel_sizes_to_spacing(pixel_sizes, labels_data.ndim)
+        if 'spacing' not in inspect.signature(expand_labels).parameters:
             raise NotImplementedError(
                 "Anisotropic expansion requires scikit-image >= 0.21.0 for the `spacing` parameter. "
                 "Uniform pixel fallback causes severe structural distortion."
             )
+        dilated_labels_data = expand_labels(labels_data, distance=distance, spacing=spacing)
     else:
-        dilated_labels_data = expand_labels(labels_data, distance=int(distance))
+        dilated_labels_data = expand_labels(labels_data, distance=distance)
 
     # Find all labels that touch the dilated mask
     touching_labels_mask = np.isin(dilated_labels_data, labels_data) & (mask > 0)
@@ -213,10 +255,18 @@ def sample_intensity_around_points(image_3d, points_3d, diameter=5, pixel_sizes=
             If `pixel_sizes` is provided, this is assumed to be in physical units.
         pixel_sizes (dict, optional): Dictionary mapping dimension to pixel size, e.g., {'Z': 1.0, 'Y': 0.5, 'X': 0.5}.
 
+    The window along each axis is the odd number of pixels nearest to `diameter`
+    (diameter 3 px -> 3, 4 px -> 5, 5 px -> 5). Means are computed in float64.
+
     Returns:
         list: A list of sampled mean intensities for each point. Out-of-bounds points will have NaN.
     """
-    points_3d = np.asarray(points_3d)
+    points_3d = np.asarray(points_3d, dtype=np.float64)
+    if points_3d.ndim == 1 and points_3d.size in (0, image_3d.ndim):
+        # [] or a single flat point [z, y, x]
+        points_3d = points_3d.reshape(-1, image_3d.ndim)
+    if points_3d.ndim != 2 or points_3d.shape[1] != image_3d.ndim:
+        raise ValueError(f"points_3d must have shape (N, {image_3d.ndim}), got {points_3d.shape}.")
 
     # Heuristic warning for likely XYZ vs ZYX mismatch
     if len(points_3d) > 0 and image_3d.ndim == 3 and points_3d.ndim == 2 and points_3d.shape[1] == 3:
@@ -241,23 +291,23 @@ def sample_intensity_around_points(image_3d, points_3d, diameter=5, pixel_sizes=
 
     # Compute filter dimensions in pixel units cleanly
     if pixel_sizes is not None:
-        dim_keys = ['Z', 'Y', 'X'] if image_3d.ndim == 3 else ['Y', 'X']
-        spacing = [pixel_sizes.get(dim, 1.0) for dim in dim_keys]
+        spacing = _pixel_sizes_to_spacing(pixel_sizes, image_3d.ndim)
     else:
         spacing = [1.0] * image_3d.ndim
 
     filter_size = []
     for s in spacing:
-        # Calculate radius in pixels from physical radius (diameter / 2)
-        physical_radius = diameter / 2.0
-        pixel_radius = int(round(physical_radius / s))
+        # Diameter in pixels, rounded half up (round() is banker's rounding: 2.5 -> 2)
+        n = max(1, int(np.floor(diameter / s + 0.5)))
         # Window size must be odd to center perfectly on the coordinate point
-        filter_size.append(2 * pixel_radius + 1)
+        filter_size.append(n if n % 2 == 1 else n + 1)
 
     filter_size = tuple(filter_size)
 
-    # Use 'reflect' or 'nearest' to ensure boundary points are not diluted by zero-padding
-    filtered_image = uniform_filter(image_3d, size=filter_size, mode='reflect')
+    # Use 'reflect' or 'nearest' to ensure boundary points are not diluted by zero-padding.
+    # Filter in float64: uniform_filter outputs the input dtype, so integer images
+    # had their means truncated (Poisson(5) uint16 -> ~3.9).
+    filtered_image = uniform_filter(image_3d, size=filter_size, mode='reflect', output=np.float64)
 
     # Vectorize point sampling:
     # Round points and ensure they are within valid image bounds
@@ -330,7 +380,10 @@ def sample_intensity_along_surface_normals(
     normals_flat = physical_normals.reshape(-1, 3)
 
     # 4. Create sampling coordinates along the normal in physical space
-    offsets = np.linspace(-thickness / 2.0, thickness / 2.0, num_steps)
+    if num_steps == 1:
+        offsets = np.zeros(1)  # linspace would put the only sample at -thickness/2
+    else:
+        offsets = np.linspace(-thickness / 2.0, thickness / 2.0, num_steps)
     physical_sampling_coords = physical_pts[:, np.newaxis, :] + (normals_flat[:, np.newaxis, :] * offsets[np.newaxis, :, np.newaxis])
 
     # 5. Convert back to pixel space for interpolation
@@ -356,31 +409,24 @@ def _resolve_spacing(
 ) -> tuple[float, ...]:
     """
     Resolves physical pixel spacing from either `pixel_sizes` or legacy `spacing` argument.
-    Emits UserWarning if neither is provided.
+    Emits UserWarning if neither is provided. Always called from a public function,
+    so warnings point at that function's caller.
     """
     if pixel_sizes is not None:
-        if isinstance(pixel_sizes, dict):
-            dim_keys = ['Z', 'Y', 'X'][-ndim:]
-            return tuple(float(pixel_sizes.get(k, 1.0)) for k in dim_keys)
-        return tuple(float(s) for s in pixel_sizes)
+        return _pixel_sizes_to_spacing(pixel_sizes, ndim, stacklevel=3)
 
     if spacing is not None:
-        if isinstance(spacing, dict):
-            dim_keys = ['Z', 'Y', 'X'][-ndim:]
-            return tuple(float(spacing.get(k, 1.0)) for k in dim_keys)
-        return tuple(float(s) for s in spacing)
+        return _pixel_sizes_to_spacing(spacing, ndim, stacklevel=3)
 
-    warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
+    warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=3)
     return (1.0,) * ndim
 
 def _ensure_pixel_size_array(pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None) -> np.ndarray:
-    """Helper to convert dict or list to [Z, Y, X] numpy array."""
+    """Helper to convert dict or list to [Z, Y, X] numpy array (called from public functions)."""
     if pixel_sizes is None:
-        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
+        warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=3)
         return np.array([1.0, 1.0, 1.0], dtype=np.float64)
-    if isinstance(pixel_sizes, dict):
-        return np.array([pixel_sizes.get('Z', 1.0), pixel_sizes.get('Y', 1.0), pixel_sizes.get('X', 1.0)], dtype=np.float64)
-    return np.array(pixel_sizes, dtype=np.float64)
+    return np.array(_pixel_sizes_to_spacing(pixel_sizes, 3, stacklevel=3), dtype=np.float64)
 
 def create_ellipsoid_struct(
     radius_um: float,
@@ -427,19 +473,17 @@ def generate_morphological_surface_mask(
     slices = tuple(slice(a, b) for a, b in zip(lo, hi))
     cropped_binary = binary_mask[slices]
 
-    # 2. Downscale
-    if downscale_factor > 1:
-        downscaled_shape = tuple(
-            max(1, int(np.ceil(s / downscale_factor)))
-            for s in cropped_binary.shape
-        )
-        downscaled_binary = resize(
-            cropped_binary,
-            output_shape=downscaled_shape,
-            order=0,
-            preserve_range=True,
-            anti_aliasing=False
-        ).astype(bool)
+    # 2. Downscale by block max-pooling (a block is foreground if any voxel is), so the
+    # envelope computed at low resolution still covers every foreground voxel.
+    # Nearest-neighbour decimation dropped small objects (17% of voxels at f=2).
+    f = int(downscale_factor)
+    if f > 1:
+        pad = [(0, (-s) % f) for s in cropped_binary.shape]
+        padded = np.pad(cropped_binary, pad, mode='constant', constant_values=False)
+        blocks_shape = []
+        for s in padded.shape:
+            blocks_shape += [s // f, f]
+        downscaled_binary = padded.reshape(blocks_shape).any(axis=tuple(range(1, 2 * padded.ndim, 2)))
         effective_spacing = tuple(s * downscale_factor for s in sp)
     else:
         downscaled_binary = cropped_binary
@@ -475,23 +519,17 @@ def generate_morphological_surface_mask(
     downscaled_envelope = downscaled_envelope[unpad_slices]
     downscaled_surface = downscaled_surface[unpad_slices]
 
-    # 5. Upscale back to cropped dimensions
-    if downscale_factor > 1:
-        cropped_envelope = resize(
-            downscaled_envelope,
-            output_shape=cropped_binary.shape,
-            order=0,
-            preserve_range=True,
-            anti_aliasing=False
-        ).astype(bool)
-
-        cropped_surface = resize(
-            downscaled_surface,
-            output_shape=cropped_binary.shape,
-            order=0,
-            preserve_range=True,
-            anti_aliasing=False
-        ).astype(bool)
+    # 5. Upscale back to cropped dimensions: block i covers voxels [i*f, (i+1)*f)
+    if f > 1:
+        crop = tuple(slice(0, s) for s in cropped_binary.shape)
+        cropped_envelope = downscaled_envelope
+        cropped_surface = downscaled_surface
+        for ax in range(cropped_binary.ndim):
+            cropped_envelope = np.repeat(cropped_envelope, f, axis=ax)
+            cropped_surface = np.repeat(cropped_surface, f, axis=ax)
+        # The envelope is a closing, so it must contain the input
+        cropped_envelope = cropped_envelope[crop] | cropped_binary
+        cropped_surface = cropped_surface[crop]
     else:
         cropped_envelope = downscaled_envelope
         cropped_surface = downscaled_surface
@@ -511,10 +549,14 @@ def estimate_inter_label_distance(
     spacing: Optional[Union[Iterable[float], Dict[str, float]]] = None,
     sample_size: int = 500,
     k_nearest: int = 2,
-    pixel_sizes: Optional[Union[Dict[str, float], Iterable[float]]] = None
+    pixel_sizes: Optional[Union[Dict[str, float], Iterable[float]]] = None,
+    seed: Optional[int] = None
 ) -> dict[str, float]:
     """
     Rapidly estimates characteristic inter-nucleus spacing in physical units (µm).
+
+    Distances are from up to `sample_size` randomly chosen labels (`seed` makes the
+    choice reproducible) to their nearest neighbours among *all* labels.
     """
     sp = _resolve_spacing(spacing, pixel_sizes, ndim=labels.ndim)
 
@@ -530,23 +572,26 @@ def estimate_inter_label_distance(
             "recommended_closing_um": float(np.round(1.5 * min_spacing, 1))
         }
 
-    # 1. Subsample label IDs
-    if len(unique_ids) > sample_size:
-        sample_ids = np.random.choice(unique_ids, size=sample_size, replace=False)
-    else:
-        sample_ids = unique_ids
-
-    # 2. Fast centroid computation (passes labels directly to avoid temporary boolean arrays)
+    # 1. Centroids of all labels: one O(voxels) pass, whatever the number of labels.
+    # The neighbours must come from all labels; within a random subsample the nearest
+    # neighbour is farther away (2.2x the true spacing for 27,000 labels, 500 sampled).
     centroids_vox = ndimage.center_of_mass(
         labels,
         labels=labels,
-        index=sample_ids
+        index=unique_ids
     )
-    centroids_um = np.asarray(centroids_vox, dtype=np.float64) * np.asarray(sp, dtype=np.float64)
+    centroids_um = np.asarray(centroids_vox, dtype=np.float64).reshape(len(unique_ids), -1) * np.asarray(sp, dtype=np.float64)
 
-    # 3. KDTree nearest-neighbor query
+    # 2. Subsample the query points only
+    if len(unique_ids) > sample_size:
+        rng = np.random.default_rng(seed)
+        query_um = centroids_um[rng.choice(len(unique_ids), size=sample_size, replace=False)]
+    else:
+        query_um = centroids_um
+
+    # 3. KDTree nearest-neighbor query (k=1 is the point itself)
     tree = KDTree(centroids_um)
-    distances, _ = tree.query(centroids_um, k=k_nearest)
+    distances, _ = tree.query(query_um, k=k_nearest)
     nn_dists_um = distances[:, k_nearest - 1]
 
     median_d = float(np.percentile(nn_dists_um, 50))
@@ -625,6 +670,11 @@ def fit_plane_ransac(
 
 def generate_plane_basis(normal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Generates an orthonormal basis (u, v) perpendicular to the normal vector."""
+    normal = np.asarray(normal, dtype=np.float64)
+    norm = np.linalg.norm(normal)
+    if norm == 0:
+        raise ValueError("normal must be non-zero.")
+    normal = normal / norm
     min_axis = np.argmin(np.abs(normal))
     ortho_choice = np.zeros(3)
     ortho_choice[min_axis] = 1.0
@@ -647,10 +697,21 @@ def sample_volume_plane(
     offset_step_um: float = 1.0
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """
-    Samples an anisotropic 3D (Z, Y, X) volume.
+    Samples an anisotropic 3D (Z, Y, X) volume on the plane through `p0_phys` with
+    normal `normal_phys` (any length; it is normalised).
+
+    Returns the sampled plane(s), shape (u_res, v_res) or (2*num_offsets+1, u_res, v_res),
+    and their pixel sizes under the ZYX convention: {'Z': offset step, 'Y': u step,
+    'X': v step}. method='cubic' interpolates (spline prefiltered); 'linear' is trilinear.
     """
     if p0_phys is None or normal_phys is None:
         raise ValueError("p0_phys and normal_phys must be provided.")
+
+    normal_phys = np.asarray(normal_phys, dtype=np.float64)
+    normal_norm = np.linalg.norm(normal_phys)
+    if normal_norm == 0:
+        raise ValueError("normal_phys must be non-zero.")
+    normal_phys = normal_phys / normal_norm
 
     pixel_size = _ensure_pixel_size_array(pixel_sizes)
     z_dim, y_dim, x_dim = volume.shape
@@ -688,6 +749,31 @@ def sample_volume_plane(
     # map_coordinates requires an integer order (1 for linear, 3 for cubic)
     spline_order = 3 if method == 'cubic' else 1
 
+    origin = np.zeros(3)
+    if spline_order == 3:
+        # Cubic B-spline *interpolation* needs prefiltered coefficients; without them
+        # map_coordinates smooths (std of a random volume 0.27 -> 0.10). Compute them
+        # once for all offsets, the same way map_coordinates(prefilter=True) would, but
+        # only on the sub-volume the planes touch. The prefilter's influence decays as
+        # 0.268^k voxels, so a 12-voxel margin makes the crop exact to ~1e-7.
+        corners = np.array([
+            p0_phys + u * u_dir + v * v_dir + d * normal_phys
+            for u in u_range_um for v in v_range_um for d in (offsets[0], offsets[-1])
+        ]) / pixel_size
+        lo = np.clip(np.floor(corners.min(axis=0)).astype(int) - 12, 0, volume.shape)
+        hi = np.clip(np.ceil(corners.max(axis=0)).astype(int) + 13, 0, volume.shape)
+        if np.any(hi <= lo):
+            # The planes miss the volume entirely: everything samples to cval
+            lo, hi = np.zeros(3, dtype=int), np.minimum(np.ones(3, dtype=int), volume.shape)
+        origin = lo.astype(np.float64)
+        source = ndimage.spline_filter(
+            volume[tuple(slice(a, b) for a, b in zip(lo, hi))],
+            order=3, output=np.float32, mode='constant'
+        )
+        is_int = np.issubdtype(volume.dtype, np.integer)
+    else:
+        source = volume
+
     # 4. Extract slices directly to the pre-allocated array
     for i, d in enumerate(offsets):
         # Calculate physical coordinates
@@ -698,22 +784,32 @@ def sample_volume_plane(
         # Convert physical metrics to fractional voxel indices
         # map_coordinates operates on dimensions: (3, N)
         coords = np.stack([
-            (phys_z / sz).ravel(),
-            (phys_y / sy).ravel(),
-            (phys_x / sx).ravel()
+            (phys_z / sz).ravel() - origin[0],
+            (phys_y / sy).ravel() - origin[1],
+            (phys_x / sx).ravel() - origin[2]
         ], axis=0)
 
-        # Sample directly into the assigned matrix slice
-        # The 'output' kwarg forces memory mapping straight to the integer dtype
-        sampled_volume[i] = map_coordinates(
-            volume,
-            coords,
-            order=spline_order,
-            mode='constant',
-            cval=0,
-            output=volume.dtype,
-            prefilter=False # Avoids calculating spline coefficients across the entire input volume for order=3
-        ).reshape(u_res, v_res)
+        if spline_order == 3:
+            plane = map_coordinates(
+                source, coords, order=3, mode='constant', cval=0,
+                output=np.float32, prefilter=False
+            ).reshape(u_res, v_res)
+            if is_int:
+                info = np.iinfo(volume.dtype)
+                plane = np.clip(np.rint(plane), info.min, info.max)
+            sampled_volume[i] = plane
+        else:
+            # Sample directly into the assigned matrix slice
+            # The 'output' kwarg forces memory mapping straight to the integer dtype
+            sampled_volume[i] = map_coordinates(
+                source,
+                coords,
+                order=1,
+                mode='constant',
+                cval=0,
+                output=volume.dtype,
+                prefilter=False
+            ).reshape(u_res, v_res)
 
         # Force clear intermediates for massive planes
         del phys_z, phys_y, phys_x, coords
@@ -726,5 +822,6 @@ def sample_volume_plane(
     spacing_v = (v_range_um[1] - v_range_um[0]) / max(1, v_res - 1)
     spacing_n = offset_step_um if num_offsets > 0 else 0.0
 
-    output_pixel_sizes = {'X': spacing_u, 'Y': spacing_v, 'Z': spacing_n}
+    # Axis 0 of each plane is u, axis 1 is v; under the ZYX convention that is Y, X
+    output_pixel_sizes = {'Z': spacing_n, 'Y': spacing_u, 'X': spacing_v}
     return sampled_volume, output_pixel_sizes

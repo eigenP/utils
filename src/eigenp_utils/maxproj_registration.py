@@ -35,13 +35,14 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
     :return: A new NumPy array with the elements shifted and the specified fill value in the vacant positions
     """
     # Ensure shifts is a list or tuple of integers, or a single integer
-    if isinstance(shifts, int):
-        shifts = [shifts] * arr.ndim
-    elif isinstance(shifts, (list, tuple)):
+    if isinstance(shifts, (int, np.integer)):
+        shifts = [int(shifts)] * arr.ndim
+    elif isinstance(shifts, (list, tuple, np.ndarray)):
         if len(shifts) != arr.ndim:
             raise ValueError("Length of shifts must be equal to the number of dimensions in the array.")
-        if not all(isinstance(shift, int) for shift in shifts):
+        if not all(isinstance(shift, (int, np.integer)) for shift in shifts):
             raise TypeError("All shift values must be integers.")
+        shifts = [int(shift) for shift in shifts]
     else:
         raise TypeError("Shifts must be a single integer or a list/tuple of integers.")
 
@@ -115,6 +116,12 @@ def estimate_drift(frame1, frame2, return_ccm = False):
     frame1_max_proj_y = np.max(frame1, axis = 1)
     frame2_max_proj_y = np.max(frame2, axis = 1)
 
+    # Remove the background pedestal before windowing (see _remove_baseline)
+    frame1_max_proj_x = _remove_baseline(frame1_max_proj_x)
+    frame2_max_proj_x = _remove_baseline(frame2_max_proj_x)
+    frame1_max_proj_y = _remove_baseline(frame1_max_proj_y)
+    frame2_max_proj_y = _remove_baseline(frame2_max_proj_y)
+
     # Apply 1D Tukey window to reduce FFT edge artifacts
     # Use alpha=0.1 (taper 5% on each side)
     # This is much less aggressive than the previous 33% taper
@@ -137,11 +144,14 @@ def estimate_drift(frame1, frame2, return_ccm = False):
     # frame1_max_proj_y = gaussian_filter1d(frame1_max_proj_y, sigma = 3, radius = 5)
     # frame2_max_proj_y = gaussian_filter1d(frame2_max_proj_y, sigma = 3, radius = 5)
 
+    # Plain (unnormalised) cross-correlation: see estimate_shift_1d_iterative
     shift_x, error, diffphase = phase_cross_correlation(frame1_max_proj_x,
-                                                      frame2_max_proj_x, upsample_factor=100)
+                                                      frame2_max_proj_x, upsample_factor=100,
+                                                      normalization=None)
 
     shift_y, error, diffphase = phase_cross_correlation(frame1_max_proj_y,
-                                                      frame2_max_proj_y, upsample_factor=100)
+                                                      frame2_max_proj_y, upsample_factor=100,
+                                                      normalization=None)
 
     shift = np.array((shift_x[0], shift_y[0]))
 
@@ -181,22 +191,47 @@ def estimate_drift(frame1, frame2, return_ccm = False):
     else:
         return shift
 
-def estimate_shift_1d_iterative(ref_proj, moving_proj, window, max_iter=3, tol=0.01):
+def _remove_baseline(profile):
+    """
+    Subtract a projection's background level (its minimum).
+
+    A camera offset or background is a constant pedestal in every max projection.
+    Multiplied by the (stationary) window it becomes a large feature shared by both
+    profiles at zero shift, which pulls the correlation peak towards zero (with phase
+    correlation, offset 500 read a shift of +6.7 as 0). The minimum (not the median)
+    leaves no negative pedestal on zero-background data. Integers become float32.
+    """
+    profile = np.asarray(profile)
+    if not np.issubdtype(profile.dtype, np.floating):
+        profile = profile.astype(np.float32)
+    return profile - profile.min()
+
+
+def estimate_shift_1d_iterative(ref_proj, moving_proj, window=None, max_iter=3, tol=0.01):
     """
     Estimates 1D shift using iterative windowed cross-correlation to eliminate stationary window bias.
 
+    0. Remove each profile's baseline (minimum), so a background offset does not bias the shift.
     1. Estimate shift d.
     2. Shift moving signal by -d (aligning with ref).
     3. Re-estimate residual shift.
     4. Repeat until convergence.
+
+    `window=None` uses no window (all ones).
     """
+    ref_proj = _remove_baseline(ref_proj)
+    moving_proj = _remove_baseline(moving_proj)
+    if window is None:
+        window = np.ones_like(ref_proj)
+
     current_shift = 0.0
 
     for _ in range(max_iter):
         shift_val = current_shift
 
         # Apply shift to align moving with ref
-        # Using cubic interpolation (order=3) for accuracy
+        # Using cubic interpolation (order=3) for accuracy; cval=0 is the baseline
+        # level after _remove_baseline, so no artificial step is shifted in
         if abs(shift_val) > 0.001:
             aligned_mov = shift(moving_proj, shift_val, order=3, mode='constant', cval=0)
         else:
@@ -205,7 +240,12 @@ def estimate_shift_1d_iterative(ref_proj, moving_proj, window, max_iter=3, tol=0
         # Estimate residual shift
         # We multiply by window here. The window is stationary (matched to ref).
         # Since aligned_mov is aligned to ref, the window is correctly placed for both.
-        res, _, _ = phase_cross_correlation(ref_proj * window, aligned_mov * window, upsample_factor=100)
+        # Plain cross-correlation (normalization=None), not phase correlation: whitening
+        # the spectrum gives the noise-dominated high frequencies of a max projection as
+        # much weight as the signal, so Poisson noise produced spurious peaks once the
+        # background pedestal (which had anchored the peak at zero) is removed.
+        res, _, _ = phase_cross_correlation(ref_proj * window, aligned_mov * window, upsample_factor=100,
+                                            normalization=None)
         res = res[0]
 
         current_shift += res
@@ -245,9 +285,10 @@ def compute_drift_trajectory(
     wins = windows if windows else [None] * num_dims
     limits = shape_limit if shape_limit else [1e9] * num_dims
 
-    # Helper to clamp drift steps
+    # Helper to reject implausible drift steps (larger than 1/5 of the axis) as outliers.
+    # The limit is at least 1 px, so short axes (e.g. Z < 5) are still corrected.
     def clamp(val, limit):
-        if abs(val) > limit:
+        if abs(val) > max(limit, 1):
             return 0.0
         return val
 
@@ -457,6 +498,8 @@ def apply_drift_correction(
             )
 
             if dtype_min is not None and dtype_max is not None:
+                # Round, don't truncate, when storing integers (truncation biased values ~0.5 DN low)
+                np.rint(shifted_slice, out=shifted_slice)
                 np.clip(shifted_slice, dtype_min, dtype_max, out=shifted_slice)
 
             corrected_data[t] = shifted_slice

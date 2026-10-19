@@ -29,10 +29,10 @@ def extract_surface(
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
 
     # --- 1. HANDLE ANISOTROPIC FACTORS ---
-    if isinstance(downscale_factor, int):
-        s_tup = (downscale_factor, downscale_factor, downscale_factor)
+    if isinstance(downscale_factor, (int, np.integer)):
+        s_tup = (int(downscale_factor),) * 3
     else:
-        s_tup = tuple(downscale_factor)
+        s_tup = tuple(int(f) for f in downscale_factor)
 
     sz, sy, sx = s_tup
 
@@ -151,7 +151,7 @@ def extract_surface(
     val_at = img_proc[z_int, y_idx, x_idx].astype(np.float32)
 
     # Values at z_int - 1
-    # Clip indices to be at least 0. If z_int=0, we just use index 0 twice (delta=0).
+    # Clip indices to be at least 0. z_int=0 has no crossing to interpolate (handled below).
     z_prev = np.maximum(z_int - 1, 0)
     val_prev = img_proc[z_prev, y_idx, x_idx].astype(np.float32)
 
@@ -167,10 +167,13 @@ def extract_surface(
     # Avoid division by zero
     denom[denom == 0] = 1.0
 
-    delta = (thresh - val_prev) / denom
-
-    # If z_int was 0, z_prev is 0, val_at == val_prev, delta=0. Refined z=0. Correct.
-    z_refined = z_prev.astype(np.float32) + delta
+    # For z_int > 0, val_prev <= thresh < val_at, so delta is in [0, 1].
+    # For z_int == 0 the column is foreground from the first slice: z_prev == z_int and
+    # val_prev == val_at > thresh, so the formula would give delta = thresh - val_at
+    # (e.g. -150): a large negative height that the upscaling then smears into
+    # neighbouring columns. There the surface is simply at z = 0.
+    delta = np.where(z_int > 0, np.clip((thresh - val_prev) / denom, 0.0, 1.0), 0.0)
+    z_refined = (z_prev.astype(np.float32) + delta).astype(np.float32)
 
     del img_proc, img_mask
 
@@ -253,28 +256,17 @@ def extract_surface(
 
         # Generate Full Resolution Grid
         Z, Y, X = image.shape
-        # We only need to interpolate up to the original image size
-        # Generating grid only for relevant area saves time if padding was huge (unlikely here)
-        gy = np.arange(Y)
-        gx = np.arange(X)
-
-        # Optimization: Pass tuple of coordinates to save memory (requires scipy >= 1.9)
-        # Use try-except to fallback for older scipy
-        try:
-            surface_z_full = interp_z((gy, gx))
-            mask_full = interp_mask((gy, gx)) > 0.5
-
-            # Check if output is 1D (older scipy treating tuple as points)
-            if surface_z_full.ndim == 1 and Y > 1 and X > 1:
-                 raise ValueError("Scipy returned 1D array for grid interpolation")
-
-        except (TypeError, ValueError):
-            # Fallback for older scipy (or if tuple is not supported)
-            GY, GX = np.meshgrid(gy, gx, indexing='ij')
-            # Stack to create (Y, X, 2) array for interpolator
-            points = np.stack([GY, GX], axis=-1)
-            surface_z_full = interp_z(points)
-            mask_full = interp_mask(points) > 0.5
+        # Open grids broadcast to (Y, X); a plain (gy, gx) tuple is read as a list of
+        # points, which fails unless Y == X (and then samples only the diagonal).
+        gy = np.arange(Y)[:, None]
+        gx = np.arange(X)[None, :]
+        surface_z_full = interp_z((gy, gx))
+        # Block centres start half a block in, so the outer rim of the image lies outside
+        # the mask grid; clamp onto the grid (nearest block) instead of filling with 0.
+        mask_full = interp_mask((
+            np.clip(gy, grid_y[0], grid_y[-1]),
+            np.clip(gx, grid_x[0], grid_x[-1])
+        )) > 0.5
     else:
         Z, Y, X = image.shape
         surface_z_full = np.zeros((Y, X), dtype=np.float32)
@@ -350,7 +342,7 @@ def pad_z_slices(arr,
     pad_before : bool, optional
         If True, pad before the existing data (default True).
     pad_after : bool, optional
-        If True, pad after the existing data (default True).
+        If True, pad after the existing data (default False).
 
     Returns
     -------
@@ -441,7 +433,7 @@ def expand_surface_z(surface: np.ndarray, thickness: int, in_place: bool = False
     This is usually faster and more memory-efficient than full vectorization.
     """
     if thickness <= 0:
-        return surface
+        return surface if in_place else surface.copy()
 
     Z, _, _ = surface.shape
     z0, y0, x0 = np.nonzero(surface)
@@ -590,15 +582,22 @@ def dask_extract_surface():
     Run surface extraction DASK (memory safe) vignette
     =====================================================================
 
-    # Calculate overlap depth based on your parameters: ceil(4 * sigma) * downscale_factor
-    # For sigma=4.0 and downscale=4, this is ceil(16) * 4 = 64 pixels
+    # NOTE: each chunk is normalised, Otsu-thresholded and component-filtered on its own,
+    # so chunks without tissue get spurious surfaces and brightness gradients give height
+    # steps at chunk seams. Prefer a single call on the whole volume when it fits in memory.
+
+    # Overlap: the Gaussian (truncate=4) reaches ceil(4 * sigma) reduced pixels, i.e.
+    # ceil(4 * sigma) * factor full-resolution pixels (sigma=4.0, XY factor 8 -> 128).
+    # The value below equals that (ceil(8 * 4.0) * 4 = 128); recompute it if sigma or
+    # _BLOCK_SIZE change.
     overlap_depth = int(np.ceil(8 * 4.0) * 4)
 
     # da_image = img_raw.isel(S=0, T=0, C=0).data
 
     # 2. Slice and explicitly chunk the Xarray object to convert it to Dask backend
     # Replace 'Z', 'Y', 'X' with your actual spatial dimension names
-    # Axis 0 (Z/Frame) has 0 overlap; chunking it at 1 optimizes blockwise handling
+    # Axis 0 (Z) must stay unchunked ({"Z": -1}) with 0 overlap: extract_surface needs
+    # each full Z column (chunking Z at 1 leaves ~99% of columns without a surface)
 
     chunked_xr = img_raw.isel(S=0, T=0, C=0).chunk(
         {"Z": -1, "Y": 1024, "X": 1024}
