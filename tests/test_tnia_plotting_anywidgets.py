@@ -1829,3 +1829,450 @@ def test_top_level_import_does_not_require_skimage():
     """)
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
+
+
+# =========================================
+# Bug-scan batch 4: slab indexing, density mode, one rotation convention
+# =========================================
+
+def _fig_frac(fig, ax, x, y):
+    """Data point on ``ax`` -> widget event coordinates (figure fraction, top-left origin)."""
+    disp = ax.transData.transform((x, y))
+    fx, fy = fig.transFigure.inverted().transform(disp)
+    return float(fx), float(1.0 - fy)
+
+
+def _rendered_centroid(ax):
+    """Intensity-weighted centroid of the image on ``ax``, in its data (physical) units."""
+    im = ax.images[0]
+    arr = np.asarray(im.get_array(), dtype=float)
+    if arr.ndim == 3:
+        arr = arr[..., :3].sum(axis=-1)
+    arr = np.nan_to_num(arr)
+    x0, x1, y0, y1 = im.get_extent()  # (left, right, bottom, top) with top=0
+    H, W = arr.shape
+    xs = x0 + (np.arange(W) + 0.5) * (x1 - x0) / W
+    ys = y1 + (np.arange(H) + 0.5) * (y0 - y1) / H
+    tot = arr.sum()
+    return float((arr.sum(axis=0) * xs).sum() / tot), float((arr.sum(axis=1) * ys).sum() / tot)
+
+
+def test_slab_end_is_inclusive_so_last_plane_is_projected():
+    """The range slider's end is inclusive, so the last plane is part of the slab.
+
+    Strategy: put signal only in the last z-plane. A 'full' projection
+    (thickness beyond the volume) and an explicit [0, Z-1] range must both show
+    it in the XY panel; so must the one-plane range [Z-1, Z-1].
+
+    Expected outcome: the XY panel's maximum is the signal value in all three
+    cases (it used to be 0: the end index was treated as exclusive).
+    """
+    Z, Y, X = 6, 16, 16
+    vol = np.zeros((Z, Y, X), dtype=np.float32)
+    vol[-1, 8, 8] = 7.0
+
+    w = show_zyx_max_slice_interactive(vol, slabs_thickness=(1000, 1000, 1000))
+    for z_start, z_end in [(None, None), (0, Z - 1), (Z - 1, Z - 1)]:
+        if z_start is not None:
+            w.z_start, w.z_end = z_start, z_end
+        fig = w._render()
+        try:
+            assert fig.axXY.images[0].get_array().max() == pytest.approx(7.0), (z_start, z_end)
+        finally:
+            plt.close(fig)
+
+
+def test_scatter_density_ids_with_single_colormap_name():
+    """Integer ids coloured by one colormap name render in density mode too.
+
+    Strategy: 4 cluster ids with colormap='viridis' (points mode samples one
+    colour per id from the colormap).
+
+    Expected outcome: construction succeeds (it raised IndexError) and the four
+    clusters are drawn in four different colours.
+    """
+    rng = np.random.default_rng(0)
+    n = 4000
+    ids = np.repeat(np.arange(4), n // 4)
+    X = ids * 25 + rng.uniform(0, 10, n)
+    Y = rng.uniform(0, 100, n)
+    Z = rng.uniform(0, 10, n)
+    w = show_zyx_max_scatter_interactive((Z, Y, X), channels=ids, colormap='viridis', render='density',
+                                         slabs_thickness=(1000, 1000, 1000))
+    fig = w._render()
+    try:
+        im = fig.axXY.images[0]
+        rgb = np.asarray(im.get_array())[..., :3]
+        W = rgb.shape[1]
+        left, right = im.get_extent()[:2]
+        # cluster c occupies data x in [25c, 25c + 10]; the panel starts at xmin - 0.5
+        col_of = lambda x: int((x - (w.xmin - 0.5) - left) / (right - left) * W)
+        cols = [rgb[:, col_of(c * 25 + 5)].max(axis=0) for c in range(4)]
+        for i in range(4):
+            for j in range(i + 1, 4):
+                assert np.abs(cols[i] - cols[j]).max() > 0.05, (i, j, cols)
+    finally:
+        plt.close(fig)
+
+
+def test_scatter_density_panels_scale_bar_and_hover_use_data_units():
+    """Density panels are drawn in data units, like points mode.
+
+    Strategy: X, Y in [0, 1000], Z in [0, 20], isotropic pixels. Check the
+    physical extent of each panel, that the scale bar spans the length it is
+    labelled with, and that hover sync ('C') at data (750, 250) on the XY panel
+    selects that position.
+
+    Expected outcome: XY spans ~1001 x 1001, XZ ~1001 x 21, ZY ~21 x 1001; the
+    bar spans as many data units as its label says; hover gives x_s, y_s within one bin (2 units)
+    of (750, 250). Before the fix every panel was a 512 x 512 bin square.
+    """
+    rng = np.random.default_rng(1)
+    n = 20000
+    X = rng.uniform(0, 1000, n); Y = rng.uniform(0, 1000, n); Z = rng.uniform(0, 20, n)
+    X[0], Y[0], Z[0] = 0, 0, 0
+    w = show_zyx_max_scatter_interactive((Z, Y, X), render='density', pixel_sizes=(1, 1, 1))
+    fig = w._render()
+    try:
+        def span(ax):
+            return abs(np.diff(ax.get_xlim())[0]), abs(np.diff(ax.get_ylim())[0])
+        np.testing.assert_allclose(span(fig.axXY), (1001, 1001), rtol=1e-6)
+        np.testing.assert_allclose(span(fig.axXZ), (1001, 21), rtol=1e-6)
+        np.testing.assert_allclose(span(fig.axZY), (21, 1001), rtol=1e-6)
+
+        label = [t.get_text() for t in fig.axBar.texts][0]
+        bar = fig.axXY.collections[-1].get_segments()[0]
+        bar_units = (bar[1][0] - bar[0][0]) * span(fig.axXY)[0]
+        assert bar_units == pytest.approx(float(label.split()[0]), rel=1e-6)
+
+        # density panels start at the data box edge, min - 0.5
+        hx, hy = _fig_frac(fig, fig.axXY, 750 - w.xmin + 0.5, 250 - w.ymin + 0.5)
+    finally:
+        plt.close(fig)
+    w.hover_coords = {'plane': 'xy', 'x': hx, 'y': hy}
+    assert abs(w.x_s - (750 - w.xmin)) <= 2 and abs(w.y_s - (250 - w.ymin)) <= 2, (w.x_s, w.y_s)
+
+
+def test_scatter_density_bin_colour_encodes_value_not_sum():
+    """A density bin shows the value of its points, not their sum.
+
+    Strategy: 50 coincident points of value 0.1 and one point of value 1.0
+    elsewhere (vmax=1). Points mode draws them at 10% and 100%.
+
+    Expected outcome: the 0.1 bin is at ~10% brightness and the 1.0 bin at full
+    brightness (both used to be white).
+    """
+    X = np.r_[np.full(50, 20.0), 80.0, 0.0, 99.0]
+    Y = np.r_[np.full(50, 20.0), 80.0, 0.0, 99.0]
+    Z = np.zeros_like(X)
+    vals = np.r_[np.full(50, 0.1), 1.0, 0.0, 0.0]
+    w = show_zyx_max_scatter_interactive((Z, Y, X), channels=vals, render='density', bins=100,
+                                         vmin=0.0, vmax=1.0)
+    fig = w._render()
+    try:
+        rgb = np.asarray(fig.axXY.images[0].get_array())[..., :3]
+        assert rgb[20, 20].max() == pytest.approx(0.1, abs=0.02)
+        assert rgb[80, 80].max() == pytest.approx(1.0, abs=0.02)
+    finally:
+        plt.close(fig)
+
+
+def test_opacity_of_one_channel_does_not_fade_composites():
+    """Per-channel opacity is baked into composites, not applied globally.
+
+    Strategy: (a) show_zyx with a pre-composited RGB image and a list opacity;
+    (b) scatter density with two continuous channels where channel 0 is hidden
+    (opacity 0) and channel 1 fully opaque.
+
+    Expected outcome: no global alpha on the image (it was channel 0's value),
+    and channel 1 is visible in the density composite.
+    """
+    rgb = np.random.default_rng(2).uniform(0, 1, (8, 8, 3)).astype(np.float32)
+    fig = show_zyx(rgb, rgb, rgb, opacity=[0.2, 1.0])
+    try:
+        assert fig.axXY.images[0].get_alpha() is None
+    finally:
+        plt.close(fig)
+
+    rng = np.random.default_rng(3)
+    n = 2000
+    X, Y, Z = rng.uniform(0, 50, n), rng.uniform(0, 50, n), rng.uniform(0, 5, n)
+    a, b = rng.uniform(0, 1, n), rng.uniform(0, 1, n)
+    w = show_zyx_max_scatter_interactive((Z, Y, X), channels=[a, b], render='density',
+                                         opacity=[0.0, 1.0], slabs_thickness=(1000, 1000, 1000))
+    fig = w._render()
+    try:
+        im = fig.axXY.images[0]
+        assert im.get_alpha() in (None, 1.0)
+        assert np.asarray(im.get_array())[..., 1].max() > 0.5  # lime channel present
+    finally:
+        plt.close(fig)
+
+
+def test_rotation_sense_is_the_same_for_images_and_points():
+    """rotate_view turns images and scatter points the same way.
+
+    Strategy: an object 35 units right of the XY centre, rotate_view=(90, 0, 0).
+    Locate it in the image widget (rendered centroid) and in the scatter widget
+    in points and density mode. Then press 'C' on the points-mode marker.
+
+    Expected outcome: all three put it above the centre (counter-clockwise on
+    screen); hover sync recovers x=85, y=50. Points mode used to rotate the
+    other way and its hover inverse disagreed with its own drawing.
+    """
+    vol = np.zeros((1, 101, 101), dtype=np.float32)
+    vol[0, 50, 85] = 1.0
+    w_img = show_zyx_max_slice_interactive(vol, rotate_view=(90, 0, 0))
+    fig = w_img._render()
+    try:
+        cx_img, cy_img = _rendered_centroid(fig.axXY)
+        centre = np.mean(fig.axXY.get_ylim())
+        assert cy_img < centre - 30
+    finally:
+        plt.close(fig)
+
+    X = np.array([0.0, 100.0, 85.0]); Y = np.array([0.0, 100.0, 50.0]); Z = np.zeros(3)
+    for render in ('points', 'density'):
+        w = show_zyx_max_scatter_interactive((Z, Y, X), render=render, rotate_view=(90, 0, 0), bins=101,
+                                             slabs_thickness=(1000, 1000, 1000))
+        fig = w._render()
+        try:
+            centre_y = np.mean(fig.axXY.get_ylim())
+            if render == 'points':
+                pts = np.vstack([c.get_offsets() for c in fig.axXY.collections if len(c.get_offsets())])
+                # The two box corners end up left/right of centre; the marker is
+                # the point closest to the centre column.
+                marker = pts[np.argmin(np.abs(pts[:, 0] - np.mean(fig.axXY.get_xlim())))]
+                assert marker[1] < centre_y - 30, (marker, centre_y)
+                hx, hy = _fig_frac(fig, fig.axXY, marker[0], marker[1])
+            else:
+                # Mask out the two corner points; the marker is the bright bin
+                # nearest the centre column.
+                rgb = np.asarray(fig.axXY.images[0].get_array())[..., :3].sum(axis=-1)
+                x0e, x1e, y0e, y1e = fig.axXY.images[0].get_extent()
+                H, W = rgb.shape
+                col = rgb[:, W // 2 - 3:W // 2 + 4].max(axis=1)
+                row = int(np.argmax(col))
+                y_marker = y1e + (row + 0.5) * (y0e - y1e) / H
+                assert y_marker < centre_y - 30, (y_marker, centre_y)
+        finally:
+            plt.close(fig)
+        if render == 'points':
+            w.hover_coords = {'plane': 'xy', 'x': hx, 'y': hy}
+            assert (w.x_s, w.y_s) == (85, 50)
+
+
+@pytest.mark.parametrize("plane, angle, pixel_sizes", [
+    ('xy', 45.0, (1, 1, 1)),
+    ('xy', 180.0, (1, 1, 1)),
+    ('xy', 30.0, (1, 1, 1)),
+    ('xz', 30.0, (4, 1, 1)),
+    ('zy', 60.0, (4, 1, 1)),
+])
+def test_rotated_click_maps_to_voxel_under_cursor(plane, angle, pixel_sizes):
+    """A click on a rotated panel records the voxel drawn under the cursor.
+
+    Strategy: a smooth blob centred on a known voxel. Render the annotator with
+    rotate_view, take the blob's rendered centroid (independent of the
+    crosshair/click transforms), click there.
+
+    Expected outcome: the recorded point is the blob's voxel. It used to be off
+    by a voxel for isotropic data and by tens of voxels for anisotropic panels.
+    """
+    Z, Y, X = 40, 64, 64
+    pz, py, px = pixel_sizes
+    tz, ty, tx = 30, 21, 45
+    zz, yy, xx = np.meshgrid(np.arange(Z), np.arange(Y), np.arange(X), indexing='ij')
+    r2 = ((zz - tz) * pz) ** 2 + ((yy - ty) * py) ** 2 + ((xx - tx) * px) ** 2
+    vol = np.exp(-r2 / (2 * 3.0 ** 2)).astype(np.float32)
+
+    rot = {'xy': (angle, 0, 0), 'xz': (0, angle, 0), 'zy': (0, 0, angle)}[plane]
+    w = show_zyx_max_slice_interactive_point_annotator(vol, pixel_sizes=pixel_sizes, rotate_view=rot,
+                                                       slabs_position=(tz * pz, ty * py, tx * px),
+                                                       slabs_thickness=(pz, py, px))
+    w.annotation_mode = True
+    fig = w._render()
+    try:
+        ax = {'xy': fig.axXY, 'xz': fig.axXZ, 'zy': fig.axZY}[plane]
+        cx, cy = _rendered_centroid(ax)
+        click_x, click_y = _fig_frac(fig, ax, cx, cy)
+    finally:
+        plt.close(fig)
+    w.click_coords = {'plane': plane, 'x': click_x, 'y': click_y}
+    assert w.points == [[tz, ty, tx]], w.points
+
+
+def test_rotated_anisotropic_panel_keeps_physical_aspect():
+    """Rotation happens in physical space, so anisotropic panels are not distorted.
+
+    Strategy: a 40 x 40 um XZ plane (Z=10 at 4 um, X=40 at 1 um), rotated 90
+    degrees, plus the matching crosshair transform.
+
+    Expected outcome: the panel is still 40 x 40 um (it was drawn 10 x 160 um),
+    and the rotated-line helper maps the panel corners onto the panel's edges.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import _get_rotated_line
+
+    vol = np.random.default_rng(4).uniform(0, 1, (10, 8, 40)).astype(np.float32)
+    fig = show_zyx_max_slabs(vol, [0, 40], [0, 8], [0, 10], pixel_sizes=(4, 1, 1), rotate_view=(0, 90, 0))
+    try:
+        assert abs(np.diff(fig.axXZ.get_xlim())[0]) == pytest.approx(40, abs=1)
+        assert abs(np.diff(fig.axXZ.get_ylim())[0]) == pytest.approx(40, abs=1)
+        xs, ys = _get_rotated_line(0, 0, 40, 40, 90, 40, 10, 1, 4)
+        # (0, 0) -> bottom-left corner and (40, 40) -> top-right corner after a CCW quarter turn
+        np.testing.assert_allclose([xs[0], ys[0]], [0, 40], atol=1)
+        np.testing.assert_allclose([xs[1], ys[1]], [40, 0], atol=1)
+    finally:
+        plt.close(fig)
+
+
+def test_rotate_expand_keeps_nan_local():
+    """One NaN pixel no longer blanks the whole rotated panel.
+
+    Expected outcome: only a few pixels around the NaN are NaN; everything
+    else is finite.
+    """
+    from eigenp_utils.tnia_plotting_anywidgets import _rotate_expand
+
+    img = np.random.default_rng(5).uniform(0, 1, (64, 64))
+    img[30, 30] = np.nan
+    out = _rotate_expand(img, 10)
+    assert 0 < np.isnan(out).sum() <= 4
+    img[30, 30] = 0.5
+    np.testing.assert_allclose(np.isfinite(_rotate_expand(img, 10)).all(), True)
+
+
+@pytest.mark.parametrize("gamma", [1, 0.5])
+def test_single_channel_panels_share_one_intensity_scale(gamma):
+    """All three ortho panels use one display range.
+
+    Strategy: plane z=2 is dim (0-10), the rest bright (0-1000).
+
+    Expected outcome: XY, XZ and ZY have the same (vmin, vmax), spanning the
+    whole volume, for gamma 1 and gamma != 1.
+    """
+    rng = np.random.default_rng(6)
+    vol = rng.uniform(0, 1000, (8, 32, 32)).astype(np.float32)
+    vol[2] = rng.uniform(0, 10, (32, 32))
+    fig = show_zyx_slice(vol, 16, 16, 2, gamma=gamma)
+    try:
+        clims = [ax.images[0].norm for ax in (fig.axXY, fig.axXZ, fig.axZY)]
+        lims = {(round(n.vmin, 3), round(n.vmax, 3)) for n in clims}
+        assert len(lims) == 1, lims
+        (lo, hi), = lims
+        assert hi > 900
+    finally:
+        plt.close(fig)
+
+
+def test_multichannel_composite_ignores_nonfinite_values():
+    """A NaN or inf pixel neither saturates its channel nor leaks into the RGB output."""
+    rng = np.random.default_rng(7)
+    a = rng.uniform(0, 1000, (16, 16)).astype(np.float32)
+    b = rng.uniform(0, 1000, (16, 16)).astype(np.float32)
+    a[3, 3] = np.nan
+    a[4, 4] = np.inf
+    xy, xz, zy = create_multichannel_rgb([a, b], [a, b], [a, b], colormap=['red', 'lime'])
+    assert np.isfinite(xy).all()
+    # red is channel a only; with vmax from finite values most pixels are not saturated
+    assert (xy[..., 0] > 0.99).mean() < 0.1
+
+
+def test_blend_colors_scalar_gamma():
+    from eigenp_utils.tnia_plotting_anywidgets import blend_colors
+
+    I = np.linspace(0, 1, 5)[:, None]
+    out = blend_colors(I, ['white'], vmin=0, vmax=1, gamma=0.5)
+    np.testing.assert_allclose(out[:, 0], np.sqrt(I[:, 0]))
+
+
+def test_histogram_and_widget_accept_inf_values():
+    vol = np.random.default_rng(8).uniform(0, 1, (4, 16, 16)).astype(np.float32)
+    vol[0, 0, 0] = np.inf
+    h = compute_histogram(vol)
+    assert np.isfinite(h['bin_edges']).all() and len(h['counts']) == 128
+    show_zyx_max_slice_interactive(vol, pixel_sizes=(1, 1, 1))
+
+
+@pytest.mark.parametrize("colormap", ['magma', ['red', 'lime']])
+def test_slice_widget_pads_short_colormap_for_multichannel(colormap):
+    """A single colormap string is not split into characters, and a short list is padded."""
+    rng = np.random.default_rng(9)
+    chans = [rng.uniform(0, 1, (4, 16, 16)).astype(np.float32) for _ in range(3)]
+    w = show_zyx_max_slice_interactive(chans, colormap=colormap)
+    assert len(w.channel_colors) == 3
+    given = [colormap] if isinstance(colormap, str) else colormap
+    assert w.colors_resolved[:len(given)] == given
+
+
+def test_points_mode_scales_y_by_sy():
+    """Points mode uses the Y pixel size for Y (it used the X one).
+
+    Strategy: pixel_sizes=(1, 2, 1); hover a marker at y=60 on the XY panel.
+
+    Expected outcome: y_s == 60, and the XY panel spans twice as far in Y as
+    in X for a square point cloud.
+    """
+    X = np.array([0.0, 99.0, 30.0]); Y = np.array([0.0, 99.0, 60.0]); Z = np.array([0.0, 9.0, 5.0])
+    w = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(1, 2, 1), slabs_thickness=(1000, 1000, 1000))
+    fig = w._render()
+    try:
+        assert abs(np.diff(fig.axXY.get_ylim())[0]) == pytest.approx(2 * abs(np.diff(fig.axXY.get_xlim())[0]))
+        hx, hy = _fig_frac(fig, fig.axXY, 30 * 1, 60 * 2)
+    finally:
+        plt.close(fig)
+    w.hover_coords = {'plane': 'xy', 'x': hx, 'y': hy}
+    assert (w.x_s, w.y_s) == (30, 60)
+
+
+def test_points_mode_scale_bar_matches_rotated_panel():
+    """The points-mode scale bar spans the length it is labelled with when rotated."""
+    rng = np.random.default_rng(10)
+    X, Y = rng.uniform(0, 99, 500), rng.uniform(0, 99, 500)
+    X[:2], Y[:2] = [0, 99], [0, 99]
+    Z = np.zeros_like(X)
+    w = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(1, 1, 1), rotate_view=(45, 0, 0))
+    fig = w._render()
+    try:
+        label = fig.axBar.texts[0].get_text()
+        seg = [c for c in fig.axXY.collections if hasattr(c, 'get_segments')][-1].get_segments()[0]
+        bar_units = (seg[1][0] - seg[0][0]) * abs(np.diff(fig.axXY.get_xlim())[0])
+        assert bar_units == pytest.approx(float(label.split()[0]), rel=1e-6)
+    finally:
+        plt.close(fig)
+
+
+def test_scatter_one_plane_slab_shows_the_points_in_its_band():
+    """A start == end slab shows the points inside the drawn one-unit band (centred on the index)."""
+    rng = np.random.default_rng(11)
+    n = 5000
+    X, Y, Z = rng.uniform(0, 100, n), rng.uniform(0, 100, n), rng.uniform(0, 10, n)
+    w = show_zyx_max_scatter_interactive((Z, Y, X))
+    w.x_start, w.x_end = 50, 50
+    fig = w._render()
+    try:
+        x0 = w.xmin + 50
+        expected = int(((X >= x0 - 0.5) & (X < x0 + 0.5)).sum())
+        shown = sum(len(c.get_offsets()) for c in fig.axZY.collections if hasattr(c, 'get_offsets'))
+        assert expected > 0 and shown == expected
+    finally:
+        plt.close(fig)
+
+
+def test_iso_scatter_uses_pixel_sizes_for_radius_and_y():
+    """The isometric viewer keeps all points inside its axes with anisotropic pixels."""
+    rng = np.random.default_rng(12)
+    X, Y, Z = rng.uniform(0, 100, 300), rng.uniform(0, 100, 300), rng.uniform(0, 100, 300)
+    w = IsoScatterWidget(X, Y, Z, pixel_sizes=(5, 1, 1))
+    assert w.max_radius >= 5 * (Z.max() - Z.min()) / 2
+
+    w2 = IsoScatterWidget(X, Y, Z, pixel_sizes=(1, 3, 1))
+    w2.elev, w2.azim = 0, 0
+    fig = w2._render()
+    try:
+        top = [ax for ax in fig.axes if ax.get_title() == "Top View (X-Y)"][0]
+        pts = top.collections[0].get_offsets()
+        assert np.ptp(pts[:, 1]) == pytest.approx(3 * np.ptp(pts[:, 0]), rel=0.05)
+        assert w2.max_radius >= np.abs(pts).max()
+    finally:
+        plt.close(fig)
