@@ -2014,8 +2014,17 @@ if __name__ == "__main__":
 # =========================================
 # Source: test_score_celltypes_binned.py
 # =========================================
-def test_score_celltypes_binned():
-    """Test that score celltypes binned works as expected."""
+def test_score_celltypes_all_methods_annotate_and_sweep():
+    """Every scoring method, cluster annotation and the Leiden sweep run end to end.
+
+    This previously shared its name with test_score_celltypes_binned above, so
+    that (asserting) test was shadowed and never collected, and this one only
+    printed. Strategy: the same two-population toy data (G0 high in cells 0-4,
+    G1 high in 5-9). Expected: each method returns one score column per cell
+    type for every cell; cluster A (cells 0-4, G0-high) is annotated Type1 with
+    a higher Type1 score than cluster B; the sweep returns an annotation table
+    for each requested resolution.
+    """
     import numpy as np
     import pandas as pd
     import scanpy as sc
@@ -2048,30 +2057,21 @@ def test_score_celltypes_binned():
         "Type1": ["G1"]
     }
 
-    # Test scanpy
-    res_scanpy = score_celltypes(adata, markers, neg_markers, score_method="scanpy", use_raw=False)
-    print("Scanpy")
-    print(res_scanpy.head(2))
+    for method in ("scanpy", "binned", "binned_weighted"):
+        res = score_celltypes(adata, markers, neg_markers, score_method=method, use_raw=False)
+        assert list(res.columns) == ["Type1", "Type2"], method
+        assert list(res.index) == list(adata.obs_names), method
+        assert np.all(np.isfinite(res.to_numpy())), method
 
-    # Test binned
-    res_binned = score_celltypes(adata, markers, neg_markers, score_method="binned", use_raw=False)
-    print("Binned")
-    print(res_binned)
-
-    # Test binned_weighted
-    res_weighted = score_celltypes(adata, markers, neg_markers, score_method="binned_weighted", use_raw=False)
-    print("Weighted")
-    print(res_weighted)
-
-    # Test annotate
     ann_res = annotate_clusters_by_markers(adata, "leiden_1.0", markers, neg_markers, score_method="binned", use_raw=False)
-    print("Annotate")
-    print(ann_res)
+    assert set(ann_res.index) == {"A", "B"}
+    assert ann_res.loc["A", "assigned_cell_type"] == "Type1"
+    assert ann_res.loc["A", "median_Type1"] > ann_res.loc["B", "median_Type1"]
 
-    # Test sweep
     sweep_res = sweep_leiden_and_annotate(adata, markers, neg_markers, score_method="binned", use_raw=False, neighbors_already_computed=True, resolutions=[0.5, 1.0])
-    print("Sweep")
-    print(sweep_res["cluster_annotations"][1.0])
+    assert set(sweep_res["cluster_annotations"]) == {0.5, 1.0}
+    for table in sweep_res["cluster_annotations"].values():
+        assert "assigned_cell_type" in table.columns and len(table) >= 1
 
 # =========================================
 # Source: test_moran_general_weights.py
@@ -3003,3 +3003,23 @@ def test_graph_helpers_work_without_scanpy():
     """)
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr[-3000:]
+
+
+def test_plot_clustering_tree_draws_with_current_matplotlib():
+    """plot_clustering_tree runs on two nested clusterings.
+
+    Its fallback colormap used plt.cm.get_cmap, removed in matplotlib 3.9, so
+    every call raised AttributeError before drawing. Strategy: two string
+    categorical clusterings where the finer one splits the coarser, so the tree
+    has real edges. Expected: no exception and the figure is returned.
+    """
+    from eigenp_utils.single_cell import plot_clustering_tree
+
+    adata = anndata.AnnData(X=np.zeros((60, 3)))
+    adata.obs["leiden_0.5"] = pd.Categorical(np.repeat(["0", "1"], 30))
+    adata.obs["leiden_1.0"] = pd.Categorical(np.repeat(["0", "1", "2"], 20))
+    try:
+        fig = plot_clustering_tree(adata, ["leiden_0.5", "leiden_1.0"])
+        assert fig is not None and len(fig.axes) == 1
+    finally:
+        plt.close("all")
