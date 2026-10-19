@@ -105,15 +105,17 @@ def test_calculate_vector_difference_overlap():
 
     vectors = calculate_vector_difference(resampled1, resampled2, overlap_only=True, num_points=5)
 
-    # Overlap origin range: from [11.57, 11.57] to [20.0, 20.0]
-    # Overlap endpoint range: from [10.0, 11.0] to [18.42, 19.42]
-    # Difference = endpoint - origin = [-1.57, -0.57] uniformly over re-parameterization.
-
+    # The overlap is clipped exactly at the box faces, so the difference is the exact
+    # [-1, 0], not biased by the 20-point sample spacing (was [-1.57, -0.57]).
     assert vectors.shape == (5, 2)
-    diff_y = vectors[0, 1]
-    diff_x = vectors[0, 0]
-    assert np.allclose(vectors[:, 1], diff_y)
-    assert np.allclose(vectors[:, 0], diff_x)
+    np.testing.assert_allclose(vectors, np.tile([-1.0, 0.0], (5, 1)), atol=1e-3)
+
+    # Control: splines without any overlap give the documented zero fallback
+    far = create_resampled_spline(line2 + 100, num_points=20)
+    np.testing.assert_array_equal(
+        calculate_vector_difference(resampled1, far, overlap_only=True, num_points=5),
+        np.zeros((5, 2)),
+    )
 
 def test_calculate_tangent_vectors():
     """Test that calculate tangent vectors works as expected."""
@@ -366,3 +368,95 @@ def test_calculate_spline_length_resolution_scaling():
     len_prescaled = calculate_spline_length([z * 2.0, y * 0.5, x * 1.0])
 
     assert np.isclose(len_mapped, len_prescaled, rtol=1e-12), "Resolution mapping is mathematically inconsistent with coordinate scaling"
+
+
+# =========================================
+# Source: scan low-severity regressions (spline_utils)
+# =========================================
+
+
+def test_generate_random_3d_coordinates_leaves_global_state_alone():
+    np.random.seed(123)
+    expected = np.random.rand()
+    np.random.seed(123)
+    pts = generate_random_3d_coordinates(5, seed=0)
+    assert np.random.rand() == expected
+    # same values as the former np.random.seed(seed) implementation
+    np.random.seed(0)
+    np.testing.assert_array_equal(pts, np.random.rand(5, 3) * 100)
+
+
+@pytest.mark.parametrize("make_image", [create_3d_image_from_spline, create_nd_image_from_spline])
+def test_spline_image_skips_negative_coordinates(make_image):
+    # A spline running from z=2 down to z=-20: only z = 0, 1, 2 lie inside the image
+    pts = np.c_[np.linspace(2, -20, 6), 5.0 + np.arange(6) * 0.1, np.full(6, 5.0)]
+    img = make_image(fit_cubic_spline(pts), (40, 40, 40))
+    assert sorted(set(np.nonzero(img)[0].tolist())) == [0, 1, 2]
+
+
+def test_spline_image_matches_point_loop():
+    """Negative control: in-bounds points are marked as before (floor of each coordinate)."""
+    pts = generate_random_3d_coordinates(8, seed=3) * 0.5 + 5
+    tck = fit_cubic_spline(pts)
+    img = create_3d_image_from_spline(tck, (60, 60, 60), num_points=500)
+    from scipy.interpolate import splev
+
+    ref = np.zeros((60, 60, 60), np.uint8)
+    for p in np.array(splev(np.linspace(0, 1, 500), tck)).T:
+        ref[tuple(int(c) for c in p)] = 1
+    np.testing.assert_array_equal(img, ref)
+
+
+def test_plot_3d_spline_returns_figure():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from eigenp_utils.spline_utils import plot_3d_spline
+
+    plt.close("all")
+    pts = generate_random_3d_coordinates(8, seed=1)
+    fig = plot_3d_spline(pts, fit_cubic_spline(pts))
+    ax = fig.axes[0]
+    assert (ax.get_xlabel(), ax.get_ylabel(), ax.get_zlabel()) == ("Z", "Y", "X")
+    plt.close("all")
+
+
+def test_calculate_vector_difference_small_overlap_and_unequal_lengths():
+    # Bounding boxes overlap in a corner holding only 2 points of each line
+    a = np.repeat(np.linspace(0, 10, 50)[:, None], 3, axis=1)
+    b = np.repeat(np.linspace(9.6, 20, 50)[:, None], 3, axis=1)
+    v = calculate_vector_difference(a, b, overlap_only=True, num_points=100)
+    assert v.shape == (100, 3) and np.isfinite(v).all()
+
+    # overlap_only=False resamples splines of different lengths (documented)
+    c = np.c_[np.linspace(0, 10, 50), np.zeros(50), np.zeros(50)]
+    d = np.c_[np.linspace(0, 10, 40), np.zeros(40), np.ones(40)]
+    v = calculate_vector_difference(c, d, overlap_only=False, num_points=100)
+    np.testing.assert_allclose(v, np.c_[np.zeros(100), np.zeros(100), np.ones(100)], atol=1e-9)
+
+
+def test_normalize_vectors_zero_vector_stays_zero():
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = normalize_vectors(np.array([[0.0, 0, 0], [3, 4, 0]]))
+    np.testing.assert_allclose(out, [[0, 0, 0], [0.6, 0.8, 0]])
+
+
+def test_calculate_spline_length_resolution_forms():
+    line_z = [np.linspace(0, 10, 11), np.zeros(11), np.zeros(11)]  # 10 px along Z
+    line_y2d = [np.linspace(0, 10, 11), np.zeros(11)]  # 10 px along Y
+
+    assert calculate_spline_length(line_z, resolution=np.array([2.0, 1.0, 1.0])) == pytest.approx(20.0)
+    assert calculate_spline_length(line_y2d, resolution=[0.5, 0.5]) == pytest.approx(5.0)
+    assert calculate_spline_length(line_y2d, resolution=(2.0, 0.5, 0.5)) == pytest.approx(5.0)
+    with pytest.raises(ValueError, match="entries"):
+        calculate_spline_length(line_y2d, resolution=[1.0, 2.0, 3.0, 4.0])
+
+    # Reader output without a Z size: warn and use 1.0 instead of crashing
+    y_line = [np.zeros(11), np.linspace(0, 10, 11), np.zeros(11)]
+    with pytest.warns(UserWarning, match="axis Z"):
+        length = calculate_spline_length(y_line, resolution={"X": 0.5, "Y": 0.5, "Z": None, "unit": "micron"})
+    assert length == pytest.approx(5.0)

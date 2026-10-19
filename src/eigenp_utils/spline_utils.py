@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 from scipy.interpolate import splprep, splev
 import matplotlib.pyplot as plt
@@ -6,8 +8,22 @@ from mpl_toolkits.mplot3d import Axes3D
 # Function to generate random 3D coordinates
 def generate_random_3d_coordinates(num_points=10, seed=None):
     if seed is not None:
-        np.random.seed(seed)  # For reproducible results
+        # A private generator: same values as np.random.seed(seed) gave, without
+        # reseeding numpy's global random state for the caller
+        return np.random.RandomState(seed).rand(num_points, 3) * 100
     return np.random.rand(num_points, 3) * 100  # Scaling to get a wider range
+
+
+def _mark_points(image, points):
+    """Set the voxels containing `points` (one row per point) to 1.
+
+    Points outside the image are skipped. Coordinates are floored, so -0.5 lies
+    outside (not in voxel 0), and negative indices never wrap around.
+    """
+    idx = np.floor(np.asarray(points)).astype(int)
+    shape = np.asarray(image.shape)
+    inside = np.all((idx >= 0) & (idx < shape), axis=1)
+    image[tuple(idx[inside].T)] = 1
 
 
 # Function to fit a cubic spline through 3D coordinates
@@ -45,17 +61,8 @@ def create_3d_image_from_spline(spline_tck, shape=None, num_points=2500):
     # Initialize the 3D image
     image = np.zeros(shape, dtype=np.uint8)
 
-    # Function to safely mark a point in the image
-    def mark_point(image, point):
-        try:
-            image[point[0], point[1], point[2]] = 1
-        except IndexError:  # In case the point is outside the image bounds
-            pass
-
     # Mark the path of the spline in the 3D image
-    for i in range(num_points):
-        point = (int(x[i]), int(y[i]), int(z[i]))
-        mark_point(image, point)
+    _mark_points(image, np.column_stack([x, y, z]))
 
     return image
 
@@ -87,39 +94,37 @@ def create_nd_image_from_spline(spline_tck, shape=None, num_points=2500):
     # Initialize the n-dimensional image
     image = np.zeros(shape, dtype=np.uint8)
 
-    # Function to safely mark a point in the image
-    def mark_point(image, point):
-        try:
-            # Convert point to a tuple of indices and set the value
-            image[tuple(point)] = 1
-        except IndexError:  # In case the point is outside the image bounds
-            pass
-
-    # Convert points to integer indices and mark the path of the spline in the image
-    for i in range(num_points):
-        point = tuple(int(coord[i]) for coord in points)
-        mark_point(image, point)
+    # Mark the path of the spline in the image
+    _mark_points(image, np.column_stack(points))
 
     return image
 
 
 # Function to plot the initial points and the spline
-def plot_3d_spline(coordinates, spline_tck, num_points=1000):
+def plot_3d_spline(coordinates, spline_tck, num_points=1000, ax=None):
     """
     Plot the initial points and the cubic spline in 3D.
 
     Parameters:
-    - coordinates: The initial 3D coordinates.
+    - coordinates: The initial 3D coordinates, columns in (Z, Y, X) order
+      (the last three columns are used, as in `fit_cubic_spline`).
     - spline_tck: The parameters of the fitted spline.
     - num_points: Number of points to sample along the spline.
+    - ax: Optional existing 3D axes to draw on.
+
+    Returns:
+    - The matplotlib Figure.
     """
     # Sample points along the spline
     u_fine = np.linspace(0, 1, num_points)
     x, y, z = splev(u_fine, spline_tck)
 
     # Create the 3D plot
-    fig = plt.figure(figsize=(4, 4), layout = 'constrained')
-    ax = fig.add_subplot(111, projection='3d')
+    if ax is None:
+        fig = plt.figure(figsize=(4, 4), layout = 'constrained')
+        ax = fig.add_subplot(111, projection='3d')
+    else:
+        fig = ax.figure
 
     # Plot the initial points
     ax.scatter(coordinates[:, -3], coordinates[:, -2], coordinates[:, -1], color='red', label='Initial Points')
@@ -127,46 +132,85 @@ def plot_3d_spline(coordinates, spline_tck, num_points=1000):
     # Plot the spline
     ax.plot(x, y, z, color='blue', label='Cubic Spline')
 
-    ax.set_xlabel('X axis')
-    ax.set_ylabel('Y axis')
-    ax.set_zlabel('Z axis')
+    # Columns are plotted in (Z, Y, X) order on the plot's x, y, z axes
+    ax.set_xlabel('Z')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('X')
     ax.legend()
 
-    plt.title('3D Cubic Spline through Random Points')
-    plt.show()
+    ax.set_title('3D Cubic Spline through Random Points')
+    return fig
 
 
 # Function to create and resample spline
 def create_resampled_spline(points, num_points=1000):
-    tck, _ = splprep(points.T, s=0)
+    # splprep needs more points than the spline degree: lower it for 2-3 points
+    tck, _ = splprep(points.T, s=0, k=min(3, len(points) - 1))
     u_fine = np.linspace(0, 1, num_points)
     spline_points = np.array(splev(u_fine, tck)).T
     return spline_points
 
 
 # Calculate vectors
+def _clip_polyline_to_box(points, lo, hi):
+    """
+    Return the part of a polyline inside the box [lo, hi], with exact entry and exit points.
+
+    Each segment is clipped with the Liang-Barsky parameters; the result runs from the
+    first point where the curve enters the box to the last point where it leaves it
+    (interior vertices in between are kept). Returns an empty (0, d) array if the
+    polyline never touches the box.
+    """
+    points = np.asarray(points, dtype=float)
+    p0, p1 = points[:-1], points[1:]
+    d = p1 - p0
+    t0 = np.zeros(len(d))
+    t1 = np.ones(len(d))
+    inside = np.ones(len(d), dtype=bool)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for k in range(points.shape[1]):
+            moving = d[:, k] != 0
+            ta = (lo[k] - p0[:, k]) / d[:, k]
+            tb = (hi[k] - p0[:, k]) / d[:, k]
+            t0 = np.where(moving, np.maximum(t0, np.minimum(ta, tb)), t0)
+            t1 = np.where(moving, np.minimum(t1, np.maximum(ta, tb)), t1)
+            # a segment parallel to this axis is inside only if it lies within the slab
+            inside &= moving | ((p0[:, k] >= lo[k]) & (p0[:, k] <= hi[k]))
+    hit = np.flatnonzero(inside & (t0 <= t1))
+    if len(hit) == 0:
+        return np.empty((0, points.shape[1]))
+    first, last = hit[0], hit[-1]
+    entry = p0[first] + t0[first] * d[first]
+    exit_ = p0[last] + t1[last] * d[last]
+    clipped = np.vstack([entry, points[first + 1 : last + 1], exit_])
+    # drop repeated points (entry/exit on a vertex), which spline fitting rejects
+    keep = np.r_[True, np.any(np.diff(clipped, axis=0) != 0, axis=1)]
+    return clipped[keep]
+
+
 def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=False, num_points=1000):
     '''
     Return the vector difference of equally resampled splines.
 
     Parameters:
     - spline_origin: The origin spline points (N x d array)
-    - spline_endpoint: The endpoint spline points (N x d array)
+    - spline_endpoint: The endpoint spline points (M x d array)
     - overlap_only: If True, only consider the overlap region of the splines
     - num_points: Number of points to resample the splines
 
     Returns:
     - vectors: An N x d array where N is the number of points and d the dimension of the space
+      (`num_points` rows when the splines are resampled)
     '''
-
-    if overlap_only == False:
-        vectors = spline_endpoint - spline_origin
-        return vectors
 
     if spline_origin.shape != spline_endpoint.shape:
         # Resample both splines to ensure they have the same number of points
         spline_origin = create_resampled_spline(spline_origin, num_points=num_points)
         spline_endpoint = create_resampled_spline(spline_endpoint, num_points=num_points)
+
+    if overlap_only == False:
+        vectors = spline_endpoint - spline_origin
+        return vectors
 
 
     # Calculate the overlap region if overlap_only is True
@@ -174,12 +218,11 @@ def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=Fal
     start = np.maximum(np.min(spline_origin, axis=0), np.min(spline_endpoint, axis=0))
     end = np.minimum(np.max(spline_origin, axis=0), np.max(spline_endpoint, axis=0))
 
-    # Mask to keep only the points that fall inside the geometric bounding box overlap
-    mask_origin = np.all((spline_origin >= start) & (spline_origin <= end), axis=1)
-    mask_endpoint = np.all((spline_endpoint >= start) & (spline_endpoint <= end), axis=1)
-
-    overlap_origin = spline_origin[mask_origin]
-    overlap_endpoint = spline_endpoint[mask_endpoint]
+    # Clip each polyline exactly at the box faces; keeping only the sample points that
+    # fall inside would start each overlap at its first interior sample, biasing the
+    # difference by up to one sample spacing
+    overlap_origin = _clip_polyline_to_box(spline_origin, start, end)
+    overlap_endpoint = _clip_polyline_to_box(spline_endpoint, start, end)
 
     # Resample the cropped splines to the common number of points
     # This requires that the overlap region has enough points and spans a valid curve segment
@@ -233,8 +276,10 @@ def project_onto_plane(vectors, tangent_vectors):
 
 # Function to normalize vectors to unit length
 def normalize_vectors(vectors):
+    """Scale each row to unit length; zero vectors stay zero."""
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    unit_vectors = vectors / norms
+    unit_vectors = np.zeros(np.shape(vectors), dtype=float)
+    np.divide(vectors, norms, out=unit_vectors, where=norms > 0)
     return unit_vectors
 
 def calculate_spline_length(coords, resolution=None):
@@ -243,7 +288,9 @@ def calculate_spline_length(coords, resolution=None):
 
     Parameters:
     - coords: List or tuple of arrays in order [Z, Y, X] for 3D or [Y, X] for 2D.
-    - resolution: List [Z, Y, X], dictionary {'Z','Y','X'}, or None.
+    - resolution: Pixel sizes as a sequence/array in the same axis order as `coords`
+      ([Z, Y, X] or [Y, X]; a [Z, Y, X] triple is also accepted for 2D), a dictionary
+      {'Z','Y','X'}, or None. Missing or None entries fall back to 1.0 with a warning.
 
     Returns:
     - Real-world length in units of the pixel size.
@@ -254,12 +301,35 @@ def calculate_spline_length(coords, resolution=None):
 
     # Default resolutions
     res = {'X': 1.0, 'Y': 1.0, 'Z': 1.0}
+    axes_used = ['Z', 'Y', 'X'][-ndim:]
 
-    if isinstance(resolution, dict):
-        res.update(resolution)
-    elif isinstance(resolution, (list, tuple)) and len(resolution) >= 3:
-        # Standard convention in this notebook: [Z, Y, X]
-        res['Z'], res['Y'], res['X'] = resolution[0], resolution[1], resolution[2]
+    if resolution is None:
+        pass
+    elif isinstance(resolution, dict):
+        for axis in axes_used:
+            value = resolution.get(axis)
+            if value is None:
+                warnings.warn(
+                    f"No pixel size for axis {axis} in resolution; using 1.0.", stacklevel=2
+                )
+            else:
+                res[axis] = float(value)
+    else:
+        values = list(np.ravel(np.asarray(resolution, dtype=object)))
+        if len(values) == 3 and ndim == 2:
+            values = values[-2:]  # a [Z, Y, X] triple for a 2D (Y, X) spline
+        if len(values) != ndim:
+            raise ValueError(
+                f"resolution has {len(values)} entries; expected {ndim} "
+                f"({', '.join(axes_used)}) for {ndim}D coordinates."
+            )
+        for axis, value in zip(axes_used, values):
+            if value is None:
+                warnings.warn(
+                    f"No pixel size for axis {axis} in resolution; using 1.0.", stacklevel=2
+                )
+            else:
+                res[axis] = float(value)
 
     # Map coordinates to resolutions:
     # If 3D, coords are [Z, Y, X]
