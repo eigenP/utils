@@ -116,6 +116,77 @@ def _(IN_WASM):
     )
 
 
+@app.cell
+def _(mo):
+    import base64
+    import io
+
+    # Palette shared by every figure: genes A / B (the pair under comparison) and the tree arms.
+    COL_A, COL_B = "#3b6ea8", "#d1495b"
+    BRANCH_COLORS = {"trunk": "#9a9a9a", "L": "#1b9e77", "R": "#8a5a9e"}
+
+    _ROW_CSS = """
+    <style>
+    .rr-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:.25rem .75rem}
+    .rr-item{flex:1 1 var(--rr-min,260px);min-width:0;max-width:var(--rr-max,460px)}
+    .rr-item img{display:block;width:100%;height:auto}
+    .rr-arrow{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;color:#777;line-height:1.1}
+    .rr-arrow .rr-glyph{font-size:1.8rem}
+    .rr-arrow small{font-size:.72rem;max-width:7.5rem;text-align:center}
+    @media (max-width:700px){
+      .rr-row{flex-direction:column;align-items:stretch}
+      .rr-item{max-width:none}
+      .rr-arrow{flex-direction:row;justify-content:center;gap:.4rem}
+      .rr-arrow .rr-glyph{transform:rotate(90deg)}
+      .rr-arrow small{max-width:none}
+    }
+    </style>
+    """
+
+    def fig_to_img(fig, dpi=160):
+        """Render a Matplotlib figure to a width-responsive <img> and close it."""
+        import matplotlib.pyplot as _plt
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+        _plt.close(fig)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return f'<img alt="figure" src="data:image/png;base64,{b64}"/>'
+
+    def fig_row(*figs, arrows=None, min_px=260, max_px=460):
+        """
+        Lay single-panel figures out in a row that wraps on narrow screens.
+
+        `arrows` (optional) holds one caption per gap; the arrow points right on wide screens and
+        turns to point down once the row stacks vertically (viewport < 700 px).
+        """
+        arrows = list(arrows or [])
+        parts = []
+        for i, f in enumerate(figs):
+            parts.append(f'<div class="rr-item">{fig_to_img(f) if hasattr(f, "savefig") else mo.as_html(f).text}</div>')
+            if i < len(arrows):
+                parts.append(f'<div class="rr-arrow"><span class="rr-glyph">&#10230;</span><small>{arrows[i]}</small></div>')
+        style = f"--rr-min:{min_px}px;--rr-max:{max_px}px"
+        return mo.Html(_ROW_CSS + f'<div class="rr-row" style="{style}">' + "".join(parts) + "</div>")
+
+    return BRANCH_COLORS, COL_A, COL_B, fig_row
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    # Page-wide CSS for small screens: wide display maths and Markdown tables scroll sideways
+    # inside their own box instead of widening the page.
+    mo.Html(
+        """
+        <style>
+        .katex-display{overflow-x:auto;overflow-y:hidden;padding-bottom:2px}
+        .markdown table, .prose table{display:block;overflow-x:auto;max-width:100%}
+        </style>
+        """
+    )
+    return
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -143,6 +214,115 @@ def _(mo):
     measured on a set of points that carry a graph** (cells × genes, spots × genes, pixels × channels,
     users × items).
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Part 0. The data: one matrix, two columns
+
+    Single-cell data arrive as an expression matrix $X \in \mathbb{R}^{n \times p}$: **rows are cells**
+    (`adata.obs`), **columns are genes** (`adata.var`), entry $X_{ig}$ is the (normalised) expression of gene
+    $g$ in cell $i$. Every comparison in this notebook takes two columns,
+    $$x = X_{:,A}, \qquad y = X_{:,B},$$
+    and returns one number. The only question is *what else* the number is allowed to look at.
+
+    Row order carries no information: a sequencer emits cells in arbitrary order (left panel). Sorting the
+    rows by pseudotime (middle; trunk first, then the two arms L and R) is purely for our eyes, and it makes the
+    structure visible. The right panel pulls out the two columns under comparison. The data are the synthetic
+    bifurcation described in Part 2; pick any pair of genes below.
+
+    Keep one fact in mind for Part 1: if we shuffle the rows of *both* columns together, every metric
+    in this notebook is unchanged. If we shuffle *one* column alone, correlation sees it and 1D
+    Wasserstein does not. Try gene B = `perm_of_…`, a copy of a trajectory gene with its cells shuffled.
+    """)
+    return
+
+
+@app.cell
+def _(genes_eval, mo):
+    gene_a_dd = mo.ui.dropdown(genes_eval, value=genes_eval[0], label="gene A", searchable=True)
+    _perm = [g for g in genes_eval if g.startswith("perm_of_")]
+    gene_b_dd = mo.ui.dropdown(
+        genes_eval, value=_perm[0] if _perm else genes_eval[1], label="gene B", searchable=True
+    )
+    mo.hstack([gene_a_dd, gene_b_dd], wrap=True, justify="start")
+    return gene_a_dd, gene_b_dd
+
+
+@app.cell
+def _(
+    BRANCH_COLORS,
+    COL_A,
+    COL_B,
+    adata,
+    fig_row,
+    gene_a_dd,
+    gene_b_dd,
+    genes_eval,
+    mo,
+    np,
+    plt,
+):
+    from matplotlib.colors import ListedColormap
+    from matplotlib.patches import Rectangle
+
+    _noise = [g for g in adata.var_names if g.startswith("noise")][:15]
+    _cols = list(genes_eval) + _noise
+    _Xs = np.asarray(adata[:, _cols].X)
+    _branch = adata.obs["branch"].to_numpy()
+    _bcode = np.searchsorted(["L", "R", "trunk"], _branch)  # alphabetical codes for the colour strip
+    _bcmap = ListedColormap([BRANCH_COLORS["L"], BRANCH_COLORS["R"], BRANCH_COLORS["trunk"]])
+    _order = np.lexsort((adata.obs["t"].to_numpy(), np.vectorize({"trunk": 0, "L": 1, "R": 2}.get)(_branch)))
+    _vmax = np.percentile(_Xs, 99)
+    _ia, _ib = _cols.index(gene_a_dd.value), _cols.index(gene_b_dd.value)
+
+    def _matrix_panel(rows, title):
+        fig, (ax_s, ax) = plt.subplots(
+            1, 2, figsize=(3.6, 4.4), sharey=True, gridspec_kw={"width_ratios": [1, 14], "wspace": 0.04}
+        )
+        ax_s.imshow(_bcode[rows, None], aspect="auto", cmap=_bcmap, vmin=0, vmax=2, interpolation="nearest")
+        ax_s.set_xticks([])
+        ax_s.set_ylabel(f"cells (n = {len(rows)})")
+        ax.imshow(_Xs[rows], aspect="auto", cmap="Greys", vmin=0, vmax=_vmax, interpolation="nearest")
+        for j, c, lab in ((_ia, COL_A, "A"), (_ib, COL_B, "B")):
+            ax.add_patch(Rectangle((j - 0.5, -0.5), 1, len(rows), fill=False, edgecolor=c, lw=2.2))
+            ax.text(j, -0.03 * len(rows), lab, color=c, ha="center", va="bottom", fontsize=12, fontweight="bold")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel(f"genes (p = {len(_cols)})")
+        ax.set_title(title, fontsize=12, pad=18)
+        return fig
+
+    _fig1 = _matrix_panel(np.arange(adata.n_obs), "X, cells as acquired")
+    _fig2 = _matrix_panel(_order, "rows sorted by pseudotime")
+
+    _fig3, _axs = plt.subplots(1, 2, figsize=(3.2, 4.4), sharey=True, gridspec_kw={"wspace": 0.08})
+    _ypos = np.arange(adata.n_obs)
+    _bounds = np.flatnonzero(np.diff(np.vectorize({"trunk": 0, "L": 1, "R": 2}.get)(_branch[_order]))) + 0.5
+    for _ax, _j, _c, _lab in ((_axs[0], _ia, COL_A, "x = X[:, A]"), (_axs[1], _ib, COL_B, "y = X[:, B]")):
+        _v = _Xs[_order, _j]
+        _ax.scatter(_v, _ypos, s=1.5, color=_c, alpha=0.25, rasterized=True)
+        _k = max(adata.n_obs // 40, 5)
+        _ax.plot(np.convolve(_v, np.ones(_k) / _k, mode="same"), _ypos, color=_c, lw=2)
+        for _y0 in _bounds:
+            _ax.axhline(_y0, color="0.6", lw=0.8, ls=":")
+        _ax.set_title(_lab, color=_c, fontsize=11)
+        _ax.set_xlabel("expression")
+        _ax.tick_params(labelsize=9)
+    _axs[0].set_ylim(adata.n_obs - 0.5, -0.5)
+    _axs[0].set_yticks([])
+    _fig3.suptitle("the two columns we compare", fontsize=12, y=1.02)
+
+    _legend = " ".join(
+        f'<span style="display:inline-block;width:.8em;height:.8em;background:{c};margin:0 .25em 0 .8em"></span>{b}'
+        for b, c in BRANCH_COLORS.items()
+    )
+    mo.vstack([
+        fig_row(_fig1, _fig2, _fig3, arrows=["sort rows (cells) by pseudotime", "take columns A and B"], min_px=220, max_px=340),
+        mo.Html(f'<div style="font-size:.8rem;color:#666;text-align:center">colour strip = true position on the tree: {_legend}</div>'),
+    ])
     return
 
 
@@ -267,22 +447,35 @@ def _(dropout_sl, noise_sl, np, relation_dd, shuffle_sw):
 
 
 @app.cell
-def _(mo, np, pair_metrics, pair_x, pair_y, pd, plt, zscore_pop):
+def _(
+    COL_A,
+    COL_B,
+    fig_row,
+    mo,
+    np,
+    pair_metrics,
+    pair_x,
+    pair_y,
+    pd,
+    plt,
+    zscore_pop,
+):
     _m = pair_metrics(pair_x, pair_y)
-    _fig, _axes = plt.subplots(1, 3, figsize=(11, 3.4))
-    _axes[0].scatter(pair_x, pair_y, s=6, alpha=0.5, color="#3b6ea8")
-    _axes[0].set(xlabel="gene x", ylabel="gene y", title="observed pairing")
+    _f1, _a1 = plt.subplots(figsize=(3.6, 3.3))
+    _a1.scatter(pair_x, pair_y, s=6, alpha=0.5, color="0.35")
+    _a1.set(xlabel="gene x", ylabel="gene y", title="observed pairing")
+    _f2, _a2 = plt.subplots(figsize=(3.6, 3.3))
     _q = np.linspace(0, 1, pair_x.size)
-    _axes[1].plot(_q, np.sort(zscore_pop(pair_x)), label="z_x", color="#3b6ea8")
-    _axes[1].plot(_q, np.sort(zscore_pop(pair_y)), label="z_y", color="#d1495b")
-    _axes[1].fill_between(_q, np.sort(zscore_pop(pair_x)), np.sort(zscore_pop(pair_y)), color="0.85")
-    _axes[1].set(xlabel="quantile u", ylabel="F⁻¹(u)", title="quantile functions (area = W1)")
-    _axes[1].legend(frameon=False)
-    _axes[2].scatter(np.argsort(np.argsort(pair_x)), np.argsort(np.argsort(pair_y)), s=4, alpha=0.4, color="#2e8b57")
-    _axes[2].set(xlabel="rank x", ylabel="rank y", title="rank pairing (Spearman)")
-    _fig.tight_layout()
+    _a2.plot(_q, np.sort(zscore_pop(pair_x)), label="z_x", color=COL_A)
+    _a2.plot(_q, np.sort(zscore_pop(pair_y)), label="z_y", color=COL_B)
+    _a2.fill_between(_q, np.sort(zscore_pop(pair_x)), np.sort(zscore_pop(pair_y)), color="0.85")
+    _a2.set(xlabel="quantile u", ylabel="F⁻¹(u)", title="quantiles (area = W1)")
+    _a2.legend(frameon=False)
+    _f3, _a3 = plt.subplots(figsize=(3.6, 3.3))
+    _a3.scatter(np.argsort(np.argsort(pair_x)), np.argsort(np.argsort(pair_y)), s=4, alpha=0.4, color="#2e8b57")
+    _a3.set(xlabel="rank x", ylabel="rank y", title="rank pairing (Spearman)")
     mo.vstack([
-        _fig,
+        fig_row(_f1, _f2, _f3, min_px=230, max_px=360),
         pd.DataFrame(_m, index=["value"]).T.round(3),
     ])
     return
@@ -324,21 +517,23 @@ def _(ChartPuck, mo, np, pair_metrics):
         _yy = np.r_[puck_y, _yo]
         _m = pair_metrics(_xx, _yy)
         _base = pair_metrics(puck_x, puck_y)
-        ax.scatter(puck_x, puck_y, s=14, color="#3b6ea8", alpha=0.7)
+        ax.scatter(puck_x, puck_y, s=10, color="#3b6ea8", alpha=0.7)
         _b = np.polyfit(_xx, _yy, 1)
         _grid = np.linspace(-6, 6, 10)
         ax.plot(_grid, np.polyval(_b, _grid), color="#d1495b", lw=1)
         ax.set_title(
-            f"Pearson {_m['pearson r']:+.2f} (was {_base['pearson r']:+.2f})   "
+            f"Pearson {_m['pearson r']:+.2f} (was {_base['pearson r']:+.2f})\n"
             f"Spearman {_m['spearman ρ']:+.2f} (was {_base['spearman ρ']:+.2f})",
-            fontsize=9,
+            fontsize=8,
         )
-        ax.set_xlabel("gene x")
-        ax.set_ylabel("gene y")
+        ax.set_xlabel("gene x", fontsize=8)
+        ax.set_ylabel("gene y", fontsize=8)
+        ax.tick_params(labelsize=7)
 
     outlier_puck = mo.ui.anywidget(
         ChartPuck.from_callback(
-            draw_fn=_draw, x_bounds=(-6, 6), y_bounds=(-6, 6), figsize=(5.5, 4.5), x=5.0, y=-5.0
+            draw_fn=_draw, x_bounds=(-6, 6), y_bounds=(-6, 6), figsize=(3.4, 3.2), x=5.0, y=-5.0,
+            puck_radius=12,
         )
     )
     outlier_puck
@@ -415,7 +610,7 @@ def _(mo):
 
     ### Synthetic ground truth
 
-    Cells lie on a bifurcating tree (trunk $t\in[0,1]$, branches A and B for $t\in[1,2]$). Each
+    Cells lie on a bifurcating tree (trunk $t\in[0,1]$, arms L and R for $t\in[1,2]$). Each
     trajectory gene has a Gaussian bump of expression around a peak position on the tree, so the
     **true gene–gene distance is the tree distance between peaks**. Counts are Poisson with
     log-normal library size, then `normalize_total` + `log1p`. Two built-in controls:
@@ -476,7 +671,7 @@ def _(ad, np, sc):
         counts = np.c_[counts_struct, counts_perm, counts_noise].astype(np.float32)
 
         names = (
-            [f"g{i:02d}_{'TAB'[b]}{t:.2f}" for i, (b, t) in enumerate(zip(gb, gt))]
+            [f"g{i:02d}_{'TLR'[b]}{t:.2f}" for i, (b, t) in enumerate(zip(gb, gt))]
             + [f"twin_of_g{p:02d}" for p in twin_parent]
             + [f"perm_of_g{p:02d}" for p in perm_parent]
             + [f"noise{i:03d}" for i in range(n_noise)]
@@ -487,7 +682,7 @@ def _(ad, np, sc):
 
         adata = ad.AnnData(counts)
         adata.var_names = names
-        adata.obs["branch"] = np.array(["trunk", "A", "B"])[cb]
+        adata.obs["branch"] = np.array(["trunk", "L", "R"])[cb]
         adata.obs["t"] = ct
         adata.var["kind"] = kind
         adata.var["parent"] = parent
@@ -534,21 +729,20 @@ def _(
 
 
 @app.cell
-def _(adata, mo, np, plt):
-    _fig, _axes = plt.subplots(1, 2, figsize=(10, 3.8))
+def _(BRANCH_COLORS, adata, fig_row, np, plt):
+    _f1, _a1 = plt.subplots(figsize=(4.2, 3.6))
     _pc = adata.obsm["X_pca"]
-    _cols = {"trunk": "#7a7a7a", "A": "#3b6ea8", "B": "#d1495b"}
-    for _b, _c in _cols.items():
+    for _b, _c in BRANCH_COLORS.items():
         _m = adata.obs["branch"].to_numpy() == _b
-        _axes[0].scatter(_pc[_m, 0], _pc[_m, 1], s=3, color=_c, label=_b, alpha=0.6)
-    _axes[0].legend(frameon=False, markerscale=4)
-    _axes[0].set(xlabel="PC1", ylabel="PC2", title="cells (PCA), coloured by true branch")
+        _a1.scatter(_pc[_m, 0], _pc[_m, 1], s=3, color=_c, label=_b, alpha=0.6)
+    _a1.legend(frameon=False, markerscale=4)
+    _a1.set(xlabel="PC1", ylabel="PC2", title="cells (PCA), true arm")
+    _f2, _a2 = plt.subplots(figsize=(4.2, 3.6))
     _traj = adata[:, adata.var["kind"] == "trajectory"]
-    _ord = np.lexsort((adata.obs["t"].to_numpy(), adata.obs["branch"].map({"trunk": 0, "A": 1, "B": 2}).to_numpy()))
-    _axes[1].imshow(_traj.X[_ord].T, aspect="auto", cmap="magma", interpolation="nearest")
-    _axes[1].set(xlabel="cells (trunk → A → B, by t)", ylabel="trajectory genes (sorted by peak)", title="log-normalised expression")
-    _fig.tight_layout()
-    mo.as_html(_fig)
+    _ord = np.lexsort((adata.obs["t"].to_numpy(), adata.obs["branch"].map({"trunk": 0, "L": 1, "R": 2}).to_numpy()))
+    _a2.imshow(_traj.X[_ord].T, aspect="auto", cmap="magma", interpolation="nearest")
+    _a2.set(xlabel="cells (trunk → L → R, by t)", ylabel="genes (by peak)", title="trajectory genes")
+    fig_row(_f1, _f2, min_px=280, max_px=440)
     return
 
 
@@ -808,17 +1002,18 @@ def _(mo):
 
 
 @app.cell
-def _(genes_eval, mo):
-    gene_a_dd = mo.ui.dropdown(genes_eval, value=genes_eval[0], label="gene A")
-    _perm = [g for g in genes_eval if g.startswith("perm_of_")]
-    gene_b_dd = mo.ui.dropdown(genes_eval, value=_perm[0] if _perm else genes_eval[1], label="gene B")
-    mo.hstack([gene_a_dd, gene_b_dd])
-    return gene_a_dd, gene_b_dd
+def _(gene_a_dd, gene_b_dd, mo):
+    # the same two dropdowns as in Part 0; changing either one updates both places
+    mo.hstack([gene_a_dd, gene_b_dd], wrap=True, justify="start")
+    return
 
 
 @app.cell
 def _(
+    COL_A,
+    COL_B,
     dists,
+    fig_row,
     gene_a_dd,
     gene_b_dd,
     gene_dist,
@@ -835,28 +1030,29 @@ def _(
     _a, _b = gene_dist[:, _ia], gene_dist[:, _ib]
     _plan = ot.emd(_a, _b, meta["D_geo"]) if ot is not None else transport_lp(_a, _b, meta["D_geo"])[0]
     _xy = meta["centroids"][:, :2]
-    _fig, _axes = plt.subplots(1, 2, figsize=(10.5, 4))
+    _fig_l, _ax_l = plt.subplots(figsize=(4.4, 3.8))
+    _fig_r, _ax_r = plt.subplots(figsize=(4.4, 3.8))
+    _axes = (_ax_l, _ax_r)
     _r, _c = meta["W"].nonzero()
     for _ax in _axes:
         _ax.plot(np.c_[_xy[_r, 0], _xy[_c, 0]].T, np.c_[_xy[_r, 1], _xy[_c, 1]].T, color="0.88", lw=0.5, zorder=0)
     _s = 3000 / len(_a)
-    _axes[0].scatter(*_xy.T, s=_a * len(_a) * _s / 3, color="#3b6ea8", alpha=0.55, label="A")
-    _axes[0].scatter(*_xy.T, s=_b * len(_b) * _s / 3, color="#d1495b", alpha=0.55, label="B")
+    _axes[0].scatter(*_xy.T, s=_a * len(_a) * _s / 3, color=COL_A, alpha=0.55, label="A")
+    _axes[0].scatter(*_xy.T, s=_b * len(_b) * _s / 3, color=COL_B, alpha=0.55, label="B")
     _axes[0].legend(frameon=False)
-    _axes[0].set(title="mass of A (blue) and B (red)", xlabel="PC1", ylabel="PC2")
+    _axes[0].set(title="mass of gene A and gene B", xlabel="PC1", ylabel="PC2")
     _src, _dst = np.nonzero(_plan > 1e-4)
     _wts = _plan[_src, _dst]
     for _i, _j, _w in zip(_src, _dst, _wts):
         if _i != _j:
             _axes[1].plot(*np.c_[_xy[_i], _xy[_j]], color="#2e8b57", lw=0.5 + 40 * _w, alpha=0.6)
     _axes[1].scatter(*_xy.T, s=4, color="0.4")
-    _axes[1].set(title="OT plan (mass moved between metacells)", xlabel="PC1")
-    _fig.tight_layout()
+    _axes[1].set(title="OT plan (mass moved)", xlabel="PC1")
     _row = {m: dists[m][_ia, _ib] for m in dists}
     _med = {m: np.median(dists[m][_ia][np.arange(len(genes_eval)) != _ia]) for m in dists}
     _tab = pd.DataFrame({"d(A,B)": _row, "median d(A,·)": _med})
     _tab["ratio"] = _tab["d(A,B)"] / _tab["median d(A,·)"]
-    mo.vstack([mo.as_html(_fig), _tab.round(3)])
+    mo.vstack([fig_row(_fig_l, _fig_r, min_px=280, max_px=440), _tab.round(3)])
     return
 
 
@@ -961,7 +1157,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo, np, plt, shift_sl, width_sl):
+def _(COL_A, COL_B, fig_row, mo, np, plt, shift_sl, width_sl):
     def path_metrics(s, w, n=400):
         xs = np.linspace(0, 1, n)
         dx = xs[1] - xs[0]
@@ -984,19 +1180,20 @@ def _(mo, np, plt, shift_sl, width_sl):
     _delta = _a - _b
     _identity_err = abs(_now["energy"] - float(-_delta @ _D @ _delta))
 
-    _fig, _axes = plt.subplots(1, 2, figsize=(10.5, 3.4))
-    _axes[0].plot(_xs, _a, color="#3b6ea8")
-    _axes[0].plot(_xs, _b, color="#d1495b")
-    _axes[0].set(title="two genes along a 1D trajectory", xlabel="pseudotime", yticks=[])
+    _fig_l, _ax_l = plt.subplots(figsize=(4.2, 3.3))
+    _fig_r, _ax_r = plt.subplots(figsize=(4.2, 3.3))
+    _axes = (_ax_l, _ax_r)
+    _axes[0].plot(_xs, _a, color=COL_A, label="A")
+    _axes[0].plot(_xs, _b, color=COL_B, label="B")
+    _axes[0].set(title="two genes on a 1D trajectory", xlabel="pseudotime", yticks=[])
     _axes[1].plot(_grid, _curves["W1"], label="W1", color="#2e8b57")
     _axes[1].plot(_grid, _curves["energy"], label="energy E", color="#8a5a9e")
     _axes[1].plot(_grid, 1 - _curves["pearson"], label="1 − Pearson", color="#d1495b")
     _axes[1].axvline(shift_sl.value, color="0.5", ls=":")
-    _axes[1].set(xlabel="separation s", title="distance vs true separation")
-    _axes[1].legend(frameon=False, loc="lower right")
-    _fig.tight_layout()
+    _axes[1].set(xlabel="separation s", title="distance vs separation")
+    _axes[1].legend(frameon=False, loc="lower right", fontsize=10)
     mo.vstack([
-        mo.as_html(_fig),
+        fig_row(_fig_l, _fig_r, min_px=280, max_px=440),
         mo.md(
             f"At s = {shift_sl.value:.2f}: W1 = {_now['W1']:.3f}, E = {_now['energy']:.4f}, "
             f"Pearson = {_now['pearson']:+.3f}. Discretisation check of E = −δᵀDδ: |error| = {_identity_err:.1e}."
@@ -1090,16 +1287,15 @@ def _(adata, dists, genes_eval, np, pd, tree_distance):
 
 
 @app.cell
-def _(mo, plt, score_df):
+def _(fig_row, plt, score_df):
     _s = score_df.sort_values("ρ(GT)")
-    _fig, _axes = plt.subplots(1, 2, figsize=(10.5, 3.6))
-    _axes[0].barh(_s.index, _s["ρ(GT)"], color="#3b6ea8")
-    _axes[0].set(xlabel="Spearman ρ with true tree distance", xlim=(min(0, _s["ρ(GT)"].min()) - 0.05, 1))
-    _axes[1].barh(_s.index, _s["perm→source rank"], color="#d1495b")
-    _axes[1].set(xlabel="rank of source gene for its permuted copy (1 = fooled)", xscale="log")
-    _axes[1].set_yticklabels([])
-    _fig.tight_layout()
-    mo.as_html(_fig)
+    _f1, _a1 = plt.subplots(figsize=(4.4, 3.6))
+    _a1.barh(_s.index, _s["ρ(GT)"], color="#3b6ea8")
+    _a1.set(xlabel="Spearman ρ with true distance", xlim=(min(0, _s["ρ(GT)"].min()) - 0.05, 1))
+    _f2, _a2 = plt.subplots(figsize=(4.4, 3.6))
+    _a2.barh(_s.index, _s["perm→source rank"], color="#d1495b")
+    _a2.set(xlabel="source rank for its permuted copy\n(1 = fooled)", xscale="log")
+    fig_row(_f1, _f2, min_px=280, max_px=440)
     return
 
 
@@ -1123,7 +1319,7 @@ def _(dists, mo):
 
 
 @app.cell
-def _(adata, dists, embed_dd, genes_eval, mo, np, plt):
+def _(adata, dists, embed_dd, fig_row, genes_eval, np, plt):
     def diffusion_map_from_distance(D, k=5, n_comp=2):
         D = np.asarray(D, float)
         sig = np.sort(D, axis=1)[:, k]
@@ -1140,8 +1336,8 @@ def _(adata, dists, embed_dd, genes_eval, mo, np, plt):
 
     _v = adata.var.loc[genes_eval]
     _emb = diffusion_map_from_distance(dists[embed_dd.value])
-    _fig, _ax = plt.subplots(figsize=(5.8, 4.4))
-    _cmaps = {0: "Greys", 1: "Blues", 2: "Reds"}
+    _fig, _ax = plt.subplots(figsize=(4.8, 4.2))
+    _cmaps = {0: "Greys", 1: "BuGn", 2: "Purples"}
     _kinds = _v["kind"].to_numpy()
     for _b, _cm in _cmaps.items():
         _m = (_v["peak_branch"].to_numpy() == _b) & (_kinds == "trajectory")
@@ -1151,9 +1347,9 @@ def _(adata, dists, embed_dd, genes_eval, mo, np, plt):
     _ax.scatter(_emb[_tw, 0], _emb[_tw, 1], marker="^", s=50, facecolor="none", edgecolor="#2e8b57", label="twin (pos. ctrl)")
     _ax.scatter(_emb[_pm, 0], _emb[_pm, 1], marker="x", s=50, color="#e08a00", label="permuted (neg. ctrl)")
     _ax.legend(frameon=False, fontsize=8)
-    _ax.set(xlabel="DC1", ylabel="DC2", title=f"gene diffusion map: {embed_dd.value}\n(grey = trunk, blue = A, red = B; darker = later)")
-    _fig.tight_layout()
-    mo.as_html(_fig)
+    _ax.set(xlabel="DC1", ylabel="DC2")
+    _ax.set_title(f"gene diffusion map: {embed_dd.value}\n(grey = trunk, green = L, purple = R; darker = later)", fontsize=10)
+    fig_row(_fig, min_px=280, max_px=480)
     return
 
 
