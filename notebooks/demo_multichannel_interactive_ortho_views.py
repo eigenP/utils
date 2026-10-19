@@ -155,6 +155,47 @@ def _(viewer):
 @app.cell
 def _(mo):
     mo.md(r"""
+    ## Blending and projection modes (keyword only)
+
+    `blending='minimum'` keeps the per-RGB minimum of the channels. Each channel is drawn from white (low) to its colour (high), or with an inverted colormap such as `'Blues'` or `'Oranges'`, giving a multichannel image on a white background (as napari's minimum blending with inverted colormaps). The other modes are `'additive'`, `'maximum'` and `'screen'`; the default keeps the current look.
+
+    `projection='attenuated_mip'` projects each slab like napari's attenuated MIP: samples are dimmed by the intensity accumulated in front of them (rays enter at the slab's lowest index), which gives a depth cue. `'minip'` and `'average'` are also available. These options are not in the GUI.
+    """)
+    return
+
+
+@app.cell
+def _(membrane, nuclei, show_zyx_max_slice_interactive):
+    viewer_minimum = show_zyx_max_slice_interactive(
+        [nuclei, membrane],
+        colormap=['Blues', 'Oranges'],
+        blending='minimum',
+        x_t=3,
+        y_t=3,
+        z_t=nuclei.shape[0] // 2 - 1,
+    )
+    viewer_minimum
+    return
+
+
+@app.cell
+def _(membrane, nuclei, show_zyx_max_slice_interactive):
+    viewer_attenuated = show_zyx_max_slice_interactive(
+        [nuclei, membrane],
+        colormap=['lime', 'magenta'],
+        projection='attenuated_mip',
+        attenuation=0.05,
+        x_t=20,
+        y_t=20,
+        z_t=nuclei.shape[0] // 2 - 1,
+    )
+    viewer_attenuated
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     ## Point Annotator Widget
 
     Toggle the "ANNOTATION" checkbox to start adding or deleting points. Points added are persistent and sync directly back to the `widget.points` list in Python.

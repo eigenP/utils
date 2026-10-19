@@ -2549,3 +2549,212 @@ def test_iso_scatter_subsampling_is_seeded_and_leaves_global_rng_alone():
     w2 = show_iso_scatter(X, Y, Z)
     assert np.array_equal(w1.X_orig, w2.X_orig)
 
+
+
+# =========================================
+# Blending modes and slab projections (keyword-only rendering options)
+# =========================================
+
+import eigenp_utils.tnia_plotting_anywidgets as _tpa
+
+
+def _panel_rgb(fig, name="axXY"):
+    return np.asarray(getattr(fig, name).images[0].get_array(), dtype=float)
+
+
+def _two_channel_planes():
+    # channel 0 on in the left column, channel 1 on in the top row
+    a = np.zeros((2, 2), dtype=np.float32); a[:, 0] = 1.0
+    b = np.zeros((2, 2), dtype=np.float32); b[0, :] = 1.0
+    return a, b
+
+
+def test_minimum_blending_is_per_rgb_minimum_of_white_to_colour_channels():
+    a, b = _two_channel_planes()
+    xy, _, _ = create_multichannel_rgb([a, b], [a, b], [a, b], vmin=0, vmax=1,
+                                       colormap=['magenta', 'cyan'], blend='minimum')
+    np.testing.assert_allclose(xy[1, 1], [1, 1, 1])        # both off: white
+    np.testing.assert_allclose(xy[1, 0], to_rgb('magenta'))  # only channel 0
+    np.testing.assert_allclose(xy[0, 1], to_rgb('cyan'))     # only channel 1
+    np.testing.assert_allclose(xy[0, 0], [0, 0, 1])        # min(magenta, cyan) = blue
+
+    # opacity fades a channel towards white, the neutral value of the minimum
+    xy, _, _ = create_multichannel_rgb([a, b], [a, b], [a, b], vmin=0, vmax=1,
+                                       colormap=['magenta', 'cyan'], opacity=[0.5, 0.0], blend='minimum')
+    np.testing.assert_allclose(xy[1, 0], [1, 0.5, 1])
+    np.testing.assert_allclose(xy[0, 1], [1, 1, 1])
+
+
+def test_minimum_blending_with_inverted_colormaps():
+    a, b = _two_channel_planes()
+    xy, _, _ = _tpa.create_multichannel_rgb_cmap([a, b], [a, b], [a, b], vmin=0, vmax=1,
+                                                 colormap=['Blues', 'Reds'], blend='minimum')
+    blues, reds = matplotlib.colormaps['Blues'], matplotlib.colormaps['Reds']
+    q = lambda c, v: np.asarray(c(np.array([v]), bytes=True)[0, :3]) / 255.0  # 8-bit colormap lookup
+    np.testing.assert_allclose(xy[1, 1], np.minimum(q(blues, 0.0), q(reds, 0.0)), atol=1e-6)
+    np.testing.assert_allclose(xy[0, 0], np.minimum(q(blues, 1.0), q(reds, 1.0)), atol=1e-6)
+    # a plain colour in the colormap path is drawn white -> colour as well
+    xy, _, _ = _tpa.create_multichannel_rgb_cmap([a, b], [a, b], [a, b], vmin=0, vmax=1,
+                                                 colormap=['Blues', 'red'], blend='minimum')
+    np.testing.assert_allclose(xy[1, 1], q(blues, 0.0), atol=1e-6)
+
+
+def test_default_blending_is_unchanged():
+    rng = np.random.default_rng(0)
+    planes = [rng.random((6, 7)).astype(np.float32) for _ in range(2)]
+    for cmap, mode in ((['magenta', 'cyan'], 'additive'), (['viridis', 'magma'], 'maximum')):
+        f0 = show_zyx(planes, planes, planes, colormap=cmap)
+        f1 = show_zyx(planes, planes, planes, colormap=cmap, blending=mode)
+        np.testing.assert_array_equal(_panel_rgb(f0), _panel_rgb(f1))
+        plt.close('all')
+
+
+def test_minimum_blending_uses_a_white_theme():
+    rng = np.random.default_rng(0)
+    planes = [rng.random((20, 30)).astype(np.float32) for _ in range(2)]
+    fig = show_zyx(planes, planes, planes, rotate_view=30, blending='minimum', pixel_sizes=(1, 1, 1))
+    xy = _panel_rgb(fig)
+    np.testing.assert_allclose(xy[0, 0], [1, 1, 1], atol=1e-6)  # rotation corner padded white, not black
+    assert mcolors.to_hex(fig.patch.get_facecolor()) == '#ffffff'
+    assert mcolors.to_hex(fig.axXY.get_facecolor()) == '#ffffff'
+    bar = fig.axXY.collections[0]
+    assert mcolors.to_hex(bar.get_colors()[0]) == '#000000'  # scale bar visible on white
+    plt.close(fig)
+
+    # control: the default theme still pads with black and draws a white bar
+    fig = show_zyx(planes, planes, planes, rotate_view=30, pixel_sizes=(1, 1, 1))
+    np.testing.assert_allclose(_panel_rgb(fig)[0, 0], [0, 0, 0], atol=1e-6)
+    assert mcolors.to_hex(fig.axXY.collections[0].get_colors()[0]) == '#ffffff'
+    plt.close(fig)
+
+
+def test_minimum_blending_single_channel_and_default_colours():
+    img = np.zeros((4, 5, 6), dtype=np.float32); img[2, 2, 3] = 1.0
+    fig = _tpa.show_zyx_max(img, blending='minimum', vmin=0, vmax=1)
+    rgba = fig.axXY.images[0].to_rgba(fig.axXY.images[0].get_array())
+    np.testing.assert_allclose(rgba[0, 0, :3], [1, 1, 1], atol=1e-6)  # background white
+    np.testing.assert_allclose(rgba[2, 3, :3], [0, 0, 0], atol=1e-6)  # signal in the default ink (black)
+    plt.close(fig)
+    assert _tpa._channel_colormaps(None, 3, 'minimum') == ['black', 'magenta', 'lime']
+    assert _tpa._channel_colormaps(None, 3) == ['white', 'lime', 'magenta']
+
+
+def test_blend_colors_minimum():
+    vals = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
+    cols = _tpa.blend_colors(vals, ['magenta', 'cyan'], vmin=0, vmax=1, blending='minimum')
+    np.testing.assert_allclose(cols, [[1, 1, 1], to_rgb('magenta'), [0, 0, 1]])
+    np.testing.assert_allclose(
+        _tpa.blend_colors(vals, ['magenta', 'cyan'], vmin=0, vmax=1),
+        _tpa.blend_colors(vals, ['magenta', 'cyan'], vmin=0, vmax=1, blending='additive'),
+    )
+
+
+def test_invalid_blending_and_projection_raise():
+    img = np.zeros((3, 4, 5))
+    with pytest.raises(ValueError, match="blending"):
+        _tpa.show_zyx_max(img, blending='multiply')
+    with pytest.raises(ValueError, match="projection"):
+        _tpa.show_zyx_max(img, projection='iso')
+    with pytest.raises(ValueError, match="attenuation"):
+        _tpa.show_zyx_max(img, projection='attenuated_mip', attenuation=-1)
+
+
+@pytest.mark.parametrize("projection, ref", [("mip", np.max), ("minip", np.min), ("average", np.mean)])
+def test_slab_projections_match_numpy(projection, ref):
+    rng = np.random.default_rng(1)
+    img = rng.random((8, 9, 10)).astype(np.float32)
+    fig = show_zyx_max_slabs(img, [2, 7], [1, 5], [3, 6], projection=projection, vmin=0, vmax=1)
+    np.testing.assert_allclose(_panel_rgb(fig), ref(img[3:6], axis=0), rtol=1e-6)
+    plt.close(fig)
+
+
+def test_attenuated_mip_matches_napari_formula():
+    # one ray of two samples, display range [0, 1]: scaled_i = v_i * exp(-a * (cumsum_i - 1))
+    a = 1.0
+    ray = np.array([0.5, 1.0], dtype=np.float32).reshape(2, 1, 1)
+    expected = max(0.5 * np.exp(-a * (0.5 - 1)), 1.0 * np.exp(-a * (1.5 - 1)))
+    np.testing.assert_allclose(_tpa._attenuated_mip(ray, 0, 0.0, 1.0, a), expected, rtol=1e-6)
+    # zero attenuation is the plain MIP of the clipped data, returned in data units
+    vol = np.random.default_rng(2).random((5, 4, 3)).astype(np.float32) * 10
+    np.testing.assert_allclose(_tpa._attenuated_mip(vol, 0, 2.0, 8.0, 0.0),
+                               np.clip(vol.max(axis=0), 2.0, 8.0), rtol=1e-5)
+
+
+def test_attenuated_mip_hides_structures_behind_bright_ones():
+    # A dim haze fills the slab; the same bright voxel is placed shallower or deeper
+    vol = np.full((30, 1, 2), 0.2, dtype=np.float32)
+    vol[2, 0, 0] = 1.0   # near the entry face (index 0)
+    vol[25, 0, 1] = 1.0  # deep behind the haze
+    # shallow: 1 * exp(-0.3 * (0.2 * 2 + 1 - 1)) = 0.89; deep: exp(-0.3 * 0.2 * 25) = 0.22,
+    # below the first haze sample (0.2 * exp(0.3 * 0.8) = 0.25)
+    out = _tpa._attenuated_mip(vol, 0, 0.0, 1.0, 0.3)
+    np.testing.assert_allclose(out[0, 0], np.exp(-0.3 * 0.4), rtol=1e-5)
+    np.testing.assert_allclose(out[0, 1], 0.2 * np.exp(0.3 * 0.8), rtol=1e-5)
+    # control: without attenuation both are fully visible
+    np.testing.assert_allclose(_tpa._attenuated_mip(vol, 0, 0.0, 1.0, 0.0), [[1.0, 1.0]])
+
+
+def test_slice_widget_blending_and_projection_kwargs():
+    rng = np.random.default_rng(3)
+    chans = [rng.random((6, 12, 14)).astype(np.float32) for _ in range(2)]
+    w = TNIASliceWidget(chans, blending='minimum', projection='attenuated_mip', attenuation=0.2)
+    # keyword-only: no GUI traits were added
+    assert not {'blending', 'projection', 'attenuation'} & set(w.trait_names())
+    assert w.colors_resolved == ['black', 'magenta']
+    assert w.channel_colors[0] == '#9e9e9e'  # dark ink lifted for the dark GUI
+    fig = w._render()
+    assert mcolors.to_hex(fig.patch.get_facecolor()) == '#ffffff'
+    plt.close(fig)
+    w.copy_params_trigger += 1
+    assert "blending='minimum'" in w.copy_params_string
+    assert "projection='attenuated_mip'" in w.copy_params_string
+    assert "attenuation=0.2" in w.copy_params_string
+
+    # interactive wrappers pass the options through
+    w2 = show_zyx_max_slice_interactive(chans[0], blending='minimum', projection='minip')
+    assert (w2.blending, w2.projection) == ('minimum', 'minip')
+    w3 = show_zyx_max_slice_interactive_point_annotator(chans, blending='minimum')
+    assert w3.colors_resolved[:2] == ['black', 'magenta'] and w3.blending == 'minimum'
+
+
+def test_scatter_widget_minimum_blending():
+    rng = np.random.default_rng(4)
+    pts = rng.random((200, 3)) * [8, 20, 30]
+    for render in ('points', 'density'):
+        w = show_zyx_max_scatter_interactive(pts, channels=list(rng.random((2, 200))), render=render,
+                                             blending='minimum')
+        assert w.subplot_bg == 'white'
+        fig = w._render()
+        assert mcolors.to_hex(fig.axXY.get_facecolor()) == '#ffffff'
+        plt.close(fig)
+    # control: default background is still black
+    w = show_zyx_max_scatter_interactive(pts, render='points')
+    assert w.subplot_bg == 'black'
+
+
+def test_scatter_widget_accepts_n_by_c_channel_array():
+    rng = np.random.default_rng(5)
+    pts = rng.random((150, 3)) * [8, 20, 30]
+    vals = rng.random((150, 2))
+    w = show_zyx_max_scatter_interactive(pts, channels=vals, render='points')
+    assert w.mode == 'cont_multi' and w.C == 2
+    plt.close(w._render())
+    with pytest.raises(ValueError, match="n_points"):
+        show_zyx_max_scatter_interactive(pts, channels=rng.random((149, 2)), render='points')
+
+
+def test_show_zyx_max_accepts_a_channel_list():
+    rng = np.random.default_rng(6)
+    chans = [rng.random((4, 5, 6)).astype(np.float32) for _ in range(2)]
+    fig = _tpa.show_zyx_max(chans, colormap=['magenta', 'cyan'])
+    assert _panel_rgb(fig).shape == (5, 6, 3)
+    plt.close(fig)
+
+
+def test_interactive_wrapper_warns_once_for_a_missing_pixel_size_axis():
+    img = np.random.default_rng(7).random((4, 8, 9)).astype(np.float32)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        show_zyx_max_slice_interactive(img, pixel_sizes={'Z': None, 'Y': 0.5, 'X': 0.5})
+    msgs = [str(r.message) for r in rec if "No value for axis Z" in str(r.message)]
+    assert len(msgs) == 1

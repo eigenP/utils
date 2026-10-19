@@ -23,13 +23,14 @@ def _safe_float(v):
             return float(v.item())
         raise ValueError(f"Could not convert {v} to float")
 
-def _parse_zyx_tuple_or_dict(val, default_val=None):
+def _parse_zyx_tuple_or_dict(val, default_val=None, warn=True):
     """
     Parse a (Z, Y, X) tuple/list or a {'Z', 'Y', 'X'} dict into three floats.
 
     Missing or None entries (e.g. an uncalibrated axis from
     ``image_io.get_tiff_voxel_size``) become ``default_val``; a warning names
-    the axis when a non-None default is substituted.
+    the axis when a non-None default is substituted (unless ``warn`` is False,
+    for callers that pass ``val`` on to a parser that will warn).
     """
     if val is None:
         return (default_val, default_val, default_val)
@@ -46,7 +47,7 @@ def _parse_zyx_tuple_or_dict(val, default_val=None):
     out = []
     for axis, v in zip('ZYX', raw):
         if v is None:
-            if default_val is not None:
+            if default_val is not None and warn:
                 warnings.warn(
                     f"No value for axis {axis} in {val!r}; using {default_val}.",
                     UserWarning, stacklevel=3,
@@ -168,8 +169,8 @@ class _PanelRotation:
         return (self.c * dx - self.s * dy + self.cx,
                 self.s * dx + self.c * dy + self.cy)
 
-    def warp(self, image, order=3):
-        """Resample a 2D or channels-last image onto the rotated canvas."""
+    def warp(self, image, order=3, cval=0.0):
+        """Resample a 2D or channels-last image onto the rotated canvas (corners filled with ``cval``)."""
         image = np.asarray(image)
         if self.angle == 0.0:
             return image
@@ -181,9 +182,9 @@ class _PanelRotation:
             all_finite = finite.all()
             src = plane if all_finite else np.where(finite, plane, 0.0)
             out = ndi.affine_transform(src, self.M, offset=self.offset, output_shape=self.out_shape,
-                                       order=order, mode='grid-constant', cval=0.0)
+                                       order=order, mode='grid-constant', cval=cval)
             if order > 1 and src.size:
-                out = np.clip(out, min(src.min(), 0.0), max(src.max(), 0.0))
+                out = np.clip(out, min(src.min(), cval), max(src.max(), cval))
             if not all_finite:
                 # Keep non-finite pixels local instead of letting the spline
                 # spread one NaN over the whole panel.
@@ -278,23 +279,55 @@ def _parse_rotate_view(val):
 
 
 _DEFAULT_CHANNEL_COLORS = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
+# With blending='minimum' each channel runs from white (low) to its colour (high),
+# so the defaults are the complements of the additive defaults ("inks" on paper):
+# the composite then looks like an inverted additive composite.
+_DEFAULT_INVERTED_CHANNEL_COLORS = ['black', 'magenta', 'lime', 'blue', 'red', 'cyan', 'yellow']
+
+# Channel compositing modes (napari names; 'add'/'max'/'min' accepted as aliases).
+_BLENDING_MODES = ('additive', 'maximum', 'screen', 'minimum')
+_BLENDING_ALIASES = {'add': 'additive', 'max': 'maximum', 'min': 'minimum'}
+# Slab projections (napari's volume rendering modes, applied along the view axis).
+_PROJECTIONS = ('mip', 'minip', 'average', 'attenuated_mip')
 
 
-def _channel_colormaps(colormap, n):
+def _check_blending(blending):
+    """Canonical blending name, or None for each function's historical default."""
+    if blending is None:
+        return None
+    b = _BLENDING_ALIASES.get(blending, blending)
+    if b not in _BLENDING_MODES:
+        raise ValueError(f"blending must be one of {_BLENDING_MODES} (or None), got {blending!r}")
+    return b
+
+
+def _check_projection(projection, attenuation=0.05):
+    """Canonical projection name ('mip' for None) after validating ``attenuation``."""
+    p = 'mip' if projection is None else projection
+    if p not in _PROJECTIONS:
+        raise ValueError(f"projection must be one of {_PROJECTIONS} (or None), got {projection!r}")
+    if not (np.isfinite(attenuation) and attenuation >= 0):
+        raise ValueError(f"attenuation must be a finite number >= 0, got {attenuation!r}")
+    return p
+
+
+def _channel_colormaps(colormap, n, blending=None):
     """
     Normalise a per-channel colormap argument to a list of length ``n``.
 
     A single string or colour tuple applies to the first channel; missing
-    entries are filled with the default channel colours not already used.
+    entries are filled with the default channel colours not already used
+    (the inverted defaults for ``blending='minimum'``).
     """
+    defaults = _DEFAULT_INVERTED_CHANNEL_COLORS if blending == 'minimum' else _DEFAULT_CHANNEL_COLORS
     if colormap is None:
         given = []
     elif isinstance(colormap, str) or (isinstance(colormap, tuple) and mcolors.is_color_like(colormap)):
         given = [colormap]
     else:
         given = list(colormap)
-    fill = [c for c in _DEFAULT_CHANNEL_COLORS if not any(c is g or (isinstance(g, str) and c == g) for g in given)]
-    fill = fill or _DEFAULT_CHANNEL_COLORS
+    fill = [c for c in defaults if not any(c is g or (isinstance(g, str) and c == g) for g in given)]
+    fill = fill or defaults
     return given[:n] + [fill[i % len(fill)] for i in range(max(0, n - len(given)))]
 
 def is_colormap(c):
@@ -308,6 +341,19 @@ def is_colormap(c):
         return True
     except (ValueError, KeyError):
         return False
+
+def _gui_channel_color(c, blending=None):
+    """GUI colour for a channel; dark inks of minimum blending are lifted to stay readable in the dark GUI."""
+    col = get_gui_channel_color(c)
+    if blending == 'minimum':
+        try:
+            r, g, b = mcolors.to_rgb(col)
+        except (ValueError, TypeError):
+            return col
+        if 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.2:
+            return '#9e9e9e'
+    return col
+
 
 def get_gui_channel_color(c):
     """
@@ -379,7 +425,7 @@ def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), co
     return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05):
     """ plots max xy, xz, and zy projections of a 3D image
 
     Args:
@@ -388,38 +434,57 @@ def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
+        blending (str, optional): channel compositing mode, see `show_zyx`.
+        projection (str, optional): how each slab is projected along the view
+            axis (napari's rendering names): 'mip' (maximum, the default),
+            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
+            ``projector``.
+        attenuation (float, optional): for 'attenuated_mip', the attenuation per
+            voxel along the ray (napari's default 0.05). Rays enter each slab at
+            its lowest index (z = start for XY, y = start for XZ, x = start for
+            ZY); samples are normalised with the display range (vmin/vmax, or
+            the channel's default range), so bright structures hide dimmer ones
+            behind them.
     """
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
             colormap = colors
 
-    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity)
+    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity, blending=blending, projection=projection, attenuation=attenuation)
 
 
-def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None):
+def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Args:
-        image_to_show (3d numpy array): image to plot
+        image_to_show (3d numpy array, or a list of them for channels): image to plot
         pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple): size of figure to
         projector: function to project with
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
+        blending (str, optional): channel compositing mode, see `show_zyx`.
+        projection (str, optional): how each slab is projected along the view
+            axis (napari's rendering names): 'mip' (maximum, the default),
+            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
+            ``projector``.
+        attenuation (float, optional): for 'attenuated_mip', the attenuation per
+            voxel along the ray (napari's default 0.05). Rays enter each slab at
+            its lowest index (z = start for XY, y = start for XZ, x = start for
+            ZY); samples are normalised with the display range (vmin/vmax, or
+            the channel's default range), so bright structures hide dimmer ones
+            behind them.
     """
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
             colormap = colors
-    projection_y = projector(image_to_show, axis=1)
-    projection_x = np.flip(np.rot90(projector(image_to_show, axis=2), 1), 0)
-    projection_z = projector(image_to_show, axis=0)
-
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity)
+    full = slice(None)
+    return show_zyx_projection_slabs(image_to_show, full, full, full, pixel_sizes=pixel_sizes, figsize=figsize, projector=projector, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, blending=blending, projection=projection, attenuation=attenuation)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None):
+def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -439,11 +504,27 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             ones derived from ``colormap`` (for pre-composited RGB input).
         pixel_sizes_given (bool, optional): whether the scale bar shows physical
             units; defaults to ``pixel_sizes is not None``.
+        blending (str, optional): how channels are composited (napari's names):
+            'additive', 'maximum', 'screen' or 'minimum'. None (default) keeps
+            the historical behaviour: additive for colour names, maximum when a
+            channel is a colormap name. 'minimum' keeps the per-RGB minimum of
+            the channels, each drawn from white (low) to its colour (high), or
+            with an inverted colormap such as 'Blues' or 'Greys': it gives a
+            multichannel image on a white background, and the panels, rotation
+            padding and scale bar switch to a white theme. For a single channel
+            or pre-composited RGB input only the white theme (and white->colour
+            colormap) applies.
     Returns:
         matplotlib Figure with named axes ``axXY``, ``axZY``, ``axXZ``, ``axBar``.
     """
     if figsize is None:
         figsize = (10, 10)
+    blending = _check_blending(blending)
+    white_theme = blending == 'minimum'
+    if white_theme and subplot_bg is None:
+        subplot_bg = 'white'
+    # Value used for the corners that rotation adds to a panel
+    pad_value = 0.0
 
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
@@ -454,7 +535,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     both_given = (pixel_sizes is not None) if pixel_sizes_given is None else bool(pixel_sizes_given)
 
     if isinstance(xy, list):
-        colormap = _channel_colormaps(colormap, len(xy))
+        colormap = _channel_colormaps(colormap, len(xy), blending)
 
     # Preserve original colormap reference before resetting colormap=None for RGB arrays
     orig_colormap = colormap
@@ -464,16 +545,20 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
         if has_colormap:
             xy, xz, zy = create_multichannel_rgb_cmap(
-                xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity
+                xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity,
+                blend=blending or 'maximum',
             )
         else:
             xy, xz, zy = create_multichannel_rgb(
-                xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity
+                xy, xz, zy, vmin=vmin, vmax=vmax, gamma=gamma, colormap=colormap, opacity=opacity,
+                blend=blending or 'additive',
             )
 
         colormap = None
         vmin, vmax, gamma = None, None, 1
         opacity = None
+        if white_theme:
+            pad_value = 1.0
     else:
         if isinstance(opacity, list):
             # Opacity of a pre-composited RGB(A) image is already baked in;
@@ -501,6 +586,11 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         if isinstance(colormap, list) and len(colormap) == 1:
             colormap = colormap[0]
 
+        # A plain colour is drawn black -> colour (white -> colour for minimum blending)
+        to_cmap = white_to if white_theme else black_to
+        if colormap is None and white_theme and np.ndim(xy) == 2:
+            colormap = _DEFAULT_INVERTED_CHANNEL_COLORS[0]
+            orig_colormap = colormap
         if colormap is not None:
             c = colormap
             if isinstance(c, str):
@@ -508,10 +598,14 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
                     matplotlib.colormaps[c]
                 except (ValueError, KeyError):
                     resolved = resolve_color(c)
-                    colormap = black_to(resolved)
+                    colormap = to_cmap(resolved)
             else:
                 resolved = resolve_color(c)
-                colormap = black_to(resolved)
+                colormap = to_cmap(resolved)
+
+        if white_theme:
+            # Corners added by rotation take the colour of the low end of the range
+            pad_value = 1.0 if np.ndim(xy) == 3 else (vmin if vmin is not None else 0.0)
 
     rot_z, rot_y, rot_x = _parse_rotate_view(rotate_view)
 
@@ -520,7 +614,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     g_xy = _PanelRotation(np.shape(xy)[:2], rot_z, py, px)
     g_xz = _PanelRotation(np.shape(xz)[:2], rot_y, pz, px)
     g_zy = _PanelRotation(np.shape(zy)[:2], rot_x, py, pz)
-    xy, xz, zy = g_xy.warp(xy), g_xz.warp(xz), g_zy.warp(zy)
+    xy, xz, zy = g_xy.warp(xy, cval=pad_value), g_xz.warp(xz, cval=pad_value), g_zy.warp(zy, cval=pad_value)
     (sxy_h, sxy_w), (sxz_h, sxz_w), (szy_h, szy_w) = g_xy.p_out, g_xz.p_out, g_zy.p_out
 
     if use_plt:
@@ -663,9 +757,13 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         for spine in ax.spines.values():
             spine.set_visible(False)
 
-    fig.patch.set_alpha(0.0)  # set transparent bgnd
+    if white_theme:
+        fig.patch.set_facecolor('white')  # the gaps between panels belong to the white canvas
+    else:
+        fig.patch.set_alpha(0.0)  # set transparent bgnd
 
-    _add_scale_bar(axXY, axBar, xy_w, both_given, figsize, unit=_length_unit(pixel_sizes))
+    _add_scale_bar(axXY, axBar, xy_w, both_given, figsize, unit=_length_unit(pixel_sizes),
+                   color='black' if white_theme else 'white')
 
     fig.axXY = axXY
     fig.axZY = axZY
@@ -676,7 +774,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     fig.canvas.draw()
     return fig
 
-def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, figsize, unit=None):
+def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, figsize, unit=None, color='white'):
     # ``ax_physical_width_um`` is in the units of the pixel sizes: ``unit``
     # (a pixel-size dict's 'unit'; µm when None). Known length units are
     # converted so the bar is labelled in µm; an unknown unit is shown as is.
@@ -718,7 +816,7 @@ def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, fi
     x0 = x1 - bar_frac
     y_line = 0.05
 
-    ax_line.hlines(y_line, x0, x1, transform=ax_line.transAxes, linewidth=linewidth, color='white', clip_on=False)
+    ax_line.hlines(y_line, x0, x1, transform=ax_line.transAxes, linewidth=linewidth, color=color, clip_on=False)
 
     if pixel_sizes_given:
         text_label = f"{int(bar_um)} {unit_label}" if bar_um >= 1 else f"{bar_um:.2g} {unit_label}"
@@ -730,7 +828,7 @@ def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, fi
             ha='center', va='center', color='gray', fontsize=fontsize_pt)
 
 ### New function
-def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None):
+def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -744,6 +842,17 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
+        blending (str, optional): channel compositing mode, see `show_zyx`.
+        projection (str, optional): how each slab is projected along the view
+            axis (napari's rendering names): 'mip' (maximum, the default),
+            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
+            ``projector``.
+        attenuation (float, optional): for 'attenuated_mip', the attenuation per
+            voxel along the ray (napari's default 0.05). Rays enter each slab at
+            its lowest index (z = start for XY, y = start for XZ, x = start for
+            ZY); samples are normalised with the display range (vmin/vmax, or
+            the channel's default range), so bright structures hide dimmer ones
+            behind them.
     """
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
@@ -763,11 +872,11 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation)
 
 
 ### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -776,32 +885,59 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
         image_to_show (3d numpy array): image to plot
         pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple): size of figure to
-        projector: function to project with
+        projector: function to project with (used when ``projection`` is None)
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
+        blending (str, optional): channel compositing mode, see `show_zyx`.
+        projection (str, optional): how each slab is projected along the view
+            axis (napari's rendering names): 'mip' (maximum, the default),
+            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
+            ``projector``.
+        attenuation (float, optional): for 'attenuated_mip', the attenuation per
+            voxel along the ray (napari's default 0.05). Rays enter each slab at
+            its lowest index (z = start for XY, y = start for XZ, x = start for
+            ZY); samples are normalised with the display range (vmin/vmax, or
+            the channel's default range), so bright structures hide dimmer ones
+            behind them.
     """
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
             colormap = colors
+    if projection is not None:
+        projection = _check_projection(projection, attenuation)
+
+    def _projector(img, i):
+        if projection is None:
+            return projector
+        lo = hi = None
+        if projection == 'attenuated_mip':
+            # Samples are normalised with the channel's display range
+            lo = vmin[i] if isinstance(vmin, (list, tuple)) else vmin
+            hi = vmax[i] if isinstance(vmax, (list, tuple)) else vmax
+            lo = _default_vmin(img) if lo is None else float(lo)
+            hi = _finite_max(img) if hi is None else float(hi)
+            if hi is None or not hi > lo:
+                hi = lo + 1.0
+        return _projector_for(projection, attenuation, lo, hi)
+
+    def _project(img, i):
+        # Slicing creates a view. Some projectors might make copies. np.max over an axis
+        # might allocate a temporary buffer if the memory is not contiguous in that axis.
+        proj = _projector(img, i)
+        return (proj(img[:, y_slices, :], axis=1),
+                np.flip(np.rot90(proj(img[:, :, x_slices], axis=2), 1), 0),
+                proj(img[z_slices, :, :], axis=0))
 
     if isinstance(image_to_show, list):
-        images_to_show_list = image_to_show
-        projection_y = []
-        projection_x = []
-        projection_z = []
-        for img in images_to_show_list:
-            # Slicing creates a view. Some projectors might make copies. np.max over an axis
-            # might allocate a temporary buffer if the memory is not contiguous in that axis.
-            projection_y.append(projector(img[:, y_slices, :], axis=1))
-            projection_x.append(np.flip(np.rot90(projector(img[:, :, x_slices], axis=2), 1), 0))
-            projection_z.append(projector(img[z_slices, :, :], axis=0))
+        projections = [_project(img, i) for i, img in enumerate(image_to_show)]
+        projection_y = [p[0] for p in projections]
+        projection_x = [p[1] for p in projections]
+        projection_z = [p[2] for p in projections]
     else:
-        projection_y = projector(image_to_show[:, y_slices, :], axis=1)
-        projection_x = np.flip(np.rot90(projector(image_to_show[:, :, x_slices], axis=2), 1), 0)
-        projection_z = projector(image_to_show[z_slices, :, :], axis=0)
+        projection_y, projection_x, projection_z = _project(image_to_show, 0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending)
 
 
 def _finite_min(*arrays):
@@ -851,8 +987,8 @@ def _finite_max(*arrays):
 def create_multichannel_rgb(
     xy_list, xz_list, zy_list,
     vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None,
-    blend='add',        # 'add' | 'screen' | 'max'
-    soft_clip=True,     # only used for blend='add'
+    blend='add',        # 'additive' | 'maximum' | 'screen' | 'minimum'
+    soft_clip=True,     # only used for additive blending
     eps=1e-12,
 ):
     """
@@ -873,10 +1009,15 @@ def create_multichannel_rgb(
     opacity : float | list[float] | None
         Opacity multiplier per channel (1 = full opacity).
     blend : str
-        'add' (default), 'screen', or 'max'.
+        How channels combine: 'additive' (default; alias 'add'), 'maximum'
+        (alias 'max'), 'screen', or 'minimum' (alias 'min'). With 'minimum'
+        each channel is drawn from white (low) to its colour (high) and the
+        per-RGB minimum is kept, giving a multichannel image on a white
+        background; opacity fades a channel towards white.
     soft_clip : bool
-        For 'add' mode, compress values >1 instead of hard clipping.
+        For additive blending, compress values >1 instead of hard clipping.
     """
+    blend = _check_blending(blend) or 'additive'
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
@@ -936,7 +1077,7 @@ def create_multichannel_rgb(
             vmaxs[i] = vmins[i] + 1.0  # avoid zero range
 
     # Choose blending accumulators
-    if blend == 'screen':
+    if blend in ('screen', 'minimum'):
         xy_acc = np.ones_like(xy_rgb)
         xz_acc = np.ones_like(xz_rgb)
         zy_acc = np.ones_like(zy_rgb)
@@ -962,6 +1103,14 @@ def create_multichannel_rgb(
         o = opacities[i]
         lo, hi = vmins[i], vmaxs[i]
 
+        if blend == 'minimum':
+            # white -> colour, faded towards white by the opacity
+            c_inv = (o * (1.0 - c)).astype(np.float32)
+            xy_acc = np.minimum(xy_acc, 1.0 - _norm_window(xy, lo, hi, g)[..., None] * c_inv)
+            xz_acc = np.minimum(xz_acc, 1.0 - _norm_window(xz, lo, hi, g)[..., None] * c_inv)
+            zy_acc = np.minimum(zy_acc, 1.0 - _norm_window(zy, lo, hi, g)[..., None] * c_inv)
+            continue
+
         # multiply by color * opacity
         c_o = (c * o).astype(np.float32)
 
@@ -973,7 +1122,7 @@ def create_multichannel_rgb(
             xy_acc *= (1.0 - xy_n)
             xz_acc *= (1.0 - xz_n)
             zy_acc *= (1.0 - zy_n)
-        elif blend == 'max':
+        elif blend == 'maximum':
             xy_acc = np.maximum(xy_acc, xy_n)
             xz_acc = np.maximum(xz_acc, xz_n)
             zy_acc = np.maximum(zy_acc, zy_n)
@@ -992,7 +1141,7 @@ def create_multichannel_rgb(
         xz_rgb = xz_acc
         zy_rgb = zy_acc
 
-        if blend == 'add':
+        if blend == 'additive':
             if soft_clip:
                 # compress highlights smoothly instead of hard clipping
                 # scale by max component per-pixel if it exceeds 1
@@ -1011,6 +1160,16 @@ def create_multichannel_rgb(
     # return xy_rgb, xz_rgb, zy_rgb
 
 def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None, blend='max', soft_clip=True, eps=1e-12):
+    """
+    Like `create_multichannel_rgb`, but each channel may be a colormap name.
+
+    Colormap names are applied as given; plain colours become black->colour
+    colormaps (white->colour for ``blend='minimum'``, so that inverted colormaps
+    such as 'Blues' or 'Greys' and plain colours compose on a white background).
+    ``blend`` takes the same modes as `create_multichannel_rgb` and defaults to
+    'maximum'.
+    """
+    blend = _check_blending(blend) or 'maximum'
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
@@ -1037,6 +1196,8 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
     for c in colormap:
         if is_colormap(c):
             cmap_list.append(matplotlib.colormaps[c])
+        elif blend == 'minimum':
+            cmap_list.append(white_to(resolve_color(c)))
         else:
             cmap_list.append(black_to(resolve_color(c)))
 
@@ -1067,7 +1228,7 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
         if vmaxs[i] <= vmins[i] + eps:
             vmaxs[i] = vmins[i] + 1.0
 
-    if blend == 'screen':
+    if blend in ('screen', 'minimum'):
         xy_acc = np.ones_like(xy_rgb)
         xz_acc = np.ones_like(xz_rgb)
         zy_acc = np.ones_like(zy_rgb)
@@ -1090,15 +1251,25 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
         o = opacities[i]
         lo, hi = vmins[i], vmaxs[i]
 
-        xy_n = (cmap(_norm_window(xy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
-        xz_n = (cmap(_norm_window(xz, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
-        zy_n = (cmap(_norm_window(zy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0) * o
+        xy_n = cmap(_norm_window(xy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0
+        xz_n = cmap(_norm_window(xz, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0
+        zy_n = cmap(_norm_window(zy, lo, hi, g), bytes=True)[..., :3].astype(np.float32) / 255.0
+
+        if blend == 'minimum':
+            # opacity fades the channel towards white (the minimum's neutral value)
+            xy_acc = np.minimum(xy_acc, 1.0 - o * (1.0 - xy_n))
+            xz_acc = np.minimum(xz_acc, 1.0 - o * (1.0 - xz_n))
+            zy_acc = np.minimum(zy_acc, 1.0 - o * (1.0 - zy_n))
+            continue
+        xy_n *= o
+        xz_n *= o
+        zy_n *= o
 
         if blend == 'screen':
             xy_acc *= (1.0 - xy_n)
             xz_acc *= (1.0 - xz_n)
             zy_acc *= (1.0 - zy_n)
-        elif blend == 'max':
+        elif blend == 'maximum':
             xy_acc = np.maximum(xy_acc, xy_n)
             xz_acc = np.maximum(xz_acc, xz_n)
             zy_acc = np.maximum(zy_acc, zy_n)
@@ -1116,7 +1287,7 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
         xz_rgb = xz_acc
         zy_rgb = zy_acc
 
-        if blend == 'add':
+        if blend == 'additive':
             if soft_clip:
                 for rgb in (xy_rgb, xz_rgb, zy_rgb):
                     m = rgb.max(axis=-1, keepdims=True)
@@ -1134,7 +1305,44 @@ def black_to(color):
     return LinearSegmentedColormap.from_list(f"black_to_{color}", [(0,0,0), rgb])
 
 
-def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_clip=True):
+def white_to(color):
+    """Return a white→color LinearSegmentedColormap (an inverted colormap, for minimum blending)."""
+    rgb = to_rgb(color)
+    return LinearSegmentedColormap.from_list(f"white_to_{color}", [(1, 1, 1), rgb])
+
+
+def _attenuated_mip(volume, axis, lo, hi, attenuation):
+    """
+    Attenuated maximum intensity projection along ``axis`` (napari's ``attenuated_mip``).
+
+    Rays enter the volume at index 0 of ``axis``. Each sample is normalised to
+    [0, 1] with the display range (lo, hi) and scaled by
+    ``exp(-attenuation * (cumulative normalised intensity - 1))``, so bright
+    structures hide what lies behind them; the brightest scaled sample is kept.
+    ``attenuation`` is per voxel along the ray (0 gives the plain MIP of the
+    clipped data). The result is returned in data units (``lo + m * (hi - lo)``)
+    so the usual display range, gamma and colormap apply to it.
+    """
+    span = max(float(hi) - float(lo), 1e-12)
+    v = (np.asarray(volume, dtype=np.float32) - np.float32(lo)) / np.float32(span)
+    v = np.clip(np.nan_to_num(v, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    scaled = v * np.exp(-np.float32(attenuation) * (np.cumsum(v, axis=axis) - 1.0))
+    m = np.clip(scaled.max(axis=axis), 0.0, 1.0)
+    return float(lo) + m * span
+
+
+def _projector_for(projection, attenuation, lo=None, hi=None):
+    """A ``f(volume, axis)`` projector for a canonical projection name."""
+    if projection == 'mip':
+        return np.max
+    if projection == 'minip':
+        return np.min
+    if projection == 'average':
+        return np.mean
+    return lambda vol, axis: _attenuated_mip(vol, axis, lo, hi, attenuation)
+
+
+def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_clip=True, blending=None):
     """
     Blend multiple channels of intensities into RGB.
 
@@ -1142,6 +1350,9 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
         Values per point per channel.
     base_colors : list of str or rgb tuples
         Colors per channel.
+    blending : str, optional
+        'additive' (default; ``soft_clip`` applies), 'maximum', 'screen' or
+        'minimum' (each channel from white to its colour, per-RGB minimum).
 
     Notes:
         - Multi-channel visualization widgets support rendering with colormaps by distinguishing strings
@@ -1157,8 +1368,9 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     import numpy as np
     from matplotlib.colors import to_rgb
 
+    blending = _check_blending(blending) or 'additive'
     N, C = intensities.shape
-    colors = np.zeros((N, 3), dtype=float)
+    colors = np.ones((N, 3), dtype=float) if blending in ('screen', 'minimum') else np.zeros((N, 3), dtype=float)
 
     vmin = [None]*C if vmin is None else (vmin.tolist() if hasattr(vmin, 'tolist') else vmin)
     if not isinstance(vmin, (list, tuple)): vmin = [vmin]*C
@@ -1182,15 +1394,23 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
         c_name = base_colors[c]
         if is_colormap(c_name):
-            cmap = matplotlib.colormaps[c_name]
-            rgb = cmap(norm)[:, :3]
-            colors += rgb
+            rgb = matplotlib.colormaps[c_name](norm)[:, :3]
         else:
-            resolved_c = resolve_color(c_name)
-            rgb = np.asarray(to_rgb(resolved_c))
-            colors += norm[:, None] * rgb
+            col = np.asarray(to_rgb(resolve_color(c_name)))
+            # black -> colour, or white -> colour for minimum blending
+            rgb = 1.0 - norm[:, None] * (1.0 - col) if blending == 'minimum' else norm[:, None] * col
+        if blending == 'minimum':
+            colors = np.minimum(colors, rgb)
+        elif blending == 'maximum':
+            colors = np.maximum(colors, rgb)
+        elif blending == 'screen':
+            colors *= 1.0 - rgb
+        else:
+            colors += rgb
 
-    if soft_clip:
+    if blending == 'screen':
+        colors = 1.0 - colors
+    if soft_clip and blending == 'additive':
         maxval = colors.max(axis=1, keepdims=True)
         scale = np.maximum(1.0, maxval)
         colors = colors / scale
@@ -1704,13 +1924,39 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
         if hasattr(self, 'rotate_view') and self.rotate_view is not None:
             s.append(f"rotate_view={self.rotate_view},")
+        # Keyword-only rendering options (not in the GUI), kept so a paste reproduces the view
+        if getattr(self, 'blending', None) is not None:
+            s.append(f"blending={self.blending!r},")
+        if getattr(self, 'projection', None) is not None:
+            s.append(f"projection={self.projection!r},")
+            if self.projection == 'attenuated_mip':
+                s.append(f"attenuation={self.attenuation},")
 
         self.copy_params_string = "\n".join(s)
 
 class TNIASliceWidget(TNIAWidgetBase):
-    def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
-                 show_crosshair=True, sync_on_hover=True, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
+    """
+    Interactive ortho-slab viewer of a 3D image (or a list of channels).
 
+    Besides the GUI-controlled display settings, two keyword-only rendering
+    options are available (not shown in the GUI):
+
+    - ``blending``: how channels are composited, 'additive', 'maximum',
+      'screen' or 'minimum' (see `show_zyx`). None keeps the default
+      (additive; maximum when a channel is a colormap name). 'minimum' draws
+      each channel from white to its colour and gives a white canvas; with no
+      ``colormap`` the channels get the inverted default colours.
+    - ``projection`` / ``attenuation``: how each slab is projected, 'mip'
+      (default), 'minip', 'average' or 'attenuated_mip' (see
+      `show_zyx_projection_slabs`).
+    """
+    def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
+                 show_crosshair=True, sync_on_hover=True, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
+                 blending=None, projection=None, attenuation=0.05, **kwargs):
+
+        self.blending = _check_blending(blending)
+        self.projection = None if projection is None else _check_projection(projection, attenuation)
+        self.attenuation = float(attenuation)
         self.rotate_view = rotate_view
         self.channel_labels_input = channel_labels
         self.channel_label_fontsize_pt = channel_label_fontsize_pt
@@ -1774,7 +2020,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             # Resolve default colors to ensure stability when toggling. A single
             # colormap string must not be split into characters, and missing
             # entries get the default channel colours.
-            self.colors_resolved = _channel_colormaps(colormap, self.num_channels)
+            self.colors_resolved = _channel_colormaps(colormap, self.num_channels, self.blending)
         else:
             self.num_channels = 1
             if channel_labels is not None:
@@ -1783,14 +2029,14 @@ class TNIASliceWidget(TNIAWidgetBase):
                 self.channel_names = ["Channel 0"]
             self.channel_dtypes = [im.dtype.name]
             if colormap is None:
-                self.colors_resolved = ['white']
+                self.colors_resolved = _channel_colormaps(None, 1, self.blending)
             elif isinstance(colormap, (list, tuple)):
                 self.colors_resolved = list(colormap)
             else:
                 self.colors_resolved = [colormap]
 
         # Use resolve_color for channel_colors (which is passed to JS)
-        GUI_CHANNEL_COLORS = [get_gui_channel_color(c) for c in self.colors_resolved]
+        GUI_CHANNEL_COLORS = [_gui_channel_color(c, self.blending) for c in self.colors_resolved]
         self.channel_colors = GUI_CHANNEL_COLORS
 
         # Set traitlets lists for interactive parameters
@@ -1965,7 +2211,8 @@ class TNIASliceWidget(TNIAWidgetBase):
             pixel_sizes=pass_pixel_sizes, figsize=self.figsize, colormap=colors_curr,
             vmin=vmin_curr, vmax=vmax_curr, gamma=gamma_curr, opacity=opacity_curr,
             rotate_view=self.rotate_view, channel_labels=channel_labels_curr,
-            channel_label_fontsize_pt=self.channel_label_fontsize_pt
+            channel_label_fontsize_pt=self.channel_label_fontsize_pt,
+            blending=self.blending, projection=self.projection, attenuation=self.attenuation,
         )
 
         if self.show_crosshair and fig:
@@ -2025,12 +2272,15 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         else:
             im_list = list(im)
 
-        # Ensure colormap is a list
+        # Ensure colormap is a list (inverted default colours for minimum blending)
+        defaults = (_DEFAULT_INVERTED_CHANNEL_COLORS
+                    if _check_blending(kwargs.get('blending')) == 'minimum'
+                    else _DEFAULT_CHANNEL_COLORS)
         if colormap is None:
             if len(im_list) == 1:
-                colors_list = ['white']
+                colors_list = defaults[:1]
             else:
-                colors_list = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
+                colors_list = list(defaults)
         elif isinstance(colormap, str):
             colors_list = [colormap]
         else:
@@ -2038,9 +2288,9 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
         while len(colors_list) < len(im_list):
             if len(im_list) == 1:
-                colors_list.extend(['white'])
+                colors_list.extend(defaults[:1])
             else:
-                colors_list.extend(['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue'])
+                colors_list.extend(defaults)
 
         colors_list = colors_list[:len(im_list)]
 
@@ -2301,7 +2551,13 @@ def _finite_points(X, Y, Z, channels=None):
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=True, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=True, subplot_bg=None, slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
+                 blending=None, **kwargs):
+        # Keyword-only channel compositing (not in the GUI); see `show_zyx`.
+        # 'minimum' also switches to a white canvas and inverted default colours.
+        self.blending = _check_blending(blending)
+        if subplot_bg is None:
+            subplot_bg = 'white' if self.blending == 'minimum' else 'black'
         self.rotate_view = rotate_view
         self.channel_label_fontsize_pt = channel_label_fontsize_pt
         if colors is not None:
@@ -2398,7 +2654,15 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 self.idx_lists = [np.asarray(ix, dtype=int) for ix in channels]
         else:
             a = _as_1d(channels)
-            if _is_int_like(a):
+            if a.ndim == 2:
+                # (N, C) array: one column of values per channel
+                if a.shape[0] != self.N:
+                    raise ValueError(
+                        f"A 2D channels array must have shape (n_points, n_channels) = ({self.N}, C), got {a.shape}"
+                    )
+                self.mode = 'cont_multi'
+                self.cont_multi = a.astype(float)
+            elif _is_int_like(a):
                 self.mode = 'ids'
                 self.ch_ids = np.asarray(a, dtype=int)
             else:
@@ -2417,10 +2681,9 @@ class TNIAScatterWidget(TNIAWidgetBase):
             self.C = self.cont_multi.shape[1]
 
         if colormap is None:
-            if self.C == 1:
-                default_cols = ['white']
-            else:
-                default_cols = ['white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue']
+            defaults = (_DEFAULT_INVERTED_CHANNEL_COLORS if self.blending == 'minimum'
+                        else _DEFAULT_CHANNEL_COLORS)
+            default_cols = list(defaults[:1] if self.C == 1 else defaults)
             while len(default_cols) < self.C:
                  default_cols += default_cols
             self.colors_use = default_cols[:max(1, self.C)]
@@ -2694,12 +2957,12 @@ class TNIAScatterWidget(TNIAWidgetBase):
             if has_colormap:
                 xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb_cmap(
                     xy_list, xz_list, zy_list,
-                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colormap=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
+                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colormap=colors_for_rgb, opacity=opacity_resolved, blend=self.blending or 'additive', soft_clip=True
                 )
             else:
                 xy_rgb, xz_rgb, zy_rgb = create_multichannel_rgb(
                     xy_list, xz_list, zy_list,
-                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colormap=colors_for_rgb, opacity=opacity_resolved, blend='add', soft_clip=True
+                    vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, colormap=colors_for_rgb, opacity=opacity_resolved, blend=self.blending or 'additive', soft_clip=True
                 )
 
             # Each histogram bin is drawn with its physical size, so panels,
@@ -2715,10 +2978,12 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 rotate_view=self.rotate_view, channel_labels=channel_labels,
                 channel_label_fontsize_pt=self.channel_label_fontsize_pt,
                 channel_label_colors=self._label_colors(),
+                blending=self.blending,
             )
 
-            fig.patch.set_alpha(0.0) # transparent figure bg
-            fig.patch.set_facecolor("none")
+            if self.blending != 'minimum':  # the white theme keeps its white canvas
+                fig.patch.set_alpha(0.0) # transparent figure bg
+                fig.patch.set_facecolor("none")
             # Subplot facecolor is handled by show_zyx if subplot_bg is passed
 
             if self.show_crosshair:
@@ -2803,7 +3068,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
             y_row1 = y0_frac + h2_frac + gap_h_frac
 
             # Create the figure at the size the layout was computed for
-            fig = Figure(figsize=(figW, figH), facecolor='none') if not plt.get_fignums() else plt.figure(figsize=(figW, figH), facecolor='none')
+            fig_bg = 'white' if self.blending == 'minimum' else 'none'
+            fig = Figure(figsize=(figW, figH), facecolor=fig_bg) if not plt.get_fignums() else plt.figure(figsize=(figW, figH), facecolor=fig_bg)
 
             axLabels = None
             if channel_labels is not None:
@@ -2886,6 +3152,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 c_use = self.colors_use[0]
                 if is_colormap(c_use):
                     cmap = matplotlib.colormaps[c_use]
+                elif self.blending == 'minimum':
+                    cmap = white_to(resolve_color(c_use))
                 else:
                     cmap = black_to(resolve_color(c_use))
 
@@ -2895,7 +3163,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 _scatter_planes(self.X_arr, self.Y_arr, self.Z_arr, c=vals, cmap=cmap, norm=norm)
 
             elif self.mode == 'cont_multi':
-                cols = blend_colors(self.cont_multi, self.colors_use, vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, soft_clip=True)
+                cols = blend_colors(self.cont_multi, self.colors_use, vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, soft_clip=True, blending=self.blending)
                 _scatter_planes(self.X_arr, self.Y_arr, self.Z_arr, c=cols)
 
             else:
@@ -2933,7 +3201,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Scale bar (kept opaque), measured against the drawn XY width
             fig.patch.set_alpha(1.0)
-            _add_scale_bar(axXY, axBar, w_x_xy, self._pixel_sizes_given, (figW, figH), unit=self._length_unit)
+            _add_scale_bar(axXY, axBar, w_x_xy, self._pixel_sizes_given, (figW, figH), unit=self._length_unit,
+                           color='black' if self.blending == 'minimum' else 'white')
 
             # FORCE MATPLOTLIB TRANSFORMS BEFORE RETURN <<<
             fig.canvas.draw()
@@ -2951,6 +3220,7 @@ def show_zyx_max_slice_interactive(
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
+    blending=None, projection=None, attenuation=0.05,
 ):
     """
     Interactive 3D slice viewer using AnyWidget.
@@ -2959,6 +3229,15 @@ def show_zyx_max_slice_interactive(
 
     Parameters
     ----------
+    blending : str, optional
+        Channel compositing: 'additive', 'maximum', 'screen' or 'minimum'
+        (white background with white->colour or inverted colormaps). None
+        keeps the default. Keyword only; not in the GUI.
+    projection : str, optional
+        Slab projection: 'mip' (default), 'minip', 'average' or
+        'attenuated_mip' (napari's rendering names). Keyword only.
+    attenuation : float, optional
+        Attenuation per voxel for 'attenuated_mip' (default 0.05).
     rotate_view : float or tuple of floats, optional
         Rotates the 2D projected views purely for visualization.
         If a single float is provided, it rotates the XY projection (in degrees).
@@ -2985,7 +3264,8 @@ def show_zyx_max_slice_interactive(
             _sz = sz if sz is not None else 1.0
             pixel_sizes = (_sz, _sxy, _sxy)
 
-    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+    # The widget parses pixel_sizes again and warns about missing axes once
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0, warn=False)
 
     if any(x is not None for x in [x_s, y_s, z_s]):
         warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
@@ -3046,7 +3326,8 @@ def show_zyx_max_slice_interactive(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
-        channel_label_fontsize_pt=channel_label_fontsize_pt
+        channel_label_fontsize_pt=channel_label_fontsize_pt,
+        blending=blending, projection=projection, attenuation=attenuation,
     )
     return w
 
@@ -3063,6 +3344,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
+    blending=None, projection=None, attenuation=0.05,
 ):
     """
     Interactive 3D slice viewer with point annotation using AnyWidget.
@@ -3073,6 +3355,15 @@ def show_zyx_max_slice_interactive_point_annotator(
 
     Parameters
     ----------
+    blending : str, optional
+        Channel compositing: 'additive', 'maximum', 'screen' or 'minimum'
+        (white background with white->colour or inverted colormaps). None
+        keeps the default. Keyword only; not in the GUI.
+    projection : str, optional
+        Slab projection: 'mip' (default), 'minip', 'average' or
+        'attenuated_mip' (napari's rendering names). Keyword only.
+    attenuation : float, optional
+        Attenuation per voxel for 'attenuated_mip' (default 0.05).
     rotate_view : float or tuple of floats, optional
         Rotates the 2D projected views purely for visualization.
         If a single float is provided, it rotates the XY projection (in degrees).
@@ -3092,7 +3383,8 @@ def show_zyx_max_slice_interactive_point_annotator(
             _sz = sz if sz is not None else 1.0
             pixel_sizes = (_sz, _sxy, _sxy)
 
-    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+    # The widget parses pixel_sizes again and warns about missing axes once
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0, warn=False)
 
     if any(x is not None for x in [x_s, y_s, z_s]):
         warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
@@ -3151,7 +3443,8 @@ def show_zyx_max_slice_interactive_point_annotator(
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         point_size_scale=point_size_scale, annotate=annotate,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
-        channel_label_fontsize_pt=channel_label_fontsize_pt
+        channel_label_fontsize_pt=channel_label_fontsize_pt,
+        blending=blending, projection=projection, attenuation=attenuation,
     )
     return w
 
@@ -3166,16 +3459,23 @@ def show_zyx_max_scatter_interactive(
     gamma=1, vmin=None, vmax=None,
     figsize=None, figsize_scale=1.0,
     show_crosshair=True, sync_on_hover=True,
-    subplot_bg='black',
+    subplot_bg=None,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
+    blending=None,
 ):
     """
     Shows interactive sliders for XY, XZ, and YZ projection of 3D point coordinates.
 
     Parameters
     ----------
+    blending : str, optional
+        Channel compositing: 'additive' (default), 'maximum', 'screen' or
+        'minimum' (white canvas; each channel from white to its colour).
+        Keyword only; not in the GUI.
+    subplot_bg : str, optional
+        Panel background; defaults to black ('white' with blending='minimum').
     rotate_view : float or tuple of floats, optional
         Rotates the 2D projected views purely for visualization.
         If a single float is provided, it rotates the XY projection (in degrees).
@@ -3204,7 +3504,8 @@ def show_zyx_max_scatter_interactive(
             _sz = sz if sz is not None else 1.0
             pixel_sizes = (_sz, _sxy, _sxy)
 
-    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
+    # The widget parses pixel_sizes again and warns about missing axes once
+    pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0, warn=False)
 
     if any(x is not None for x in [x_s, y_s, z_s]):
         warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
@@ -3306,7 +3607,8 @@ def show_zyx_max_scatter_interactive(
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
         subplot_bg=subplot_bg,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t),
-        rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt
+        rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt,
+        blending=blending,
     )
     w.X_arr_phys = w.X_arr * px
     w.Y_arr_phys = w.Y_arr * py
