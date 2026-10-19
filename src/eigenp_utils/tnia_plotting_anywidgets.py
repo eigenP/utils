@@ -1,4 +1,3 @@
-from skimage.transform import resize, rotate
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
@@ -6,7 +5,7 @@ from skimage.transform import resize, rotate
 #     "traitlets",
 #     "matplotlib",
 #     "numpy",
-#     "scikit-image",
+#     "scipy",
 # ]
 # ///
 
@@ -51,10 +50,52 @@ import base64
 import importlib.resources as ir
 from matplotlib import gridspec
 
-from skimage.transform import resize
+from scipy import ndimage as ndi
 from matplotlib.colors import PowerNorm, to_rgb, LinearSegmentedColormap
 import matplotlib.colors as mcolors
 from matplotlib.figure import Figure
+
+
+def _rotate_expand(image, angle_deg, order=3):
+    """
+    Rotate a 2D (H, W) or channels-last (H, W, C) image counter-clockwise by
+    ``angle_deg`` about its centre, expanding the canvas to fit the result.
+
+    Pure scipy replacement for
+    ``skimage.transform.rotate(image, angle_deg, resize=True, order=order, preserve_range=True)``:
+    same output shape, rotation centre ``((W - 1) / 2, (H - 1) / 2)``, zero fill
+    and clipping of spline overshoot to the input range.
+    """
+    image = np.asarray(image)
+    if not np.issubdtype(image.dtype, np.floating):
+        image = image.astype(np.float64)
+    rows, cols = image.shape[:2]
+    theta = np.deg2rad(angle_deg)
+    c, s = np.cos(theta), np.sin(theta)
+    cy, cx = (rows - 1) / 2.0, (cols - 1) / 2.0
+
+    # Output-space positions of the input corners (forward rotation)
+    corners = np.array([[0, 0], [0, rows - 1], [cols - 1, rows - 1], [cols - 1, 0]], dtype=float)
+    dx, dy = corners[:, 0] - cx, corners[:, 1] - cy
+    out_x = c * dx + s * dy + cx
+    out_y = -s * dx + c * dy + cy
+    minc, minr = out_x.min(), out_y.min()
+    out_shape = (int(np.around(out_y.max() - minr + 1)), int(np.around(out_x.max() - minc + 1)))
+
+    # Inverse map in (row, col) index order: input = M @ output + offset
+    M = np.array([[c, s], [-s, c]])
+    offset = M @ np.array([minr - cy, minc - cx]) + np.array([cy, cx])
+
+    def _warp(plane):
+        out = ndi.affine_transform(plane, M, offset=offset, output_shape=out_shape,
+                                   order=order, mode='grid-constant', cval=0.0)
+        if order > 1:
+            out = np.clip(out, min(plane.min(), 0.0), max(plane.max(), 0.0))
+        return out
+
+    if image.ndim == 2:
+        return _warp(image)
+    return np.stack([_warp(image[..., k]) for k in range(image.shape[-1])], axis=-1)
 
 
 def _rotate_points_2d(px, py, angle_deg, cx, cy):
@@ -333,11 +374,11 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     rot_z, rot_y, rot_x = _parse_rotation(rotate_view)
 
     if rot_z != 0.0:
-        xy = rotate(xy, rot_z, resize=True, order=3, preserve_range=True)
+        xy = _rotate_expand(xy, rot_z, order=3)
     if rot_y != 0.0:
-        xz = rotate(xz, rot_y, resize=True, order=3, preserve_range=True)
+        xz = _rotate_expand(xz, rot_y, order=3)
     if rot_x != 0.0:
-        zy = rotate(zy, rot_x, resize=True, order=3, preserve_range=True)
+        zy = _rotate_expand(zy, rot_x, order=3)
 
     if use_plt:
         fig = plt.figure(figsize=figsize, constrained_layout=False)
