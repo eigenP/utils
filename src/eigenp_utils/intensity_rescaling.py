@@ -1,18 +1,38 @@
 import numpy as np
 import functools
 import warnings
-from skimage.exposure import adjust_gamma, rescale_intensity
+from skimage.exposure import rescale_intensity
 from scipy.optimize import curve_fit
 import scipy.ndimage as ndimage
 from scipy.fft import dctn, idctn
 import skimage.transform as transform
 
 
+def _float_to_int(arr, dtype):
+    """Round floats and cast them to an integer dtype, clipping to its range (NaN -> 0).
+
+    float(np.iinfo(int64).max) rounds up to 2**63, so a plain clip-then-cast can
+    still overflow and wrap to the minimum; the upper bound stays strictly inside.
+    """
+    info = np.iinfo(dtype)
+    hi = np.float64(info.max)
+    if int(hi) > info.max:
+        hi = np.nextafter(hi, -np.inf)
+    out = np.nan_to_num(np.asarray(arr, dtype=np.float64), nan=0.0)
+    return np.clip(np.round(out), np.float64(info.min), hi).astype(dtype)
+
+
 def ensure_float_and_restore_dtype(func):
     """
-    Decorator to safely convert integer arrays to normalized float32 [0.0, 1.0]
-    for processing, and restore original integer ranges upon completion.
-    Floats pass through without range modification.
+    Decorator to safely convert integer arrays to normalized floats for processing,
+    and restore the original integer dtype upon completion.
+
+    - 8/16-bit integers are divided by the dtype maximum (unsigned -> [0, 1]; signed
+      -> [-1, 1] with 0 kept at 0, as skimage's img_as_float) and processed in float32.
+    - Wider integers (32/64-bit) are divided by the data's own maximum magnitude and
+      processed in float64: dividing by e.g. 2**63 - 1 would leave ~1e-17 values that
+      float32 cannot resolve and that make scale-dependent operations meaningless.
+    - float32/float64 inputs pass through unchanged (other floats become float32).
     """
     @functools.wraps(func)
     def wrapper(image, *args, **kwargs):
@@ -25,11 +45,17 @@ def ensure_float_and_restore_dtype(func):
         if is_integer:
             info = np.iinfo(orig_dtype)
             valid_min, valid_max = info.min, info.max
-            scale = float(valid_max - valid_min)
-            # Normalize integers to [0.0, 1.0] float32
-            image_float = (image.astype(np.float32) - valid_min) / scale
+            if orig_dtype.itemsize <= 2:
+                work_dtype = np.float32
+                scale = float(valid_max)
+            else:
+                work_dtype = np.float64
+                scale = float(max(np.abs(image.max(initial=0)), np.abs(image.min(initial=0)), 1))
+            image_float = image.astype(work_dtype) / work_dtype(scale)
+        elif orig_dtype in (np.float32, np.float64):
+            image_float = image
         else:
-            image_float = image if orig_dtype == np.float32 else image.astype(np.float32)
+            image_float = image.astype(np.float32)
 
         result = func(image_float, *args, **kwargs)
 
@@ -40,8 +66,7 @@ def ensure_float_and_restore_dtype(func):
             if not is_integer:
                 return arr.astype(orig_dtype)
 
-            # Denormalize float [0.0, 1.0] back to integer range [valid_min, valid_max]
-            arr_scaled = (arr * scale) + valid_min
+            arr_scaled = arr.astype(np.float64) * scale
 
             if np.nanmax(arr_scaled) > valid_max or np.nanmin(arr_scaled) < valid_min:
                 warnings.warn(
@@ -49,9 +74,8 @@ def ensure_float_and_restore_dtype(func):
                     RuntimeWarning,
                     stacklevel=3
                 )
-                arr_scaled = np.clip(arr_scaled, valid_min, valid_max)
 
-            return np.round(arr_scaled).astype(orig_dtype)
+            return _float_to_int(arr_scaled, orig_dtype)
 
         if isinstance(result, tuple):
             return tuple(convert_output(res) if i == 0 else res for i, res in enumerate(result))
@@ -69,38 +93,37 @@ def ensure_float_and_restore_dtype(func):
 @ensure_float_and_restore_dtype
 def contrast_stretching(image, p_min=0.0, p_max=99.9):
     """
-    Stretch the intensity range of the image based on percentiles.
+    Stretch the intensity range of the image based on percentiles, to [0, 1]
+    (floats) or [0, dtype max] (integers).
     """
-    v_min, v_max = np.percentile(image, (p_min, p_max))
+    v_min, v_max = np.nanpercentile(image, (p_min, p_max))
     if v_min == v_max:
         return image
-    return rescale_intensity(image, in_range=(v_min, v_max))
+    return rescale_intensity(image, in_range=(v_min, v_max), out_range=(0.0, 1.0))
 
 def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=None):
     """
     Normalize image intensities to lie between 0 and 1 (for float) or 0 and MAX (for int).
-    """
-    lower_bound = np.percentile(image, lower_percentile)
-    upper_bound = np.percentile(image, upper_percentile)
 
-    image_clipped = np.clip(image, lower_bound, upper_bound)
+    NaN pixels are ignored when computing the percentiles; they stay NaN in float
+    outputs and become 0 in integer outputs.
+    """
+    image = np.asarray(image)
+    lower_bound, upper_bound = np.nanpercentile(image, (lower_percentile, upper_percentile))
+
+    work = image if image.dtype == np.float32 else image.astype(np.float64)
     denom = upper_bound - lower_bound
     if denom == 0:
         denom = 1.0
 
-    normalized_image = (image_clipped - lower_bound) / denom
+    normalized_image = (np.clip(work, lower_bound, upper_bound) - lower_bound) / denom
 
     if dtype is None:
         dtype = image.dtype
 
-    if np.issubdtype(dtype, np.floating):
-        return normalized_image.astype(dtype)
-    elif np.issubdtype(dtype, np.integer):
-        max_val = np.iinfo(dtype).max
-        normalized_image *= max_val
-        return np.round(normalized_image).astype(dtype)
-    else:
-        return normalized_image.astype(dtype)
+    if np.issubdtype(dtype, np.integer):
+        return _float_to_int(normalized_image.astype(np.float64) * np.iinfo(dtype).max, dtype)
+    return normalized_image.astype(dtype)
 
 def _fit_linear(x_data, y_data):
     """Exact OLS for linear decay (additive noise)."""
@@ -163,18 +186,42 @@ def adjust_brightness_per_slice(*args, **kwargs):
 def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', final_gamma=0.8, return_diagnostic=False):
     """
     Corrects Z-axis intensity attenuation using statistical decay modeling.
+
+    The per-slice 99th percentile is fitted with `fit_model` and every slice is
+    corrected so that its fitted percentile maps onto the brightest fitted one
+    (y_ref):
+
+    - method='gain': multiply slice i by y_ref / y_fit[i].
+    - method='gamma': power law on a rescaled intensity, I -> s * (I / s) ** g_i,
+      with g_i = log(t) / log(t * y_fit[i] / y_ref), t = min(y_ref, 0.5) for data in
+      [0, 1] (t = 0.5 otherwise) and s = y_ref / t. This still maps y_fit[i] exactly
+      onto y_ref; for [0, 1] data with y_ref <= 0.5 it is the classic
+      g_i = log(y_ref) / log(y_fit[i]). Anchoring at t <= 0.5 keeps g_i away from 0
+      when y_ref approaches full scale (log(y_ref) -> 0), which used to collapse every
+      factor to the 0.1 clip and flood deep slices.
+
+    Works for integer images (via the dtype decorator), floats in [0, 1] and floats in
+    raw intensity units. Gain output is clipped to [0, 1] only for [0, 1] data.
     """
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
+    if method not in ('gamma', 'gain'):
+        raise ValueError(f"Unknown correction method: {method}")
 
     num_slices = image.shape[0]
     adjusted_image = np.empty_like(image)
 
+    data_min, data_max = float(np.nanmin(image)), float(np.nanmax(image))
+    unit_range = data_min >= 0.0 and data_max <= 1.0
+    if method == 'gamma' and data_min < 0:
+        raise ValueError("method='gamma' needs non-negative intensities.")
+
     diagnostic_data = None
+    scale = 1.0
 
     if fit_model is not None:
         x_data = np.arange(num_slices)
-        y_data = np.array([np.percentile(image[i], 99) for i in range(num_slices)])
+        y_data = np.array([np.nanpercentile(image[i], 99) for i in range(num_slices)])
 
         y_data_norm = y_data
 
@@ -198,30 +245,30 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
                 "gamma_fit_func": fit_model if isinstance(fit_model, str) else "custom_callable"
             }
 
-        y_fit_norm = np.clip(y_fit_norm, 1e-9, 1.0)
-        y_ref_norm = np.clip(np.max(y_fit_norm), 1e-9, 1.0)
-
-        if method == 'gamma':
-            log_y_fit = np.log(y_fit_norm)
-            log_y_ref = np.log(y_ref_norm)
-
-            # Avoid division by zero warning by replacing close-to-zero values temporarily
-            safe_log_y_fit = np.where(np.abs(log_y_fit) > 1e-9, log_y_fit, 1.0)
-            factors = np.where(np.abs(log_y_fit) > 1e-9, log_y_ref / safe_log_y_fit, 1.0)
-            factors = np.clip(factors, 0.1, 10.0)
-        elif method == 'gain':
-            factors = np.clip(y_ref_norm / y_fit_norm, 0.1, 100.0)
+        y_ref = float(np.max(y_fit_norm))
+        if not y_ref > 0:
+            factors = np.ones(num_slices)
         else:
-            raise ValueError(f"Unknown correction method: {method}")
+            # Ratio of each slice's fitted percentile to the reference (scale-free)
+            ratio = np.clip(np.asarray(y_fit_norm, dtype=np.float64) / y_ref, 1e-9, 1.0)
+            if method == 'gamma':
+                t = min(y_ref, 0.5) if unit_range else 0.5
+                scale = y_ref / t
+                factors = np.clip(np.log(t) / np.log(t * ratio), 0.1, 10.0)
+            else:
+                factors = np.clip(1.0 / ratio, 0.1, 100.0)
     else:
         factors = np.linspace(1.0, final_gamma, num_slices)
+        if method == 'gamma' and not unit_range and data_max > 0:
+            scale = data_max
 
+    upper = 1.0 if unit_range else np.inf
+    lower = 0.0 if data_min >= 0 else -np.inf
     for i in range(num_slices):
         if method == 'gamma':
-            adjusted_image[i, :, :] = adjust_gamma(image[i, :, :], gamma=factors[i])
-        elif method == 'gain':
-            img_slice = image[i, :, :] * factors[i]
-            adjusted_image[i, :, :] = np.clip(img_slice, 0, 1.0)
+            adjusted_image[i, :, :] = scale * np.power(image[i, :, :] / scale, factors[i])
+        else:
+            adjusted_image[i, :, :] = np.clip(image[i, :, :] * factors[i], lower, upper)
 
     if return_diagnostic:
         return {"image": adjusted_image, "diagnostic_data": diagnostic_data}
@@ -264,12 +311,9 @@ def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z
         # but rescale_intensity handles "image" range if not specified.
         # However, here we assume arrays are meant to define the range).
 
-        # We need to handle cases where one array might be None if the user only supplied one?
-        # The user code assumed both exist or passed them directly.
-        # We'll assume if they are passed, they are valid for indexing.
-
-        in_range_min = p_min_array[i] if p_min_array is not None else "image"
-        in_range_max = p_max_array[i] if p_max_array is not None else "image"
+        # A missing bound defaults to the slice's own min / max.
+        in_range_min = p_min_array[i] if p_min_array is not None else np.nanmin(image[i])
+        in_range_max = p_max_array[i] if p_max_array is not None else np.nanmax(image[i])
 
         # Construct in_range tuple
         current_in_range = (in_range_min, in_range_max)
@@ -294,24 +338,13 @@ def test_z_axis_orientation(img, channel=None, return_image=True):
     # Extract Z-stack for metric calculation
     if img.ndim == 3:
         img_Z = img
+    elif channel is not None:
+        if img.ndim < 4:
+            raise ValueError(f"channel given but image has {img.ndim} dims; expected (..., C, Z, Y, X).")
+        # C is the 4th axis from the end in (S, T, C, Z, Y, X), (T, C, Z, Y, X) and (C, Z, Y, X)
+        img_Z = np.take(img, channel, axis=-4)
     else:
-        # Expecting high-dimensional input, e.g., 6D (S,T,C,Z,Y,X)
-        # We try to extract using the user's pattern: S=0, T=0
-        if channel is not None:
-            try:
-                # Use provided channel.
-                # User pattern: img[0, 0, channel, ...]
-                img_Z = img[0, 0, channel, ...]
-            except IndexError:
-                # Fallback: try to just squeeze or look at first channel
-                print("Warning: Could not index [0,0,channel,...]. Checking dimensions.")
-                # If 4D (C, Z, Y, X)
-                if img.ndim == 4:
-                    img_Z = img[channel, ...]
-                else:
-                    img_Z = np.squeeze(img)
-        else:
-            img_Z = np.squeeze(img)
+        img_Z = np.squeeze(img)
 
     # Ensure img_Z is 3D (Z, Y, X) for the split
     if img_Z.ndim > 3:
@@ -321,10 +354,13 @@ def test_z_axis_orientation(img, channel=None, return_image=True):
 
     FLAG = False
 
+    if img_Z.ndim != 3 or img_Z.shape[0] < 2:
+        raise ValueError(f"Need a (Z, Y, X) stack with Z >= 2, got shape {img_Z.shape}.")
+
     # Compare 99.99th percentile of top vs bottom half of Z
     z_mid = img_Z.shape[0] // 2
     top_image_metric = np.percentile(img_Z[0:z_mid, :, :], 99.99)
-    bot_image_metric = np.percentile(img_Z[z_mid:-1, :, :], 99.99)
+    bot_image_metric = np.percentile(img_Z[z_mid:, :, :], 99.99)
     print(top_image_metric, bot_image_metric)
 
     if top_image_metric < bot_image_metric:
@@ -384,6 +420,7 @@ def fit_basic_shading(
     max_reweight_iterations=10,
     max_iterations=500,
     optimization_tol=1e-3,
+    optimization_tol_diff=1e-2,
     reweighting_tol=1e-2,
     smoothness_flatfield=None,
     smoothness_darkfield=None,
@@ -406,7 +443,9 @@ def fit_basic_shading(
         working_size (int): Spatial dimension size to downscale to for faster fitting.
         max_reweight_iterations (int): Maximum number of reweighting iterations.
         max_iterations (int): Maximum number of ADMM iterations per reweighting loop.
-        optimization_tol (float): Tolerance for ADMM convergence.
+        optimization_tol (float): Tolerance for ADMM convergence (relative fit residual).
+        optimization_tol_diff (float): 'ladmap' only: tolerance on the relative size of the
+            last update. Both tolerances must be met to stop (as in BaSiCPy).
         reweighting_tol (float): Tolerance for reweighting loop convergence.
         smoothness_flatfield (float): Smoothness regularization weight. If None, it is estimated.
         smoothness_darkfield (float): Smoothness regularization weight for darkfield. If None, it is estimated.
@@ -423,6 +462,8 @@ def fit_basic_shading(
     """
     if fitting_mode not in ('approximate', 'ladmap'):
         raise ValueError(f"fitting_mode '{fitting_mode}' is not valid. Use 'approximate' or 'ladmap'.")
+    if max_reweight_iterations < 1:
+        raise ValueError("max_reweight_iterations must be >= 1.")
 
     images, original_shape = _prepare_data_for_basic(images, is_3d)
 
@@ -633,13 +674,16 @@ def fit_basic_shading(
 
                 R_flat = Im_flat - I_R_flat
                 S_sq = np.sum(S**2)
-                if S_sq < 1e-9:
-                    S_sq = 1e-9
 
                 R_spatial = R_flat.reshape(s_s, *s_spatial)
                 Y_spatial = Y_flat.reshape(s_s, *s_spatial)
 
-                B_new = np.sum(S[np.newaxis, ...] * (R_spatial + Y_spatial / mu), axis=tuple(range(1, Im.ndim))) / S_sq
+                # While the shrinkage still zeroes S (mu starts tiny), B carries no
+                # information: keep it instead of collapsing it to 0 for good.
+                if S_sq > 0:
+                    B_new = np.sum(S[np.newaxis, ...] * (R_spatial + Y_spatial / mu), axis=tuple(range(1, Im.ndim))) / S_sq
+                else:
+                    B_new = B.copy()
                 B_new = np.clip(B_new, 0, None)
 
                 mean_B = np.mean(B_new)
@@ -687,7 +731,11 @@ def fit_basic_shading(
                 norm_ratio = value_diff / image_norm
                 mu = min(mu * rho, max_mu)
 
-                if norm_ratio <= optimization_tol:
+                # Stop only when the fit residual AND the update are both small. A
+                # small update alone happens in the first iterations, while the
+                # shrinkage still zeroes S, and stopping there returned S == 0.
+                residual_ratio = np.linalg.norm(fit_residual_flat) / image_norm
+                if residual_ratio <= optimization_tol and norm_ratio <= optimization_tol_diff:
                     break
 
         D_R = D_R + D_Z * S
@@ -763,6 +811,10 @@ def apply_basic_shading(
         baseline: Estimated baseline for timelapse correction.
         baseline_smooth_method: Method to smooth baseline ('gaussian').
         baseline_smooth_sigma: Sigma for gaussian smoothing.
+        output_dtype: dtype of the result. Defaults to the input dtype, except when
+            `baseline` is given: baseline-corrected images are centred on zero (as in
+            BaSiCPy), so the default is then float32 rather than clipping the negative
+            half of the background to 0. Integer outputs are rounded and clipped.
 
     Returns:
         Corrected images.
@@ -793,17 +845,14 @@ def apply_basic_shading(
             raise ValueError(f"Baseline size {baseline.size} does not match leading dimensions of images {leading_shape}.")
 
         b = baseline.reshape(leading_shape)
-        b = b[..., *((np.newaxis,) * flatfield.ndim)]
+        b = b.reshape(leading_shape + (1,) * flatfield.ndim)
 
         corrected = corrected - b
 
     if output_dtype is None:
-        output_dtype = images.dtype
+        output_dtype = np.float32 if baseline is not None else images.dtype
 
     if np.issubdtype(output_dtype, np.integer):
-        # Clip to valid integer range before casting to prevent wrap-around
-        min_val = np.iinfo(output_dtype).min
-        max_val = np.iinfo(output_dtype).max
-        corrected = np.clip(corrected, min_val, max_val)
+        return _float_to_int(corrected, output_dtype)
 
     return corrected.astype(output_dtype)

@@ -14,6 +14,8 @@ def add_stat_annotations(
     loc='inside',
     comparisons_correction='Holm-Bonferroni',
     return_annotator=False,
+    order=None,
+    hue_order=None,
     **kwargs
 ):
     """
@@ -43,6 +45,13 @@ def add_stat_annotations(
         The multiple testing correction method.
     return_annotator : bool, default False
         Whether to return the Annotator object in addition to the Axes.
+    order : list, optional
+        Order of the groups along the categorical axis, as drawn. If None, it is
+        read from the axis tick labels when they name exactly the groups in `data`
+        (e.g. after `raincloud_plot`, which sorts groups), so the brackets land on
+        the right groups; otherwise statannotations' default (first appearance) is used.
+    hue_order : list, optional
+        Order of the hue levels, as drawn.
     **kwargs : dict
         Additional kwargs passed to annotator.configure()
 
@@ -62,7 +71,10 @@ def add_stat_annotations(
             "'pip install eigenp_utils[plotting]'."
         )
 
-    annotator = Annotator(ax, pairs, data=data, x=x, y=y, hue=hue)
+    if order is None:
+        order = _order_from_ticks(ax, data, x, y)
+
+    annotator = Annotator(ax, pairs, data=data, x=x, y=y, hue=hue, order=order, hue_order=hue_order)
     annotator.configure(
         test=test,
         text_format=text_format,
@@ -75,6 +87,23 @@ def add_stat_annotations(
     if return_annotator:
         return ax, annotator
     return ax
+
+
+def _order_from_ticks(ax, data, x, y):
+    """Group order as drawn on ax, read from the tick labels of the categorical axis.
+
+    Returns None unless the tick labels name exactly the groups present in `data`.
+    """
+    if not isinstance(data, pd.DataFrame):
+        return None
+    for col, ticks in ((x, ax.get_xticklabels()), (y, ax.get_yticklabels())):
+        if col is None or col not in data or (pd.api.types.is_numeric_dtype(data[col]) and not isinstance(data[col].dtype, pd.CategoricalDtype)):
+            continue
+        groups = {str(v): v for v in pd.unique(data[col].dropna())}
+        labels = [t.get_text() for t in ticks]
+        if labels and len(labels) == len(groups) and set(labels) == set(groups):
+            return [groups[label] for label in labels]
+    return None
 
 import scipy.special
 import warnings
@@ -186,7 +215,10 @@ def cohens_d(group1, group2, correction=True):
     s_pooled = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2))
 
     if s_pooled == 0:
-        return 0.0
+        # Both groups constant: no effect only if the means are equal too;
+        # otherwise the standardized difference is unbounded.
+        diff = np.mean(x1) - np.mean(x2)
+        return 0.0 if diff == 0 else float(np.copysign(np.inf, diff))
 
     d = (np.mean(x1) - np.mean(x2)) / s_pooled
 
@@ -215,7 +247,7 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
         The number of bootstrap samples.
     ci : float, default 0.95
         The confidence interval width (between 0 and 1).
-    method : str, default 'bc'
+    method : str, default 'bca'
         The bootstrap method to use. Options are:
         - 'bca': Bias-Corrected and Accelerated (BCa) bootstrap. Corrects for median bias and skewness.
         - 'bc': Bias-Corrected (BC) bootstrap. Corrects for median bias in the bootstrap distribution.
@@ -229,6 +261,10 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
         A tuple of (lower_bound, upper_bound)
     """
     data = np.asarray(data)
+    if len(data) < 2:
+        raise ValueError("bootstrap_ci needs at least 2 observations.")
+    if np.issubdtype(data.dtype, np.number) and np.isnan(data).any():
+        raise ValueError("bootstrap_ci: data contains NaN; drop missing values first.")
     rng = np.random.default_rng(random_state)
 
     # Generate bootstrap indices
@@ -271,10 +307,14 @@ def bootstrap_ci(data, stat_func=np.mean, n_bootstraps=1000, ci=0.95, method='bc
         a = 0.0
         if method == 'bca':
             # Calculate acceleration factor (a) using jackknife estimates
+            # Leave out one observation (row) at a time, matching the row-wise
+            # bootstrap resampling above (np.delete without an axis would flatten 2D data)
             jackknife_stats = np.empty(len(data))
+            keep = np.ones(len(data), dtype=bool)
             for i in range(len(data)):
-                jackknife_data = np.delete(data, i)
-                jackknife_stats[i] = stat_func(jackknife_data)
+                keep[i] = False
+                jackknife_stats[i] = stat_func(data[keep])
+                keep[i] = True
 
             mean_jackknife = np.mean(jackknife_stats)
             diffs = mean_jackknife - jackknife_stats
@@ -332,6 +372,19 @@ def summary_stats(df, group_by, value_col):
 
     return summary
 
+def _abs_zscore(values):
+    """|z| of NaN-free values; a zero-variance (or single-value) sample has no outliers.
+
+    scipy.stats.zscore returns NaN there, and NaN <= threshold is False, which used
+    to flag every value of a constant column (and so drop every row).
+    """
+    values = np.asarray(values, dtype=float)
+    sd = values.std()
+    if values.size < 2 or not sd > 0:
+        return np.zeros(values.shape)
+    return np.abs((values - values.mean()) / sd)
+
+
 def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     """
     Filter out outliers in a DataFrame or array.
@@ -358,7 +411,9 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
     Returns
     -------
     pd.DataFrame or array-like
-        The filtered data.
+        The filtered data. 1D arrays drop outliers and NaNs; 2D arrays drop rows
+        (observations) with an outlier in any column, keeping NaNs as DataFrames do.
+        A constant (zero-variance) column never produces z-score outliers.
     """
 
     if isinstance(data, pd.DataFrame):
@@ -379,7 +434,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                 # Use scipy.stats.zscore with nan_policy='omit'
                 valid_mask = df_out[column].notna()
                 z_scores = pd.Series(index=df_out.index, dtype=float)
-                z_scores[valid_mask] = np.abs(stats.zscore(df_out.loc[valid_mask, column]))
+                z_scores[valid_mask] = _abs_zscore(df_out.loc[valid_mask, column])
                 mask = valid_mask & (z_scores <= threshold)
             elif method == 'robust_zscore':
                 valid_mask = df_out[column].notna()
@@ -408,7 +463,8 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
 
                 bool_mask = np.ones(len(df_out), dtype=bool)
 
-                if valid_row_mask.any():
+                # D^2 needs a covariance, i.e. at least 2 complete rows; keep all otherwise
+                if valid_row_mask.sum() >= 2:
                     X_valid = X[valid_row_mask]
                     n_samples, n_features = X_valid.shape
 
@@ -449,7 +505,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
                     col_mask = (col_data >= lower_bound) & (col_data <= upper_bound)
                 elif method == 'zscore':
                     z_scores = pd.Series(index=df_out.index, dtype=float)
-                    z_scores[valid_mask] = np.abs(stats.zscore(df_out.loc[valid_mask, col]))
+                    z_scores[valid_mask] = _abs_zscore(df_out.loc[valid_mask, col])
                     col_mask = valid_mask & (z_scores <= threshold)
                 elif method == 'robust_zscore':
                     z_scores = pd.Series(index=df_out.index, dtype=float)
@@ -477,7 +533,8 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             valid_row_mask = ~np.isnan(values).any(axis=1)
             keep_mask = np.ones(values.shape[0], dtype=bool)
 
-            if valid_row_mask.any():
+            # D^2 needs a covariance, i.e. at least 2 complete rows; keep all otherwise
+            if valid_row_mask.sum() >= 2:
                 X_valid = values[valid_row_mask]
                 n_samples, n_features = X_valid.shape
 
@@ -500,6 +557,14 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
 
             return values[keep_mask]
 
+        if values.ndim == 2:
+            # Filter rows on each column (as for a DataFrame) instead of pooling all
+            # columns into one flattened sample.
+            keep = remove_outliers(pd.DataFrame(values), method=method, threshold=threshold).index
+            return values[np.asarray(keep)]
+        if values.ndim > 2:
+            raise ValueError("remove_outliers supports 1D or 2D arrays (rows = observations).")
+
         # Filter out NaNs for calculation
         valid_mask = ~np.isnan(values)
         valid_values = values[valid_mask]
@@ -515,7 +580,7 @@ def remove_outliers(data, method='iqr', threshold=1.5, column=None):
             upper_bound = q3 + threshold * iqr
             keep_valid = (valid_values >= lower_bound) & (valid_values <= upper_bound)
         elif method == 'zscore':
-            z_scores = np.abs(stats.zscore(valid_values))
+            z_scores = _abs_zscore(valid_values)
             keep_valid = z_scores <= threshold
         elif method == 'robust_zscore':
             z_scores = np.abs(robust_standardize(valid_values))
