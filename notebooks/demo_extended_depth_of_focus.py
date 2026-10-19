@@ -190,9 +190,9 @@ def _(membrane, np, patch_size_slider):
     slice_img = membrane[30, ...]
 
 
-    # 1. Compute Laplacian
-    lap = laplace(slice_img)
-    lap = lap / lap.max()
+    # 1. Compute Laplacian (in float: on uint16 data negative values would wrap around)
+    lap = laplace(slice_img.astype(np.float32))
+    lap = lap / np.abs(lap).max()
 
     # 2. Compute Energy (Squared)
     energy = lap ** 2
@@ -255,7 +255,7 @@ def _(lap, mean_energy, plt, slice_img, std_grid):
     _axes[2].axis('off')
 
     _axes[3].imshow(std_grid, cmap='gray')
-    _axes[3].set_title("Energy")
+    _axes[3].set_title("Patch STD")
     _axes[3].axis('off')
 
 

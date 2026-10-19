@@ -45,14 +45,18 @@ def _my_clahe_(image, kernel_size=None,
 
     Parameters
     ----------
-    image : (N1, ...,NN[, C]) ndarray
-        Input image.
+    image : (N1, ...,NN) ndarray
+        Input image. Every axis is treated as spatial: there is no color-channel
+        handling, so an (M, N, 3) RGB image is equalised as a 3-slice volume,
+        which mixes the channels and shifts hues. To equalise a color image,
+        run this on its HSV V channel (e.g. ``skimage.color.rgb2hsv``) and convert
+        back.
     kernel_size : int or array_like, optional
         Defines the shape of contextual regions used in the algorithm. If
         iterable is passed, it must have the same number of elements as
-        ``image.ndim`` (without color channel). If integer, it is broadcasted
-        to each `image` dimension. By default, ``kernel_size`` is 1/8 of
-        ``image`` height by 1/8 of its width.
+        ``image.ndim``. If integer, it is broadcasted to each `image`
+        dimension. By default, ``kernel_size`` is 1/8 of ``image`` height by
+        1/8 of its width.
     clip_limit : float or None, optional
         Clipping limit, normalized between 0 and 1 (higher values give more
         contrast). 0.0 gives Identity (min contrast). 1.0 (or None) gives
@@ -64,7 +68,7 @@ def _my_clahe_(image, kernel_size=None,
 
     Returns
     -------
-    out : (N1, ...,NN[, C]) ndarray
+    out : (N1, ...,NN) ndarray
         Equalized image with float16 dtype.
 
     See Also
@@ -73,11 +77,8 @@ def _my_clahe_(image, kernel_size=None,
 
     Notes
     -----
-    * For color images, the following steps are performed:
-       - The image is converted to HSV color space
-       - The CLAHE algorithm is run on the V (Value) channel
-       - The image is converted back to RGB space and returned
-    * For RGBA images, the original alpha channel is removed.
+    Adapted from ``skimage.exposure.equalize_adapthist``, without its
+    color-image (HSV) handling.
 
     .. versionchanged:: 0.17
         The values returned by this function are slightly shifted upwards

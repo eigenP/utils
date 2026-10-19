@@ -157,8 +157,8 @@ async def _(download_file_async):
 @app.cell
 def _(cells_path, imread):
     cells = imread(cells_path)
-    # Select the membrane channel (index 1)
-    membrane_stack = cells[:, 1, :, :]
+    # cells3d is (Z, C, Y, X) with C=0 membrane, C=1 nuclei: select the membrane channel
+    membrane_stack = cells[:, 0, :, :]
     return (membrane_stack,)
 
 

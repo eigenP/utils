@@ -1,6 +1,7 @@
 from pathlib import Path
 import asyncio
 import gzip
+import os
 import shutil
 import sys
 import urllib.request
@@ -9,17 +10,24 @@ import warnings
 # True inside Pyodide (e.g. marimo WASM notebooks), where there are no sockets
 IN_WASM = sys.platform == "emscripten"
 
+class FileExistsAssertionError(FileExistsError, AssertionError):
+    """Raised by `check_file_before_save`; still an AssertionError for older callers."""
+
+
 def check_file_before_save(filename, overwrite=False):
     """
-    Checks if a file exists before attempting to save. Raises an AssertionError if conditions are not met.
+    Checks if a file exists before attempting to save.
 
     Parameters:
     - filename: The path to the file where data will be saved.
-    - overwrite: If False and the file exists, raises an AssertionError.
+    - overwrite: If False and the file exists, raises FileExistsAssertionError
+      (a FileExistsError that is also an AssertionError). Unlike a bare assert,
+      the check also runs under ``python -O``.
     """
     path = Path(filename)
     print(f'Saving at: {path}')
-    assert overwrite or not path.exists(), "File exists and overwrite is False."
+    if not overwrite and path.exists():
+        raise FileExistsAssertionError(f"File exists and overwrite is False: {path}")
 
 def ensure_directory(filepath):
     """
@@ -85,33 +93,58 @@ def download_file(url: str, dest: Path, chunk: int = 8192) -> Path:
         )
 
     ensure_directory(dest)
+    # Download to a temporary file and move it into place only once it is complete,
+    # so an interrupted download is never mistaken for a cached file later
+    part = dest.with_name(dest.name + ".part")
 
     try:
-        # Try using urllib (Standard Library)
-        with urllib.request.urlopen(url) as response:
-            with open(dest, 'wb') as f:
-                shutil.copyfileobj(response, f, length=chunk)
-
-    except Exception as e:
-        # Fallback to requests
         try:
-            import requests
+            # Try using urllib (Standard Library)
+            with urllib.request.urlopen(url) as response:
+                with open(part, 'wb') as f:
+                    shutil.copyfileobj(response, f, length=chunk)
+                _check_complete(part, response.headers.get("Content-Length"), url)
+
+        except Exception as e:
+            # Fallback to requests
+            try:
+                import requests
+            except ImportError:
+                warnings.warn(
+                    f"Download with urllib failed: {e}. 'requests' library not found. "
+                    "Please install it using 'uv pip install requests' and reload the module: "
+                    "import importlib; importlib.reload(eigenp_utils.io)"
+                )
+                raise e
             print(f"urllib failed ({e}), falling back to requests...")
             resp = requests.get(url, stream=True, timeout=30)
             resp.raise_for_status()
-            with open(dest, "wb") as f:
+            with open(part, "wb") as f:
                 for c in resp.iter_content(chunk_size=chunk):
                     if c:
                         f.write(c)
-        except ImportError:
-            warnings.warn(
-                f"Download with urllib failed: {e}. 'requests' library not found. "
-                "Please install it using 'uv pip install requests' and reload the module: "
-                "import importlib; importlib.reload(eigenp_utils.io)"
-            )
-            raise e
+            # Content-Length counts the bytes on the wire; skip the check for encoded bodies
+            if not resp.headers.get("Content-Encoding"):
+                _check_complete(part, resp.headers.get("Content-Length"), url)
+
+        os.replace(part, dest)
+    finally:
+        if part.exists():
+            part.unlink()
 
     return dest
+
+
+def _check_complete(path: Path, content_length, url: str) -> None:
+    """Raise if fewer bytes than the announced Content-Length were written."""
+    if content_length is None:
+        return
+    expected = int(content_length)
+    received = path.stat().st_size
+    if received != expected:
+        raise OSError(
+            f"Incomplete download of {url}: received {received} of {expected} bytes."
+        )
 
 
 async def download_file_async(url: str, dest: Path, chunk: int = 8192) -> Path:

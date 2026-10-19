@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import xarray as xr
 import tifffile
@@ -67,21 +69,52 @@ def numpy_to_stczyx_xarray(
 
     da = da.assign_coords(coords)
 
-    # 6. Append metadata attributes
-    if attrs is None:
-        attrs = {}
+    # 6. Append metadata attributes (copy: never modify the caller's dict)
+    attrs = dict(attrs or {})
     attrs['axes'] = 'STCZYX'
     da.attrs.update(attrs)
 
     return da
 
 
+# Length units in metres, keyed by the spellings ImageJ, OME and TIFF use
+_UNIT_IN_METRES = {
+    'm': 1.0, 'meter': 1.0, 'metre': 1.0,
+    'cm': 1e-2, 'centimeter': 1e-2,
+    'mm': 1e-3, 'millimeter': 1e-3,
+    'µm': 1e-6, 'μm': 1e-6, 'um': 1e-6, 'micron': 1e-6, 'microns': 1e-6, 'micrometer': 1e-6,
+    'nm': 1e-9, 'nanometer': 1e-9,
+    'å': 1e-10, 'angstrom': 1e-10,
+    'inch': 0.0254, 'in': 0.0254,
+}
+
+
+def _unit_in_metres(unit):
+    if unit is None:
+        return None
+    # ImageJ writes µ as the escape sequence 'µ'
+    key = str(unit).strip().replace('\\u00B5', 'µ').replace('\\u00b5', 'µ').lower()
+    return _UNIT_IN_METRES.get(key)
+
+
 def get_tiff_voxel_size(filepath):
     """
     Attempts to read X, Y, and Z physical pixel sizes from a TIFF file.
-    Returns a dictionary with the sizes and units.
+    Returns a dictionary with the sizes and one common unit:
+    ``{'X': ..., 'Y': ..., 'Z': ..., 'unit': ...}`` (None where unknown).
+
+    - ImageJ stacks follow ImageJ's own decoding: Z is ``abs(spacing)``, and a
+      multi-slice stack without a ``spacing`` entry has the default step 1.0
+      (ImageJ omits the entry when the step is 1.0). A ``zunit`` that differs
+      from ``unit`` is converted.
+    - OME-TIFF sizes are read with their per-axis units (default µm).
+    - X/Y fall back to the TIFF resolution tags (inch or cm).
+
+    When the axes have different units (e.g. X/Y from resolution tags in cm and
+    Z from OME in µm), all sizes are converted to µm.
     """
     voxel_data = {'X': None, 'Y': None, 'Z': None, 'unit': None}
+    units = {'X': None, 'Y': None, 'Z': None}
 
     with tifffile.TiffFile(filepath) as tif:
 
@@ -91,9 +124,14 @@ def get_tiff_voxel_size(filepath):
         if tif.is_imagej:
             metadata = tif.imagej_metadata
             if metadata:
-                # ImageJ stores Z spacing explicitly
-                voxel_data['Z'] = metadata.get('spacing')
-                voxel_data['unit'] = metadata.get('unit')
+                unit = metadata.get('unit')
+                units['X'] = units['Y'] = unit
+                spacing = metadata.get('spacing')
+                if spacing is not None:
+                    voxel_data['Z'] = abs(float(spacing))
+                elif int(metadata.get('slices', 1) or 1) > 1:
+                    voxel_data['Z'] = 1.0
+                units['Z'] = metadata.get('zunit', unit)
 
         # ---------------------------------------------------------
         # 2. Try OME-TIFF Metadata (Common in microscopy)
@@ -108,10 +146,11 @@ def get_tiff_voxel_size(filepath):
                 pixels = root.find('.//ome:Pixels', ns)
 
                 if pixels is not None:
-                    voxel_data['X'] = float(pixels.get('PhysicalSizeX')) if pixels.get('PhysicalSizeX') else None
-                    voxel_data['Y'] = float(pixels.get('PhysicalSizeY')) if pixels.get('PhysicalSizeY') else None
-                    voxel_data['Z'] = float(pixels.get('PhysicalSizeZ')) if pixels.get('PhysicalSizeZ') else None
-                    voxel_data['unit'] = pixels.get('PhysicalSizeXUnit', 'µm') # Usually microns
+                    for ax in ('X', 'Y', 'Z'):
+                        value = pixels.get(f'PhysicalSize{ax}')
+                        if value:
+                            voxel_data[ax] = float(value)
+                            units[ax] = pixels.get(f'PhysicalSize{ax}Unit', 'µm')
 
         # ---------------------------------------------------------
         # 3. Read Standard TIFF Tags (Fallback for X and Y)
@@ -134,12 +173,35 @@ def get_tiff_voxel_size(filepath):
                     voxel_data['X'] = x_den / x_num
                     voxel_data['Y'] = y_den / y_num
 
-                # Standard TIFF ResolutionUnit: 1=None, 2=Inch, 3=Centimeter
-                if res_unit_tag:
+                # Standard TIFF ResolutionUnit: 1=None, 2=Inch, 3=Centimeter.
+                # ImageJ's own 'unit' defines its resolution tags, so it takes precedence.
+                if res_unit_tag and units['X'] is None:
                     unit_val = res_unit_tag.value
                     if unit_val == 2:
-                        voxel_data['unit'] = 'inch'
+                        units['X'] = units['Y'] = 'inch'
                     elif unit_val == 3:
-                        voxel_data['unit'] = 'cm'
+                        units['X'] = units['Y'] = 'cm'
+
+    # ---------------------------------------------------------
+    # 4. Report all sizes in one unit
+    # ---------------------------------------------------------
+    present = {ax: units[ax] for ax in ('X', 'Y', 'Z') if voxel_data[ax] is not None}
+    first_unit = next((u for u in present.values() if u is not None), units['X'])
+    # Spellings of the same unit ('um', 'µm', 'micron') count as one unit
+    distinct = {_unit_in_metres(u) or u for u in present.values() if u is not None}
+    if len(distinct) <= 1:
+        voxel_data['unit'] = first_unit
+    elif all(_unit_in_metres(u) is not None for u in present.values()):
+        for ax, u in present.items():
+            voxel_data[ax] = voxel_data[ax] * _unit_in_metres(u) / 1e-6
+        voxel_data['unit'] = 'µm'
+    else:
+        warnings.warn(
+            f"Pixel sizes of {filepath} use units {present} that could not be converted "
+            "to a common unit; 'unit' refers to X.",
+            UserWarning,
+            stacklevel=2,
+        )
+        voxel_data['unit'] = units['X']
 
     return voxel_data

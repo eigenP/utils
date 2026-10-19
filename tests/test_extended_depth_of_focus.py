@@ -503,5 +503,57 @@ def test_synthetic_focal_stack_reconstruction():
     assert ssim_edf > ssim_mean, f"EDF SSIM ({ssim_edf:.4f}) failed to beat Mean ({ssim_mean:.4f})"
 
 
+# =========================================
+# Source: bug-scan regressions (low-severity sweep)
+# =========================================
+
+
+def _textured_stack(shape, seed=0):
+    rng = np.random.default_rng(seed)
+    return rng.random(shape).astype(np.float32)
+
+
+def test_best_focus_image_accepts_pathlike(tmp_path):
+    import tifffile
+
+    stack = (_textured_stack((5, 40, 40)) * 1000).astype(np.uint16)
+    path = tmp_path / "stack.tif"
+    tifffile.imwrite(path, stack)
+    np.testing.assert_allclose(best_focus_image(path), best_focus_image(stack))
+
+
+@pytest.mark.parametrize("shape", [(5, 8, 8), (5, 25, 25), (5, 40, 40)])
+def test_best_focus_image_small_images_have_no_seam_holes(shape):
+    """Default patch sizes of 1-4 px used to leave zero-weight seams or crash."""
+    stack = _textured_stack(shape) + 1.0  # every input value is >= 1
+    out = best_focus_image(stack)
+    assert out.shape == shape[1:]
+    assert out.min() >= 1.0 - 1e-5  # a zero-weight seam gives 0
+
+
+def test_best_focus_image_keeps_negative_values():
+    """Blending must commute with an intensity offset (no clamp at 0)."""
+    rng = np.random.default_rng(1)
+    stack = gaussian_filter(rng.normal(size=(7, 64, 64)), (0, 1, 1)).astype(np.float32)
+    direct = best_focus_image(stack, patch_size=32)
+    shifted = best_focus_image(stack + 10.0, patch_size=32) - 10.0
+    assert (direct < 0).mean() > 0.3
+    np.testing.assert_allclose(direct, shifted, atol=1e-3)
+
+
+def test_best_focus_heightmap_stays_in_stack():
+    """A tilt that is near slice 0 at the first patch centre: linear extrapolation
+    towards the image edge must not leave the stack, heights within [0, Z-1]."""
+    Z, H, W = 7, 96, 96
+    rng = np.random.default_rng(2)
+    texture = rng.random((H, W))
+    x = np.arange(W)
+    z_map = np.clip(0.3 + (x - 12) / 16, 0, Z - 1)[None, :].repeat(H, 0)
+    zz = np.arange(Z)[:, None, None]
+    stack = (texture[None] * np.exp(-((zz - z_map[None]) ** 2) / 0.5)).astype(np.float32)
+    _, height = best_focus_image(stack, patch_size=24, return_heightmap=True)
+    assert height.min() >= 0.0 and height.max() <= Z - 1
+
+
 if __name__ == "__main__":
     unittest.main()

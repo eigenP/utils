@@ -57,6 +57,7 @@ def static_server():
     yield f"http://localhost:{port}"
 
     httpd.shutdown()
+    httpd.server_close()
     tmpdir.cleanup()
 
 def test_frontend_click_registers_despite_proxies_and_race_conditions(page, static_server):

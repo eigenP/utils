@@ -113,11 +113,10 @@ async def _(download_file_async):
 
 @app.cell
 def _(cells_path, imread):
-    # Use cells3d nuclei channel (channel 1 is nuclei, 0 is membrane usually... let's check doc or just pick one)
     # cells3d shape: (Z, C, Y, X). C=0 membrane, C=1 nuclei.
     cells = imread(cells_path)
     # Pick a middle slice of the membrane channel
-    membrane_slice = cells[30, 1, :, :]
+    membrane_slice = cells[30, 0, :, :]
     return cells, membrane_slice
 
 
