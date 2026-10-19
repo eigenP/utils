@@ -105,15 +105,17 @@ def test_calculate_vector_difference_overlap():
 
     vectors = calculate_vector_difference(resampled1, resampled2, overlap_only=True, num_points=5)
 
-    # Overlap origin range: from [11.57, 11.57] to [20.0, 20.0]
-    # Overlap endpoint range: from [10.0, 11.0] to [18.42, 19.42]
-    # Difference = endpoint - origin = [-1.57, -0.57] uniformly over re-parameterization.
-
+    # The overlap is clipped exactly at the box faces, so the difference is the exact
+    # [-1, 0], not biased by the 20-point sample spacing (was [-1.57, -0.57]).
     assert vectors.shape == (5, 2)
-    diff_y = vectors[0, 1]
-    diff_x = vectors[0, 0]
-    assert np.allclose(vectors[:, 1], diff_y)
-    assert np.allclose(vectors[:, 0], diff_x)
+    np.testing.assert_allclose(vectors, np.tile([-1.0, 0.0], (5, 1)), atol=1e-3)
+
+    # Control: splines without any overlap give the documented zero fallback
+    far = create_resampled_spline(line2 + 100, num_points=20)
+    np.testing.assert_array_equal(
+        calculate_vector_difference(resampled1, far, overlap_only=True, num_points=5),
+        np.zeros((5, 2)),
+    )
 
 def test_calculate_tangent_vectors():
     """Test that calculate tangent vectors works as expected."""

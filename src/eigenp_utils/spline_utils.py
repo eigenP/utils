@@ -152,6 +152,42 @@ def create_resampled_spline(points, num_points=1000):
 
 
 # Calculate vectors
+def _clip_polyline_to_box(points, lo, hi):
+    """
+    Return the part of a polyline inside the box [lo, hi], with exact entry and exit points.
+
+    Each segment is clipped with the Liang-Barsky parameters; the result runs from the
+    first point where the curve enters the box to the last point where it leaves it
+    (interior vertices in between are kept). Returns an empty (0, d) array if the
+    polyline never touches the box.
+    """
+    points = np.asarray(points, dtype=float)
+    p0, p1 = points[:-1], points[1:]
+    d = p1 - p0
+    t0 = np.zeros(len(d))
+    t1 = np.ones(len(d))
+    inside = np.ones(len(d), dtype=bool)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for k in range(points.shape[1]):
+            moving = d[:, k] != 0
+            ta = (lo[k] - p0[:, k]) / d[:, k]
+            tb = (hi[k] - p0[:, k]) / d[:, k]
+            t0 = np.where(moving, np.maximum(t0, np.minimum(ta, tb)), t0)
+            t1 = np.where(moving, np.minimum(t1, np.maximum(ta, tb)), t1)
+            # a segment parallel to this axis is inside only if it lies within the slab
+            inside &= moving | ((p0[:, k] >= lo[k]) & (p0[:, k] <= hi[k]))
+    hit = np.flatnonzero(inside & (t0 <= t1))
+    if len(hit) == 0:
+        return np.empty((0, points.shape[1]))
+    first, last = hit[0], hit[-1]
+    entry = p0[first] + t0[first] * d[first]
+    exit_ = p0[last] + t1[last] * d[last]
+    clipped = np.vstack([entry, points[first + 1 : last + 1], exit_])
+    # drop repeated points (entry/exit on a vertex), which spline fitting rejects
+    keep = np.r_[True, np.any(np.diff(clipped, axis=0) != 0, axis=1)]
+    return clipped[keep]
+
+
 def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=False, num_points=1000):
     '''
     Return the vector difference of equally resampled splines.
@@ -182,12 +218,11 @@ def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=Fal
     start = np.maximum(np.min(spline_origin, axis=0), np.min(spline_endpoint, axis=0))
     end = np.minimum(np.max(spline_origin, axis=0), np.max(spline_endpoint, axis=0))
 
-    # Mask to keep only the points that fall inside the geometric bounding box overlap
-    mask_origin = np.all((spline_origin >= start) & (spline_origin <= end), axis=1)
-    mask_endpoint = np.all((spline_endpoint >= start) & (spline_endpoint <= end), axis=1)
-
-    overlap_origin = spline_origin[mask_origin]
-    overlap_endpoint = spline_endpoint[mask_endpoint]
+    # Clip each polyline exactly at the box faces; keeping only the sample points that
+    # fall inside would start each overlap at its first interior sample, biasing the
+    # difference by up to one sample spacing
+    overlap_origin = _clip_polyline_to_box(spline_origin, start, end)
+    overlap_endpoint = _clip_polyline_to_box(spline_endpoint, start, end)
 
     # Resample the cropped splines to the common number of points
     # This requires that the overlap region has enough points and spans a valid curve segment

@@ -567,21 +567,22 @@ def test_raincloud_features():
     assert 'fig' in fig_dict
     assert 'axes' in fig_dict
 
-    # Test fallback gracefully handles if all points are filtered
+    # Fallback when the outlier filter removes every point of a group:
+    # two points, each 0.5 IQR from the median, are both outside 0.0001 * IQR
     df_all_outliers = pd.DataFrame({
         'category': ['A', 'A'],
-        'value': [1000, -1000] # Mean is 0, MAD is 1000, zscores are 0.6745. Both < 3.
-        # But wait, robust_zscore on 2 points? Let's just pass some random stuff.
+        'value': [1000.0, -1000.0],
     })
 
     fig_dict2 = raincloud_plot(
-        data=df,
+        data=df_all_outliers,
         x='category',
         y='value',
         outlier_method='iqr',
-        outlier_multiplier=0.0001, # This will filter almost everything
+        outlier_multiplier=0.0001,
     )
     assert 'fig' in fig_dict2
+    plt.close(fig_dict2['fig'])
 
 def test_raincloud_legacy():
     """Test that raincloud legacy works as expected."""
