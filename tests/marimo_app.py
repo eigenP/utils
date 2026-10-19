@@ -7,7 +7,7 @@ app = mo.App()
 def __():
     import numpy as np
     from skimage.data import cells3d
-    from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
     try:
         im = cells3d()
@@ -20,7 +20,7 @@ def __():
     membrane = im[:, 0, :, :]
     nuclei = im[:, 1, :, :]
 
-    widget = show_xyz_max_slice_interactive(
+    widget = show_zyx_max_slice_interactive(
         [membrane, nuclei],
         colors=['magma', 'viridis']
     )

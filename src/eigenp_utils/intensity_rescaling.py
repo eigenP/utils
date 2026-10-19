@@ -793,7 +793,7 @@ def apply_basic_shading(
             raise ValueError(f"Baseline size {baseline.size} does not match leading dimensions of images {leading_shape}.")
 
         b = baseline.reshape(leading_shape)
-        b = b[..., *((np.newaxis,) * flatfield.ndim)]
+        b = b.reshape(leading_shape + (1,) * flatfield.ndim)
 
         corrected = corrected - b
 

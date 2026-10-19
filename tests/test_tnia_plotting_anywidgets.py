@@ -585,7 +585,7 @@ def test_marimo_update(tmp_path):
     def __():
         import numpy as np
         from skimage.data import cells3d
-        from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+        from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
         try:
             im = cells3d()
@@ -598,7 +598,7 @@ def test_marimo_update(tmp_path):
         membrane = im[:, 0, :, :]
         nuclei = im[:, 1, :, :]
 
-        widget = show_xyz_max_slice_interactive(
+        widget = show_zyx_max_slice_interactive(
             [membrane, nuclei],
             colormap=['magma', 'viridis']
         )
@@ -616,6 +616,11 @@ def test_marimo_update(tmp_path):
     compile(written, str(app_path), "exec")
     assert "colormap=" in written
     assert "colors=" not in written
+
+    # The snippet must reference a function that exists and accepts colormap=
+    import inspect
+    import eigenp_utils.tnia_plotting_anywidgets as tpa
+    assert "colormap" in inspect.signature(tpa.show_zyx_max_slice_interactive).parameters
 
 # =========================================
 # Source: test_tnia_figsize_scale.py

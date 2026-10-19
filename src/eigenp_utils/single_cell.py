@@ -576,6 +576,9 @@ def plot_clustering_tree(
                           (e.g., 'viridis') for a gradient based on proportion.
         num_layout_iterations (int): Number of iterations for the barycenter layout
                                      algorithm to stabilize node positions.
+
+    Returns:
+        matplotlib.figure.Figure: The figure (call ``plt.show()`` yourself in scripts).
     """
 
     # 0. Validate Keys
@@ -759,7 +762,7 @@ def plot_clustering_tree(
     )  # Adjust figsize for better readability
 
     # -- Define Colors per Node based on adata.uns --
-    fallback_cmap = plt.cm.get_cmap("Spectral", len(cluster_keys))
+    fallback_cmap = plt.colormaps["Spectral"].resampled(len(cluster_keys))
     node_colors = {}
 
     for i, key in enumerate(cluster_keys):
@@ -935,8 +938,8 @@ def plot_clustering_tree(
     )
 
     ax.autoscale_view()
-    plt.subplots_adjust(right=0.75)  # Adjust right margin
-    plt.show()
+    fig.subplots_adjust(right=0.75)  # Adjust right margin
+    return fig
 
 
 def import_obs_to_adata_from_csv(

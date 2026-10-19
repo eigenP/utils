@@ -87,7 +87,7 @@ def _(mo):
     mo.md("""
     # Registration / Drift Correction Demo
 
-    Demonstrates `estimate_drift_2D` and `apply_drift_correction_2D` on a synthetically drifted stack.
+    Demonstrates `estimate_drift` and `apply_drift_correction` on a synthetically drifted stack.
     """)
     return
 
@@ -100,13 +100,13 @@ def _():
     from scipy.ndimage import shift
     from eigenp_utils.io import download_file_async
     from eigenp_utils.maxproj_registration import (
-        estimate_drift_2D,
-        apply_drift_correction_2D
+        estimate_drift,
+        apply_drift_correction
     )
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
     return (
-        apply_drift_correction_2D,
+        apply_drift_correction,
         download_file_async,
         imread,
         np,
@@ -164,8 +164,8 @@ def _(drifted_stack, show_zyx_max_slice_interactive):
 
 
 @app.cell
-def _(apply_drift_correction_2D, drifted_stack):
-    corrected_stack, drift_table = apply_drift_correction_2D(drifted_stack)
+def _(apply_drift_correction, drifted_stack):
+    corrected_stack, drift_table = apply_drift_correction(drifted_stack)
     return corrected_stack, drift_table
 
 

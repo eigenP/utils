@@ -7,7 +7,7 @@
 #     "seaborn",
 #     "matplotlib",
 #     "scikit-learn",
-#     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main ; sys_platform != 'emscripten'",
+#     "eigenp-utils[plotting] @ git+https://github.com/eigenP/utils.git@main ; sys_platform != 'emscripten'",
 # ]
 # ///
 

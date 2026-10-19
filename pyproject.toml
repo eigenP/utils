@@ -51,6 +51,8 @@ single-cell = [
     "triku",
     "leidenalg",
     "adjustText",
+    # scanpy's default seurat_v3 HVG flavor (preprocess_subset, kknn_ingest)
+    "scikit-misc",
 ]
 dev = [
     "pytest>=7.0.0",
