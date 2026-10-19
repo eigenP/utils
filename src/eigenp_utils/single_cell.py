@@ -58,10 +58,17 @@ try:
 except ImportError:
     pass  # Allow import to succeed even if dependencies aren't immediately available in dev env
 
-try:
-    import triku as tk
-except ImportError:
-    tk = None
+
+
+def _import_triku():
+    """Import triku lazily; its import calls ``warnings.filterwarnings('ignore')``
+    process-wide, so the global warning filters are restored afterwards."""
+    with warnings.catch_warnings():
+        try:
+            import triku
+        except ImportError:
+            return None
+    return triku
 
 try:
     from adjustText import adjust_text
@@ -232,6 +239,21 @@ def _has_integer_like_counts(X, n_check=200000):
     return np.allclose(data, np.round(data))
 
 
+def _raw_counts_for_vars(A):
+    """Return ``A.raw.X`` restricted and ordered to ``A.var_names``.
+
+    ``A.raw`` usually keeps every gene while ``A`` has been gene-filtered, so
+    ``A.raw.X`` cannot be stored as a layer of ``A`` without alignment.
+    """
+    missing = A.var_names.difference(A.raw.var_names)
+    if len(missing) > 0:
+        raise KeyError(
+            f"{len(missing)} genes of A.var_names are not in A.raw.var_names "
+            f"(e.g. {list(missing[:5])}); cannot take counts from A.raw."
+        )
+    return A.raw[:, A.var_names].X.copy()
+
+
 def _ensure_log1p_layer(
     A,
     *,
@@ -255,10 +277,10 @@ def _ensure_log1p_layer(
         C = A.layers[counts_layer]
         src_name = f"layers['{counts_layer}']"
     elif A.raw is not None:
-        C = A.raw.X
+        # cache an aligned copy for future calls
+        A.layers[counts_layer] = _raw_counts_for_vars(A)
+        C = A.layers[counts_layer]
         src_name = "raw.X"
-        # cache a copy for future calls
-        A.layers[counts_layer] = A.raw.X.copy()
     else:
         raise KeyError(
             f"Cannot build '{target_layer}': need raw counts in A.layers['{counts_layer}'] or A.raw.X."
@@ -410,8 +432,8 @@ def preprocess_subset(
     if counts_layer in A.layers:
         has_counts = True
     elif A.raw is not None:
-        # Auto-populate if possible
-        A.layers[counts_layer] = A.raw.X.copy()
+        # Auto-populate if possible (aligned: filter_genes above may have dropped genes)
+        A.layers[counts_layer] = _raw_counts_for_vars(A)
         has_counts = True
 
     if hvg_flavor == "seurat_v3":
@@ -493,10 +515,13 @@ def preprocess_subset(
     if scale_data:
         sc.pp.scale(A, max_value=scale_max_value)
 
+    # arpack needs n_comps < min(n_obs, n_features used by the PCA)
+    has_hvg = "highly_variable" in A.var
+    n_features = int(A.var["highly_variable"].sum()) if has_hvg else A.n_vars
     sc.tl.pca(
         A,
-        n_comps=min(n_comps, A.n_vars - 1),
-        use_highly_variable=True,  # mask_var removed; not needed anyway after subsetting
+        n_comps=min(n_comps, n_features - 1, A.n_obs - 1),
+        mask_var="highly_variable" if has_hvg else None,
         svd_solver=svd_solver,
         random_state=random_state,
     )
@@ -505,6 +530,7 @@ def preprocess_subset(
 
     if n_neighbors is None:
         n_neighbors = pacmap_heuristic_n_neighbors(A.n_obs)
+    n_neighbors = min(n_neighbors, A.n_obs - 1)
     if use_rep is not None:
         sc.pp.neighbors(A, n_neighbors=n_neighbors, use_rep=use_rep)
     else:
@@ -534,21 +560,23 @@ def find_cluster_keys(adata, pattern=r"leiden_[\d\.]+"):
 
     Args:
         adata: AnnData object
-        pattern: Regex pattern to match column names (default: 'leiden_' followed by numbers)
+        pattern: Regex the whole column name must match (default: 'leiden_' followed by numbers)
 
     Returns:
         List of column names sorted by resolution.
     """
     # Find matching columns in .obs
-    keys = [c for c in adata.obs.columns if re.match(pattern, c)]
+    # fullmatch: annotation columns such as 'leiden_0.5_cell_type' are not clusterings
+    keys = [c for c in adata.obs.columns if re.fullmatch(pattern, c)]
 
-    # Helper to sort by the number inside the string (e.g., 0.5, 1.0, 2.0)
+    # Helper to sort by the number inside the string (e.g., 0.5, 1.0, 2.0);
+    # names without a number sort after, alphabetically (keys must be comparable)
     def natural_sort_key(text):
         # Find the first floating point number in the string
         match = re.search(r"(\d+\.?\d*)", text)
         if match:
-            return float(match.group(1))
-        return text  # Fallback to alphabetical
+            return (0, float(match.group(1)), text)
+        return (1, 0.0, text)
 
     return sorted(keys, key=natural_sort_key)
 
@@ -1155,10 +1183,21 @@ def plot_marker_genes_dict_on_embedding(
         )
 
     # 2. Check Genes
+    # Genes are scored and plotted from adata.raw when it exists, unless the caller
+    # passes use_raw=False or a layer (the same default as sc.pl.embedding).
+    layer = pl_kwargs.get("layer")
+    use_raw = pl_kwargs.get("use_raw")
+    if use_raw is None:
+        use_raw = adata.raw is not None and layer is None
+    use_raw = bool(use_raw) and adata.raw is not None
+    pl_kwargs["use_raw"] = use_raw
+
     # Updates the marker_genes dict to only include found genes
-    marker_genes = check_gene_adata(adata, marker_genes)
+    marker_genes = check_gene_adata(adata, marker_genes, use_raw=use_raw)
     if negative_marker_genes is not None:
-        negative_marker_genes = check_gene_adata(adata, negative_marker_genes)
+        negative_marker_genes = check_gene_adata(
+            adata, negative_marker_genes, use_raw=use_raw
+        )
 
     # 3. Setup Colormaps
     if colormaps is None:
@@ -1206,10 +1245,6 @@ def plot_marker_genes_dict_on_embedding(
         # Prepare items to plot: expression of positive genes
         items_to_plot = list(genes)
 
-        # Check if use_raw is in pl_kwargs to pass to score_genes
-        # Default to True as it's scanpy's default, unless provided
-        use_raw = pl_kwargs.get("use_raw", True)
-
         computed_score_names = []
 
         for method in methods_to_run:
@@ -1229,6 +1264,7 @@ def plot_marker_genes_dict_on_embedding(
                     adata,
                     cell_type_markers_dict=ct_dict,
                     cell_type_negative_markers_dict=neg_dict,
+                    layer=layer,
                     use_raw=use_raw,
                     score_method=method,
                     min_markers=1,
@@ -1317,28 +1353,33 @@ def plot_marker_genes_dict_on_embedding(
     return axes_list
 
 
-def check_gene_adata(adata, gene):
+def check_gene_adata(adata, gene, use_raw: bool = False):
     """
     Checks if a gene or a collection of genes exist in the adata object.
 
     Parameters:
     - adata: The AnnData object containing gene information.
     - gene: A string, list, or dictionary of genes to check.
+    - use_raw: Check against ``adata.raw.var_names`` (when ``adata.raw`` exists)
+      instead of ``adata.var_names``.
 
     Returns:
     - A sanitized version of the input 'gene', containing only genes present in adata.
     """
+    var_names = (
+        adata.raw.var_names if use_raw and adata.raw is not None else adata.var_names
+    )
 
     if isinstance(gene, str):
-        if gene in adata.var_names:
+        if gene in var_names:
             return gene
         else:
             print(f"Gene '{gene}' not found in adata.")
             return None  # Or you could raise an exception here
 
     elif isinstance(gene, list):
-        sanitized_genes = [g for g in gene if g in adata.var_names]
-        not_found_genes = [g for g in gene if g not in adata.var_names]
+        sanitized_genes = [g for g in gene if g in var_names]
+        not_found_genes = [g for g in gene if g not in var_names]
         for g in not_found_genes:
             print(f"Gene '{g}' not found in adata.")
         return sanitized_genes
@@ -1348,8 +1389,8 @@ def check_gene_adata(adata, gene):
         for key, genes in gene.items():
             if isinstance(genes, str):
                 genes = [genes]  # Convert single gene string to a list
-            sanitized_genes = [g for g in genes if g in adata.var_names]
-            not_found_genes = [g for g in genes if g not in adata.var_names]
+            sanitized_genes = [g for g in genes if g in var_names]
+            not_found_genes = [g for g in genes if g not in var_names]
             for g in not_found_genes:
                 print(f"Gene '{g}' not found in adata (key: '{key}').")
             sanitized_dict[key] = sanitized_genes
@@ -2311,6 +2352,7 @@ def run_triku(
     """
     if n_neighbors is None:
         n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
+    tk = _import_triku()
     if tk is None:
         raise ImportError(
             "The 'triku' package is required for this function. Please install it."
@@ -2377,17 +2419,30 @@ def run_triku(
     # KNN graph for Triku on the current X (log1p); use PCA for stability/speed
     # This avoids the earlier "X_pca doesn't exist" issue.
     # Note: We run this on the *subset* (adata_triku), which is faster.
-    sc.tl.pca(adata_triku, n_comps=min(50, adata_triku.n_vars - 1), random_state=0)
+    sc.tl.pca(
+        adata_triku,
+        n_comps=min(50, adata_triku.n_vars - 1, adata_triku.n_obs - 1),
+        random_state=0,
+    )
+    # Drop any graph inherited from `adata` (built on another representation, k, or
+    # on more cells before slicing) so Triku sees the graph requested here.
+    for graph_key in ("connectivities", "distances"):
+        adata_triku.obsp.pop(graph_key, None)
+    adata_triku.uns.pop("neighbors", None)
     ensure_neighbors(
-        adata_triku, n_neighbors=n_neighbors, use_rep=None, n_pcs=n_pcs_for_knn
+        adata_triku,
+        n_neighbors=n_neighbors,
+        use_rep=None,
+        n_pcs=min(n_pcs_for_knn, adata_triku.obsm["X_pca"].shape[1]),
     )
 
     # Run Triku on the subset
-    tk.tl.triku(
-        adata_triku,
-        n_features=n_features,
-        use_raw=use_raw,
-    )
+    with warnings.catch_warnings():
+        tk.tl.triku(
+            adata_triku,
+            n_features=n_features,
+            use_raw=use_raw,
+        )
 
     # --- 3. Map Results Back to Original Adata ---
 
@@ -2516,7 +2571,8 @@ def tl_pacmap(
     adata
         Annotated data matrix.
     n_neighbors
-        Number of neighbors for PaCMAP. If None, PaCMAP defaults are used (usually 10-30 depending on n).
+        Number of neighbors for PaCMAP. If None, PaCMAP's size heuristic is used
+        (`pacmap_heuristic_n_neighbors`: 10 up to 10,000 cells, then 10 + 15*(log10(n) - 4)).
     MN_ratio
         Ratio of mid-near pairs to near pairs.
     FP_ratio
@@ -2596,9 +2652,10 @@ def tl_pacmap(
     elif "init" in pmap_kwargs:
         del pmap_kwargs["init"]
 
-    # Pass n_neighbors only if not None
-    if n_neighbors is not None:
-        pmap_kwargs["n_neighbors"] = n_neighbors
+    # PaCMAP's constructor default is a fixed 10, so pass the heuristic explicitly
+    pmap_kwargs["n_neighbors"] = (
+        n_neighbors if n_neighbors is not None else computed_n_neighbors
+    )
 
     embedder = pacmap.PaCMAP(
         n_components=n_components,
@@ -2632,7 +2689,7 @@ def tl_pacmap(
             # Ensure shape matches (n_samples, n_components)
             if init_method.shape[1] < n_components:
                 # Pad with small random noise or zeros to reach n_components
-                padding = np.random.normal(
+                padding = np.random.default_rng(random_state).normal(
                     scale=1e-4,
                     size=(init_method.shape[0], n_components - init_method.shape[1]),
                 )
@@ -2692,6 +2749,14 @@ def calculate_lineage_coupling(
     n_permutations : int
         Number of permutations to use if method='permutation'.
 
+    Notes
+    -----
+    The 'hypergeometric' variance treats clones as independent and ignores the
+    negative covariance between clones that compete for the same fixed pool of
+    cells. Its z-scores are therefore smaller than the permutation z-scores
+    (most visibly on the diagonal) and its p-values are conservative. Use
+    'permutation' when calibrated p-values matter.
+
     Returns
     -------
     observed_counts : pd.DataFrame
@@ -2718,10 +2783,10 @@ def calculate_lineage_coupling(
     if method == "permutation":
         null_matrices = []
 
-        # We shuffle the labels array to break the link between clone and cell type
-        # Convert to standard numpy array to avoid categorical shuffling warnings
-        # Use astype(str) or astype(object) before extracting array to avoid read-only or categorical warnings
-        labels_array = np.array(df[label_key].astype(str))
+        # We shuffle the labels array to break the link between clone and cell type.
+        # Keep the original label values (not str): the shuffled crosstab columns must
+        # match binary_matrix.columns, or every null matrix is all zeros.
+        labels_array = np.array(df[label_key].to_numpy(dtype=object))
 
         print(f"Running {n_permutations} permutations...")
         for _ in range(n_permutations):
@@ -2744,7 +2809,10 @@ def calculate_lineage_coupling(
         null_std[null_std == 0] = 1.0
 
         z_scores_vals = (observed_counts.values - null_mean) / null_std
-        p_values_vals = (null_matrices >= observed_counts.values).sum(axis=0) / n_permutations
+        # +1 correction (Phipson & Smyth 2010): a permutation p-value is never exactly 0
+        p_values_vals = (
+            (null_matrices >= observed_counts.values).sum(axis=0) + 1
+        ) / (n_permutations + 1)
 
         z_scores = pd.DataFrame(z_scores_vals, index=observed_counts.index, columns=observed_counts.columns)
         p_values = pd.DataFrame(p_values_vals, index=observed_counts.index, columns=observed_counts.columns)
@@ -2756,14 +2824,17 @@ def calculate_lineage_coupling(
         from scipy.stats import norm
         N = len(df)
 
-        # Get exact cell counts per clone and per type
+        # Get exact cell counts per clone and per type. The per-clone probabilities
+        # depend only on the clone size, so they are computed once per distinct size
+        # and weighted by how many clones have that size.
         cell_counts_per_clone = df[clone_key].value_counts().values
+        clone_sizes, clones_per_size = np.unique(cell_counts_per_clone, return_counts=True)
         cell_counts_per_type = df[label_key].value_counts().loc[binary_matrix.columns].values
 
         n_types = len(cell_counts_per_type)
 
         K_i = cell_counts_per_type[:, None]
-        k_c = cell_counts_per_clone[None, :]
+        k_c = clone_sizes[None, :]
 
         def prob_zero(K, k_c):
             """
@@ -2798,9 +2869,9 @@ def calculate_lineage_coupling(
         p_c_ij[diag_idx, diag_idx, :] = 1.0 - P_i
 
         # Analytical Expectations and Variance
-        expected_counts = np.sum(p_c_ij, axis=-1)
+        expected_counts = np.sum(p_c_ij * clones_per_size, axis=-1)
 
-        var_counts = np.sum(p_c_ij * (1.0 - p_c_ij), axis=-1)
+        var_counts = np.sum(p_c_ij * (1.0 - p_c_ij) * clones_per_size, axis=-1)
         var_counts = np.maximum(var_counts, 0) # Clamp for numerical stability
 
         std_counts = np.sqrt(var_counts)
@@ -2926,6 +2997,28 @@ def plot_coupling_heatmap(observed, z_scores, p_values, title="Lineage Coupling"
 # ------------------------- Multiscale Coarsening -------------------------
 
 
+def _to_h5ad_safe(obj):
+    """Recursively convert `obj` into types AnnData can write to `.uns`."""
+    if isinstance(obj, dict):
+        return {
+            ("->".join(map(str, k)) if isinstance(k, tuple) else str(k)): _to_h5ad_safe(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, pd.Series):
+        return obj.astype(str).to_numpy()
+    if isinstance(obj, pd.DataFrame):
+        out = obj.copy()
+        out.columns = out.columns.map(str)
+        out.index = out.index.map(str)
+        for col in out.columns:
+            if out[col].dtype == object:
+                out[col] = out[col].astype(str)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return np.asarray(obj)
+    return obj
+
+
 def multiscale_coarsening(
     adata: sc.AnnData,
     resolutions: Optional[List[float]] = None,
@@ -2948,8 +3041,10 @@ def multiscale_coarsening(
                      Defaults to [0.5, 1.0, 10.0, 100.0].
         use_rep: Representation to use for clustering and centroid calculation (e.g., 'X_pca').
                  If 'X', uses adata.X.
-        store_in_uns: Whether to store the results in .
-        uns_key: Key under which to store results in .
+        store_in_uns: Whether to store the results in `adata.uns[uns_key]`. The stored copy is
+                      converted so `write_h5ad` can save it: dict keys become strings
+                      (resolution pairs as "fine->coarse") and label Series become string arrays.
+        uns_key: Key under which to store results in `adata.uns`.
         return_output: Whether to return the results dictionary.
         random_state: Random seed for Leiden clustering.
 
@@ -3131,7 +3226,7 @@ def multiscale_coarsening(
     }
 
     if store_in_uns:
-        adata.uns[uns_key] = results
+        adata.uns[uns_key] = _to_h5ad_safe(results)
 
     if return_output:
         return results
@@ -3415,10 +3510,16 @@ def score_celltypes(
 
     Notes:
       - If fewer than `min_markers` genes are present, that cell type's score is NaN.
+      - Expression source: `layer` if given, else `adata.raw` if `use_raw` and it exists,
+        else `adata.X`. All score methods and the marker presence check use the same source.
     """
 
+    # A layer takes precedence over raw (as scanpy's use_raw=None does), and
+    # use_raw is ignored when there is no adata.raw.
+    use_raw = bool(use_raw) and adata.raw is not None and layer is None
+
     # Determine gene universe for presence/missing checks
-    if use_raw and getattr(adata, "raw", None) is not None and adata.raw is not None:
+    if use_raw:
         gene_universe = set(map(str, adata.raw.var_names))
     else:
         gene_universe = set(map(str, adata.var_names))
@@ -3483,11 +3584,7 @@ def score_celltypes(
             x = _extract_gene_vector(
                 adata,
                 g,
-                source="raw"
-                if use_raw and getattr(adata, "raw", None) is not None
-                else layer
-                if layer
-                else "X",
+                source="raw" if use_raw else layer if layer else "X",
                 duplicate_policy="mean",
             )
             # Find non-zero values
@@ -3874,8 +3971,16 @@ def sweep_leiden_and_annotate(
     cluster_annotations = {}
     celltype_labels = {}
 
-    for r in res_list:
-        key = f"{leiden_key_prefix}_{r:.1f}"
+    # One decimal for resolutions that have one (leiden_0.5, leiden_1.0); full
+    # precision otherwise, so 0.96 and 1.04 do not share a 'leiden_1.0' column.
+    def _res_key(r):
+        return f"{leiden_key_prefix}_{r:.1f}" if round(r, 1) == r else f"{leiden_key_prefix}_{r!r}"
+
+    res_keys = [_res_key(r) for r in res_list]
+    if len(set(res_keys)) != len(res_keys):
+        raise ValueError(f"Duplicate resolutions in {list(resolutions)}.")
+
+    for r, key in zip(res_list, res_keys):
         # We check if leiden key exists or compute it if missing?
         # The user snippet raised ValueError. I will modify to compute if missing for convenience, or match intent.
         # "sweep_leiden" implies it might run it.
@@ -3883,7 +3988,7 @@ def sweep_leiden_and_annotate(
         # But earlier "multiscale_coarsening" computes it.
         # Let's compute it if missing, as it is helpful.
         if key not in adata.obs:
-            print(f"Computing Leiden resolution {r:.1f}...")
+            print(f"Computing Leiden resolution {r:g}...")
             sc.tl.leiden(adata, resolution=r, key_added=key, random_state=random_state, flavor='igraph', n_iterations=2, directed=False)
 
         cdf = annotate_clusters_by_markers(
@@ -4216,6 +4321,18 @@ def plot_volcano_adata(
     return ax
 
 
+def _kknn_distance_weights(dist: np.ndarray) -> np.ndarray:
+    """Normalised inverse-distance weights with a median-distance bandwidth.
+
+    Using the median neighbourhood distance as a bandwidth makes the weighting
+    scale-invariant without letting a coincident cell (dist=0) take all the weight.
+    """
+    epsilon = 1e-6
+    median_dist = np.median(dist[dist > 0]) if np.any(dist > 0) else 0.0
+    weights = 1.0 / (dist + median_dist + epsilon)
+    return weights / np.sum(weights)
+
+
 def kknn_classifier(
     adata: sc.AnnData,
     obs_key: str,
@@ -4295,12 +4412,7 @@ def kknn_classifier(
         neighbors_labels = labels[idx]
 
         # Distance weighting: smaller distance = larger weight
-        # Using the median distance of the neighborhood as a bandwidth makes the weighting
-        # scale-invariant without letting the self-node (dist=0) completely dominate the vote with infinite weight.
-        epsilon = 1e-6
-        median_dist = np.median(dist[dist > 0]) if np.any(dist > 0) else 0.0
-        weights = 1.0 / (dist + median_dist + epsilon)
-        weights /= np.sum(weights)
+        weights = _kknn_distance_weights(dist)
 
         if is_categorical:
             # Tally weighted votes
@@ -4402,6 +4514,13 @@ def _compute_kknn_curvatures(
     return curvatures
 
 
+def _embedding_fingerprint(X: np.ndarray) -> np.ndarray:
+    """Cheap fingerprint (shape and moments of a row subsample) of an embedding."""
+    X = np.asarray(X)
+    sub = X[:: max(1, X.shape[0] // 512)].astype(np.float64)
+    return np.array([X.shape[0], X.shape[1], sub.sum(), np.square(sub).sum()])
+
+
 def compute_kknn_neighbors(
     adata_query: sc.AnnData,
     adata_ref: sc.AnnData,
@@ -4456,7 +4575,8 @@ def compute_kknn_neighbors(
     if max_neighbors is None:
         max_neighbors = max(10, 2 * P)
 
-    # Ensure min <= max
+    # Cannot query more neighbors than there are reference cells; ensure min <= max
+    max_neighbors = min(max_neighbors, N_ref)
     min_neighbors = min(min_neighbors, max_neighbors)
 
     print(
@@ -4470,10 +4590,20 @@ def compute_kknn_neighbors(
     # 2. Query neighbors for all query cells
     distances, indices = nn.kneighbors(X_query)
 
-    # 3. Compute reference curvature bounds if not cached
+    # 3. Compute reference curvature bounds if not cached.
+    # The bounds depend on the embedding and on max_neighbors, so the cache is keyed by
+    # both and also stores a fingerprint of the embedding to detect a recomputed one.
     bounds_key = "kknn_curvature_bounds"
-    if bounds_key in adata_ref.uns:
-        lower_bound, upper_bound = adata_ref.uns[bounds_key]
+    cache_entry = f"{use_rep}|k={max_neighbors}"
+    fingerprint = _embedding_fingerprint(X_ref)
+    cache = adata_ref.uns.get(bounds_key)
+    if not isinstance(cache, dict):
+        cache = {}  # absent, or a single (lower, upper) pair from older versions
+    cached = cache.get(cache_entry)
+    if cached is not None and np.allclose(
+        np.asarray(cached)[2:], fingerprint, rtol=1e-9, atol=0
+    ):
+        lower_bound, upper_bound = (float(b) for b in np.asarray(cached)[:2])
     else:
         print("kkNN: Computing and caching reference curvature bounds...")
         # Get neighbors for the reference dataset itself
@@ -4486,10 +4616,12 @@ def compute_kknn_neighbors(
         # Compute curvatures for the reference dataset
         ref_curvatures = _compute_kknn_curvatures(X_ref, ref_indices, max_neighbors)
 
-        # Calculate bounds and cache them
+        # Calculate bounds and cache them (not for temporary representations)
         lower_bound = np.percentile(ref_curvatures, 1)
         upper_bound = np.percentile(ref_curvatures, 99)
-        adata_ref.uns[bounds_key] = (lower_bound, upper_bound)
+        if not use_rep.startswith("__temp_"):
+            cache[cache_entry] = np.concatenate([[lower_bound, upper_bound], fingerprint])
+            adata_ref.uns[bounds_key] = cache
 
     # 4. Compute local curvature for query cells
     # Note: the query cells use the reference data for neighborhood,
@@ -4533,6 +4665,98 @@ def compute_kknn_neighbors(
         pruned_indices.append(indices[i, :keep])
 
     return pruned_distances, pruned_indices
+
+
+def _project_onto_reference_pca(adata_query, adata_fit) -> np.ndarray:
+    """Project ``adata_query.X`` into the PCA space stored on ``adata_fit``.
+
+    ``adata_fit`` is the object the PCA was computed on: its ``.X`` is the fitted
+    matrix, with ``varm['PCs']`` and ``uns['pca']['params']``. The query goes
+    through the same steps as the reference did:
+
+    1. If the reference was standardised with ``sc.pp.scale`` (``var['mean']`` and
+       ``var['std']`` present), the query is standardised with the reference
+       statistics, ``(x - mean) / std``, and clipped like the reference
+       (``max_value`` clipping is detected from the values tied at the maximum).
+    2. If the PCA was zero-centred, the column means of the fitted matrix are
+       subtracted. The query's own mean is never used: it depends on the query's
+       cell-type composition.
+    """
+    if not adata_query.var_names.equals(adata_fit.var_names):
+        raise ValueError(
+            "Variables in the query adata are different from variables in the reference adata."
+        )
+
+    pca_params = adata_fit.uns["pca"]["params"]
+    mask_key = pca_params.get("mask_var")
+    if not isinstance(mask_key, str):
+        mask_key = (
+            "highly_variable" if pca_params.get("use_highly_variable", False) else None
+        )
+    if mask_key is not None:
+        if mask_key not in adata_fit.var.columns:
+            raise ValueError(f"Did not find `adata_ref.var['{mask_key}']`.")
+        cols = adata_fit.var[mask_key].to_numpy(dtype=bool)
+    else:
+        cols = np.ones(adata_fit.n_vars, dtype=bool)
+
+    x = adata_query.X[:, cols]
+    # float64 copy: never modifies adata_query.X, and works for integer matrices
+    x = x.toarray() if sp.issparse(x) else np.asarray(x)
+    x = x.astype(np.float64)
+    X_fit = adata_fit.X[:, cols]
+
+    if "std" in adata_fit.var:
+        print(
+            "kkNN Ingest: Reference features were scaled. Scaling query features with the reference statistics..."
+        )
+        if "mean" in adata_fit.var:
+            x -= adata_fit.var["mean"].to_numpy(dtype=np.float64)[cols]
+        std = adata_fit.var["std"].to_numpy(dtype=np.float64)[cols]
+        x /= np.where(std == 0, 1.0, std)
+        # sc.pp.scale(max_value=m) clips to [-m, m], leaving many entries tied at
+        # exactly +-m; unclipped continuous data has no such ties.
+        abs_fit = abs(X_fit)
+        amax = float(abs_fit.max())
+        if amax > 0 and (abs_fit == amax).sum() > 1:
+            np.clip(x, -amax, amax, out=x)
+
+    if pca_params.get("zero_center", True):
+        x -= np.asarray(X_fit.mean(axis=0), dtype=np.float64).ravel()
+
+    return x @ np.asarray(adata_fit.varm["PCs"])[cols]
+
+
+def _check_embedding_model(model, key, X_q, X_r, ref_coords, use_rep):
+    """Validate that an embedding model can map ``X_q`` into ``adata_ref.obsm[key]``."""
+    n_dims = getattr(model, "num_dimensions", None)
+    if n_dims is not None and X_q.shape[1] != n_dims:
+        raise ValueError(
+            f"The embedding model for '{key}' was fit on {n_dims}-dimensional data, but the "
+            f"query representation has {X_q.shape[1]} dimensions. The model must be fit on "
+            f"adata_ref.obsm['{use_rep}']."
+        )
+    n_inst = getattr(model, "num_instances", None)
+    if n_inst is not None:
+        if getattr(model, "tree", None) is None and X_r.shape[0] != n_inst:
+            raise ValueError(
+                f"The embedding model for '{key}' was fit on {n_inst} cells, but its basis "
+                f"adata_ref.obsm['{use_rep}'] has {X_r.shape[0]} rows. Pass the reference the "
+                "model was fit on (same cells, same order)."
+            )
+        if ref_coords.shape[0] != n_inst:
+            raise ValueError(
+                f"The embedding model for '{key}' was fit on {n_inst} cells, but adata_ref has "
+                f"{ref_coords.shape[0]}; its embedding does not correspond to adata_ref.obsm['{key}']."
+            )
+    embedding = getattr(model, "embedding_", None)
+    if embedding is not None and embedding.shape == ref_coords.shape:
+        scale = float(np.max(np.abs(ref_coords))) or 1.0
+        if not np.allclose(embedding, ref_coords, rtol=1e-4, atol=1e-6 * scale):
+            warnings.warn(
+                f"adata_ref.obsm['{key}'] differs from the embedding the model for '{key}' "
+                "was fit to; mapped query coordinates are in the model's embedding space."
+            )
 
 
 def kknn_ingest(
@@ -4594,14 +4818,25 @@ def kknn_ingest(
         use_rep: Shared representation space to find neighbors (default: 'X_pca').
         n_neighbors: Base number of neighbors to use (overrides heuristic).
         barycenter: Averaging method. Currently supports 'distance' or 'lle' (Locally Linear Embedding).
-        embedding_models: Dictionary containing scikit-learn compatible projection models (e.g., PaCMAP).
+        embedding_models: Dictionary containing scikit-learn compatible projection models (e.g., PaCMAP),
+                          used with `barycenter='transform'`. Each model must have been fit on
+                          `adata_ref.obsm[use_rep]` (all reference cells, in order); this is checked.
         recompute_ref_PCA: If True, recomputes PCA on the reference dataset before projecting the query.
+                           Embedding models are still applied in the stored `X_pca` space.
         save_ref_PCA_key: Optional key to save the projected query PCA representation in `adata_query.obsm`.
+                          With `recompute_ref_PCA=True` the matching reference coordinates are saved
+                          under the same key in `adata_ref.obsm` (the key must not exist there yet);
+                          otherwise the query is in the basis of `adata_ref.obsm['X_pca']`.
         lle_reg_lambda: Regularization strength for Locally Linear Embedding (`barycenter='lle'`).
                         Decreasing it (e.g., to 1e-4) forces sparser, sharper assignment to nearest neighbors.
         **kwargs: Additional args for compute_kknn_neighbors (e.g., min_neighbors, max_neighbors).
 
     Notes:
+        - With `use_rep='X_pca'` the query is projected with the reference statistics: if the
+          reference was scaled with `sc.pp.scale`, the query is standardised as
+          `(x - mean_ref) / std_ref` and clipped like the reference; it is then centred on the
+          reference mean. The query `.X` must hold the same kind of values as the reference
+          `.X` before scaling (e.g. log-normalised data).
         - When barycenter='distance', inverse distance weights are calculated using a scale-invariant
           bandwidth based on the median neighborhood distance plus a small epsilon
           (`1.0 / (dist + median_dist + 1e-6)`). This properly prevents self-nodes (dist=0) from
@@ -4638,15 +4873,18 @@ def kknn_ingest(
         if key not in adata_ref.obsm:
             raise KeyError(f"Embedding '{key}' not found in adata_ref.obsm")
 
+    original_use_rep = use_rep
     query_use_rep = use_rep
     temp_query_rep_key = None
     temp_ref_rep_key = None
+    # Query coordinates in the space the embedding models were fit on, when that is
+    # not the space used for the neighbour search (barycenter='transform').
+    model_X_query = None
 
     if use_rep == "X_pca":
-        # Check if reference needs recomputing its PCA
         if not adata_query.var_names.equals(adata_ref.var_names):
-            warnings.warn(
-                "Warning: adata_query.var_names and adata_ref.var_names are not identical. "
+            raise ValueError(
+                "adata_query.var_names and adata_ref.var_names are not identical. "
                 "It is expected that the datasets have been intersected to contain the same features. "
                 "For example:\n"
                 "common_genes = adata_ref.var_names.intersection(adata_query.var_names)\n"
@@ -4654,7 +4892,30 @@ def kknn_ingest(
                 "adata_query = adata_query[:, common_genes].copy()"
             )
 
+        has_stored_pca = (
+            "pca" in adata_ref.uns and "PCs" in adata_ref.varm and "X_pca" in adata_ref.obsm
+        )
+        needs_model_space = (
+            barycenter == "transform"
+            and embedding_models is not None
+            and any(key in embedding_models for key in obsm_keys)
+        )
+
         if recompute_ref_PCA:
+            if save_ref_PCA_key is not None and save_ref_PCA_key in adata_ref.obsm:
+                raise ValueError(
+                    f"save_ref_PCA_key='{save_ref_PCA_key}' already exists in adata_ref.obsm. With "
+                    "recompute_ref_PCA=True the query is projected onto a freshly computed PCA whose "
+                    "axes differ from it. Use a new key (the matching reference coordinates are "
+                    "stored under it as well), or recompute_ref_PCA=False to project onto the "
+                    "reference's stored PCA."
+                )
+            if needs_model_space and not has_stored_pca:
+                raise ValueError(
+                    "barycenter='transform' needs the query in the space the embedding models were "
+                    "fit on (adata_ref.obsm['X_pca']), but adata_ref has no stored PCA "
+                    "(uns['pca'], varm['PCs'])."
+                )
             print(
                 "Warning: recompute_ref_PCA is True, but this function will not mutate your reference object in place."
             )
@@ -4677,98 +4938,30 @@ def kknn_ingest(
                 )
             sc.tl.pca(adata_ref_copy)
 
-            # Store it temporarily for this run
-            temp_ref_rep_key = f"__temp_ref_ingest_{uuid4().hex[:8]}"
-            adata_ref.obsm[temp_ref_rep_key] = adata_ref_copy.obsm["X_pca"]
-            use_rep = temp_ref_rep_key
-
-            pca_params = adata_ref_copy.uns["pca"]["params"]
-            pca_centered = pca_params.get("zero_center", True)
-            pca_use_hvg = pca_params.get("use_highly_variable", False)
-            n_pcs = adata_ref_copy.obsm["X_pca"].shape[1]
-            pca_basis = adata_ref_copy.varm["PCs"]
-
-            if pca_use_hvg:
-                hvg_mask = adata_ref_copy.var["highly_variable"]
-
+            x_pca_projected = _project_onto_reference_pca(adata_query, adata_ref_copy)
+            ref_pca_coords = adata_ref_copy.obsm["X_pca"]
             del adata_ref_copy
+
+            if save_ref_PCA_key is not None:
+                # Store the reference in the same basis, so the saved query projection
+                # can be compared or concatenated with it.
+                adata_ref.obsm[save_ref_PCA_key] = ref_pca_coords
+                use_rep = save_ref_PCA_key
+            else:
+                # Store it temporarily for this run
+                temp_ref_rep_key = f"__temp_ref_ingest_{uuid4().hex[:8]}"
+                adata_ref.obsm[temp_ref_rep_key] = ref_pca_coords
+                use_rep = temp_ref_rep_key
+
+            if needs_model_space:
+                # The models were fit on the reference's stored X_pca, not on the recomputed PCA
+                model_X_query = _project_onto_reference_pca(adata_query, adata_ref)
         else:
-            if "pca" not in adata_ref.uns or "PCs" not in adata_ref.varm:
+            if not has_stored_pca:
                 raise ValueError(
                     "Reference dataset must have PCA computed (adata_ref.uns['pca'] and adata_ref.varm['PCs'])."
                 )
-
-            pca_params = adata_ref.uns["pca"]["params"]
-            pca_centered = pca_params.get("zero_center", True)
-            pca_use_hvg = pca_params.get("use_highly_variable", False)
-
-            n_pcs = adata_ref.obsm["X_pca"].shape[1]
-            pca_basis = adata_ref.varm["PCs"]
-
-            if pca_use_hvg:
-                if "highly_variable" not in adata_ref.var.columns:
-                    raise ValueError("Did not find `adata_ref.var['highly_variable']`.")
-                hvg_mask = adata_ref.var["highly_variable"]
-
-        # Extract query data
-        x_query = adata_query.X
-        if sp.issparse(x_query):
-            x_query = x_query.toarray()
-        else:
-            # Important: Ensure we copy so we don't modify the original .X in-place
-            # and that we have a numpy array to subtract mean from
-            x_query = np.asarray(x_query).copy()
-
-        if pca_use_hvg:
-            # Align query columns. Assuming adata_query.var_names match adata_ref.var_names
-            if not adata_query.var_names.equals(adata_ref.var_names):
-                raise ValueError(
-                    "Variables in the query adata are different from variables in the reference adata."
-                )
-
-            x_query = x_query[:, hvg_mask]
-            pca_basis = pca_basis[hvg_mask]
-        else:
-            if not adata_query.var_names.equals(adata_ref.var_names):
-                raise ValueError(
-                    "Variables in the query adata are different from variables in the reference adata."
-                )
-
-        # Check if the reference was scaled (standardized to variance 1)
-        # Scanpy usually stores this in adata_ref.var['std'] if sc.pp.scale was used
-        pca_scaled = "std" in adata_ref.var
-
-        if pca_scaled:
-            print(
-                "kkNN Ingest: Reference features were scaled. Scaling query features..."
-            )
-            # Get the standard deviations used for the reference
-            ref_gene_stds = (
-                adata_ref.var["std"].values[hvg_mask]
-                if pca_use_hvg
-                else adata_ref.var["std"].values
-            )
-
-            # Avoid division by zero for genes with no variance in reference
-            ref_gene_stds = np.where(ref_gene_stds == 0, 1.0, ref_gene_stds)
-
-            # Scale the query using the REFERENCE's standard deviations
-            x_query = x_query / ref_gene_stds
-
-        if pca_centered:
-            # If using reference scaling, you should also center using the REFERENCE's mean
-            if "mean" in adata_ref.var:
-                ref_gene_means = (
-                    adata_ref.var["mean"].values[hvg_mask]
-                    if pca_use_hvg
-                    else adata_ref.var["mean"].values
-                )
-                x_query -= ref_gene_means
-            else:
-                # Fallback to query mean
-                x_query -= x_query.mean(axis=0)
-
-        x_pca_projected = np.dot(x_query, pca_basis[:, :n_pcs])
+            x_pca_projected = _project_onto_reference_pca(adata_query, adata_ref)
 
         if save_ref_PCA_key is not None:
             adata_query.obsm[save_ref_PCA_key] = x_pca_projected
@@ -4810,8 +5003,7 @@ def kknn_ingest(
 
             if barycenter == "distance" or barycenter == "transform":
                 # Inverse distance weighting (default for transform if needed later, and distance)
-                weights = 1.0 / (dist + 1e-8)
-                weights /= np.sum(weights)
+                weights = _kknn_distance_weights(dist)
             elif barycenter == "lle":
                 x_q = adata_query.obsm[query_use_rep][i]
                 X_neigh = adata_ref.obsm[use_rep][idx]
@@ -4836,15 +5028,13 @@ def kknn_ingest(
                     else:
                         weights = np.ones(len(idx)) / len(idx)
                 except (np.linalg.LinAlgError, ValueError):
-                    weights = 1.0 / (dist + 1e-8)
-                    weights /= np.sum(weights)
+                    weights = _kknn_distance_weights(dist)
             elif barycenter == "wasserstein":
                 if i == 0:
                     warnings.warn(
                         "Wasserstein barycenter not yet fully implemented. Falling back to distance-weighted."
                     )
-                weights = 1.0 / (dist + 1e-8)
-                weights /= np.sum(weights)
+                weights = _kknn_distance_weights(dist)
             else:
                 # Unweighted fallback
                 weights = np.ones(len(idx)) / len(idx)
@@ -4863,15 +5053,21 @@ def kknn_ingest(
                     model = embedding_models[key]
                     print(f"Using provided model's .transform() for '{key}'...")
 
-                    # We need the source data to transform.
-                    # Since we want to map the query data, we use the query representation used to find neighbors
-                    X_q = adata_query.obsm[query_use_rep]
+                    # The model maps from the space it was fit on: adata_ref.obsm[original_use_rep]
+                    if model_X_query is not None:
+                        X_q = model_X_query
+                        X_r = adata_ref.obsm[original_use_rep]
+                    else:
+                        X_q = adata_query.obsm[query_use_rep]
+                        X_r = adata_ref.obsm[use_rep]
+                    _check_embedding_model(
+                        model, key, X_q, X_r, ref_coords, original_use_rep
+                    )
 
                     try:
                         import pacmap
 
                         if isinstance(model, pacmap.PaCMAP):
-                            X_r = adata_ref.obsm[use_rep]
                             query_coords = model.transform(X_q, basis=X_r)
                         else:
                             query_coords = model.transform(X_q)

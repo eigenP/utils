@@ -3023,3 +3023,421 @@ def test_plot_clustering_tree_draws_with_current_matplotlib():
         assert fig is not None and len(fig.axes) == 1
     finally:
         plt.close("all")
+
+
+# =========================================
+# Source: bug-scan batch 3 regressions (kknn_ingest maths, .raw handling)
+# =========================================
+
+
+def _typed_counts(n_per_type=150, n_types=4, n_genes=200, seed=0):
+    """Poisson counts with `n_types` cell types, each with 15 up-regulated genes."""
+    rng = np.random.default_rng(seed)
+    n = n_per_type * n_types
+    labels = np.repeat(np.arange(n_types), n_per_type)
+    rate = np.full((n, n_genes), 1.0)
+    for t in range(n_types):
+        rate[labels == t, t * 15 : (t + 1) * 15] = 8.0
+    counts = rng.poisson(rate).astype(np.float32)
+    a = AnnData(counts)
+    a.var_names = [f"G{i}" for i in range(n_genes)]
+    a.obs_names = [f"c{i}" for i in range(n)]
+    a.obs["ct"] = pd.Categorical([f"T{t}" for t in labels])
+    return a
+
+
+def _typed_log(n_per_type=150, n_types=4, n_genes=200, seed=0):
+    a = _typed_counts(n_per_type, n_types, n_genes, seed)
+    a.layers["counts"] = a.X.copy()
+    sc.pp.normalize_total(a, target_sum=1e4)
+    sc.pp.log1p(a)
+    return a
+
+
+def test_preprocess_subset_takes_counts_from_raw_after_gene_filtering():
+    a = _typed_counts(n_per_type=50)
+    a.X[:, :5] = 0
+    a.X[0, :5] = 3  # five genes expressed in a single cell: removed by filter_genes
+    a.raw = a.copy()
+    sc.pp.normalize_total(a, target_sum=1e4)
+    sc.pp.log1p(a)
+
+    out = preprocess_subset(a, hvg_flavor="seurat", n_top_genes=50, copy=True)
+
+    assert out.n_vars == 50
+    raw_counts = a.raw[:, out.var_names].X
+    np.testing.assert_array_equal(np.asarray(out.layers["counts"]), np.asarray(raw_counts))
+
+
+def test_preprocess_subset_caps_n_comps_on_small_inputs():
+    small = _typed_log(n_per_type=5)  # 20 cells < default n_comps=32
+    out = preprocess_subset(small, hvg_flavor="seurat", n_top_genes=100, copy=True)
+    assert out.obsm["X_pca"].shape[1] <= 19
+
+    few_hvgs = _typed_log(n_per_type=50)
+    out = preprocess_subset(
+        few_hvgs, hvg_flavor="seurat", n_top_genes=20, subset_to_hvgs=False, copy=True
+    )
+    assert out.obsm["X_pca"].shape[1] <= 19
+
+
+def test_score_celltypes_without_raw_uses_X_by_default():
+    a = _typed_log(n_per_type=60)
+    assert a.raw is None
+    markers = {"T0": [f"G{i}" for i in range(15)], "T1": [f"G{i}" for i in range(15, 30)]}
+
+    scores = score_celltypes(a, markers)  # default use_raw=True, score_method='scanpy'
+    assert scores["T0"][a.obs["ct"] == "T0"].mean() > scores["T0"][a.obs["ct"] == "T1"].mean()
+
+    a.obs["cl"] = a.obs["ct"].astype(str)
+    cdf = annotate_clusters_by_markers(a, "cl", markers)
+    assert cdf.loc["T0", "assigned_cell_type"] == "T0"
+
+
+def test_score_celltypes_binned_uses_layer_over_raw():
+    a = _typed_log(n_per_type=60)
+    a.raw = a.copy()
+    a.layers["zeros"] = np.zeros_like(a.X)
+    markers = {"T0": [f"G{i}" for i in range(15)]}
+
+    scores = score_celltypes(a, markers, layer="zeros", score_method="binned")
+    assert np.all(scores["T0"].to_numpy() == 0)
+
+
+def test_plot_marker_genes_dict_uses_raw_genes_and_scores_without_raw():
+    full = _typed_log(n_per_type=40)
+    full.obsm["X_umap"] = np.random.default_rng(0).normal(size=(full.n_obs, 2))
+    full.raw = full.copy()
+    sub = full[:, 30:].copy()  # markers G0-G2 exist only in sub.raw
+
+    axes = plot_marker_genes_dict_on_embedding(sub, {"T1": ["G0", "G1", "G2"]})
+    titles = [ax.get_title() for ax in axes]
+    assert titles == ["G0", "G1", "G2", "T1_score_scanpy"]
+    plt.close("all")
+
+    no_raw = _typed_log(n_per_type=40)
+    no_raw.obsm["X_umap"] = np.random.default_rng(0).normal(size=(no_raw.n_obs, 2))
+    axes = plot_marker_genes_dict_on_embedding(no_raw, {"T1": ["G0", "G1", "G2"]})
+    assert "T1_score_scanpy" in [ax.get_title() for ax in axes]
+    plt.close("all")
+
+
+def test_find_cluster_keys_ignores_annotation_columns_and_mixed_names():
+    from eigenp_utils.single_cell import find_cluster_keys
+
+    a = AnnData(np.zeros((3, 2)))
+    for col in [
+        "leiden_1.0",
+        "leiden_0.5",
+        "leiden_0.5_cell_type",
+        "leiden_0.5_ctype_softmaxp",
+        "leiden",
+    ]:
+        a.obs[col] = 0
+    assert find_cluster_keys(a) == ["leiden_0.5", "leiden_1.0"]
+    assert find_cluster_keys(a, pattern=r"leiden(_[\d\.]+)?") == [
+        "leiden_0.5",
+        "leiden_1.0",
+        "leiden",
+    ]
+
+
+def test_lineage_coupling_permutation_with_integer_labels():
+    rng = np.random.default_rng(0)
+    n = 400
+    a = AnnData(np.zeros((n, 1)))
+    a.obs["cell_type"] = rng.integers(0, 4, n)  # integer cluster ids
+    a.obs["CloneID"] = rng.integers(0, 120, n).astype(str)
+
+    np.random.seed(0)
+    obs, z_perm, p_perm = calculate_lineage_coupling(a, method="permutation", n_permutations=200)
+    _, z_hyp, _ = calculate_lineage_coupling(a, method="hypergeometric")
+
+    # Random clones: no enrichment, so z-scores are O(1), not the raw counts
+    assert np.abs(z_perm.to_numpy()).max() < 4
+    assert (p_perm.to_numpy() > 0).all()
+    assert np.corrcoef(z_perm.to_numpy().ravel(), z_hyp.to_numpy().ravel())[0, 1] > 0.5
+
+
+def test_lineage_coupling_hypergeometric_matches_per_clone_formula():
+    """Grouping clones by size must not change the analytical z-scores."""
+    import scipy.special
+
+    rng = np.random.default_rng(1)
+    n = 300
+    a = AnnData(np.zeros((n, 1)))
+    a.obs["cell_type"] = rng.choice(list("ABC"), n)
+    a.obs["CloneID"] = rng.integers(0, 90, n).astype(str)
+    obs, z, _ = calculate_lineage_coupling(a, method="hypergeometric")
+
+    df = a.obs[["cell_type", "CloneID"]]
+    N = n
+    k_c = df["CloneID"].value_counts().to_numpy()
+    K = df["cell_type"].value_counts().loc[obs.columns].to_numpy()
+
+    def p0(Kv, k):
+        Kv, k = np.broadcast_arrays(Kv, k)
+        out = np.zeros(Kv.shape)
+        ok = (N - Kv) >= k
+        out[ok] = np.exp(
+            scipy.special.gammaln(N - Kv[ok] + 1) - scipy.special.gammaln(N - Kv[ok] - k[ok] + 1)
+            - scipy.special.gammaln(N + 1) + scipy.special.gammaln(N - k[ok] + 1)
+        )
+        return out
+
+    Pi = p0(K[:, None], k_c[None, :])
+    Pij = p0(K[:, None, None] + K[None, :, None], k_c[None, None, :])
+    p = 1 - Pi[:, None, :] - Pi[None, :, :] + Pij
+    p[np.arange(3), np.arange(3), :] = 1 - Pi
+    expected = p.sum(-1)
+    std = np.sqrt(np.maximum((p * (1 - p)).sum(-1), 0))
+    std[std == 0] = 1
+    np.testing.assert_allclose(z.to_numpy(), (obs.to_numpy() - expected) / std, atol=1e-10)
+
+
+def test_sweep_leiden_keeps_close_resolutions_apart():
+    from eigenp_utils.single_cell import sweep_leiden_and_annotate
+
+    a = _typed_log(n_per_type=50)
+    sc.pp.pca(a, n_comps=10)
+    sc.pp.neighbors(a, n_neighbors=10)
+    markers = {"T0": [f"G{i}" for i in range(15)], "T1": [f"G{i}" for i in range(15, 30)]}
+
+    sweep_leiden_and_annotate(a, markers, resolutions=(0.5, 0.96, 1.04, 2.0), use_raw=False)
+    for key in ["leiden_0.5", "leiden_0.96", "leiden_1.04", "leiden_2.0"]:
+        assert key in a.obs
+
+    with pytest.raises(ValueError, match="Duplicate"):
+        sweep_leiden_and_annotate(a, markers, resolutions=(0.5, 0.5), use_raw=False)
+
+
+def test_multiscale_coarsening_store_in_uns_can_be_written(tmp_path):
+    a = _typed_log(n_per_type=40)
+    sc.pp.pca(a, n_comps=10)
+    sc.pp.neighbors(a, n_neighbors=10)
+    res = multiscale_coarsening(a, resolutions=[0.2, 0.5, 1.0], store_in_uns=True)
+
+    assert 0.5 in res["clustering"]  # returned results keep float keys
+    stored = a.uns["multiscale_hierarchy"]
+    assert "0.5->0.2" in stored["hierarchy"]["tree"]  # "fine->coarse"
+    assert all(isinstance(v, np.ndarray) for v in stored["clustering"].values())
+
+    try:
+        AnnData(np.zeros((2, 1))).write_h5ad(tmp_path / "probe.h5ad")
+    except Exception as e:  # e.g. anndata 0.10 with pandas 3 string indexes
+        pytest.skip(f"this anndata/pandas pair cannot write h5ad at all: {e}")
+    a.write_h5ad(tmp_path / "x.h5ad")
+    back = anndata.read_h5ad(tmp_path / "x.h5ad")
+    assert "0.5->0.2" in back.uns["multiscale_hierarchy"]["hierarchy"]["tree"]
+
+
+def test_run_triku_rebuilds_graph_and_restores_warning_filters(monkeypatch):
+    import eigenp_utils.single_cell as scmod
+
+    seen = {}
+
+    def fake_triku(adata, n_features, use_raw):
+        seen["n_neighbors"] = adata.uns["neighbors"]["params"]["n_neighbors"]
+        seen["use_rep"] = adata.uns["neighbors"]["params"].get("use_rep")
+        warnings.filterwarnings("ignore")  # triku does this on import
+        adata.var["triku_highly_variable"] = False
+        adata.var["triku_distance"] = 0.0
+
+    fake = MagicMock()
+    fake.tl.triku = fake_triku
+    monkeypatch.setattr(scmod, "_import_triku", lambda: fake)
+
+    a = _typed_log(n_per_type=50)
+    a.layers["log1p"] = a.X.copy()
+    a.obsm["X_other"] = np.random.default_rng(0).normal(size=(a.n_obs, 3))
+    sc.pp.neighbors(a, n_neighbors=5, use_rep="X_other")
+
+    with warnings.catch_warnings():
+        filters_before = list(warnings.filters)
+        scmod.run_triku(a, layer="log1p", n_neighbors=25, n_pcs_for_knn=30)
+        assert warnings.filters == filters_before
+    assert seen["n_neighbors"] == 25
+    assert seen["use_rep"] != "X_other"
+
+
+def test_importing_single_cell_keeps_warnings_enabled():
+    import subprocess
+    import sys
+
+    code = (
+        "import warnings\n"
+        "import eigenp_utils.single_cell as s\n"
+        "s.run_triku\n"
+        "getattr(s, '_import_triku', lambda: None)()\n"
+        "print(any(f[0] == 'ignore' and f[1] is None and f[2] is Warning and f[3] is None "
+        "for f in warnings.filters))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip().splitlines()[-1] == "False"
+
+
+def test_tl_pacmap_applies_neighbor_heuristic(monkeypatch):
+    import pacmap
+    import eigenp_utils.single_cell as scmod
+
+    captured = {}
+
+    class FakePaCMAP:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.n_components = kw.get("n_components", 2)
+
+        def fit_transform(self, X, init=None):
+            return np.zeros((X.shape[0], self.n_components))
+
+    monkeypatch.setattr(pacmap, "PaCMAP", FakePaCMAP)
+    monkeypatch.setattr(scmod, "pacmap_heuristic_n_neighbors", lambda n: 17)
+    a = _typed_log(n_per_type=30)
+    sc.pp.pca(a, n_comps=10)
+    tl_pacmap(a)
+    assert captured["n_neighbors"] == 17
+
+
+def test_tl_pacmap_padded_init_is_reproducible():
+    a = _typed_log(n_per_type=40)
+    sc.pp.pca(a, n_comps=10)
+    a.obsm["X_init1d"] = a.obsm["X_pca"][:, :1].copy()
+    tl_pacmap(a, init="X_init1d", random_state=3)
+    first = a.obsm["X_pacmap"].copy()
+    np.random.seed(None)
+    tl_pacmap(a, init="X_init1d", random_state=3)
+    np.testing.assert_allclose(a.obsm["X_pacmap"], first)
+
+
+def test_kknn_curvature_cache_is_keyed_by_representation():
+    rng = np.random.default_rng(0)
+    a = AnnData(np.zeros((400, 1)))
+    a.obsm["X_flat"] = rng.normal(size=(400, 5))
+    t = rng.uniform(0, 6 * np.pi, 400)
+    a.obsm["X_curved"] = np.c_[np.cos(t), np.sin(t), 0.01 * rng.normal(size=400)]
+
+    fresh = a.copy()
+    _, idx_fresh = compute_kknn_neighbors(fresh, fresh, use_rep="X_curved")
+
+    compute_kknn_neighbors(a, a, use_rep="X_flat")  # caches bounds for X_flat
+    _, idx = compute_kknn_neighbors(a, a, use_rep="X_curved")
+    assert [len(i) for i in idx] == [len(i) for i in idx_fresh]
+
+    # A recomputed embedding under the same key invalidates the cache entry
+    a.obsm["X_flat"] = a.obsm["X_curved"].copy()
+    _, idx_again = compute_kknn_neighbors(a, a, use_rep="X_flat")
+    assert [len(i) for i in idx_again] == [len(i) for i in idx_fresh]
+
+
+def test_compute_kknn_neighbors_small_reference():
+    rng = np.random.default_rng(0)
+    ref = AnnData(np.zeros((8, 1)))
+    ref.obsm["X_pca"] = rng.normal(size=(8, 3))
+    dists, idxs = compute_kknn_neighbors(ref, ref)
+    assert all(1 <= len(i) <= 8 for i in idxs)
+
+
+def _scaled_reference(max_value):
+    a = _typed_log(n_per_type=100)
+    a.raw = a.copy()  # unscaled log data, used to build queries
+    sc.pp.highly_variable_genes(a, n_top_genes=100, flavor="seurat")
+    sc.pp.scale(a, max_value=max_value)
+    sc.tl.pca(a, n_comps=20)
+    return a
+
+
+@pytest.mark.parametrize("max_value", [None, 2.0])
+def test_kknn_ingest_projects_scaled_reference_exactly(max_value):
+    ref = _scaled_reference(max_value)
+    query = AnnData(ref.raw.X.copy(), obs=ref.obs[["ct"]].copy(), var=ref.var[[]].copy())
+
+    kknn_ingest(
+        query, ref, obs_keys="ct", recompute_ref_PCA=False, save_ref_PCA_key="X_pca_proj"
+    )
+
+    np.testing.assert_allclose(query.obsm["X_pca_proj"], ref.obsm["X_pca"], atol=2e-3)
+    assert (query.obs["ct_kknn"].astype(str) == query.obs["ct"].astype(str)).mean() > 0.97
+
+
+@pytest.mark.parametrize("recompute", [False, True])
+def test_kknn_ingest_query_of_one_type_is_not_recentred(recompute):
+    ref = _typed_log(n_per_type=200, seed=0)
+    sc.pp.highly_variable_genes(ref, n_top_genes=100, flavor="seurat")
+    sc.tl.pca(ref, n_comps=20)
+    del ref.layers["counts"]  # the recompute path then selects HVGs on log data
+
+    query = _typed_log(n_per_type=200, seed=1)
+    query = query[query.obs["ct"] == "T0"].copy()
+    del query.layers["counts"]
+
+    kknn_ingest(query, ref, obs_keys="ct", recompute_ref_PCA=recompute)
+    assert (query.obs["ct_kknn"].astype(str) == "T0").mean() > 0.95
+
+
+def test_kknn_ingest_recompute_saves_matching_reference_basis():
+    ref = _typed_log(n_per_type=100)
+    del ref.layers["counts"]
+    sc.pp.highly_variable_genes(ref, n_top_genes=100, flavor="seurat")
+    sc.tl.pca(ref, n_comps=20)
+    query = ref[:150].copy()
+
+    with pytest.raises(ValueError, match="already exists"):
+        kknn_ingest(query, ref, obs_keys="ct", save_ref_PCA_key="X_pca")
+
+    kknn_ingest(query, ref, obs_keys="ct", save_ref_PCA_key="X_pca_ingest")
+    assert ref.obsm["X_pca_ingest"].shape[0] == ref.n_obs
+    np.testing.assert_allclose(
+        query.obsm["X_pca_ingest"], ref.obsm["X_pca_ingest"][:150], atol=1e-3
+    )
+
+
+def test_kknn_ingest_distance_weights_use_median_bandwidth():
+    rng = np.random.default_rng(0)
+    ref = AnnData(np.zeros((501, 1)))
+    ref.obsm["X_emb"] = np.r_[rng.normal(size=(500, 2)), [[0.0, 0.0]]]
+    ref.obs["lbl"] = pd.Categorical(["A"] * 500 + ["B"])
+    query = AnnData(np.zeros((1, 1)))
+    query.obsm["X_emb"] = np.array([[0.0, 0.0]])  # coincides with the single B cell
+
+    kknn_ingest(query, ref, obs_keys="lbl", use_rep="X_emb")
+    assert query.obs["lbl_kknn"].iloc[0] == "A"
+
+
+def test_kknn_ingest_integer_query_matrix():
+    ref = _typed_counts(n_per_type=60)
+    sc.pp.highly_variable_genes(ref, n_top_genes=100, flavor="seurat_v3")
+    sc.tl.pca(ref, n_comps=10)
+    query = ref[:50].copy()
+    query.X = query.X.astype(np.int64)
+    kknn_ingest(query, ref, obs_keys="ct", recompute_ref_PCA=False)
+    assert (query.obs["ct_kknn"].astype(str) == query.obs["ct"].astype(str)).mean() > 0.9
+
+
+def test_kknn_ingest_transform_uses_model_space():
+    pacmap = pytest.importorskip("pacmap")
+    ref = _typed_log(n_per_type=100)
+    del ref.layers["counts"]
+    sc.pp.highly_variable_genes(ref, n_top_genes=100, flavor="seurat")
+    sc.tl.pca(ref, n_comps=12)  # != 50, the recomputed PCA's default width
+    model = pacmap.PaCMAP(n_components=2, random_state=0)
+    ref.obsm["X_pacmap"] = model.fit_transform(ref.obsm["X_pca"])
+
+    query = ref[:120].copy()
+    kknn_ingest(
+        query, ref, obs_keys="ct", obsm_keys="X_pacmap", barycenter="transform",
+        embedding_models={"X_pacmap": model},
+    )
+    Y = query.obsm["X_pacmap_kknn"]
+    assert Y.shape == (120, 2)
+    # each mapped cell's nearest reference cell in the embedding has its own type
+    d = ((Y[:, None, :] - ref.obsm["X_pacmap"][None, :, :]) ** 2).sum(-1)
+    nn_type = ref.obs["ct"].to_numpy()[d.argmin(1)]
+    assert (nn_type == query.obs["ct"].to_numpy()).mean() > 0.9
+
+    # a basis with different rows from the model's training data is rejected
+    with pytest.raises(ValueError, match="fit on"):
+        kknn_ingest(
+            query, ref[:300].copy(), obs_keys="ct", obsm_keys="X_pacmap",
+            barycenter="transform", embedding_models={"X_pacmap": model},
+            recompute_ref_PCA=False,
+        )
