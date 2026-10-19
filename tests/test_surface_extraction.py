@@ -325,3 +325,55 @@ class TestSurfaceAccuracy(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# =========================================
+# Regression tests: scan batch 5
+# =========================================
+
+def test_extract_surface_tissue_from_first_slice():
+    """Columns already foreground at z=0 got heights like -361 that spread to their neighbours."""
+    vol = np.zeros((96, 64, 64), dtype=np.uint8)
+    vol[:, :, :32] = 200          # left half: tissue from the first slice
+    vol[40:, :, 32:] = 200        # right half: surface at z = 40
+    mask, heights = extract_surface(vol, return_heightmap=True)
+
+    # Every column has exactly one surface voxel, and no height is far below the volume
+    assert np.all(mask.sum(axis=0) == 1)
+    assert heights.min() > -0.5
+    # Away from the boundary, each half gets its own surface (within the blur's
+    # resolution: sigma=4 reduced px is 16 full px here)
+    assert np.all(heights[:, :20] <= 2.0)
+    assert np.all(np.abs(heights[:, 44:] - 40) <= 4.0)
+
+
+def test_extract_surface_covers_outer_rim():
+    """Block centres start half a block in; the outer rim got no surface (12% of 64x64)."""
+    vol = np.zeros((96, 64, 64), dtype=np.uint8)
+    vol[40:] = 200
+    mask, heights = extract_surface(vol, return_heightmap=True)
+    assert np.all(mask.sum(axis=0) == 1)
+    assert np.ptp(heights) < 1e-6
+
+
+@pytest.mark.parametrize("shape", [(32, 1, 64), (32, 64, 1)])
+def test_extract_surface_single_row_or_column(shape):
+    vol = np.zeros(shape, dtype=np.uint8)
+    vol[16:] = 200
+    mask, heights = extract_surface(vol, return_heightmap=True)
+    assert mask.shape == shape and heights.shape == shape[1:]
+    assert np.all(mask.sum(axis=0) == 1)
+
+
+def test_extract_surface_numpy_integer_factor():
+    vol = np.zeros((48, 32, 32), dtype=np.uint8)
+    vol[20:] = 200
+    np.testing.assert_array_equal(extract_surface(vol, downscale_factor=np.int64(4)), extract_surface(vol, downscale_factor=4))
+
+
+def test_expand_surface_z_zero_thickness_returns_copy():
+    s = np.zeros((4, 3, 3), dtype=bool)
+    r = expand_surface_z(s, 0)
+    r[0, 0, 0] = True
+    assert not s[0, 0, 0]
+    assert expand_surface_z(s, 0, in_place=True) is s

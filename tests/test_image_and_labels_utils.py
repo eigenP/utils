@@ -639,3 +639,248 @@ def test_estimate_inter_label_distance():
     few_labels[5:8, 5:8, 5:8] = 1
     fallback_metrics = estimate_inter_label_distance(few_labels, spacing=(2.0, 2.0, 2.0), k_nearest=2)
     assert fallback_metrics["median_um"] == 2.0
+
+
+# =========================================
+# Regression tests: scan batch 5
+# =========================================
+
+from scipy import ndimage as _ndi
+from scipy.ndimage import gaussian_filter as _gaussian_filter, map_coordinates as _map_coordinates
+
+
+def _blob_volume(shape, centers, sigma, amplitude=1000.0):
+    vol = np.zeros(shape, dtype=np.float64)
+    for c in centers:
+        vol[tuple(c)] = 1.0
+    vol = _gaussian_filter(vol, sigma)
+    return vol / vol.max() * amplitude
+
+
+def test_voronoi_keeps_nuclei_in_thin_stacks_and_at_borders():
+    """peak_local_max's default exclude_border dropped every seed within 3 px of a face."""
+    # 6-slice stack with 4 well-separated nuclei: thinner than 2 * 3 + 1 slices
+    centers = [(3, 15, 15), (3, 15, 45), (2, 45, 15), (3, 45, 45)]
+    vol = _blob_volume((6, 60, 60), centers, sigma=(1.0, 3.0, 3.0))
+    labels = voronoi_otsu_labeling(vol, spot_sigma=1, outline_sigma=1)
+    assert len(np.unique(labels[labels > 0])) == 4
+
+    # 2D nuclei centred on or next to the border are labelled too
+    img = _blob_volume((64, 64), [(1, 30), (32, 62), (62, 5)], sigma=3.0)
+    labels_2d = voronoi_otsu_labeling(img, spot_sigma=1, outline_sigma=1)
+    for c in [(1, 30), (32, 62), (62, 5)]:
+        assert labels_2d[c] > 0
+    assert len(np.unique(labels_2d[labels_2d > 0])) == 3
+
+
+def test_voronoi_seed_spacing_is_physical():
+    """Seeds must be 3 finest-axis pixels apart in physical units, not 3 px on every axis."""
+    # Z = 2 um, XY = 0.5 um: two nuclei 6 um (3 slices) apart in Z are distinct objects,
+    # but a 3-px Chebyshev footprint in Z (6 um) let the brighter one suppress the other.
+    ps = {'Z': 2.0, 'Y': 0.5, 'X': 0.5}
+    vol = _blob_volume((12, 40, 40), [(4, 20, 20), (7, 20, 20)], sigma=(0.4, 3.0, 3.0))
+    vol[7] *= 0.9
+    labels = voronoi_otsu_labeling(vol, spot_sigma=0.5, outline_sigma=0.5, pixel_sizes=ps)
+    assert labels[4, 20, 20] > 0 and labels[7, 20, 20] > 0
+    assert labels[4, 20, 20] != labels[7, 20, 20]
+
+    # Control: XY spacing is unchanged (3 px of the finest axis), so two maxima
+    # 1 um (2 px) apart in XY still give a single seed
+    vol_xy = _blob_volume((12, 40, 40), [(6, 20, 20), (6, 20, 22)], sigma=(0.4, 3.0, 3.0))
+    labels_xy = voronoi_otsu_labeling(vol_xy, spot_sigma=0.5, outline_sigma=0.5, pixel_sizes=ps)
+    assert len(np.unique(labels_xy[labels_xy > 0])) == 1
+
+
+def test_voronoi_isotropic_matches_peak_local_max_reference():
+    """Control: without pixel sizes the seeds are exactly peak_local_max(min_distance=3)."""
+    from skimage import feature, filters, segmentation
+    rng = np.random.default_rng(0)
+    vol = _gaussian_filter(rng.random((24, 48, 48)), 2.0)
+    labels = voronoi_otsu_labeling(vol, spot_sigma=1, outline_sigma=1)
+
+    blurred = filters.gaussian(vol, sigma=(1, 1, 1))
+    peaks = np.zeros_like(blurred, dtype=bool)
+    peaks[tuple(feature.peak_local_max(blurred, min_distance=3, exclude_border=False).T)] = True
+    outline = filters.gaussian(vol, sigma=(1, 1, 1))
+    mask = outline > filters.threshold_otsu(outline)
+    markers, _ = _ndi.label(peaks)
+    expected = segmentation.watershed(-outline, markers, mask=mask, compactness=0.5)
+    np.testing.assert_array_equal(labels, expected)
+
+
+def test_sample_intensity_around_points_integer_means_not_truncated():
+    """uniform_filter kept the integer dtype, truncating every mean (Poisson(5) -> ~3.9)."""
+    rng = np.random.default_rng(1)
+    img = rng.poisson(5.0, size=(40, 40, 40)).astype(np.uint16)
+    pts = rng.integers(5, 35, size=(200, 3))
+    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
+    means_int = np.array(sample_intensity_around_points(img, pts, diameter=5, pixel_sizes=ps))
+    means_float = np.array(sample_intensity_around_points(img.astype(np.float64), pts, diameter=5, pixel_sizes=ps))
+    np.testing.assert_allclose(means_int, means_float, rtol=0, atol=1e-9)
+    assert abs(means_int.mean() - 5.0) < 0.15
+    assert len(np.unique(means_int)) > 10
+
+    # A single bright uint8 voxel averaged over a 3-cube: 255 / 27, not 0
+    one = np.zeros((9, 9, 9), dtype=np.uint8)
+    one[4, 4, 4] = 255
+    val = sample_intensity_around_points(one, [[4, 4, 4]], diameter=3, pixel_sizes=ps)[0]
+    assert val == pytest.approx(255 / 27)
+
+
+def test_sample_intensity_around_points_window_matches_diameter():
+    """round() is banker's rounding: diameter 3 averaged a 5-cube, diameter 7 a 9-cube."""
+    one = np.zeros((15, 15, 15))
+    one[7, 7, 7] = 1.0
+    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
+    for diameter, side in [(1, 1), (2, 3), (3, 3), (4, 5), (5, 5), (7, 7)]:
+        val = sample_intensity_around_points(one, [[7, 7, 7]], diameter=diameter, pixel_sizes=ps)[0]
+        assert val == pytest.approx(1.0 / side ** 3), diameter
+
+
+def test_sample_intensity_around_points_empty_and_flat_points():
+    img = np.ones((5, 5, 5))
+    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
+    assert sample_intensity_around_points(img, [], 3, ps) == []
+    assert sample_intensity_around_points(img, [2, 2, 2], 3, ps) == [1.0]
+    with pytest.raises(ValueError):
+        sample_intensity_around_points(img, np.zeros((4, 2)), 3, ps)
+
+
+def test_estimate_inter_label_distance_neighbours_from_all_labels():
+    """Neighbours were searched only within the random subsample (8 um lattice -> 17.9 um)."""
+    # 30^3 lattice of 2x2x2-voxel nuclei every 4 voxels; 2 um voxels -> 8 um spacing
+    n, step = 30, 4
+    labels = np.zeros((n * step,) * 3, dtype=np.int32)
+    ids = np.arange(1, n ** 3 + 1, dtype=np.int32).reshape((n,) * 3)
+    for dz in range(2):
+        for dy in range(2):
+            for dx in range(2):
+                labels[dz::step, dy::step, dx::step] = ids
+    ps = {'Z': 2.0, 'Y': 2.0, 'X': 2.0}
+    m = estimate_inter_label_distance(labels, pixel_sizes=ps, sample_size=500)
+    assert m["median_um"] == pytest.approx(8.0)
+    assert m["p90_um"] == pytest.approx(8.0)
+    assert m["recommended_closing_um"] == pytest.approx(4.8)
+    # seed makes the subsample reproducible
+    assert estimate_inter_label_distance(labels, pixel_sizes=ps, seed=3) == estimate_inter_label_distance(labels, pixel_sizes=ps, seed=3)
+
+
+def test_none_pixel_size_falls_back_to_one_with_warning():
+    """Readers give {'Z': None} for uncalibrated axes; that erased labels or returned zeros."""
+    labels = np.zeros((10, 10, 10), dtype=int)
+    labels[1:5, 1:5, 1:5] = 1
+    labels[6:10, 6:10, 6:10] = 2
+    mask = np.zeros_like(labels)
+    mask[2:4, 2:4, 2:4] = 1
+    with pytest.warns(UserWarning, match="axis Z"):
+        out = optimized_entire_labels_touching_mask(labels, mask, distance=1, pixel_sizes={'Z': None, 'Y': 1.0, 'X': 1.0})
+    np.testing.assert_array_equal(out, labels * (labels == 1))
+
+    vol = np.full((20, 20, 20), 100.0)
+    yy, xx = np.meshgrid(np.arange(5, 15), np.arange(5, 15), indexing='ij')
+    grid = np.stack([np.full_like(yy, 10.0), yy, xx], axis=-1).astype(float)
+    with pytest.warns(UserWarning, match="axis Z"):
+        sampled = sample_intensity_along_surface_normals(vol, grid, pixel_sizes={'X': 0.5, 'Y': 0.5, 'Z': None})
+    assert np.all(sampled == 100.0)
+
+    for bad in ({'Z': 0.0, 'Y': 1.0, 'X': 1.0}, {'Z': np.nan, 'Y': 1.0, 'X': 1.0}):
+        with pytest.raises(ValueError):
+            _ensure_pixel_size_array(bad)
+
+
+def test_tuple_pixel_sizes_accepted():
+    vol = _blob_volume((10, 30, 30), [(5, 15, 15)], sigma=(1.0, 3.0, 3.0))
+    with pytest.warns(DeprecationWarning):
+        a = voronoi_otsu_labeling(vol, 1, 1, spacing=(2.0, 0.5, 0.5))
+    b = voronoi_otsu_labeling(vol, 1, 1, pixel_sizes={'Z': 2.0, 'Y': 0.5, 'X': 0.5})
+    np.testing.assert_array_equal(a, b)
+    proj = windowed_slice_projection(vol, window_size=4, pixel_sizes=(2.0, 0.5, 0.5))
+    assert proj.shape == vol.shape
+
+
+def test_optimized_labels_touching_mask_float_distance_not_truncated():
+    """Without pixel sizes, int(distance) disagreed with explicit unit pixel sizes."""
+    labels = np.zeros((1, 9, 9), dtype=int)
+    labels[0, 4, 4] = 1
+    mask = np.zeros_like(labels)
+    mask[0, 6, 5] = 1  # sqrt(5) = 2.24 px from the label
+    with pytest.warns(UserWarning):
+        implicit = optimized_entire_labels_touching_mask(labels, mask, distance=2.9)
+    explicit = optimized_entire_labels_touching_mask(labels, mask, distance=2.9, pixel_sizes={'Z': 1, 'Y': 1, 'X': 1})
+    np.testing.assert_array_equal(implicit, explicit)
+    assert implicit[0, 4, 4] == 1
+
+
+def test_windowed_slice_projection_negative_values_and_unknown_operation():
+    prof = np.array([-1, -2, -3, -4, -5], dtype=float)[:, None, None] * np.ones((1, 2, 2))
+    out = windowed_slice_projection(prof, window_size=3, operation='max', pixel_sizes={'Z': 1, 'Y': 1, 'X': 1})
+    np.testing.assert_array_equal(out[:, 0, 0], [-1, -1, -2, -3, -4])
+    with pytest.raises(ValueError):
+        windowed_slice_projection(prof, window_size=3, operation='mean', pixel_sizes={'Z': 1, 'Y': 1, 'X': 1})
+
+
+def test_morphological_envelope_contains_input_when_downscaled():
+    """Nearest-neighbour decimation left 17% of foreground voxels outside the envelope."""
+    rng = np.random.default_rng(2)
+    shape = (40, 120, 120)
+    mask = np.zeros(shape, dtype=bool)
+    zz, yy, xx = np.ogrid[:shape[0], :shape[1], :shape[2]]
+    for c in rng.integers((3, 4, 4), (37, 116, 116), size=(150, 3)):
+        mask |= ((zz - c[0]) / 2) ** 2 + ((yy - c[1]) / 3) ** 2 + ((xx - c[2]) / 3) ** 2 <= 1
+    ps = {'Z': 1.0, 'Y': 0.5, 'X': 0.5}
+    for f in (1, 2, 3):
+        surface, envelope = generate_morphological_surface_mask(mask, pixel_sizes=ps, closing_radius_um=6.0, downscale_factor=f)
+        assert np.count_nonzero(mask & ~envelope) == 0, f
+        assert surface.shape == mask.shape and np.any(surface)
+
+
+def test_sample_volume_plane_normalises_normal_and_labels_axes_zyx():
+    vol = np.broadcast_to(np.arange(20, dtype=np.float32)[:, None, None], (20, 20, 20)).copy()
+    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
+    kw = dict(pixel_sizes=ps, p0_phys=np.array([10.0, 10.0, 10.0]), u_range_um=(-4, 4), v_range_um=(-4, 4),
+              u_res=9, v_res=5, num_offsets=1, offset_step_um=1.0)
+    a, sp_a = sample_volume_plane(vol, normal_phys=np.array([3.0, 0.0, 0.0]), **kw)
+    b, sp_b = sample_volume_plane(vol, normal_phys=np.array([1.0, 0.0, 0.0]), **kw)
+    np.testing.assert_array_equal(a, b)
+    # Offsets land at z = 9, 10, 11 (not 7, 10, 13)
+    np.testing.assert_allclose(a[:, 4, 2], [9, 10, 11])
+    u, v = generate_plane_basis(np.array([3.0, 0.0, 0.0]))
+    assert np.linalg.norm(u) == pytest.approx(1) and np.linalg.norm(v) == pytest.approx(1)
+    # Output (9, 5) planes: axis 0 (u, step 1.0) is Y, axis 1 (v, step 2.0) is X
+    assert a.shape == (3, 9, 5)
+    assert sp_a == {'Z': 1.0, 'Y': 1.0, 'X': 2.0}
+
+
+def test_sample_volume_plane_cubic_interpolates():
+    """order=3 without prefiltering is a smoothing B-spline, not an interpolation."""
+    rng = np.random.default_rng(3)
+    vol = rng.random((12, 16, 16)).astype(np.float32)
+    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
+    n = np.array([1.0, 0.0, 0.0])
+    plane, _ = sample_volume_plane(vol, ps, p0_phys=np.array([5.0, 0.0, 0.0]), normal_phys=n,
+                                   u_range_um=(-15, 15), v_range_um=(-15, 15), u_res=31, v_res=31, method='cubic')
+    linear, _ = sample_volume_plane(vol, ps, p0_phys=np.array([5.0, 0.0, 0.0]), normal_phys=n,
+                                    u_range_um=(-15, 15), v_range_um=(-15, 15), u_res=31, v_res=31, method='linear')
+    # The plane samples sit on voxel centres, where interpolation must return the voxels
+    # (linear does so exactly); unprefiltered cubic was off by up to 0.46 there
+    np.testing.assert_allclose(plane, linear, atol=1e-5)
+    assert np.count_nonzero(linear) == 16 * 16
+
+    # Oblique plane: the cropped prefilter matches prefiltering the whole volume
+    vol2 = rng.random((40, 40, 40)).astype(np.float32)
+    n2 = np.array([1.0, 0.3, -0.2])
+    plane2, _ = sample_volume_plane(vol2, ps, p0_phys=np.array([20.0, 20.0, 20.0]), normal_phys=n2,
+                                    u_range_um=(-6, 6), v_range_um=(-6, 6), u_res=25, v_res=25, method='cubic')
+    u_dir, v_dir = generate_plane_basis(n2)
+    uu, vv = np.meshgrid(np.linspace(-6, 6, 25), np.linspace(-6, 6, 25), indexing='ij')
+    pts = np.array([20.0, 20.0, 20.0])[:, None, None] + uu * u_dir[:, None, None] + vv * v_dir[:, None, None]
+    expected = _map_coordinates(vol2, pts.reshape(3, -1), order=3, mode='constant', cval=0, prefilter=True).reshape(25, 25)
+    np.testing.assert_allclose(plane2, expected, atol=1e-4)
+
+
+def test_surface_normals_single_step_samples_surface():
+    vol = np.broadcast_to(np.arange(20, dtype=float)[:, None, None], (20, 20, 20)).copy()
+    yy, xx = np.meshgrid(np.arange(5, 15), np.arange(5, 15), indexing='ij')
+    grid = np.stack([np.full_like(yy, 10.0), yy, xx], axis=-1).astype(float)
+    out = sample_intensity_along_surface_normals(vol, grid, thickness=4, num_steps=1, pixel_sizes={'Z': 1, 'Y': 1, 'X': 1})
+    assert np.all(out == 10.0)
