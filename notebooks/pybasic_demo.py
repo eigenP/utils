@@ -1,3 +1,16 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "marimo",
+#     "numpy",
+#     "scipy",
+#     "matplotlib",
+#     "scikit-image",
+#     "tifffile",
+#     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main ; sys_platform != 'emscripten'",
+# ]
+# ///
+
 import marimo
 
 __generated_with = "0.24.2"
@@ -139,6 +152,8 @@ def _(mo):
     ## 3D Shading Correction
 
     For volumes with smoothly varying intensity biases across three dimensions, we can fit a 3D shading correction by passing `is_3d=True`. Here we demonstrate recovering a simulated 3D degradation.
+
+    A darkfield cannot be separated from the flatfield using a single volume, so this section fits the flatfield only (`get_darkfield=False`). Estimating a darkfield needs several volumes, as in the tile section below.
     """)
     return
 
@@ -154,12 +169,13 @@ def _(apply_basic_shading, cells3d_vol, fit_basic_shading, mo, np, plt, run_3d):
 
     degraded_3d = cells3d_vol * gradient_3d + darkfield_ground_truth_3d
 
-    res_3d = fit_basic_shading(degraded_3d, is_3d=True, get_darkfield=True, fitting_mode='approximate')
+    # A single volume cannot identify a darkfield: fit the flatfield only
+    res_3d = fit_basic_shading(degraded_3d, is_3d=True, get_darkfield=False, fitting_mode='approximate')
     corrected_3d = apply_basic_shading(degraded_3d, res_3d['flatfield'], res_3d['darkfield'], res_3d['baseline'])
 
     mid_z = cells3d_vol.shape[0] // 2
 
-    fig_3d, axes_3d = plt.subplots(1, 5, figsize=(25, 5))
+    fig_3d, axes_3d = plt.subplots(1, 4, figsize=(20, 5))
     axes_3d[0].imshow(cells3d_vol[mid_z], cmap='gray')
     axes_3d[0].set_title('Original 3D (mid z-slice)')
     axes_3d[0].axis('off')
@@ -172,13 +188,9 @@ def _(apply_basic_shading, cells3d_vol, fit_basic_shading, mo, np, plt, run_3d):
     axes_3d[2].set_title('Estimated Flatfield 3D')
     axes_3d[2].axis('off')
 
-    axes_3d[3].imshow(res_3d['darkfield'][mid_z], cmap='gray')
-    axes_3d[3].set_title('Estimated Darkfield 3D')
+    axes_3d[3].imshow(corrected_3d[mid_z], cmap='gray')
+    axes_3d[3].set_title('Corrected 3D')
     axes_3d[3].axis('off')
-
-    axes_3d[4].imshow(corrected_3d[mid_z], cmap='gray')
-    axes_3d[4].set_title('Corrected 3D')
-    axes_3d[4].axis('off')
 
     plot_3d = mo.as_html(fig_3d)
     return (plot_3d,)

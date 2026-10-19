@@ -88,6 +88,7 @@ def test_download_file_async_native_roundtrip(tmp_path):
         assert dest.read_bytes() == b"cached"
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_download_file_refuses_to_block_in_wasm(tmp_path, monkeypatch):
@@ -105,3 +106,65 @@ def test_download_file_refuses_to_block_in_wasm(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="download_file_async"):
         eio.download_file("http://127.0.0.1:9/never", dest)
     assert not dest.exists()
+
+
+# =========================================
+# Source: bug-scan regressions (low-severity sweep)
+# =========================================
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide")
+def test_check_file_before_save_raises_file_exists_even_with_O(tmp_path):
+    import subprocess
+
+    existing = tmp_path / "exists.txt"
+    existing.write_text("x")
+    with pytest.raises(FileExistsError):
+        check_file_before_save(existing, overwrite=False)
+
+    # A bare assert disappears under python -O
+    code = (
+        "import sys\n"
+        "from eigenp_utils.io import check_file_before_save\n"
+        "try:\n"
+        "    check_file_before_save(sys.argv[1], overwrite=False)\n"
+        "except FileExistsError:\n"
+        "    print('raised')\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-O", "-c", code, str(existing)], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip().splitlines()[-1] == "raised"
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no sockets / HTTP server in Pyodide")
+def test_download_file_rejects_truncated_body(tmp_path):
+    """A connection dropped before Content-Length bytes must raise and cache nothing."""
+    import http.server
+    import threading
+
+    from eigenp_utils.io import download_file
+
+    class Truncating(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            self.wfile.write(b"x" * 1000)
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Truncating)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    dest = tmp_path / "blob.bin"
+    try:
+        with pytest.raises(Exception):
+            download_file(f"http://127.0.0.1:{server.server_address[1]}/blob.bin", dest)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert not dest.exists()
+    assert list(tmp_path.iterdir()) == []

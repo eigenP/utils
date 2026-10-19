@@ -8,6 +8,8 @@
 # ///
 """extended depth of focus with patch blending"""
 
+import os
+
 import numpy as np
 import skimage.io
 
@@ -39,13 +41,21 @@ def _get_1d_weight_variants(patch_size, overlap):
     - end: Taper Start, Flat End (Bottom/Right Boundary)
     - flat: Flat Start, Flat End (Single Patch)
     """
-    x = np.linspace(0, 1, overlap, dtype=np.float32)
-    x2 = x * x
-    x3 = x2 * x
-    taper = (3.0 * x2 - 2.0 * x3).astype(np.float32)
-
     # Base: Flat
     w_base = np.ones(patch_size, dtype=np.float32)
+    if overlap == 0:
+        # Patches do not overlap, so no taper is needed
+        return w_base.copy(), w_base.copy(), w_base.copy(), w_base
+
+    if overlap == 1:
+        # A one-pixel overlap is shared equally; the smoothstep sampled at a single
+        # point would be 0 for both neighbours and leave a hole at every seam
+        taper = np.array([0.5], dtype=np.float32)
+    else:
+        x = np.linspace(0, 1, overlap, dtype=np.float32)
+        x2 = x * x
+        x3 = x2 * x
+        taper = (3.0 * x2 - 2.0 * x3).astype(np.float32)
 
     # Full (Internal)
     w_full = w_base.copy()
@@ -120,10 +130,15 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     """
     Extended depth of focus via local focus scoring and weighted subpixel patch blending.
     Dimension order expected: ZYX
+
+    `image_or_path` is a (Z, Y, X) array or a path (str or os.PathLike) to one.
+    `patch_size` defaults to 1/10 of the smaller lateral size (at least 3 px).
+    With `return_heightmap=True` the per-pixel best-focus slice index, clipped to
+    [0, Z-1], is returned as well.
     """
     # 1. Load the image
-    if isinstance(image_or_path, str):
-        img = skimage.io.imread(image_or_path)
+    if isinstance(image_or_path, (str, os.PathLike)):
+        img = skimage.io.imread(os.fspath(image_or_path))
     else:
         img = image_or_path
 
@@ -135,7 +150,10 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
     # 2. Determine patch size and padding
     if patch_size is None:
-        patch_size = min(original_shape) // 10
+        patch_size = max(min(original_shape) // 10, 3)
+    patch_size = int(patch_size)
+    if patch_size < 1:
+        raise ValueError(f"patch_size must be >= 1, got {patch_size}")
     overlap = patch_size // 3  # 33% overlap
 
     pad_y = (patch_size - H % patch_size) + overlap
@@ -222,6 +240,10 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     ]
 
     Z_dim = img.shape[0]
+    # Catmull-Rom undershoot is clamped at the input's minimum, not at 0 (which would
+    # destroy the negative values of signed or background-subtracted data). Overshoot
+    # above the samples is kept: it recovers a focus peak lying between two slices.
+    img_min = float(np.min(img))
 
     # Fast patch extraction
     def _get_padded_patch(z_idx, y_start, x_start):
@@ -264,7 +286,7 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
                 p3 = p2 if z3 == z2 else _get_padded_patch(z3, y_start, x_start)
 
                 patch = _cubic_interp_1d(p0, p1, p2, p3, alpha)
-                np.maximum(patch, 0.0, out=patch)
+                np.maximum(patch, img_min, out=patch)
 
             # In-place patch weighting
             patch *= _2D_window
@@ -295,6 +317,9 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
             GY, GX = np.meshgrid(gy, gx, indexing='ij')
             pts = np.array([GY.ravel(), GX.ravel()]).T
             height_map_full = interp(pts).reshape(original_shape).astype(np.float32)
+
+        # Linear extrapolation beyond the outermost patch centres can leave the stack
+        np.clip(height_map_full, 0, Z_dim - 1, out=height_map_full)
 
         return final_img, height_map_full
 

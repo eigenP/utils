@@ -92,6 +92,7 @@ def static_rangeslider_server():
     yield f"http://localhost:{port}"
 
     httpd.shutdown()
+    httpd.server_close()
     tmpdir.cleanup()
 
 def test_frontend_rangeslider_ui(page, static_rangeslider_server):

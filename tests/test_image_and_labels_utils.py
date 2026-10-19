@@ -884,3 +884,21 @@ def test_surface_normals_single_step_samples_surface():
     grid = np.stack([np.full_like(yy, 10.0), yy, xx], axis=-1).astype(float)
     out = sample_intensity_along_surface_normals(vol, grid, thickness=4, num_steps=1, pixel_sizes={'Z': 1, 'Y': 1, 'X': 1})
     assert np.all(out == 10.0)
+
+
+def test_optimized_entire_labels_touching_mask_anisotropic_distance():
+    """Distance is physical: 3 slices at Z = 3 µm are 9 µm, 3 pixels at XY = 1 µm are 3 µm."""
+    aniso = {'Z': 3.0, 'Y': 1.0, 'X': 1.0}
+    mask = np.zeros((9, 9, 9), dtype=int)
+    mask[4, 4, 4] = 1
+
+    below = np.zeros_like(mask)
+    below[1, 4, 4] = 1  # 3 slices from the mask: 9 µm
+    beside = np.zeros_like(mask)
+    beside[4, 4, 1] = 1  # 3 pixels from the mask: 3 µm
+
+    assert optimized_entire_labels_touching_mask(below, mask, distance=5.0, pixel_sizes=aniso).max() == 0
+    assert optimized_entire_labels_touching_mask(beside, mask, distance=5.0, pixel_sizes=aniso).max() == 1
+    # negative control: with isotropic pixels the label 3 slices away is within 5 µm
+    iso = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
+    assert optimized_entire_labels_touching_mask(below, mask, distance=5.0, pixel_sizes=iso).max() == 1
