@@ -203,8 +203,12 @@ def test_score_celltypes_negative_selection():
     # The difference should be much larger when negative selection is applied, penalizing cell_3
     assert diff_neg > diff_base
 
-def test_missing_negative_markers():
-    """Test when cell type is missing in negative dict, it falls back to positive."""
+NET_METHODS = [("net_scanpy", "scanpy"), ("net_binned", "binned"), ("net_binned_weighted", "binned_weighted")]
+
+
+@pytest.mark.parametrize("net_method,pos_method", NET_METHODS)
+def test_missing_negative_markers(net_method, pos_method):
+    """A cell type missing from the negative dict gets its positive-only score."""
     adata = create_mock_adata()
 
     pos_dict = {
@@ -217,15 +221,18 @@ def test_missing_negative_markers():
         # B-cell is missing
     }
 
-    scores_neg = score_celltypes(adata, pos_dict, cell_type_negative_markers_dict=neg_dict)
+    scores_neg = score_celltypes(
+        adata, pos_dict, cell_type_negative_markers_dict=neg_dict, score_method=net_method
+    )
+    scores_pos = score_celltypes(adata, pos_dict, score_method=pos_method)
 
-    # Both B-cell and T-cell should be present in the output
-    assert "T-cell" in scores_neg.columns
-    assert "B-cell" in scores_neg.columns
-    assert not scores_neg["B-cell"].isna().all()
+    np.testing.assert_allclose(scores_neg["B-cell"], scores_pos["B-cell"])
+    # ... while the T-cell score is penalised for the contaminated cell 3 (CD14 high)
+    assert scores_neg.loc["cell_3", "T-cell"] < scores_pos.loc["cell_3", "T-cell"]
+
 
 def test_annotation_with_negative_selection():
-    """Test full pipeline with annotate_clusters_by_markers."""
+    """CD14 as a T-cell negative marker lowers the T-cell evidence of cluster 0."""
     adata = create_mock_adata()
 
     pos_dict = {
@@ -238,45 +245,63 @@ def test_annotation_with_negative_selection():
         "T-cell": ["CD14"]
     }
 
-    # cluster 0 has 3 cells (0, 2, 3)
-    # In base case, it might be classified as T-cell
+    # cluster 0 has 3 cells (0, 2, 3), cell 3 is CD14-high
     df_base = annotate_clusters_by_markers(
-        adata,
-        "leiden",
-        cell_type_markers_dict=pos_dict
+        adata, "leiden", cell_type_markers_dict=pos_dict, score_method="net_binned"
     )
-
     df_neg = annotate_clusters_by_markers(
         adata,
         "leiden",
         cell_type_markers_dict=pos_dict,
-        cell_type_negative_markers_dict=neg_dict
+        cell_type_negative_markers_dict=neg_dict,
+        score_method="net_binned",
     )
 
-    # Verify both run without errors
-    assert not df_base.empty
-    assert not df_neg.empty
-    assert "T-cell" in df_base.columns or "median_T-cell" in df_base.columns
+    assert df_base.loc["0", "assigned_cell_type"] == "T-cell"
+    assert df_neg.loc["0", "assigned_cell_type"] == "T-cell"
+    assert df_neg.loc["0", "median_T-cell"] <= df_base.loc["0", "median_T-cell"]
+    # the cluster-0 cells' mean T-cell evidence drops by cell 3's penalty
+    s_base = score_celltypes(adata, pos_dict, score_method="net_binned")
+    s_neg = score_celltypes(
+        adata, pos_dict, cell_type_negative_markers_dict=neg_dict, score_method="net_binned"
+    )
+    in_c0 = (adata.obs["leiden"] == "0").to_numpy()
+    assert s_neg["T-cell"][in_c0].mean() < s_base["T-cell"][in_c0].mean()
+    # B-cell cluster unaffected
+    assert df_neg.loc["1", "assigned_cell_type"] == "B-cell"
 
-def test_empty_negative_list():
-    """Test handling of empty lists in negative dictionary."""
+
+@pytest.mark.parametrize("net_method,pos_method", NET_METHODS)
+def test_empty_negative_list(net_method, pos_method):
+    """An empty negative list leaves the positive score unchanged."""
     adata = create_mock_adata()
     pos_dict = {"T-cell": ["CD3E"]}
     neg_dict = {"T-cell": []}
 
-    scores = score_celltypes(adata, pos_dict, cell_type_negative_markers_dict=neg_dict)
-    assert not scores.empty
-    assert not scores["T-cell"].isna().all()
+    scores = score_celltypes(
+        adata, pos_dict, cell_type_negative_markers_dict=neg_dict, score_method=net_method
+    )
+    scores_pos = score_celltypes(adata, pos_dict, score_method=pos_method)
+    np.testing.assert_allclose(scores["T-cell"], scores_pos["T-cell"])
+    assert np.isfinite(scores["T-cell"]).all()
 
-def test_missing_genes_in_dataset():
-    """Test robustness when negative markers are completely missing from adata."""
+
+@pytest.mark.parametrize("net_method,pos_method", NET_METHODS)
+def test_missing_genes_in_dataset(net_method, pos_method):
+    """Negative markers absent from adata are ignored (positive score unchanged)."""
     adata = create_mock_adata()
     pos_dict = {"T-cell": ["CD3E"]}
     neg_dict = {"T-cell": ["UNKNOWN_GENE"]}
 
-    scores = score_celltypes(adata, pos_dict, cell_type_negative_markers_dict=neg_dict)
-    assert not scores.empty
-    assert not scores["T-cell"].isna().all()
+    scores = score_celltypes(
+        adata, pos_dict, cell_type_negative_markers_dict=neg_dict, score_method=net_method
+    )
+    scores_pos = score_celltypes(adata, pos_dict, score_method=pos_method)
+    np.testing.assert_allclose(scores["T-cell"], scores_pos["T-cell"])
+    assert np.isfinite(scores["T-cell"]).all()
+    report = adata.uns["marker_missing_report"]
+    row = report[(report["cell_type"] == "T-cell") & (report["marker_set"] == "neg")]
+    assert row["missing_genes"].tolist() == ["UNKNOWN_GENE"]
 
 # =========================================
 # Source: test_single_cell_kknn_pbmc.py
@@ -505,14 +530,26 @@ def test_stat_defaults():
     import numpy as np
     from eigenp_utils.single_cell import kknn_ingest
 
-    adata_ref = sc.AnnData(np.random.normal(size=(100, 10)))
-    adata_ref.obsm['X_pca'] = np.random.normal(size=(100, 5))
-    adata_ref.obs['cell_type'] = np.random.choice(['A', 'B'], size=100)
+    rng = np.random.default_rng(0)
+    adata_ref = sc.AnnData(rng.normal(size=(100, 10)))
+    adata_ref.obsm['X_pca'] = rng.normal(size=(100, 5))
+    adata_ref.obs['cell_type'] = rng.choice(['A', 'B'], size=100)
 
-    adata_query = sc.AnnData(np.random.normal(size=(20, 10)))
-    adata_query.obsm['X_pca'] = np.random.normal(size=(20, 5))
+    adata_query = sc.AnnData(rng.normal(size=(20, 10)))
+    adata_query.obsm['X_pca'] = rng.normal(size=(20, 5))
 
     kknn_ingest(adata_query, adata_ref, obs_keys=['cell_type'])
+
+    # default outputs: labels from the reference, a vote-fraction confidence,
+    # an adapted k per query cell, and NaN placeholders on the reference
+    assert set(adata_query.obs['cell_type_kknn']) <= {'A', 'B'}
+    conf = adata_query.obs['mapping_confidence_cell_type_kknn'].to_numpy()
+    assert np.all((conf >= 0.5) & (conf <= 1.0))  # winner of a two-label vote
+    k = adata_query.obs['kknn_k'].to_numpy()
+    assert np.all((k >= 3) & (k <= adata_ref.n_obs))
+    assert adata_ref.obs['kknn_k'].isna().all()
+    assert adata_ref.obs['mapping_confidence_cell_type_kknn'].isna().all()
+    assert (adata_ref.obs['cell_type_kknn'] == adata_ref.obs['cell_type']).all()
 
 # =========================================
 # Source: test_moran_properties.py
@@ -1901,59 +1938,37 @@ def test_kknn_classifier_with_mask():
 # =========================================
 
 def test_moran_formulas():
-    """Test that moran formulas works as expected."""
-    N = 10000
-    block = 1024
-
-    # Random sparse X
-    np.random.seed(42)
-    X = sp.random(N, block, density=0.05, format='csr', dtype=np.float32)
-
-    # Random sparse W (row standardized)
-    W = sp.random(N, N, density=0.001, format='csr', dtype=np.float32)
-    rs = np.array(W.sum(axis=1)).ravel()
+    """morans_i_all_fast matches the centred Moran's I formula, and the expanded
+    (uncentred) numerator/denominator agree with the centred ones."""
+    rng = np.random.default_rng(42)
+    N, G = 400, 30
+    X = sp.random(N, G, density=0.2, format="csr", dtype=np.float64, random_state=rng)
+    X = X + sp.csr_matrix(np.outer(np.linspace(0, 1, N), np.ones(G)))  # spatial trend
+    W = sp.random(N, N, density=0.02, format="csr", dtype=np.float64, random_state=rng)
+    W = W + W.T
+    rs = np.asarray(W.sum(axis=1)).ravel()
     rs[rs == 0] = 1.0
-    W = W.multiply(1.0 / rs[:, None]).tocsr()
+    W = sp.csr_matrix(W.multiply(1.0 / rs[:, None]))
 
-    # 1. Current formula
-    t0 = time.time()
-    Xb = X.copy()
-    WXb = W @ Xb
-    Xb_dense1 = Xb.toarray()
-    WXb_dense1 = WXb.toarray()
+    Xd = X.toarray()
+    mu = Xd.mean(axis=0)
+    Z = Xd - mu
+    num = np.einsum("ij,ij->j", Z, W @ Z)
+    den = np.einsum("ij,ij->j", Z, Z)
+    I_ref = (N / W.sum()) * num / den
 
-    mu = Xb_dense1.mean(axis=0)
-    W_row_sums = np.array(W.sum(axis=1)).ravel()
+    # expanded form used by older code
+    WX = W @ Xd
+    num_exp = (np.einsum("ij,ij->j", Xd, WX) - mu * WX.sum(axis=0)
+               - mu * (Xd.T @ np.asarray(W.sum(axis=1)).ravel()) + mu**2 * W.sum())
+    den_exp = np.einsum("ij,ij->j", Xd, Xd) - N * mu**2
+    np.testing.assert_allclose(num_exp, num, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(den_exp, den, rtol=1e-9)
 
-    sum_cross = np.einsum('ij,ij->j', Xb_dense1, WXb_dense1)
-    sum_sq = np.einsum('ij,ij->j', Xb_dense1, Xb_dense1)
-    sum_WXb = WXb_dense1.sum(axis=0)
-    sum_xR = Xb_dense1.T @ W_row_sums
-    S0 = W.sum()
-
-    num1 = sum_cross - mu * sum_WXb - mu * sum_xR + (mu**2) * S0
-    den1 = sum_sq - N * (mu**2)
-    t1 = time.time()
-
-    # 2. Proposed formula
-    t2 = time.time()
-    Xb_dense2 = X.toarray()
-    Xb_dense2 -= mu[None, :]
-    WXb_dense2 = W @ Xb_dense2
-
-    num2 = np.einsum('ij,ij->j', Xb_dense2, WXb_dense2)
-    den2 = np.einsum('ij,ij->j', Xb_dense2, Xb_dense2)
-    t3 = time.time()
-
-    print(f"Current: num={num1[:5]}, den={den1[:5]}, time={t1-t0:.4f}s")
-    print(f"Proposed: num={num2[:5]}, den={den2[:5]}, time={t3-t2:.4f}s")
-
-    # Check max difference
-    print(f"Max diff num: {np.abs(num1 - num2).max()}")
-    print(f"Max diff den: {np.abs(den1 - den2).max()}")
-
-if __name__ == '__main__':
-    test_moran_formulas()
+    adata = AnnData(X.astype(np.float32))
+    adata.var_names = [f"g{j}" for j in range(G)]
+    out = morans_i_all_fast(adata, W_rowstd=W, deduplicate="none").set_index("gene")
+    np.testing.assert_allclose(out.loc[adata.var_names, "I"].to_numpy(), I_ref, rtol=1e-4, atol=1e-5)
 
 # =========================================
 # Source: test_volcano_reproduction.py
@@ -3441,3 +3456,424 @@ def test_kknn_ingest_transform_uses_model_space():
             barycenter="transform", embedding_models={"X_pacmap": model},
             recompute_ref_PCA=False,
         )
+
+
+# =========================================
+# Source: scan low-severity / remaining-medium regressions (single_cell)
+# =========================================
+
+
+def test_plot_clustering_tree_uses_uns_colors_for_integer_categories():
+    from eigenp_utils.single_cell import plot_clustering_tree
+
+    a = AnnData(np.zeros((6, 1)))
+    a.obs["leiden_0.5"] = pd.Categorical([0, 0, 1, 1, 2, 2])
+    a.obs["leiden_1.0"] = pd.Categorical([0, 1, 2, 3, 4, 5])
+    a.uns["leiden_0.5_colors"] = ["#ff0000", "#00ff00", "#0000ff"]
+    fig = plot_clustering_tree(a, ["leiden_0.5", "leiden_1.0"])
+    facecolors = {
+        matplotlib.colors.to_hex(c)
+        for coll in fig.axes[0].collections
+        for c in coll.get_facecolors()
+    }
+    assert {"#ff0000", "#00ff00", "#0000ff"} <= facecolors
+    plt.close(fig)
+
+
+def test_import_obs_twice_without_overwrite(tmp_path):
+    a = AnnData(np.zeros((3, 1)))
+    a.obs_names = ["c0", "c1", "c2"]
+    a.obs["ct"] = ["x", "y", "z"]
+    path = tmp_path / "ann.csv"
+    pd.DataFrame({"ct": ["A", "B", "C"]}, index=["c0", "c1", "c2"]).to_csv(path)
+
+    import_obs_to_adata_from_csv(str(path), a, "ct")
+    import_obs_to_adata_from_csv(str(path), a, "ct")
+    assert list(a.obs["ct"]) == ["x", "y", "z"]
+    assert list(a.obs["ct_imported"].astype(str)) == ["A", "B", "C"]
+    assert list(a.obs["ct_imported_2"].astype(str)) == ["A", "B", "C"]
+
+
+def test_custom_graph_keys_follow_scanpy_naming():
+    from eigenp_utils.single_cell import ensure_neighbors, build_rowstd_connectivities
+
+    a = _typed_log(n_per_type=30)
+    sc.pp.pca(a, n_comps=10)
+    ensure_neighbors(a, n_neighbors=10, key="my_connectivities")
+    assert "my_connectivities" in a.obsp
+    W = build_rowstd_connectivities(a, key="my_connectivities")
+    np.testing.assert_allclose(np.asarray(W.sum(axis=1)).ravel(), 1.0, rtol=1e-5)
+    out = morans_i_all_fast(a, weights_key="my_connectivities")
+    assert len(out) == a.n_vars
+
+    with pytest.raises(ValueError, match="key_added"):
+        ensure_neighbors(a, n_neighbors=10, key="my_graph")
+
+
+def test_morans_i_empty_gene_list():
+    pytest.importorskip("esda")
+    from eigenp_utils.single_cell import morans_i
+
+    a = _typed_log(n_per_type=20)
+    sc.pp.pca(a, n_comps=5)
+    sc.pp.neighbors(a, n_neighbors=5)
+    out = morans_i(a, [], permutations=9)
+    assert out.empty
+    assert list(out.columns) == ["gene", "I", "p_sim", "z_sim"]
+
+
+def _moran_test_adata(sparse, n=3000):
+    rng = np.random.default_rng(0)
+    side = int(np.sqrt(n))
+    n = side * side
+    yy, xx = np.divmod(np.arange(n), side)
+    signal = np.sin(xx / 6.0) + 0.3 * rng.normal(size=n)  # strongly autocorrelated
+    X = np.c_[signal - signal.min(), np.full(n, 0.1), np.full(n, 0.7), rng.random(n)]
+    X = X.astype(np.float32)
+    a = AnnData(sp.csr_matrix(X) if sparse else X)
+    a.var_names = ["trend", "c01", "c07", "noise"]
+    a.obsm["X_pos"] = np.c_[xx, yy].astype(float)
+    sc.pp.neighbors(a, n_neighbors=8, use_rep="X_pos")
+    return a
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+def test_morans_i_all_fast_constant_genes_are_nan(sparse):
+    out = morans_i_all_fast(_moran_test_adata(sparse)).set_index("gene")
+    assert np.isnan(out.loc["c01", "I"]) and np.isnan(out.loc["c07", "I"])
+    assert np.isnan(out.loc["c01", "pval_z"])
+    assert out.index[0] == "trend"
+
+
+def test_morans_i_all_fast_pvalues_do_not_underflow():
+    rng = np.random.default_rng(0)
+    side = 54
+    yy, xx = np.divmod(np.arange(side * side), side)
+    signal = np.sin(xx / 6.0) + rng.normal(size=side * side)  # z ~ 25
+    a = AnnData(np.c_[signal - signal.min(), rng.random(side * side)].astype(np.float32))
+    a.var_names = ["trend", "noise"]
+    a.obsm["X_pos"] = np.c_[xx, yy].astype(float)
+    sc.pp.neighbors(a, n_neighbors=8, use_rep="X_pos")
+    out = morans_i_all_fast(a).set_index("gene")
+    z = out.loc["trend", "z_score"]
+    assert 13 < z < 37  # float32 p underflows to 0 here, float64 does not
+    p = out.loc["trend", "pval_z"]
+    assert out["pval_z"].dtype == np.float64
+    assert 0 < p < 1e-40
+    from scipy.stats import norm
+    np.testing.assert_allclose(p, 2 * norm.sf(z), rtol=1e-6)
+
+
+def test_find_expression_archetypes_array_like_and_duplicate_names():
+    rng = np.random.default_rng(0)
+    n = 300
+    f1, f2 = rng.normal(size=n), rng.normal(size=n)
+    X = np.c_[[f1 + 0.3 * rng.normal(size=n) for _ in range(4)]].T
+    X = np.c_[X, np.c_[[f2 + 0.3 * rng.normal(size=n) for _ in range(4)]].T]
+    a = AnnData(X)
+    a.var_names = ["g1", "g2", "g3", "g4", "h1", "h2", "h3", "g1"]  # 'g1' duplicated
+
+    res = find_expression_archetypes(a, pd.Series(["g1", "g2", "h1", "h2"]), 2)
+    assert res["gene_list"] == ["g1", "g2", "h1", "h2"]
+    res = find_expression_archetypes(a, np.array(["g2", "g3", "h1", "h2"]), 2)
+    assert len(res["clusters"]) == 4
+
+
+def test_find_expression_archetypes_share_one_scale():
+    rng = np.random.default_rng(0)
+    n = 500
+    f1, f2, f3 = rng.normal(size=(3, n))
+    cols = [f1 + 0.5 * rng.normal(size=n) for _ in range(5)]
+    cols += [f2 + 0.5 * rng.normal(size=n) for _ in range(5)]
+    cols += [f3]  # a lone gene
+    a = AnnData(np.c_[cols].T)
+    a.var_names = [f"g{i}" for i in range(11)]
+    res = find_expression_archetypes(a, list(a.var_names), 3)
+
+    stds = res["archetypes"].std(axis=1)
+    np.testing.assert_allclose(stds, 1.0, rtol=1e-6)
+    # argmax assignment recovers the dominant factor for most cells
+    truth = np.argmax(np.c_[f1, f2, f3], axis=1)
+    pred = np.argmax(res["archetypes"], axis=0)
+    # map archetypes to factors by correlation
+    corr = np.corrcoef(np.r_[res["archetypes"], np.c_[f1, f2, f3].T])[:3, 3:]
+    mapping = corr.argmax(axis=1)
+    assert (mapping[pred] == truth).mean() > 0.85
+
+
+def test_archetype_plots_keep_existing_obs_columns():
+    from eigenp_utils.single_cell import plot_archetype_assignments
+
+    a = _typed_log(n_per_type=30)
+    a.obsm["X_umap"] = np.random.default_rng(0).normal(size=(a.n_obs, 2))
+    res = find_expression_archetypes(a, [f"G{i}" for i in range(20)], 2)
+    a.obs["archetype_1_score"] = 123.0
+
+    plot_archetype_summary(a, res, 1, k=2)
+    plot_archetype_assignments(a, res)
+    plt.close("all")
+    assert (a.obs["archetype_1_score"] == 123.0).all()
+    assert "archetype_2_score" not in a.obs
+
+
+def test_plot_archetype_hierarchy_returns_figure():
+    from eigenp_utils.single_cell import plot_archetype_hierarchy
+
+    a = _typed_log(n_per_type=30)
+    res = find_expression_archetypes(a, [f"G{i}" for i in range(20)], 2)
+    before = len(plt.get_fignums())
+    fig = plot_archetype_hierarchy(res)
+    assert isinstance(fig, plt.Figure)
+    assert len(plt.get_fignums()) == before + 1
+    plt.close(fig)
+
+
+def test_filter_marker_dict_by_triku_strings_and_casing():
+    from eigenp_utils.single_cell import filter_marker_dict_by_triku
+
+    a = AnnData(np.zeros((2, 3)))
+    a.var_names = ["CD3E", "MS4A1", "LYZ"]
+    a.var["triku_highly_variable"] = True
+    a.var["triku_distance"] = 1.0
+    out = filter_marker_dict_by_triku(a, {"T": "CD3E", "B": ["ms4a1"], "M": ["XYZ"]})
+    assert out == {"T": ["CD3E"], "B": ["MS4A1"], "M": []}
+
+
+def test_multiscale_coarsening_clusters_on_use_rep():
+    a = _typed_log(n_per_type=40)
+    sc.pp.pca(a, n_comps=10)
+    a.obsm["X_other"] = np.random.default_rng(0).normal(size=(a.n_obs, 3))
+    sc.pp.neighbors(a, n_neighbors=10)  # built on X_pca
+
+    with pytest.warns(UserWarning, match="multiscale_neighbors"):
+        multiscale_coarsening(a, resolutions=[0.5, 1.0], use_rep="X_other")
+    assert a.uns["multiscale_neighbors"]["params"]["use_rep"] == "X_other"
+
+    b = AnnData(np.random.default_rng(1).normal(size=(200, 20)).astype(np.float32))
+    multiscale_coarsening(b, resolutions=[0.5], use_rep="X")
+    assert "X_pca" not in b.obsm
+    assert b.uns["neighbors"]["params"]["use_rep"] == "X"
+
+
+def test_filter_markers_exact_var_name_beats_alias():
+    from eigenp_utils.single_cell import filter_markers_to_adata
+
+    a = AnnData(np.zeros((2, 3)))
+    a.var_names = ["CD4", "CD8A", "CD8B"]
+    a.var["Symbol"] = ["CD4", "CD8A", "CD8A"]
+    cleaned, removed, repl = filter_markers_to_adata({"T": ["CD8A", "CD4"]}, a, verbose=False)
+    assert cleaned["T"] == ["CD8A", "CD4"]
+    assert repl == {}
+
+    b = AnnData(np.zeros((2, 4)))
+    b.var_names = ["CD4", "CD8A", "TBCE", "TBCE-1"]
+    b.var["gene_name"] = ["CD4", "CD8A", "TBCE", "TBCE"]
+    cleaned, _, _ = filter_markers_to_adata({"X": ["TBCE"]}, b, verbose=False)
+    assert cleaned["X"] == ["TBCE"]
+
+
+def test_filter_markers_by_moran_fills_from_above_threshold_first():
+    from eigenp_utils.single_cell import filter_markers_by_moran
+
+    df = pd.DataFrame({"gene": list("ABCDEF"), "I": [0.9, 0.8, 0.7, 0.6, 0.05, 0.01]})
+    out, report = filter_markers_by_moran(
+        {"t": list("ABCDEF")}, df, threshold=0.1, top_k=2, min_k=3, verbose=False
+    )
+    assert out["t"] == ["A", "B", "C"]
+    assert report["t"]["used_fallback"] is False
+
+    out, report = filter_markers_by_moran(
+        {"t": ["A", "E", "F"]}, df, threshold=0.1, top_k=5, min_k=2, verbose=False
+    )
+    assert out["t"] == ["A", "E"]
+    assert report["t"]["used_fallback"] is True
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+def test_binned_scores_batched_matches_per_gene(sparse, monkeypatch):
+    import eigenp_utils.single_cell as scmod
+
+    a = _typed_log(n_per_type=40)
+    a.var_names = [f"G{i}" for i in range(a.n_vars - 1)] + ["g0"]  # case duplicate of G0
+    if sparse:
+        a.X = sp.csr_matrix(a.X)
+    markers = {"T0": ["G0", "G1", "G2", "G3"], "T1": [f"G{i}" for i in range(15, 30)]}
+
+    expected = {}
+    for ct, genes in markers.items():
+        cols = []
+        for g in genes:
+            x = _extract_gene_vector(a, g, source="X", duplicate_policy="mean")
+            nz = x > 0
+            b = np.zeros_like(x)
+            if nz.any():
+                med = np.median(x[nz])
+                b[nz & (x <= med)] = 0.5
+                b[x > med] = 1.0
+            cols.append(b)
+        expected[ct] = np.mean(cols, axis=0)
+
+    calls = []
+    real = scmod._select_matrix_and_names
+    monkeypatch.setattr(
+        scmod, "_select_matrix_and_names", lambda *ar, **kw: (calls.append(1), real(*ar, **kw))[1]
+    )
+    scores = score_celltypes(a, markers, use_raw=False, score_method="binned")
+    for ct in markers:
+        np.testing.assert_allclose(scores[ct], expected[ct])
+    assert len(calls) == len(markers)  # one matrix slice per gene set, not per gene
+
+
+def test_marker_missing_report_is_h5ad_safe(tmp_path):
+    a = _typed_log(n_per_type=30)
+    a.obs["cl"] = a.obs["ct"].astype(str)
+    annotate_clusters_by_markers(
+        a, "cl", {"NK/T": ["G0", "G1", "MISSING"], "B": [f"G{i}" for i in range(15, 20)]}
+    )
+    rep = a.uns["marker_missing_report"]
+    assert isinstance(rep, pd.DataFrame)
+    row = rep[(rep["cell_type"] == "NK/T") & (rep["marker_set"] == "pos")]
+    assert row["missing_genes"].tolist() == ["MISSING"]
+
+    try:
+        AnnData(np.zeros((2, 1))).write_h5ad(tmp_path / "probe.h5ad")
+    except Exception as e:  # e.g. anndata 0.10 with pandas 3 string indexes
+        pytest.skip(f"this anndata/pandas pair cannot write h5ad at all: {e}")
+    a.write_h5ad(tmp_path / "x.h5ad")
+
+
+def test_export_obs_keeps_dotted_names(tmp_path):
+    a = AnnData(np.zeros((3, 1)))
+    a.obs["score"] = [1.0, 2.0, 3.0]
+    export_obs_from_adata_to_csv(a, "score", output_path=str(tmp_path / "run_2024.10"))
+    export_obs_from_adata_to_csv(a, "score", output_path=str(tmp_path / "run_2024.11"))
+    assert (tmp_path / "run_2024.10.csv").exists()
+    assert (tmp_path / "run_2024.11.csv").exists()
+    export_obs_from_adata_to_csv(a, "score", output_path=str(tmp_path))
+    assert (tmp_path / "score_export.csv").exists()
+
+
+def _volcano_adata(pvals):
+    n = len(pvals)
+    a = AnnData(np.zeros((2, n)))
+    a.var_names = [f"Gene{i}" for i in range(n)]
+    dt = [("0", "f8")]
+    p = np.zeros(n, dtype=dt)
+    p["0"] = pvals
+    lfc = np.zeros(n, dtype=dt)
+    lfc["0"] = np.linspace(-5, 5, n)
+    names = np.zeros(n, dtype=[("0", "U10")])
+    names["0"] = a.var_names
+    a.uns["rank_genes_groups"] = {"pvals_adj": p, "logfoldchanges": lfc, "names": names}
+    return a
+
+
+def test_plot_volcano_all_zero_pvalues():
+    pytest.importorskip("adjustText")
+    a = _volcano_adata(np.zeros(6))
+    ax = plot_volcano_adata(a, "rank_genes_groups", group="0", label_top_n=3)
+    ys = np.concatenate([c.get_offsets()[:, 1] for c in ax.collections])
+    assert np.isfinite(ys).all() and ys.max() > 300
+    plt.close("all")
+
+
+def test_plot_volcano_uses_current_adjusttext_api(caplog, monkeypatch):
+    adjustText = pytest.importorskip("adjustText")
+    import inspect
+    import logging
+    import eigenp_utils.single_cell as scmod
+
+    params = inspect.signature(adjustText.adjust_text).parameters
+    if "force_static" not in params:
+        pytest.skip("adjustText < 1.0")
+    passed = {}
+    import functools
+
+    @functools.wraps(adjustText.adjust_text)  # keeps the signature the code inspects
+    def spy(*args, **kwargs):
+        passed.update(kwargs)
+        return adjustText.adjust_text(*args, **kwargs)
+
+    monkeypatch.setattr(scmod, "adjust_text", spy)
+    a = _volcano_adata(np.r_[np.full(10, 1e-10), np.full(10, 0.5)])
+    with caplog.at_level(logging.WARNING, logger="adjustText"):
+        plot_volcano_adata(a, "rank_genes_groups", group="0", label_top_n=5)
+    # unknown keywords are forwarded to the arrows and trigger the annotate fallback
+    assert set(passed) - {"arrowprops"} <= set(params)
+    assert not any("FancyArrowPatch" in r.getMessage() for r in caplog.records)
+    plt.close("all")
+
+
+def test_kknn_classifier_votes_on_booleans():
+    rng = np.random.default_rng(0)
+    a = AnnData(np.zeros((200, 1)))
+    a.obsm["X_emb"] = rng.normal(size=(200, 2))
+    a.obs["is_doublet"] = rng.random(200) < 0.05
+    out = kknn_classifier(a, "is_doublet", use_rep="X_emb", inplace=False)
+    assert out.dtype == bool
+
+
+def test_kknn_ingest_transfers_numeric_obs_as_weighted_mean():
+    rng = np.random.default_rng(0)
+    t_ref = rng.uniform(0, 1, 2000)
+    ref = AnnData(np.zeros((2000, 1)))
+    ref.obsm["X_emb"] = np.c_[np.cos(3 * t_ref), np.sin(3 * t_ref)] + 0.02 * rng.normal(size=(2000, 2))
+    ref.obs["pt"] = t_ref + 0.05 * rng.normal(size=2000)  # noisy pseudotime
+    t_q = rng.uniform(0.05, 0.95, 500)
+    q = AnnData(np.zeros((500, 1)))
+    q.obsm["X_emb"] = np.c_[np.cos(3 * t_q), np.sin(3 * t_q)]
+
+    kknn_ingest(q, ref, obs_keys="pt", use_rep="X_emb")
+    pred = q.obs["pt_kknn"].to_numpy()
+    assert np.mean(np.abs(pred - t_q)) < 0.025  # 1-NN plurality vote gives ~0.04
+    assert q.obs["mapping_std_pt_kknn"].between(0, 0.2).all()
+    assert q.obs["mapping_confidence_pt_kknn"].isna().all()
+
+
+def test_find_correlated_features_drops_nan_targets():
+    rng = np.random.default_rng(0)
+    n = 300
+    t = rng.normal(size=n)
+    a = AnnData(np.c_[t + 0.1 * rng.normal(size=n), rng.normal(size=n)])
+    a.var_names = ["good", "noise"]
+    a.obs["score"] = t
+    a.obs.loc[a.obs_names[:100], "score"] = np.nan
+    with pytest.warns(UserWarning, match="100 non-finite"):
+        res = find_correlated_features(a, "score", metrics=("pearson", "spearman"))
+    assert res.loc["good", "pearson"] > 0.9
+    assert np.isfinite(res.to_numpy()).all()
+
+
+def test_find_correlated_features_spearman_constant_genes():
+    rng = np.random.default_rng(0)
+    n = 200
+    X = np.c_[rng.normal(size=n), np.zeros(n), np.full(n, 3.0)]
+    a = AnnData(sp.csr_matrix(X))
+    a.var_names = ["g", "zero", "const"]
+    a.obs["score"] = X[:, 0] + 0.1 * rng.normal(size=n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        res = find_correlated_features(a, "score", metrics=("pearson", "spearman"))
+    assert res.loc["zero", "spearman"] == 0.0 and res.loc["const", "spearman"] == 0.0
+    assert res.loc["g", "spearman"] > 0.9
+
+
+def test_tl_pacmap_paga_init_without_plotting_paga():
+    a = _typed_log(n_per_type=50)
+    sc.pp.pca(a, n_comps=10)
+    sc.pp.neighbors(a, n_neighbors=10)
+    try:
+        sc.tl.paga(a, groups="ct")
+    except ValueError:
+        # sc.tl.paga fails with some scanpy/scipy pairs; build what it stores instead
+        C = np.full((4, 4), 0.2)
+        np.fill_diagonal(C, 0.0)
+        a.uns["paga"] = {
+            "connectivities": sp.csr_matrix(C),
+            "connectivities_tree": sp.csr_matrix(np.triu(C)),
+            "groups": "ct",
+        }
+    assert "pos" not in a.uns["paga"]
+    tl_pacmap(a, init="paga")
+    assert a.obsm["X_pacmap"].shape == (a.n_obs, 2)
+    assert np.isfinite(a.obsm["X_pacmap"]).all()

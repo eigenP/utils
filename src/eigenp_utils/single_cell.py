@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any, Union
+import contextlib
 import importlib
 import warnings
 from collections import defaultdict
@@ -804,7 +805,8 @@ def plot_clustering_tree(
                     colors_list = adata.uns[uns_key]
 
                     if len(categories) == len(colors_list):
-                        specific_colors_map = dict(zip(categories, colors_list))
+                        # Node labels are strings (see above), so key the map by str
+                        specific_colors_map = dict(zip(map(str, categories), colors_list))
             except Exception as e:
                 print(f"Warning: Could not map colors for {key}: {e}")
 
@@ -1006,7 +1008,8 @@ def import_obs_to_adata_from_csv(
         Parser engine to use. Default "python".
     overwrite_existing
         If True, the column in the CSV will overwrite if it already exists in adata.obs.
-        If False, existing columns will be preserved and new columns will have a suffix if they clash.
+        If False, existing columns are preserved and the imported column is stored as
+        '{obs_key}_imported' (or '{obs_key}_imported_2', ... if that name is taken too).
     to_category
         If True, convert object-type columns in the imported data to categorical.
     """
@@ -1051,11 +1054,15 @@ def import_obs_to_adata_from_csv(
         # If not overwriting, append suffix to new data if overlap
         suffix = "_imported"
         if overlapping_cols:
-            print(f"Column {obs_key} exists. Appending '{suffix}' suffix to new data.")
-            adata.obs = adata.obs.join(df_join, how="left", rsuffix=suffix)
+            # First free name: '<key>_imported', then '<key>_imported_2', ...
             target_col = f"{obs_key}{suffix}"
-        else:
-            adata.obs = adata.obs.join(df_join, how="left")
+            n = 2
+            while target_col in adata.obs.columns:
+                target_col = f"{obs_key}{suffix}_{n}"
+                n += 1
+            print(f"Column {obs_key} exists. Storing the imported data as '{target_col}'.")
+            df_join = df_join.rename(columns={obs_key: target_col})
+        adata.obs = adata.obs.join(df_join, how="left")
 
     # Optional: make columns categorical to save memory
     if to_category:
@@ -1400,6 +1407,25 @@ def check_gene_adata(adata, gene, use_raw: bool = False):
         raise TypeError("Input 'gene' must be a string, list, or dictionary.")
 
 
+def _compute_neighbors_graph(adata, key: str = "connectivities", **neighbors_kwargs) -> None:
+    """Run ``sc.pp.neighbors`` so that its connectivities end up in ``adata.obsp[key]``.
+
+    scanpy stores graphs as ``'connectivities'`` (default) or
+    ``'<key_added>_connectivities'``; any other key cannot be produced by it.
+    """
+    suffix = "_connectivities"
+    if key == "connectivities":
+        sc.pp.neighbors(adata, **neighbors_kwargs)
+    elif key.endswith(suffix) and len(key) > len(suffix):
+        sc.pp.neighbors(adata, key_added=key[: -len(suffix)], **neighbors_kwargs)
+    else:
+        raise ValueError(
+            f"Graph '{key}' is not in adata.obsp and cannot be built here: sc.pp.neighbors "
+            f"stores graphs as 'connectivities' or '<key_added>{suffix}'. Use one of those "
+            f"names or compute the graph yourself."
+        )
+
+
 def ensure_neighbors(
     adata,
     n_neighbors: Optional[int] = None,
@@ -1410,16 +1436,18 @@ def ensure_neighbors(
     """
     Make sure adata.obsp[key] exists; builds neighbors in-place if missing.
     Supports both standard Scanpy usage (via use_rep) and Triku usage (via n_pcs).
+    `key` must be 'connectivities' or '<name>_connectivities' (scanpy's `key_added` naming)
+    for the graph to be buildable.
     """
     if n_neighbors is None:
         n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
     if key not in adata.obsp:
         if use_rep is None and n_pcs is not None:
             # Triku-style: use specific number of PCs without a named representation
-            sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs)
+            _compute_neighbors_graph(adata, key, n_neighbors=n_neighbors, n_pcs=n_pcs)
         else:
             # Standard style: use provided representation (default "X_pca")
-            sc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=use_rep)
+            _compute_neighbors_graph(adata, key, n_neighbors=n_neighbors, use_rep=use_rep)
 
 
 def _select_matrix_and_names(
@@ -1547,6 +1575,36 @@ def _extract_gene_vector(
     return np.asarray(x, dtype=float)
 
 
+def _extract_gene_matrix(
+    adata,
+    genes: Sequence[str],
+    *,
+    source: Literal["X", "raw"] | str = "X",
+) -> np.ndarray:
+    """
+    Dense (n_cells, len(genes)) float matrix: column j equals
+    ``_extract_gene_vector(adata, genes[j], source=source, duplicate_policy="mean")``,
+    but the matrix is sliced once for all genes instead of once per gene.
+    """
+    M, names = _select_matrix_and_names(adata, source)
+    upper = pd.Index(np.asarray(names).astype(str)).str.upper()
+    cols, rows, vals = [], [], []
+    for j, gene in enumerate(genes):
+        idx = np.flatnonzero(upper == str(gene).upper())
+        if idx.size == 0:
+            raise KeyError(f"Gene '{gene}' not found in {source}.")
+        cols.extend(idx)
+        rows.extend([j] * idx.size)
+        vals.extend([1.0 / idx.size] * idx.size)
+    used, inv = np.unique(np.asarray(cols, dtype=np.int64), return_inverse=True)
+    # (n_used, n_genes) averaging matrix: duplicates of a name are averaged
+    G = sp.csr_matrix((vals, (inv, rows)), shape=(used.size, len(genes)))
+    block = M[:, used]
+    out = block @ G if sp.issparse(block) else np.asarray(block, dtype=float) @ G.toarray()
+    out = out.toarray() if sp.issparse(out) else np.asarray(out)
+    return np.asarray(out, dtype=float)
+
+
 # ------------------------- Moran Tools -------------------------
 
 
@@ -1565,7 +1623,7 @@ def build_rowstd_connectivities(
     if n_neighbors is None:
         n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
     if recompute or key not in adata.obsp:
-        sc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=use_rep)
+        _compute_neighbors_graph(adata, key, n_neighbors=n_neighbors, use_rep=use_rep)
     W = adata.obsp[key].tocsr(copy=True)
     W.sort_indices()
     W = W.astype(np.float32, copy=False)
@@ -1602,8 +1660,9 @@ def build_pysal_weights(
     if n_neighbors is None:
         n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
     if recompute or (key not in adata.obsp):
-        sc.pp.neighbors(
+        _compute_neighbors_graph(
             adata,
+            key,
             n_neighbors=n_neighbors,
             use_rep=use_rep,
             method=method,
@@ -1641,7 +1700,8 @@ def morans_i(
             x = x - x.mean()
         mi = Moran(x, w, permutations=permutations)
         rows.append({"gene": g, "I": mi.I, "p_sim": mi.p_sim, "z_sim": mi.z_sim})
-    return pd.DataFrame(rows).sort_values("I", ascending=False).reset_index(drop=True)
+    df = pd.DataFrame(rows, columns=["gene", "I", "p_sim", "z_sim"])
+    return df.sort_values("I", ascending=False).reset_index(drop=True)
 
 
 def _ensure_csr_f32(A: sp.csr_matrix) -> sp.csr_matrix:
@@ -1789,7 +1849,11 @@ def morans_i_all_fast(
     # precompute means if centering
     if center:
         if sp.issparse(X):
-            mu = (np.asarray(X.sum(axis=0)).ravel() / float(n)).astype(np.float32)
+            # accumulate in float64 like the dense path: a float32 sum drifts, so a
+            # constant gene would get a non-zero constant deviation and I = 1
+            mu = (
+                np.asarray(X.sum(axis=0, dtype=np.float64)).ravel() / float(n)
+            ).astype(np.float32)
         else:
             mu = (X.sum(axis=0, dtype=np.float64) / float(n)).astype(np.float32)
     else:
@@ -1797,8 +1861,9 @@ def morans_i_all_fast(
 
     G = X.shape[1]
     I_vals = np.empty(G, dtype=np.float32)
-    Z_vals = np.full(G, np.nan, dtype=np.float32)
-    P_vals = np.full(G, np.nan, dtype=np.float32)
+    # float64: p-values underflow to 0 in float32 once |z| exceeds ~13
+    Z_vals = np.full(G, np.nan, dtype=np.float64)
+    P_vals = np.full(G, np.nan, dtype=np.float64)
 
     # Constant for Expected I: E[I] = -1 / (N-1)
     if n > 1:
@@ -1863,7 +1928,10 @@ def morans_i_all_fast(
                 np.multiply(Xb, Xb, out=Xb)
                 sum_fourth = np.sum(Xb, axis=0, dtype=np.float64)
 
-        den = np.where(den > 0, den, np.nan)
+        # Zero variance (NaN I): sum of squared deviations at or below float32
+        # rounding of the mean, i.e. a constant gene.
+        tol = n * (8 * np.finfo(np.float32).eps * np.abs(mub.astype(np.float64))) ** 2
+        den = np.where(den > tol, den, np.nan)
         I_vals[j0:j1] = nfac * (num / den).astype(np.float32)
 
         # Variance Calculation
@@ -1883,15 +1951,15 @@ def morans_i_all_fast(
             sd_I = np.sqrt(var_I)
 
             # Avoid division by zero if variance is tiny (constant I)
-            z = np.zeros_like(I_vals[j0:j1])
+            z = np.zeros(j1 - j0, dtype=np.float64)
             mask_sd = sd_I > 1e-12
             z[mask_sd] = (I_vals[j0:j1][mask_sd] - E_I) / sd_I[mask_sd]
 
             # P-value (two-sided)
             p = 2 * norm.sf(np.abs(z))
 
-            Z_vals[j0:j1] = z.astype(np.float32)
-            P_vals[j0:j1] = p.astype(np.float32)
+            Z_vals[j0:j1] = z
+            P_vals[j0:j1] = p
 
     out = pd.DataFrame(
         {"gene": out_names, "I": I_vals, "pval_z": P_vals, "z_score": Z_vals}
@@ -1906,7 +1974,7 @@ def morans_i_all_fast(
 
 def find_expression_archetypes(
     adata: sc.AnnData,
-    gene_list: List[str],
+    gene_list: Sequence[str],
     num_clusters: int,
     *,
     source: Literal["X", "raw"] | str = "X",
@@ -1926,7 +1994,9 @@ def find_expression_archetypes(
 
     Returns:
         A dictionary containing:
-        - 'archetypes': (num_clusters, n_cells) array of archetype profiles.
+        - 'archetypes': (num_clusters, n_cells) array of archetype profiles, each with
+                        mean 0 and unit standard deviation across cells (the scale of a
+                        Z-scored gene), so archetypes can be compared with each other.
         - 'clusters': (n_genes,) array of cluster assignments (1-based) for each gene.
         - 'gene_corrs': (n_genes,) array of Pearson correlations for each gene
                           to its assigned archetype.
@@ -1936,7 +2006,8 @@ def find_expression_archetypes(
     """
     print("Finding gene archetypes ... ", flush=True, end="")
 
-    if not gene_list:
+    gene_list = [str(g) for g in gene_list]  # accepts pd.Series / ndarray
+    if len(gene_list) == 0:
         raise ValueError("`gene_list` cannot be empty.")
 
     if num_clusters < 1:
@@ -1947,8 +2018,11 @@ def find_expression_archetypes(
     all_names_index = pd.Index(all_names)
 
     # 2. Find the integer indices for the requested gene_list
-    # We use get_indexer to maintain the order of gene_list
-    var_idx = all_names_index.get_indexer(gene_list)
+    # We use get_indexer to maintain the order of gene_list. get_indexer needs a
+    # unique index, so duplicated names resolve to their first occurrence.
+    first = ~all_names_index.duplicated(keep="first")
+    pos = all_names_index[first].get_indexer(gene_list)
+    var_idx = np.where(pos >= 0, np.flatnonzero(first)[pos], -1)
 
     # Check for missing genes
     missing_mask = var_idx == -1
@@ -2026,7 +2100,7 @@ def find_expression_archetypes(
         cluster_data = sdge_z[indices]  # (n_genes_in_cluster, n_cells)
 
         if cluster_data.shape[0] == 1:
-            # Only one gene, archetype is the gene itself
+            # Only one gene, archetype is the gene itself (already unit std)
             arch = cluster_data[0]
         else:
             try:
@@ -2034,7 +2108,9 @@ def find_expression_archetypes(
                 # The first right singular vector Vt[0] corresponds to the first Principal Component
                 # (eigenvector of X.T @ X) in the cell space, representing the dominant expression pattern.
                 _, _, Vt = svd(cluster_data, full_matrices=False, check_finite=False)
-                arch = Vt[0]
+                # Vt[0] has unit norm (std 1/sqrt(n_cells)); rescale to unit std so
+                # every archetype is on the scale of a Z-scored gene
+                arch = Vt[0] * np.sqrt(cluster_data.shape[1])
 
                 # Sign ambiguity: PC1 direction is arbitrary (+v or -v).
                 # We align it with the mean vector so that it positively correlates
@@ -2048,6 +2124,9 @@ def find_expression_archetypes(
                     f"SVD failed for gene cluster {i}: {e}. Falling back to mean archetype."
                 )
                 arch = np.mean(cluster_data, axis=0)
+                arch_std = arch.std()
+                if arch_std > 0:
+                    arch = arch / arch_std
 
         archetypes_list.append(arch)
 
@@ -2101,6 +2180,23 @@ def find_expression_archetypes(
     }
 
 
+@contextlib.contextmanager
+def _temporary_obs_columns(adata, columns: Dict[str, np.ndarray]):
+    """Set ``adata.obs`` columns for the duration of a plot, then restore any
+    pre-existing columns of the same name (or remove the temporary ones)."""
+    saved = {name: adata.obs[name].copy() for name in columns if name in adata.obs}
+    try:
+        for name, values in columns.items():
+            adata.obs[name] = values
+        yield
+    finally:
+        for name in columns:
+            if name in saved:
+                adata.obs[name] = saved[name]
+            elif name in adata.obs:
+                del adata.obs[name]
+
+
 def plot_archetype_summary(
     adata: sc.AnnData,
     archetype_results: Dict[str, Any],
@@ -2142,9 +2238,8 @@ def plot_archetype_summary(
     arch_idx = archetype_id - 1  # Convert to 0-based index
     archetype_profile = archetypes[arch_idx, :]
 
-    # Store in adata.obs for plotting
+    # Stored in adata.obs only while plotting (see below)
     profile_name = f"archetype_{archetype_id}_score"
-    adata.obs[profile_name] = archetype_profile
 
     # 2. Find the top k genes for this archetype
     # Find indices (relative to gene_list) of genes in this cluster
@@ -2174,14 +2269,15 @@ def plot_archetype_summary(
     basis = use_rep.replace("X_", "")  # sc.pl.embedding wants 'umap', not 'X_umap'
 
     print(f"Plotting Archetype {archetype_id} Score")
-    sc.pl.embedding(
-        adata,
-        basis=basis,
-        color=profile_name,
-        title=f"Archetype {archetype_id} Score",
-        cmap=archetype_cmap,
-        **kwargs,
-    )
+    with _temporary_obs_columns(adata, {profile_name: archetype_profile}):
+        sc.pl.embedding(
+            adata,
+            basis=basis,
+            color=profile_name,
+            title=f"Archetype {archetype_id} Score",
+            cmap=archetype_cmap,
+            **kwargs,
+        )
 
     if top_k_genes:
         print(f"Plotting Top {len(top_k_genes)} Genes for Archetype {archetype_id}")
@@ -2193,9 +2289,6 @@ def plot_archetype_summary(
             cmap=cmap,
             **kwargs,
         )
-
-    # Clean up obs
-    del adata.obs[profile_name]
 
 
 def plot_archetype_assignments(
@@ -2220,12 +2313,9 @@ def plot_archetype_assignments(
     archetypes = archetype_results["archetypes"]  # (n_clusters, n_cells)
     num_clusters = archetypes.shape[0]
 
-    obs_names = []
-    # Add each archetype score to adata.obs
-    for i in range(num_clusters):
-        profile_name = f"archetype_{i + 1}_score"
-        adata.obs[profile_name] = archetypes[i, :]
-        obs_names.append(profile_name)
+    # Each archetype score is stored in adata.obs only while plotting
+    profiles = {f"archetype_{i + 1}_score": archetypes[i, :] for i in range(num_clusters)}
+    obs_names = list(profiles)
 
     basis = use_rep.replace("X_", "")
 
@@ -2236,17 +2326,14 @@ def plot_archetype_assignments(
         kwargs["cmap"] = "viridis"
 
     # Plotting all archetypes as subplots
-    sc.pl.embedding(
-        adata,
-        basis=basis,
-        color=obs_names,  # Pass the list of names
-        title="Archetype Scores per Cell",  # Title will be adapted by scanpy
-        **kwargs,
-    )
-
-    # Clean up obs
-    for name in obs_names:
-        del adata.obs[name]
+    with _temporary_obs_columns(adata, profiles):
+        sc.pl.embedding(
+            adata,
+            basis=basis,
+            color=obs_names,  # Pass the list of names
+            title="Archetype Scores per Cell",  # Title will be adapted by scanpy
+            **kwargs,
+        )
 
 
 def plot_archetype_hierarchy(
@@ -2255,9 +2342,11 @@ def plot_archetype_hierarchy(
     p: int = 0,
     truncate_mode: Optional[str] = None,
     **kwargs,
-) -> None:
+) -> plt.Figure:
     """
     Plots the dendrogram of the gene clustering hierarchy.
+
+    Returns the figure (it is not shown or closed here; call `plt.show()` in scripts).
 
     Args:
         archetype_results: The dictionary output from `find_expression_archetypes`.
@@ -2285,9 +2374,9 @@ def plot_archetype_hierarchy(
     if truncate_mode is None:
         truncate_mode = "lastp"
 
-    plt.figure(figsize=kwargs.pop("figsize", (12, 6)))
-    plt.title("Gene Clustering Hierarchy (Dendrogram)")
-    plt.ylabel("Distance (Ward)")
+    fig, ax = plt.subplots(figsize=kwargs.pop("figsize", (12, 6)))
+    ax.set_title("Gene Clustering Hierarchy (Dendrogram)")
+    ax.set_ylabel("Distance (Ward)")
 
     # --- Set color threshold ---
     # We set the threshold to color the `num_clusters`
@@ -2317,16 +2406,17 @@ def plot_archetype_hierarchy(
         leaf_font_size=8.0,
         color_threshold=color_threshold,
         above_threshold_color="grey",  # Color for links above the threshold
+        ax=ax,
         **kwargs,
     )
 
     if truncate_mode == "lastp":
-        plt.xlabel(f"Genes / Gene Clusters (showing last {p} merged clusters)")
+        ax.set_xlabel(f"Genes / Gene Clusters (showing last {p} merged clusters)")
     else:
-        plt.xlabel("Genes")
+        ax.set_xlabel("Genes")
 
-    plt.tight_layout()
-    plt.show()
+    fig.tight_layout()
+    return fig
 
 
 # ------------------------- Triku Tools -------------------------
@@ -2505,15 +2595,22 @@ def filter_marker_dict_by_triku(
 ) -> Dict[str, List[str]]:
     """
     Keep only genes selected by Triku (case-insensitive against adata.var_names).
+    Kept genes are returned with their adata.var_names spelling; a single gene may be
+    given as a string.
     """
     keep = triku_gene_set(adata, min_score=min_score)
-    keep_lower = {g.lower() for g in keep}
+    # exact names win over case-insensitive matches
+    canonical = {g.lower(): g for g in keep}
+    canonical.update({g: g for g in keep})
     out = {}
     for t, genes in marker_dict.items():
+        if isinstance(genes, str):
+            genes = [genes]
         kept = []
         for g in genes:
-            if (g in keep) or (g.lower() in keep_lower):
-                kept.append(g)
+            name = canonical.get(g, canonical.get(g.lower()))
+            if name is not None:
+                kept.append(name)
         out[t] = kept
     return out
 
@@ -2587,7 +2684,8 @@ def tl_pacmap(
     init
         How to initialize the embedding. Options are:
         - None: Let PaCMAP decide automatically based on feature count ('pca' or 'random').
-        - 'paga': positions from `scanpy.pl.paga`.
+        - 'paga': positions from `scanpy.pl.paga` (computed here if `sc.tl.paga` was run
+          but PAGA was not plotted yet).
         - 'pca': PCA initialization.
         - 'random': Random initialization.
         - An `obsm` key (e.g., 'X_pca').
@@ -2671,6 +2769,13 @@ def tl_pacmap(
         if isinstance(init, str) and init == "paga":
             from scanpy.tools._utils import get_init_pos_from_paga
 
+            if "paga" not in adata.uns:
+                raise ValueError("init='paga' needs `sc.tl.paga(adata, ...)` to be run first.")
+            if "pos" not in adata.uns["paga"]:
+                # The node positions are only computed by plotting PAGA
+                fig, ax = plt.subplots()
+                sc.pl.paga(adata, ax=ax, show=False, random_state=random_state)
+                plt.close(fig)
             init_coords = get_init_pos_from_paga(adata, random_state=random_state)
             init_method = init_coords
         elif isinstance(init, str) and init in adata.obsm:
@@ -3072,10 +3177,23 @@ def multiscale_coarsening(
         )
         use_rep = "X"
 
-    # Ensure neighbors exist if we are going to run leiden
+    # Leiden runs on a graph built from `use_rep`. The default graph is reused when it
+    # was built from the same representation (scanpy records use_rep=None for X_pca);
+    # otherwise a dedicated graph is built under 'multiscale_neighbors'.
+    neighbors_key = None
     if "connectivities" not in adata.obsp:
         print("Computing neighbors for Leiden clustering...")
-        sc.pp.neighbors(adata, use_rep=use_rep if use_rep != "X" else None)
+        sc.pp.neighbors(adata, use_rep=use_rep)
+    else:
+        graph_rep = adata.uns.get("neighbors", {}).get("params", {}).get("use_rep")
+        if (graph_rep or "X_pca") != use_rep:
+            warnings.warn(
+                f"adata.obsp['connectivities'] was built from '{graph_rep or 'X_pca'}', not "
+                f"'{use_rep}'; clustering on a graph built from '{use_rep}' "
+                "(stored as 'multiscale_neighbors')."
+            )
+            neighbors_key = "multiscale_neighbors"
+            sc.pp.neighbors(adata, use_rep=use_rep, key_added=neighbors_key)
 
     # 2. Run Clustering
     clustering_results = {}
@@ -3084,7 +3202,7 @@ def multiscale_coarsening(
     print(f"Running multiscale clustering on resolutions: {resolutions}")
     for res in resolutions:
         key = f"leiden_res_{res}"
-        sc.tl.leiden(adata, resolution=res, key_added=key, random_state=random_state, flavor='igraph', n_iterations=2, directed=False)
+        sc.tl.leiden(adata, resolution=res, key_added=key, random_state=random_state, flavor='igraph', n_iterations=2, directed=False, neighbors_key=neighbors_key)
         clustering_results[res] = adata.obs[key].copy()
         obs_keys.append(key)
 
@@ -3272,11 +3390,7 @@ def _build_norm_map(
         ]
     norm_map = {}
 
-    # 1) var_names / index
-    for var_name in adata.var_names:
-        norm_map[_normalize_symbol(var_name)] = var_name
-
-    # 2) alternate columns (row-aligned)
+    # 1) alternate columns (row-aligned); the first row with a symbol wins
     for col in extra_cols:
         if col in adata.var.columns:
             col_series = adata.var[col]
@@ -3287,9 +3401,13 @@ def _build_norm_map(
                 sval = str(val).strip()
                 if sval == "" or sval.lower() == "nan":
                     continue
-                norm_map[_normalize_symbol(sval)] = str(
-                    idx
+                norm_map.setdefault(
+                    _normalize_symbol(sval), str(idx)
                 )  # idx is var_name for that row
+
+    # 2) var_names / index, last so an exact var_name always maps to itself
+    for var_name in adata.var_names:
+        norm_map[_normalize_symbol(var_name)] = var_name
 
     return norm_map
 
@@ -3436,14 +3554,15 @@ def filter_markers_by_moran(
         used_fallback = False
         if len(picked) < min_k and fallback_to_min_k:
             need = min_k - len(picked)
-            # take best from below to reach min_k (avoid duplicates)
-            for g, s in below:
+            # take the next best to reach min_k: remaining above-threshold genes
+            # (when top_k < min_k) before any below-threshold gene; avoid duplicates
+            for g, s in above[top_k:] + below:
                 if g not in [x[0] for x in picked]:
                     picked.append((g, s))
                     need -= 1
                     if need == 0:
                         break
-            used_fallback = True if len(above) < min_k else False
+            used_fallback = any(s < threshold for _, s in picked)
 
         # store only gene names
         filtered_by_moran[cat] = [g for g, _ in picked]
@@ -3512,6 +3631,9 @@ def score_celltypes(
       - If fewer than `min_markers` genes are present, that cell type's score is NaN.
       - Expression source: `layer` if given, else `adata.raw` if `use_raw` and it exists,
         else `adata.X`. All score methods and the marker presence check use the same source.
+      - Side effect: `adata.uns['marker_missing_report']` is a DataFrame with one row per
+        cell type and marker set ('pos'/'neg'): `cell_type`, `marker_set`, and the
+        comma-joined `missing_genes`. Rows from earlier calls are kept and updated.
     """
 
     # A layer takes precedence over raw (as scanpy's use_raw=None does), and
@@ -3541,7 +3663,7 @@ def score_celltypes(
         markers = [str(g) for g in markers]
         present = [g for g in markers if g in gene_universe]
         missing = [g for g in markers if g not in gene_universe]
-        missing_report[f"{ct}_pos"] = missing
+        missing_report[(str(ct), "pos")] = missing
 
         if len(present) < min_markers:
             ct_to_pos_hash[ct] = None
@@ -3555,7 +3677,7 @@ def score_celltypes(
             neg_markers = [str(g) for g in cell_type_negative_markers_dict[ct]]
             neg_present = [g for g in neg_markers if g in gene_universe]
             neg_missing = [g for g in neg_markers if g not in gene_universe]
-            missing_report[f"{ct}_neg"] = neg_missing
+            missing_report[(str(ct), "neg")] = neg_missing
 
             if len(neg_present) > 0:
                 neg_tuple = tuple(sorted(neg_present))
@@ -3579,14 +3701,12 @@ def score_celltypes(
         binned_matrix = np.zeros((adata.n_obs, len(genes)), dtype=float)
         detected_mask = np.zeros((adata.n_obs, len(genes)), dtype=bool)
 
-        for i, g in enumerate(genes):
-            # Extract expression vector
-            x = _extract_gene_vector(
-                adata,
-                g,
-                source="raw" if use_raw else layer if layer else "X",
-                duplicate_policy="mean",
-            )
+        # One slice for all marker genes (slicing a CSR matrix per gene is ~90x slower)
+        expr = _extract_gene_matrix(
+            adata, genes, source="raw" if use_raw else layer if layer else "X"
+        )
+        for i in range(len(genes)):
+            x = expr[:, i]
             # Find non-zero values
             nz_mask = x > 0
             if not np.any(nz_mask):
@@ -3695,9 +3815,21 @@ def score_celltypes(
             errors="ignore",
         )
 
-    # Merge missing-gene report into .uns
-    adata.uns.setdefault("marker_missing_report", {})
-    adata.uns["marker_missing_report"].update(missing_report)
+    # Merge missing-gene report into .uns. A table, not a dict keyed by cell type:
+    # names such as 'NK/T' are not valid h5ad keys and broke write_h5ad.
+    report = pd.DataFrame(
+        [
+            {"cell_type": ct, "marker_set": kind, "missing_genes": ",".join(genes)}
+            for (ct, kind), genes in missing_report.items()
+        ],
+        columns=["cell_type", "marker_set", "missing_genes"],
+    )
+    previous = adata.uns.get("marker_missing_report")
+    if isinstance(previous, pd.DataFrame) and list(previous.columns) == list(report.columns):
+        report = pd.concat([previous, report], ignore_index=True).drop_duplicates(
+            subset=["cell_type", "marker_set"], keep="last"
+        )
+    adata.uns["marker_missing_report"] = report.reset_index(drop=True)
 
     return df
 
@@ -3735,14 +3867,22 @@ def annotate_clusters_by_markers(
     and columns == cell types. Otherwise, scores are computed once here.
 
     Parameters:
-    - normalize_scores: Whether to apply robust normalization (median/MAD) to the scores. Default is True.
-      Formula: (x - median(x)) / (median(|x - median(x)|) + 1e-8)
+    - normalize_scores: Whether to robustly standardize each cell type's scores across cells
+      (only for score_method='scanpy'). Default is True. Uses `stats.robust_standardize`:
+      (x - median) / (1.4826 * MAD); where the MAD is 0 it falls back to the mean and
+      sqrt(pi/2) * mean absolute deviation, then to the standard deviation; constant
+      columns become 0.
 
     Notes:
-        Calculates the 'Probability of Superiority' (confidence) using a parametric normal approximation
-        ($P(X > Y) = \\Phi(\\mu_d / \\sigma_d)$). This properly accounts for the variance of the score difference
-        ($\\sigma_d$), ensuring extreme outliers or correlated variables appropriately inflate the standard
-        deviation and lower assignment confidence, avoiding the overconfidence of simple empirical non-parametric fractions.
+        The assigned type is the one with the highest median score in the cluster.
+        `softmax_p` (name kept for compatibility) is the empirical Probability of
+        Superiority of the top type over the runner-up within the cluster: the fraction
+        of cells whose score for the top type exceeds their score for the runner-up, with
+        ties counted as 0.5 (the common-language effect size, not a normal approximation).
+        It is 1.0 when only one type has a finite score and 0.5 when fewer than two cells
+        have finite differences. `uncertainty = 1 - softmax_p * consensus_frac`, where
+        `consensus_frac` is the fraction of the cluster's cells whose own best type is the
+        assigned type.
     """
     if beta is not None:
         warnings.warn(
@@ -3846,9 +3986,6 @@ def annotate_clusters_by_markers(
                 valid_diff = diff[np.isfinite(diff)]
 
                 if valid_diff.size > 1:
-                    np.mean(valid_diff)
-                    np.std(valid_diff, ddof=1)  # Sample std
-
                     # matth: Robust Probability of Superiority (Empirical)
                     # Instead of assuming normality (P = Phi(mu/std)), we compute the
                     # fraction of cells where Top1 > Top2 directly. This is robust to outliers
@@ -4126,8 +4263,11 @@ def export_obs_from_adata_to_csv(
         out_file = Path(f'{obs_key}_export.csv')
     else:
         out_file = Path(output_path)
-        if not out_file.suffix.lower() == ".csv":
-            out_file = out_file.with_suffix(".csv")
+        if out_file.is_dir():
+            out_file = out_file / f"{obs_key}_export.csv"
+        elif out_file.suffix.lower() != ".csv":
+            # append, not replace: 'run_2024.10' must not become 'run_2024.csv'
+            out_file = out_file.with_name(out_file.name + ".csv")
 
     print(f"Saving at {out_file.resolve()}")
     df_export.to_csv(out_file)
@@ -4219,11 +4359,15 @@ def plot_volcano_adata(
     # Calculate -log10 of p-values, handling p-values of 0
     with np.errstate(divide="ignore"):
         neg_log10_pvals = -np.log10(pvals_adj)
-    # Replace infinite values with a value slightly larger than the max finite value
-    if np.isinf(neg_log10_pvals).any():
-        neg_log10_pvals[np.isinf(neg_log10_pvals)] = (
-            np.nanmax(neg_log10_pvals[np.isfinite(neg_log10_pvals)]) * 1.1
-        )
+    # Replace infinite values (p = 0) with a value slightly larger than the max finite
+    # value, or with -log10 of the smallest positive float when nothing else is finite
+    inf_mask = np.isinf(neg_log10_pvals)
+    if inf_mask.any():
+        finite = neg_log10_pvals[np.isfinite(neg_log10_pvals)]
+        cap = np.max(finite) * 1.1 if finite.size and np.max(finite) > 0 else 0.0
+        if cap <= 0:
+            cap = -np.log10(np.finfo(float).tiny)
+        neg_log10_pvals[inf_mask] = cap
 
     # --- 3. Plotting ---
     if ax is None:
@@ -4287,20 +4431,32 @@ def plot_volcano_adata(
         )
 
     # Use adjust_text to prevent labels from overlapping
-    # Default values for adjust_text
-    adjust_text_kwargs = dict(
-        force_text=(0.5, 10.0),  # stonger vertical push
-        force_points=(0.2, 0.2),
-        expand_text=(1.5, 5.5),
-        expand_points=(1.0, 1.0),
-        lim=100_000,
-        arrowprops=dict(
-            arrowstyle="-",
-            color="gray",
-            lw=0.5,
-            alpha=0.8,  # Make arrows slightly transparent
-        ),
+    # Default values for adjust_text. adjustText >= 1.0 renamed the parameters, and
+    # passes unknown keywords on to the arrows, so pick the names it understands.
+    import inspect
+
+    arrowprops = dict(
+        arrowstyle="-",
+        color="gray",
+        lw=0.5,
+        alpha=0.8,  # Make arrows slightly transparent
     )
+    if "force_static" in inspect.signature(adjust_text).parameters:  # adjustText >= 1.0
+        adjust_text_kwargs = dict(
+            force_text=(0.1, 0.5),  # stronger vertical push
+            force_static=(0.1, 0.2),
+            expand=(1.2, 1.6),
+            arrowprops=arrowprops,
+        )
+    else:  # adjustText < 1.0
+        adjust_text_kwargs = dict(
+            force_text=(0.5, 10.0),  # stonger vertical push
+            force_points=(0.2, 0.2),
+            expand_text=(1.5, 5.5),
+            expand_points=(1.0, 1.0),
+            lim=100_000,
+            arrowprops=arrowprops,
+        )
     # Update with any user-provided kwargs
     adjust_text_kwargs.update(kwargs)
 
@@ -4350,7 +4506,7 @@ def kknn_classifier(
     This function utilizes the local manifold curvature proxy from `compute_kknn_neighbors`
     to weight and average labels or numeric values from `adata.obs`.
 
-    For categorical (discrete) observations, it performs a distance-weighted majority vote.
+    For categorical (discrete) and boolean observations, it performs a distance-weighted majority vote.
     For continuous (numeric) observations, it performs a distance-weighted average.
 
     Args:
@@ -4397,7 +4553,10 @@ def kknn_classifier(
             )
         mask = np.asarray(mask, dtype=bool)
 
-    is_categorical = not pd.api.types.is_numeric_dtype(adata.obs[obs_key])
+    # Booleans are voted on (as labels), not averaged into fractions
+    col = adata.obs[obs_key]
+    is_bool = pd.api.types.is_bool_dtype(col)
+    is_categorical = is_bool or not pd.api.types.is_numeric_dtype(col)
 
     smoothed = []
 
@@ -4449,7 +4608,9 @@ def kknn_classifier(
                 smoothed.append(np.nan)
 
     # Cast back to original categorical type if necessary
-    if is_categorical:
+    if is_bool and not any(pd.isna(v) for v in smoothed):
+        smoothed = np.array(smoothed, dtype=bool)
+    elif is_categorical:
         if isinstance(adata.obs[obs_key].dtype, pd.CategoricalDtype):
             cat_dtype = adata.obs[obs_key].dtype
             smoothed = pd.Categorical(smoothed, categories=cat_dtype.categories)
@@ -4792,6 +4953,11 @@ def kknn_ingest(
     neighbors chosen for each query cell based on local manifold curvature. You can plot this
     column on an embedding to inspect curvature adaptation.
 
+    Categorical, string and boolean obs columns are transferred by weighted vote, with the
+    winning weight fraction as `mapping_confidence_{key}_kknn`. Numeric columns are
+    transferred as the weighted mean over the neighbourhood, with the weighted standard
+    deviation in `mapping_std_{key}_kknn` (their `mapping_confidence_...` column is NaN).
+
     After ingest, if you wish to concatenate the query and reference datasets, use the
     `anndata.concat()` function (the preferred method over `.concatenate()`):
 
@@ -5104,6 +5270,31 @@ def kknn_ingest(
         for key in obs_keys:
             print(f"Mapping obs: '{key}'...")
             ref_labels = adata_ref.obs[key].values
+            ref_col = adata_ref.obs[key]
+
+            if pd.api.types.is_numeric_dtype(ref_col) and not pd.api.types.is_bool_dtype(ref_col):
+                # Continuous values: NaN-aware weighted mean over the neighbourhood (a vote
+                # over float values would be 1-NN). The spread is the weighted std; a
+                # vote-fraction confidence has no meaning here, so it is NaN.
+                values = ref_col.to_numpy(dtype=float)
+                means = np.full(N_query, np.nan)
+                stds = np.full(N_query, np.nan)
+                for i in range(N_query):
+                    v = values[pruned_indices[i]]
+                    w = np.asarray(cell_weights[i], dtype=float)
+                    ok = np.isfinite(v) & (w > 0)
+                    if ok.any():
+                        w_ok = w[ok] / w[ok].sum()
+                        means[i] = np.sum(w_ok * v[ok])
+                        stds[i] = np.sqrt(np.sum(w_ok * (v[ok] - means[i]) ** 2))
+                adata_query.obs[f"{key}_kknn"] = means
+                adata_ref.obs[f"{key}_kknn"] = ref_col
+                adata_query.obs[f"mapping_std_{key}_kknn"] = stds
+                adata_ref.obs[f"mapping_std_{key}_kknn"] = np.nan
+                conf_key = f"mapping_confidence_{key}_kknn"
+                adata_query.obs[conf_key] = np.nan
+                adata_ref.obs[conf_key] = np.nan
+                continue
 
             mapped_labels = []
             confidences = []
@@ -5227,6 +5418,23 @@ def find_correlated_features(
         source="raw" if use_raw and adata.raw is not None else layer if layer else "X",
     )
 
+    # Cells without a finite target value are left out (one NaN would otherwise make
+    # every metric NaN); graph smoothing needs a value on every cell.
+    finite_target = np.isfinite(target_vec)
+    if not finite_target.all():
+        n_bad = int((~finite_target).sum())
+        if use_graph:
+            raise ValueError(
+                f"Target '{target}' has {n_bad} non-finite values; use_graph=True needs a "
+                "value for every cell. Impute them or use use_graph=False."
+            )
+        warnings.warn(
+            f"Target '{target}' has {n_bad} non-finite values; computing on the "
+            f"{int(finite_target.sum())} remaining cells."
+        )
+        target_vec = target_vec[finite_target]
+        M = M[np.flatnonzero(finite_target)]
+
     n_cells, n_features = M.shape
     if n_cells <= 1:
         raise ValueError("Cannot compute correlation with 1 or fewer cells.")
@@ -5292,7 +5500,12 @@ def find_correlated_features(
         res_dict["pearson"] = np.clip(r_pearson, -1.0, 1.0)
 
     if "spearman" in metrics:
-        from scipy.stats import rankdata, zscore
+        from scipy.stats import rankdata
+
+        def zscore(r):
+            # constant input (rank std 0) -> zeros, i.e. r = 0, as for Pearson
+            sd = r.std()
+            return (r - r.mean()) / sd if sd > 0 else np.zeros_like(r, dtype=float)
 
         target_rank_z = zscore(rankdata(target_vec))
         r_spear = np.empty(n_features, dtype=float)
