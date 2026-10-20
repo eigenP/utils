@@ -1796,6 +1796,15 @@ def _(mo):
     Each gene becomes one vector $\phi(a_g)$, and all pairwise distances are a single $L_1$ distance
     computation (Indyk & Thaper 2003; Le *et al.* 2019).
 
+    **Why not just smooth the genes and correlate?** Averaging each gene over its kNN neighbours before
+    computing Spearman does bring the manifold into a correlation, but at one scale only: it still
+    saturates once two genes are farther apart than the averaging radius, and it blurs genes that are
+    closer than it. Adding up the mismatch between $a$ and $b$ at *every* scale, each weighted by how far
+    mass has to move at that scale, fixes both, and that sum is a transport distance. Tree $W_1$ is
+    that sum over the levels of a cluster hierarchy; Diffusion EMD (Tong *et al.* 2021) is the same sum
+    over random-walk times. A correlation cannot get there: it is bounded by 1, so no amount of
+    smoothing makes it keep counting.
+
     **Top row, the hierarchy.** On the left it is drawn in PCA: nodes sit at their cluster centroids,
     larger, darker and with thicker lines for coarser levels, each joined to its parent. On the right
     the same tree is lifted into a dendrogram, with the root at the top and the finest clusters along the
@@ -2499,6 +2508,7 @@ def _(mo):
     * Santambrogio F. *Optimal Transport for Applied Mathematicians*, ch. 4 (Beckmann formulation). Birkhäuser (2015).
     * Indyk P. & Thaper N. Fast image retrieval via embeddings. *3rd Int. Workshop on Statistical and Computational Theories of Vision* (2003).
     * Le T., Yamada M., Fukumizu K. & Cuturi M. Tree-sliced variants of Wasserstein distances. *NeurIPS* (2019).
+    * Tong A., Huguet G., Natik A., MacDonald K., Kuchroo M., Coifman R., Wolf G. & Krishnaswamy S. Diffusion earth mover's distance and distribution embeddings. *ICML* (2021).
     """)
     return
 
