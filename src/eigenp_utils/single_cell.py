@@ -1253,6 +1253,8 @@ def plot_marker_genes_dict_on_embedding(
         items_to_plot = list(genes)
 
         computed_score_names = []
+        # Caller's columns that share a score name are restored after plotting
+        saved_columns = {}
 
         for method in methods_to_run:
             score_name = f"{tissue}_score_{method}"
@@ -1281,6 +1283,8 @@ def plot_marker_genes_dict_on_embedding(
                 if tissue in scores_df.columns:
                     score_col = scores_df[tissue]
                     if not score_col.isna().all():
+                        if score_name in adata.obs and score_name not in saved_columns:
+                            saved_columns[score_name] = adata.obs[score_name].copy()
                         adata.obs[score_name] = score_col.values
                         computed_score_names.append(score_name)
                     else:
@@ -1301,14 +1305,18 @@ def plot_marker_genes_dict_on_embedding(
         # sc.pl.embedding returns a list of axes if show=False and multiple genes are plotted,
         # or a single axis if one gene. Or None if show=True.
         # Here 'color' is a list of genes.
-        res = sc.pl.embedding(
-            adata, basis=basis, color=items_to_plot, cmap=current_cmap, **pl_kwargs
-        )
-
-        # Remove the score columns from obs
-        for name in computed_score_names:
-            if name in adata.obs:
-                del adata.obs[name]
+        try:
+            res = sc.pl.embedding(
+                adata, basis=basis, color=items_to_plot, cmap=current_cmap, **pl_kwargs
+            )
+        finally:
+            # Remove the temporary score columns from obs, restoring any column of
+            # the same name that existed before the call
+            for name in computed_score_names:
+                if name in saved_columns:
+                    adata.obs[name] = saved_columns[name]
+                elif name in adata.obs:
+                    del adata.obs[name]
 
         # Normalize result to a single axis or list of axes
         # Scanpy's embedding returns: Union[Axes, List[Axes], None]
@@ -1467,17 +1475,24 @@ def _select_matrix_and_names(
 
 
 def _match_gene_indices(
-    var_names: np.ndarray, gene: str, case_insensitive: bool = True
+    var_names: np.ndarray, gene: str, case_insensitive: bool = True, upper=None
 ) -> np.ndarray:
-    """Return all column indices matching `gene`."""
+    """
+    Return the column indices of `gene`.
+
+    An exact (case-sensitive) name always wins: if `gene` occurs exactly, only those
+    columns are returned, so 'ACTB' never picks up a distinct 'Actb' feature. Only when
+    there is no exact match and `case_insensitive` is True are all case variants
+    returned (callers then combine them with their duplicate policy). `upper` may pass
+    precomputed upper-cased names.
+    """
     arr = np.asarray(var_names).astype(str)
-    if case_insensitive:
-        try:
-            up = pd.Index(arr).str.upper().to_numpy()
-        except Exception:
-            up = np.char.upper(arr)
-        return np.where(up == gene.upper())[0]
-    return np.where(arr == gene)[0]
+    exact = np.flatnonzero(arr == str(gene))
+    if exact.size or not case_insensitive:
+        return exact
+    if upper is None:
+        upper = pd.Index(arr).str.upper().to_numpy()
+    return np.flatnonzero(np.asarray(upper) == str(gene).upper())
 
 
 def smooth_expression_on_graph(
@@ -1547,6 +1562,9 @@ def _extract_gene_vector(
     """
     Dense (n_cells,) float vector for `gene` from the chosen source.
     Handles duplicates deterministically via `duplicate_policy`.
+
+    Matching follows `_match_gene_indices`: columns named exactly `gene` win; case
+    variants (e.g. 'Actb' for 'ACTB') are used only when no exact name exists.
     """
     M, names = _select_matrix_and_names(adata, source)
     idx = _match_gene_indices(names, gene, case_insensitive=True)
@@ -1587,10 +1605,11 @@ def _extract_gene_matrix(
     but the matrix is sliced once for all genes instead of once per gene.
     """
     M, names = _select_matrix_and_names(adata, source)
-    upper = pd.Index(np.asarray(names).astype(str)).str.upper()
+    names = np.asarray(names).astype(str)
+    upper = pd.Index(names).str.upper().to_numpy()
     cols, rows, vals = [], [], []
     for j, gene in enumerate(genes):
-        idx = np.flatnonzero(upper == str(gene).upper())
+        idx = _match_gene_indices(names, gene, upper=upper)
         if idx.size == 0:
             raise KeyError(f"Gene '{gene}' not found in {source}.")
         cols.extend(idx)
@@ -1713,10 +1732,14 @@ def _ensure_csr_f32(A: sp.csr_matrix) -> sp.csr_matrix:
 def _build_dedup_aggregator(
     var_names: np.ndarray,
     how: Literal["mean", "sum"] = "mean",
-    case_insensitive: bool = True,
+    case_insensitive: bool = False,
 ) -> Tuple[np.ndarray, sp.csr_matrix]:
     """
     Return (uniq_names, G) where X_uniq = X @ G collapses duplicate columns.
+
+    By default only identical names are duplicates; names that differ only by case
+    ('Actb', 'ACTB') are distinct features, consistent with `_match_gene_indices`
+    and with the 'first'/'last' modes of `morans_i_all_fast`.
     """
     names = np.asarray(var_names).astype(str)
     keys = np.char.upper(names) if case_insensitive else names
@@ -1777,6 +1800,9 @@ def morans_i_all_fast(
     Fast Moran's I for all genes with analytical p-values (randomization null).
     Uses the identity I = (n/S0) * (x^T W x) / (x^T x).
     Returns DataFrame ['gene','I', 'pval_z', 'z_score'] sorted by I desc.
+
+    `deduplicate` combines columns with identical names (all modes are
+    case-sensitive: 'Actb' and 'ACTB' are reported separately).
     """
     if W_rowstd is None:
         W_rowstd = build_rowstd_connectivities(adata, key=weights_key)
@@ -2685,7 +2711,9 @@ def tl_pacmap(
         How to initialize the embedding. Options are:
         - None: Let PaCMAP decide automatically based on feature count ('pca' or 'random').
         - 'paga': positions from `scanpy.pl.paga` (computed here if `sc.tl.paga` was run
-          but PAGA was not plotted yet).
+          but PAGA was not plotted yet). If the PAGA graph has no edges between groups
+          (fully disconnected clusters), positions are undefined and the default
+          initialisation is used, with a warning.
         - 'pca': PCA initialization.
         - 'random': Random initialization.
         - An `obsm` key (e.g., 'X_pca').
@@ -2763,14 +2791,26 @@ def tl_pacmap(
         **pmap_kwargs,
     )
 
+    if isinstance(init, str) and init == "paga":
+        if "paga" not in adata.uns:
+            raise ValueError("init='paga' needs `sc.tl.paga(adata, ...)` to be run first.")
+        paga = adata.uns["paga"]
+        if "pos" not in paga and sp.csr_matrix(paga["connectivities"]).count_nonzero() == 0:
+            # Fully disconnected groups: PAGA positions are undefined, and scanpy's
+            # layout (via igraph) fails on a graph without edges
+            warnings.warn(
+                "init='paga': the PAGA graph has no edges between groups (the groups are "
+                "disconnected in the neighbour graph), so PAGA positions are undefined. "
+                "Using the default initialisation instead."
+            )
+            init = None
+
     # Determine initialization method
     init_method = None
     if init is not None:
         if isinstance(init, str) and init == "paga":
             from scanpy.tools._utils import get_init_pos_from_paga
 
-            if "paga" not in adata.uns:
-                raise ValueError("init='paga' needs `sc.tl.paga(adata, ...)` to be run first.")
             if "pos" not in adata.uns["paga"]:
                 # The node positions are only computed by plotting PAGA
                 fig, ax = plt.subplots()
@@ -3503,6 +3543,9 @@ def filter_markers_by_moran(
     If fewer than `min_k` pass the threshold and `fallback_to_min_k` is True,
     backfill with the best-scoring genes (even if below threshold) until min_k.
 
+    A gene's score is taken from its exact (case-sensitive) row in `df_top_dict` when
+    one exists; with `case_insensitive=True` case variants are used only otherwise.
+
     Returns
     -------
     filtered_by_moran : dict
@@ -3521,10 +3564,14 @@ def filter_markers_by_moran(
 
     df["_key"] = df[gene_col].map(norm)
     # best score per gene
-    best = df.sort_values(score_col, ascending=False).drop_duplicates("_key")
+    ranked = df.sort_values(score_col, ascending=False)
+    best = ranked.drop_duplicates("_key")
     score_map = dict(zip(best["_key"], best[score_col]))
     # also map canonical name to return (use the 'gene' from DF if case differs)
     canon_map = dict(zip(best["_key"], best[gene_col]))
+    # an exact (case-sensitive) name wins over its case variants
+    exact = ranked.assign(_exact=ranked[gene_col].map(str)).drop_duplicates("_exact")
+    exact_score_map = dict(zip(exact["_exact"], exact[score_col]))
 
     filtered_by_moran = {}
     report = {}
@@ -3535,7 +3582,9 @@ def filter_markers_by_moran(
         missing_in_df = []
         for g in genes:
             key = norm(g)
-            if key in score_map and pd.notna(score_map[key]):
+            if str(g) in exact_score_map and pd.notna(exact_score_map[str(g)]):
+                present.append((g, float(exact_score_map[str(g)])))
+            elif key in score_map and pd.notna(score_map[key]):
                 # keep original symbol from filtered if it matches canon ignoring case,
                 # otherwise use DF's canon (helps unify case/alias differences)
                 out_name = g if norm(g) == norm(canon_map[key]) else canon_map[key]

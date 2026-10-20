@@ -3865,7 +3865,7 @@ def test_tl_pacmap_paga_init_without_plotting_paga():
     try:
         sc.tl.paga(a, groups="ct")
     except ValueError:
-        # sc.tl.paga fails with some scanpy/scipy pairs; build what it stores instead
+        # sc.tl.paga fails (python-igraph bug) when no edges cross groups; build what it stores instead
         C = np.full((4, 4), 0.2)
         np.fill_diagonal(C, 0.0)
         a.uns["paga"] = {
@@ -3875,5 +3875,101 @@ def test_tl_pacmap_paga_init_without_plotting_paga():
         }
     assert "pos" not in a.uns["paga"]
     tl_pacmap(a, init="paga")
+    assert a.obsm["X_pacmap"].shape == (a.n_obs, 2)
+    assert np.isfinite(a.obsm["X_pacmap"]).all()
+
+
+# =========================================
+# Source: scan residuals (score-column restore, exact gene names, edgeless PAGA)
+# =========================================
+
+
+def test_plot_marker_genes_dict_restores_existing_score_column():
+    a = _typed_log(n_per_type=40)
+    a.obsm["X_umap"] = np.random.default_rng(0).normal(size=(a.n_obs, 2))
+    user_values = np.arange(a.n_obs, dtype=float)
+    a.obs["T1_score_scanpy"] = user_values
+    a.obs["other"] = 1.0
+
+    axes = plot_marker_genes_dict_on_embedding(a, {"T1": ["G0", "G1", "G2"]})
+    plt.close("all")
+
+    assert "T1_score_scanpy" in [ax.get_title() for ax in axes]
+    np.testing.assert_array_equal(a.obs["T1_score_scanpy"].to_numpy(), user_values)
+    assert list(a.obs.columns) == ["ct", "T1_score_scanpy", "other"]
+
+
+def _case_variant_adata():
+    X = np.array([[5.0, 0.0, 1.0], [10.0, 0.0, 2.0], [15.0, 0.0, 3.0]])
+    a = AnnData(X)
+    a.var_names = ["Cd4", "CD4", "B"]
+    return a
+
+
+def test_exact_gene_name_wins_over_case_variants():
+    from eigenp_utils.single_cell import _extract_gene_matrix
+
+    a = _case_variant_adata()
+    # exact name present: only that column, not the mean with 'Cd4'
+    np.testing.assert_array_equal(_extract_gene_vector(a, "CD4"), [0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(_extract_gene_vector(a, "Cd4"), [5.0, 10.0, 15.0])
+    np.testing.assert_array_equal(
+        _extract_gene_matrix(a, ["CD4", "Cd4"]), [[0, 5], [0, 10], [0, 15]]
+    )
+    # no exact name: case-insensitive fallback combines all case variants
+    np.testing.assert_array_equal(_extract_gene_vector(a, "cd4"), [2.5, 5.0, 7.5])
+    np.testing.assert_array_equal(_extract_gene_matrix(a, ["cd4"]).ravel(), [2.5, 5.0, 7.5])
+    # identical names are still duplicates combined by the duplicate policy
+    b = AnnData(np.array([[1.0, 3.0], [2.0, 4.0]]))
+    b.var_names = ["A", "A"]
+    np.testing.assert_array_equal(_extract_gene_vector(b, "A"), [2.0, 3.0])
+
+
+def test_morans_dedup_modes_agree_on_case_variants():
+    rng = np.random.default_rng(0)
+    n = 60
+    coords = rng.normal(size=(n, 2))
+    smooth = coords[:, 0]
+    X = np.c_[smooth, rng.normal(size=n), smooth + 0.1 * rng.normal(size=n), smooth]
+    a = AnnData(X)
+    a.var_names = ["Gene1", "GENE1", "B", "B"]
+    a.obsm["X_pca"] = coords
+    sc.pp.neighbors(a, n_neighbors=8, use_rep="X_pca")
+
+    reported = {}
+    for mode in ("none", "mean", "sum", "first", "last"):
+        df = morans_i_all_fast(a, deduplicate=mode)
+        reported[mode] = sorted(df["gene"])
+    # case variants are distinct features in every mode; identical names collapse
+    assert reported["none"] == ["B", "B", "GENE1", "Gene1"]
+    for mode in ("mean", "sum", "first", "last"):
+        assert reported[mode] == ["B", "GENE1", "Gene1"], mode
+    I = morans_i_all_fast(a, deduplicate="mean").set_index("gene")["I"]
+    assert I["Gene1"] > 0.5 and I["GENE1"] < 0.3
+
+
+def test_filter_markers_by_moran_prefers_exact_name():
+    from eigenp_utils.single_cell import filter_markers_by_moran
+
+    df = pd.DataFrame({"gene": ["Actb", "ACTB", "Gapdh"], "I": [0.9, 0.05, 0.5]})
+    kept, report = filter_markers_by_moran(
+        {"x": ["ACTB", "GAPDH"]}, df, threshold=0.1, top_k=5, min_k=1,
+        fallback_to_min_k=False, verbose=False,
+    )
+    # ACTB's own score (0.05) is below threshold; Actb's 0.9 must not be used.
+    # GAPDH has no exact row, so its case variant's score (0.5) is used
+    # (the caller's spelling is kept).
+    assert kept["x"] == ["GAPDH"]
+
+
+def test_tl_pacmap_paga_init_with_disconnected_groups():
+    a = _typed_log(n_per_type=50)
+    sc.pp.pca(a, n_comps=10)
+    sc.pp.neighbors(a, n_neighbors=10)
+    # what sc.tl.paga describes for groups with no edges between them
+    Z = sp.csr_matrix((4, 4))
+    a.uns["paga"] = {"connectivities": Z, "connectivities_tree": Z, "groups": "ct"}
+    with pytest.warns(UserWarning, match="no edges between groups"):
+        tl_pacmap(a, init="paga")
     assert a.obsm["X_pacmap"].shape == (a.n_obs, 2)
     assert np.isfinite(a.obsm["X_pacmap"]).all()
