@@ -400,7 +400,7 @@ def _(mo):
     drive the transport figures in Part 3.
 
     The data are simulated with a known answer (Part 3 shows how, from a shape you can draw; the default
-    is a horseshoe-shaped trajectory). The gene names say what each gene is:
+    is a horseshoe-shaped trajectory with a side branch). The gene names say what each gene is:
 
     * `g07_t0.35`: a **trajectory gene**, expressed in a band of cells around position $t = 0.35$ along
       the trajectory. The true distance between two trajectory genes is the distance between their
@@ -959,9 +959,15 @@ def _(Path, ScatterWidget, mo, np, pal, wigglystuff):
             "p===0&&(C=g,g.click())", "p===0&&(C=g,setTimeout(()=>g.click(),0))"
         )
 
-    def _horseshoe(seed=3, R=130.0, cx=300.0, cy=180.0):
+    def _branched_horseshoe(seed=3, R=130.0, cx=370.0, cy=180.0, branch_len=200.0):
+        """A horseshoe with a side branch leaving its outer edge halfway along: a bifurcation."""
         rng = np.random.default_rng(seed)
         pts = []
+
+        def add(xs, ys, label, color):
+            for x, y in zip(xs, ys):
+                pts.append({"x": float(x), "y": float(y), "color": color, "label": label, "batch": 0})
+
         for label, color, lo, hi, n in [
             ("a", pal["a"], 35, 62, 22),
             ("c", "#9a9a9a", 62, 298, 120),
@@ -969,11 +975,17 @@ def _(Path, ScatterWidget, mo, np, pal, wigglystuff):
         ]:
             th = np.deg2rad(rng.uniform(lo, hi, n))
             r = R + rng.normal(0, 9, n)
-            for x, y in zip(cx + r * np.cos(th), cy + r * np.sin(th)):
-                pts.append({"x": float(x), "y": float(y), "color": color, "label": label, "batch": 0})
+            add(cx + r * np.cos(th), cy + r * np.sin(th), label, color)
+        # the branch starts on the arc at 180 degrees and heads outwards, away from the opening
+        root = np.array([cx - R, cy])
+        direction = np.array([-1.0, 0.0])
+        u = rng.uniform(0, branch_len, 45)
+        side = rng.normal(0, 9, 45)
+        xy = root + u[:, None] * direction + side[:, None] * np.array([-direction[1], direction[0]])
+        add(xy[:, 0], xy[:, 1], "c", "#9a9a9a")
         return pts
 
-    default_drawing = _horseshoe()
+    default_drawing = _branched_horseshoe()
     draw_widget = mo.ui.anywidget(CellCanvas(n_classes=3, width=640, height=360, brushsize=20, data=default_drawing))
     draw_widget
     return default_drawing, draw_widget
@@ -1107,7 +1119,7 @@ def _(mo):
     ### A dataset with a known answer, generated from your drawing
 
     To score metrics we need data where the true gene–gene distance is known. This dataset is built from
-    the canvas above (the horseshoe until you press the rebuild button under it): the drawing *is* the cell space.
+    the canvas above (a horseshoe with a side branch until you press the rebuild button under it): the drawing *is* the cell space.
 
     * **Cells** are sampled around the drawn points, with a little jitter.
     * **Trajectory genes** each peak at one drawn point; their expression falls off with the distance
@@ -1127,11 +1139,13 @@ def _(mo):
     Drawing strokes alone only update the quick A/B demo above.
 
     The figure checks the simulation. **Left:** cells in PCA, coloured by their position $t$ along the
-    drawing (geodesic distance from one end). With the default horseshoe, the two ends sit close in PCA
-    but far apart along the shape: exactly where a straight-line distance between cells misleads.
-    **Right:** read it like a stack of in situ stains. Each row is one trajectory gene (sorted by peak
-    position), each column one cell (sorted by $t$). The diagonal band is the structure a good distance
-    should recover.
+    drawing (geodesic distance from one end). With the default drawing, the two ends of the horseshoe sit
+    close in PCA but far apart along the shape: exactly where a straight-line distance between cells
+    misleads. **Right:** read it like a stack of in situ stains. Each row is one trajectory gene (sorted
+    by peak position), each column one cell (sorted by $t$). The diagonal band is the structure a good
+    distance should recover. Past the branch point the band splits in two: cells on the side branch
+    and on the main arc share the same values of $t$, so no single ordering of the cells lines up every
+    gene. That is why the distances below are computed on a graph of the cells, not along $t$.
     """)
     return
 
