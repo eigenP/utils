@@ -31,11 +31,17 @@ def _():
 @app.cell(hide_code=True)
 def _():
     # marimo-lens: agent-managed Lens cell
-    import marimo as _mo
-    from marimo_lens import Lens as _Lens
+    # Lens is a local pairing tool (installed in the pixi dev environment). Where marimo-lens is not
+    # installed, e.g. on molab, this cell does nothing.
+    import importlib.util as _ilu
 
-    _lens = _Lens()
-    _mo.output.append(_lens)
+    import marimo as _mo
+
+    if _ilu.find_spec("marimo_lens") is not None:
+        from marimo_lens import Lens as _Lens
+
+        _lens = _Lens()
+        _mo.output.append(_lens)
     return
 
 
@@ -141,6 +147,123 @@ def _(np):
 
 
 @app.cell(hide_code=True)
+def _(io, mo, np, plt):
+    import base64
+    from matplotlib.transforms import Bbox
+
+    # Responsive figure layout. Every figure is shown as one or more images in a flex row: side by
+    # side on wide screens, stacked below 700 px (and any arrows between them turn to point down).
+    _ROW_CSS = """
+    <style>
+    .rr-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:.25rem .75rem}
+    .rr-item{flex:1 1 var(--rr-min,260px);min-width:0;max-width:var(--rr-max,460px)}
+    .rr-item img{display:block;width:100%;height:auto}
+    .rr-arrow{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;color:#777;line-height:1.1}
+    .rr-arrow .rr-glyph{font-size:1.8rem}
+    .rr-arrow small{font-size:.72rem;max-width:7.5rem;text-align:center}
+    @media (max-width:700px){
+      .rr-row{flex-direction:column;align-items:stretch}
+      .rr-item{max-width:none}
+      .rr-arrow{flex-direction:row;justify-content:center;gap:.4rem}
+      .rr-arrow .rr-glyph{transform:rotate(90deg)}
+      .rr-arrow small{max-width:none}
+    }
+    </style>
+    """
+
+    def fig_to_img(fig, bbox_inches="tight", dpi=160):
+        """Render a Matplotlib figure (or a crop of it) to a width-responsive <img>."""
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi, bbox_inches=bbox_inches)
+        return f'<img alt="figure" src="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"/>'
+
+    def fig_row(*items, arrows=None, min_px=260, max_px=460):
+        """
+        Lay figures (or HTML strings / marimo objects) out in a row that stacks on narrow screens.
+
+        `arrows` (optional) holds one caption per gap; the arrow points right on wide screens and
+        turns to point down once the row stacks vertically (viewport < 700 px).
+        """
+        arrows = list(arrows or [])
+        parts = []
+        for i, item in enumerate(items):
+            if hasattr(item, "savefig"):
+                html = fig_to_img(item)
+                plt.close(item)
+            elif isinstance(item, str):
+                html = item
+            else:
+                html = mo.as_html(item).text
+            parts.append(f'<div class="rr-item">{html}</div>')
+            if i < len(arrows):
+                parts.append(f'<div class="rr-arrow"><span class="rr-glyph">&#10230;</span><small>{arrows[i]}</small></div>')
+        style = f"--rr-min:{min_px}px;--rr-max:{max_px}px"
+        return mo.Html(_ROW_CSS + f'<div class="rr-row" style="{style}">' + "".join(parts) + "</div>")
+
+    def fig_panels(fig, min_px=260, max_px=460, pad=0.08):
+        """
+        Show a multi-panel figure as one image per column of panels, laid out by `fig_row`, so the
+        columns stack on a phone instead of shrinking. Colourbars stay with the panel to their left;
+        figure-level text and legends (column headers, a shared legend) stay with the column they
+        sit over. A figure with a single column of panels is shown whole.
+        """
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        visible = [a for a in fig.axes if a.get_visible()]
+
+        def _is_cbar(a):
+            return a.get_label() == "<colorbar>"
+
+        def _centre(a):
+            q = a.get_position()
+            return (q.x0 + q.x1) / 2
+
+        cols = []
+        for a in sorted((a for a in visible if not _is_cbar(a)), key=lambda a: a.get_position().x0):
+            for col in cols:
+                if abs(_centre(a) - _centre(col[0])) < 0.05:
+                    col.append(a)
+                    break
+            else:
+                cols.append([a])
+        if len(cols) < 2:
+            return fig_row(fig, min_px=min_px, max_px=max(max_px, 720))
+
+        centres = [np.mean([_centre(a) for a in col]) for col in cols]
+        boxes = [[a.get_tightbbox(renderer) for a in col] for col in cols]
+        for a in visible:
+            if _is_cbar(a):
+                left = [i for i, col in enumerate(cols) if max(b.get_position().x1 for b in col) <= a.get_position().x0 + 1e-6]
+                boxes[left[-1] if left else 0].append(a.get_tightbbox(renderer))
+        figure_level = list(fig.texts) + list(fig.legends) + ([fig._suptitle] if fig._suptitle is not None else [])
+        for artist in figure_level:
+            ext = artist.get_window_extent(renderer)
+            xc = fig.transFigure.inverted().transform(((ext.x0 + ext.x1) / 2, 0))[0]
+            boxes[int(np.argmin([abs(xc - c) for c in centres]))].append(ext)
+        to_inches = fig.dpi_scale_trans.inverted()
+        imgs = [fig_to_img(fig, bbox_inches=Bbox.union(b).transformed(to_inches).padded(pad)) for b in boxes]
+        plt.close(fig)
+        return fig_row(*imgs, min_px=min_px, max_px=max_px)
+
+    return fig_panels, fig_row
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    # Page-wide CSS for small screens: wide display maths and Markdown tables scroll sideways
+    # inside their own box instead of widening the page.
+    mo.Html(
+        """
+        <style>
+        .katex-display{overflow-x:auto;overflow-y:hidden;padding-bottom:2px}
+        .markdown table, .prose table{display:block;overflow-x:auto;max-width:100%}
+        </style>
+        """
+    )
+    return
+
+
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     # How far apart are two genes? Pearson, Spearman, Wasserstein and graph optimal transport
@@ -188,7 +311,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(log_ticks, mo, np, pal, plt, wasserstein_distance):
+def _(fig_panels, log_ticks, mo, np, pal, plt, wasserstein_distance):
     def _three_views():
         rng = np.random.default_rng(0)
         t = np.sort(rng.uniform(0, 1, 600))
@@ -228,7 +351,7 @@ def _(log_ticks, mo, np, pal, plt, wasserstein_distance):
             fig.text((box.x0 + box.x1) / 2, 0.965, question, ha="center", fontsize=14, fontweight="bold")
         return fig
 
-    mo.as_html(_three_views())
+    fig_panels(_three_views())
     return
 
 
@@ -243,7 +366,100 @@ def _(mo):
 
     Only the right-hand column, which moves expression *along the cell order*, both rejects the
     shuffled copy and says how far B is from A. The rest of the notebook makes each column precise.
+    """)
+    return
 
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Part 0. The data: one matrix, two columns
+
+    Single-cell data arrive as an expression matrix $X \in \mathbb{R}^{n \times p}$: **rows are cells**
+    (`adata.obs`), **columns are genes** (`adata.var`), and $X_{ig}$ is the normalised expression of gene
+    $g$ in cell $i$. Every comparison in this notebook takes two columns,
+    $$x = X_{:,A}, \qquad y = X_{:,B},$$
+    and returns one number. The only question is *what else* the number is allowed to look at.
+
+    Row order carries no information: cells come off the sequencer in arbitrary order (left). Sorting the
+    rows by a 1D coordinate (here the position $t$ along the drawn trajectory; in practice a pseudotime or
+    any other cell ordering) is only for our eyes, but it makes the structure visible (middle): each
+    trajectory gene lights up in its own band of cells. The right panel pulls out the two columns under
+    comparison, gene A in blue and gene B in orange. The data are the dataset generated from your drawing
+    (built in Part 3); pick any two genes below. The same two selectors drive the transport figures in
+    Part 3.
+
+    Keep one fact in mind for Part 1: shuffling the rows of *both* columns together changes no metric in
+    this notebook. Shuffling *one* column alone is what correlation notices and 1D Wasserstein does not.
+    Try gene B = `perm_of_…`, a copy of a trajectory gene with its cells shuffled.
+    """)
+    return
+
+
+@app.cell
+def _(gene_a_dd, gene_b_dd, mo):
+    # the same two dropdowns as in Part 3; changing either one updates both places
+    mo.hstack([gene_a_dd, gene_b_dd], wrap=True, justify="start")
+    return
+
+
+@app.cell(hide_code=True)
+def _(adata, fig_row, gene_a_dd, gene_b_dd, genes_eval, mo, np, pal, plt):
+    from matplotlib.patches import Rectangle
+
+    _cols = list(genes_eval) + [g for g in adata.var_names if g.startswith("noise")][:15]
+    _Xs = np.asarray(adata[:, _cols].X)
+    _t = adata.obs["t"].to_numpy()
+    _order = np.argsort(_t)
+    _vmax = np.percentile(_Xs, 99)
+    _ia, _ib = _cols.index(gene_a_dd.value), _cols.index(gene_b_dd.value)
+
+    def _matrix_panel(rows, title):
+        fig, (ax_s, ax) = plt.subplots(
+            1, 2, figsize=(3.6, 4.4), sharey=True, gridspec_kw={"width_ratios": [1, 14], "wspace": 0.04}
+        )
+        # left strip: each cell's position t along the 1D coordinate
+        ax_s.imshow(_t[rows, None], aspect="auto", cmap="viridis", vmin=0, vmax=1, interpolation="nearest")
+        ax_s.set_xticks([])
+        ax_s.set_ylabel(f"cells, n = {len(rows)}")
+        ax.imshow(_Xs[rows], aspect="auto", cmap="Purples", vmin=0, vmax=_vmax, interpolation="nearest")
+        for j, c, lab in ((_ia, pal["a"], "A"), (_ib, pal["b"], "B")):
+            ax.add_patch(Rectangle((j - 0.5, -0.5), 1, len(rows), fill=False, edgecolor=c, lw=2.2))
+            ax.text(j, -0.03 * len(rows), lab, color=c, ha="center", va="bottom", fontsize=12, fontweight="bold")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel(f"genes, p = {len(_cols)}")
+        ax.set_title(title, fontsize=12, pad=30)
+        return fig
+
+    _fig1 = _matrix_panel(np.arange(adata.n_obs), "X, cells as acquired")
+    _fig2 = _matrix_panel(_order, "rows sorted by t")
+
+    _fig3, _axs = plt.subplots(1, 2, figsize=(3.2, 4.4), sharey=True, gridspec_kw={"wspace": 0.08})
+    _ypos = np.arange(adata.n_obs)
+    _k = max(adata.n_obs // 40, 5)
+    for _ax, _j, _c, _lab in ((_axs[0], _ia, pal["a"], "x = X[:, A]"), (_axs[1], _ib, pal["b"], "y = X[:, B]")):
+        _v = _Xs[_order, _j]
+        _ax.scatter(_v, _ypos, s=1.5, color=_c, alpha=0.25, rasterized=True, lw=0)
+        _ax.plot(np.convolve(_v, np.ones(_k) / _k, mode="same"), _ypos, color=_c, lw=2)
+        _ax.set_title(_lab, color=_c, fontsize=11)
+        _ax.set_xlabel("expression\n[log(1 + CP10k)]")
+        _ax.tick_params(labelsize=9)
+    _axs[0].set_ylim(adata.n_obs - 0.5, -0.5)
+    _axs[0].set_yticks([])
+    _axs[0].set_ylabel("cells, sorted by t")
+    _fig3.suptitle("the two columns we compare", fontsize=12, y=1.02)
+
+    mo.vstack([
+        fig_row(_fig1, _fig2, _fig3, arrows=["sort rows (cells) by their 1D coordinate t", "take columns A and B"], min_px=220, max_px=340),
+        mo.Html('<div style="font-size:.8rem;color:#666;text-align:center">colour strip = position t along the 1D coordinate (dark = start, yellow = end); line = running mean</div>'),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     ## Part 1. Pearson and Spearman: co-variation in the same cells
 
     Let $x, y \in \mathbb{R}^n$ be the expression of two genes over the same $n$ cells, and $z_x, z_y$
@@ -330,7 +546,7 @@ def _(dropout_sl, noise_sl, np, relation_dd):
 
 
 @app.cell(hide_code=True)
-def _(mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
+def _(fig_panels, mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
     _m = pair_metrics(pair_x, pair_y)
     _fig, _axes = plt.subplots(1, 2, figsize=(9.5, 3.9))
     _axes[0].scatter(pair_x, pair_y, s=6, alpha=0.5, color=pal["dark"], lw=0)
@@ -342,7 +558,7 @@ def _(mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
     for _ax in _axes:
         _ax.set_box_aspect(1)
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -376,7 +592,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
+def _(fig_panels, mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
     def _split(x, y):
         m = pair_metrics(x, y)
         return m["W2²(z_x, z_y)"], 2 * m["coupling gap r_max − r"]
@@ -394,7 +610,7 @@ def _(mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
     _ax.set_xlabel("2 − 2r, distance from perfect agreement [SD²] (0 = identical z-scores)")
     _ax.legend(loc=(1.02, 0.25))
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -435,7 +651,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo, np, pair_metrics, pair_x, pair_y, pal, plt, zscore_pop):
+def _(fig_panels, mo, np, pair_metrics, pair_x, pair_y, pal, plt, zscore_pop):
     _zx, _zy = zscore_pop(pair_x), zscore_pop(pair_y)
     _w1 = pair_metrics(pair_x, pair_y)["W1(z_x, z_y)"]
     _fig, _axes = plt.subplots(1, 3, figsize=(12, 3.5), gridspec_kw={"width_ratios": [1.1, 1, 1]})
@@ -466,7 +682,7 @@ def _(mo, np, pair_metrics, pair_x, pair_y, pal, plt, zscore_pop):
         _ax.set_xlabel("z-score [SD]")
         _ax.set_title(_title, fontsize=11)
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -483,7 +699,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo, pair_metrics, pair_x, pair_y, pair_y_shuffled, pal, plt):
+def _(fig_panels, mo, pair_metrics, pair_x, pair_y, pair_y_shuffled, pal, plt):
     _orig, _shuf = pair_metrics(pair_x, pair_y), pair_metrics(pair_x, pair_y_shuffled)
     _keys = [("pearson r", "Pearson r"), ("spearman ρ", "Spearman ρ"), ("W1(z_x, z_y)", "$W_1$ on z-scores")]
     _fig, _axes = plt.subplots(1, 3, figsize=(10, 2.9))
@@ -499,7 +715,7 @@ def _(mo, pair_metrics, pair_x, pair_y, pair_y_shuffled, pal, plt):
         _ax.set_title(_label, fontsize=11)
         _ax.set_ylabel({"pearson r": "Pearson r", "spearman ρ": "Spearman ρ", "W1(z_x, z_y)": "$W_1$ [SD]"}[_k])
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -561,7 +777,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo, np, pal, plt, shift_sl):
+def _(fig_panels, mo, np, pal, plt, shift_sl):
     def _path_metrics(s, w=0.05, n=400):
         xs = np.linspace(0, 1, n)
         a = np.exp(-((xs - (0.5 - s / 2)) ** 2) / (2 * w**2))
@@ -586,7 +802,7 @@ def _(mo, np, pal, plt, shift_sl):
     _axes[1].axvline(shift_sl.value, color=pal["light"], ls=":")
     _axes[1].set(xlabel="true separation s [pseudotime units]", ylabel="reported distance\n($W_1$ in pseudotime units; 1 − r unitless)", ylim=(0, 1.45))
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -703,7 +919,15 @@ def _(Path, ScatterWidget, mo, np, pal, wigglystuff):
     _ours = f'["{pal["a"]}","{pal["b"]}","#9a9a9a","#d62728"]'
 
     class CellCanvas(ScatterWidget):
-        _esm = _js.replace(_default, _ours)
+        # Two patches to wigglystuff's scatter-widget.js: our class colours, and a fix for an upstream
+        # bug. While building the class buttons, render() auto-clicks the first one, and that click
+        # handler touches the brush cursor `B`, which is declared later in render(): a temporal-dead-zone
+        # ReferenceError that aborts rendering (the canvas shows up empty, seen in app mode). Deferring
+        # the first click until render() has returned fixes it. Both replacements are no-ops if a future
+        # wigglystuff changes this code.
+        _esm = _js.replace(_default, _ours).replace(
+            "p===0&&(C=g,g.click())", "p===0&&(C=g,setTimeout(()=>g.click(),0))"
+        )
 
     def _horseshoe(seed=3, R=130.0, cx=300.0, cy=180.0):
         rng = np.random.default_rng(seed)
@@ -747,6 +971,7 @@ def _(draw_widget, get_drawing, mo, set_drawing):
 def _(
     beckmann_w1,
     draw_widget,
+    fig_panels,
     knn_graph,
     mo,
     np,
@@ -840,7 +1065,7 @@ def _(
             },
             index=["gene A vs gene B"],
         ).round(3)
-        return mo.vstack([mo.as_html(fig), table])
+        return mo.vstack([fig_panels(fig), table])
 
     draw_two_genes(draw_widget.widget.data)
     return
@@ -1018,7 +1243,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(adata, mo, np, pal, plt):
+def _(adata, fig_panels, mo, np, pal, plt):
     _fig, _axes = plt.subplots(1, 2, figsize=(12, 4.2), gridspec_kw={"width_ratios": [1, 1.25]})
     _pc = adata.obsm["X_pca"]
     _t = adata.obs["t"].to_numpy()
@@ -1037,7 +1262,7 @@ def _(adata, mo, np, pal, plt):
     _axes[1].set(xlabel="cells, ordered by t", ylabel="trajectory genes,\nordered by peak", xticks=[])
     _axes[1].set_title("expression program", fontsize=12)
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -1097,7 +1322,7 @@ def _(adata, build_metacell_graph, genes_eval, k_meta_sl, n_meta_sl, np):
 
 
 @app.cell(hide_code=True)
-def _(adata, meta, mo, np, pal, pd, pdist, plt, squareform):
+def _(adata, fig_panels, meta, mo, np, pal, pd, pdist, plt, squareform):
     _xy = meta["centroids"][:, :2]
     _pc = adata.obsm["X_pca"]
     _t = pd.Series(adata.obs["t"].to_numpy()).groupby(meta["labels"]).mean().to_numpy()
@@ -1120,7 +1345,7 @@ def _(adata, meta, mo, np, pal, pd, pdist, plt, squareform):
     _far = (np.abs(_t[:, None] - _t[None]) > 0.5)[_iu]
 
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -1160,15 +1385,16 @@ def _(mo):
 def _(adata, genes_eval, mo):
     _v = adata.var.loc[genes_eval]
     _traj = _v[_v["kind"] == "trajectory"]
-    gene_a_dd = mo.ui.dropdown(genes_eval, value=_traj["peak_t"].idxmin(), label="gene A")
-    gene_b_dd = mo.ui.dropdown(genes_eval, value=_traj["peak_t"].idxmax(), label="gene B")
-    mo.hstack([gene_a_dd, gene_b_dd])
+    gene_a_dd = mo.ui.dropdown(genes_eval, value=_traj["peak_t"].idxmin(), label="gene A", searchable=True)
+    gene_b_dd = mo.ui.dropdown(genes_eval, value=_traj["peak_t"].idxmax(), label="gene B", searchable=True)
+    mo.hstack([gene_a_dd, gene_b_dd], wrap=True, justify="start")
     return gene_a_dd, gene_b_dd
 
 
 @app.cell(hide_code=True)
 def _(
     beckmann_w1,
+    fig_panels,
     gene_a_dd,
     gene_b_dd,
     gene_dist,
@@ -1216,7 +1442,7 @@ def _(
     _axes[2].scatter(*_xy.T, s=3, color=pal["mid"], lw=0)
     _axes[2].set_title(f"flow: traffic along each graph edge\n$W_1$ = {_w1_flow:.4f}", fontsize=11)
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -1400,6 +1626,7 @@ def _(
     adata,
     dist_secs,
     dists,
+    fig_panels,
     genes_eval,
     level_w1,
     log_ticks,
@@ -1447,7 +1674,7 @@ def _(
     # one shared legend above the panels (the hollow k-means marker appears in two of them)
     _fig.legend(*_axes[0].get_legend_handles_labels(), loc="upper center", ncol=2, bbox_to_anchor=(0.5, 1.0))
     _fig.tight_layout(rect=(0, 0, 1, 0.9))
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -1497,6 +1724,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     adata,
+    fig_panels,
     gene_a_dd,
     gene_b_dd,
     mo,
@@ -1582,7 +1810,7 @@ def _(
     _axes[1, 0].set_title(f"edge terms in PCA: tree $W_1$ = {_total:.2f}", fontsize=11)
     _axes[1, 1].set_title(f"edge terms on the dendrogram ({100 * _leaf / _total:.0f}% of $W_1$ is in the undrawn cell → cluster edges)", fontsize=11)
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -1709,7 +1937,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo, np, pal, pd, plt, ring_res):
+def _(fig_panels, mo, np, pal, pd, plt, ring_res):
     _iu = np.triu_indices(len(ring_res["truth"]), 1)
     _t, _split = ring_res["truth"][_iu], ring_res["split"][_iu]
     _fig, _axes = plt.subplots(1, 3, figsize=(13, 3.8))
@@ -1730,7 +1958,7 @@ def _(mo, np, pal, pd, plt, ring_res):
     _axes[2].set_title(f"graph $W_1$, {ring_res['n_mid']}-cluster level:\nρ = {pd.Series(ring_res['D_graph'][_iu]).corr(pd.Series(_t), method='spearman'):.3f}", fontsize=11)
     _axes[2].legend(loc=(0.6, 0.15), markerscale=2.5)
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -1835,6 +2063,7 @@ def _(mo):
 def _(
     dist_secs,
     dists,
+    fig_panels,
     genes_eval,
     log_ticks,
     mo,
@@ -1866,7 +2095,7 @@ def _(
     log_ticks(_axes[1].xaxis)
     _axes[1].set_xlabel(f"runtime for {len(genes_eval)} genes = {len(_x)} pairs [s] (log scale)")
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -1931,7 +2160,7 @@ def _(adata, dists, genes_eval, np, pd, true_distance):
 
 
 @app.cell(hide_code=True)
-def _(log_ticks, mo, pal, plt, score_df):
+def _(fig_panels, log_ticks, mo, pal, plt, score_df):
     _s = score_df.sort_values("ρ(GT)")
     _fig, _axes = plt.subplots(1, 2, figsize=(11, 3.3), sharey=True)
     _axes[0].barh(_s.index, _s["ρ(GT)"], color=pal["dark"], height=0.6)
@@ -1943,9 +2172,10 @@ def _(log_ticks, mo, pal, plt, score_df):
         _axes[1].text(_v * 1.1, _k, f"{_v:.0f}", va="center", fontsize=10)
     _axes[1].set(xlabel="rank of source gene for its shuffled copy\n(log scale; 1 = fooled)", xscale="log")
     _axes[1].set_xlim(0.7, _s["perm→source rank"].max() * 3)
+    _axes[1].tick_params(labelleft=True)  # keep method names when panels stack on a phone
     log_ticks(_axes[1].xaxis)
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
@@ -2075,7 +2305,7 @@ def _(dists, mo):
 
 
 @app.cell(hide_code=True)
-def _(Line2D, adata, dists, embed_dd, genes_eval, mo, np, pal, plt):
+def _(Line2D, adata, dists, embed_dd, fig_panels, genes_eval, mo, np, pal, plt):
     def diffusion_map_from_distance(D, k=5, n_comp=2):
         D = np.asarray(D, float)
         sig = np.sort(D, axis=1)[:, k]
@@ -2109,7 +2339,7 @@ def _(Line2D, adata, dists, embed_dd, genes_eval, mo, np, pal, plt):
     _ax.legend(handles=_handles, loc=(1.36, 0.3))
     _ax.set(xlabel="DC1", ylabel="DC2", title=f"gene diffusion map: {embed_dd.value}")
     _fig.tight_layout()
-    mo.as_html(_fig)
+    fig_panels(_fig)
     return
 
 
