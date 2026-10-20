@@ -1,0 +1,43 @@
+[workspace]
+name = "eigenp-utils"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "osx-64", "win-64"]
+
+# Runtime deps of the library and its extras (plotting, single-cell, image-analysis).
+[dependencies]
+python = "3.12.*"
+numpy = "*"
+scipy = "*"
+pandas = "*"
+matplotlib = "*"
+scikit-learn = "*"
+scikit-image = "*"
+anndata = "*"
+scanpy = "*"
+leidenalg = "*"
+python-lsp-server = ">=1.15.0,<2"
+websockets = ">=17.2,<18"
+python-lsp-ruff = ">=2.3.4,<3"
+
+[pypi-dependencies]
+# Local package, editable so changes in src/ are picked up by notebooks.
+eigenp-utils = { path = ".", editable = true, extras = ["plotting", "single-cell", "image-analysis"] }
+
+# Dev only: tests, notebooks, and POT as the reference OT solver for cross-checks.
+[feature.dev.dependencies]
+marimo = "*"
+pytest = "*"
+pot = "*"
+
+[feature.dev.pypi-dependencies]
+wigglystuff = "*"
+marimo-lens = ">=0.2.4, <0.3"
+
+[feature.dev.tasks]
+notebook = "marimo edit --no-sandbox --no-token notebooks/blog_gene_distances_ot.py"
+test = "pytest tests"
+
+[environments]
+default = ["dev"]
+# Library without dev tools, e.g. to check nothing in src/ imports POT or marimo.
+lib = []
