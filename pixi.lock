@@ -359,6 +359,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/da/45/ede6d644008022592ba97211a562eca7cce527a0adc061028716fa20d34f/libpysal-4.15.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/db/6c/f940133c71427c208575910e981942bd78c98b1f7cd0d1425ca4b7457c04/wcwidth-0.9.2-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/e5/7d/905a3a3d51087515719058c94cfbda2ff0fc14417c20d557ae3e82d8b250/plotly-7.1.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/ec/52/3ba0bb75fe3d9a6d2edbe82463dfbc05f5f665ffa28fb4f123083a673071/scikit_misc-0.5.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/f1/7b/ce1eafaf1a76852e2ec9b22edecf1daa58175c090266e9f6c64afcd81d91/stack_data-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f1/ef/19390fa617d0417dd432d14a10eb5735a5513d7b6aebb357b10900d42af8/statannotations-0.7.2-py3-none-any.whl
       osx-64:
@@ -620,6 +621,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/6d/18/83376915176eb058cb86470eb7396388a13350b09a8f233a79303bbcbc5b/pure_eval-0.2.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/09/4c59d56b8461ae8eb0d8ba34bb25b7e618547044679d58a82ef9b2479fc1/markupsafe-3.0.4-cp312-cp312-macosx_10_13_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/8b/29/c82e425df0eccad26583225c2fc44470dfb5f731e111d37794a92aa8df93/scikit_misc-0.5.3.tar.gz
       - pypi: https://files.pythonhosted.org/packages/8b/e0/fce035140da2730aaf0816dd49b6660d9feb91c6fe5cad7485517c80affd/agent_plugins-0.2.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/c2/8fec8e8e2eb920cc2280f569144080cd58622a2eda83bfa4c0c354a63264/anywidget-0.11.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl
@@ -921,6 +923,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/e7/c8/693809898870237d82785a03f3b2b58fe4c9f14669f84a7d4e623c92a59e/charset_normalizer-3.5.2-cp312-cp312-macosx_10_13_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/f1/7b/ce1eafaf1a76852e2ec9b22edecf1daa58175c090266e9f6c64afcd81d91/stack_data-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f1/ef/19390fa617d0417dd432d14a10eb5735a5513d7b6aebb357b10900d42af8/statannotations-0.7.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/f8/93/2851c7467b831a4b31899fb6d1bdc3ef70c397fd48b6b2ca553d4ffbabe3/scikit_misc-0.5.3-cp312-cp312-macosx_11_0_arm64.whl
       win-64:
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_3.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/anndata-0.13.4-pyhd8ed1ab_0.conda
@@ -1158,6 +1161,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/zstd-1.5.7-h534d264_7.conda
       - pypi: ./
       - pypi: https://files.pythonhosted.org/packages/0f/79/fb0d346499b08a2b0e48b07e57870c8ed5c6317f7e2f596d9b6eda7069ad/triku-2.2.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/22/1a/02500336853d92ae5543d1b5884afdadefa9116c3da5fe926f44588de29b/scikit_misc-0.5.3-cp312-cp312-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/2d/1e/65b59cf518c106aa755e7f7da3099027738687a862ec785060702a481320/ipython-9.17.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/33/ef/6d27fc118f58cb24886da413545a7efb0853d405fddbfd8b2d9ac09fbed4/jupyterlab_widgets-3.0.17-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/34/95/40e17e20046b7bc820d29d09ae84ec157ec8dd6e6f6cd722626292c31b2e/widgetsnbextension-4.0.16-py3-none-any.whl
@@ -1512,6 +1516,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/da/45/ede6d644008022592ba97211a562eca7cce527a0adc061028716fa20d34f/libpysal-4.15.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/db/6c/f940133c71427c208575910e981942bd78c98b1f7cd0d1425ca4b7457c04/wcwidth-0.9.2-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/e5/7d/905a3a3d51087515719058c94cfbda2ff0fc14417c20d557ae3e82d8b250/plotly-7.1.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/ec/52/3ba0bb75fe3d9a6d2edbe82463dfbc05f5f665ffa28fb4f123083a673071/scikit_misc-0.5.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/f1/7b/ce1eafaf1a76852e2ec9b22edecf1daa58175c090266e9f6c64afcd81d91/stack_data-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f1/ef/19390fa617d0417dd432d14a10eb5735a5513d7b6aebb357b10900d42af8/statannotations-0.7.2-py3-none-any.whl
       osx-64:
@@ -1750,6 +1755,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/09/4c59d56b8461ae8eb0d8ba34bb25b7e618547044679d58a82ef9b2479fc1/markupsafe-3.0.4-cp312-cp312-macosx_10_13_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/8b/29/c82e425df0eccad26583225c2fc44470dfb5f731e111d37794a92aa8df93/scikit_misc-0.5.3.tar.gz
       - pypi: https://files.pythonhosted.org/packages/8e/c2/8fec8e8e2eb920cc2280f569144080cd58622a2eda83bfa4c0c354a63264/anywidget-0.11.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9e/c3/059298687310d527a58bb01f3b1965787ee3b40dce76752eda8b44e9a2c5/pexpect-4.9.0-py2.py3-none-any.whl
@@ -2024,6 +2030,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/e7/c8/693809898870237d82785a03f3b2b58fe4c9f14669f84a7d4e623c92a59e/charset_normalizer-3.5.2-cp312-cp312-macosx_10_13_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/f1/7b/ce1eafaf1a76852e2ec9b22edecf1daa58175c090266e9f6c64afcd81d91/stack_data-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f1/ef/19390fa617d0417dd432d14a10eb5735a5513d7b6aebb357b10900d42af8/statannotations-0.7.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/f8/93/2851c7467b831a4b31899fb6d1bdc3ef70c397fd48b6b2ca553d4ffbabe3/scikit_misc-0.5.3-cp312-cp312-macosx_11_0_arm64.whl
       win-64:
       - conda: https://conda.anaconda.org/conda-forge/noarch/anndata-0.13.4-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/annotated-types-0.8.0-pyhd8ed1ab_0.conda
@@ -2237,6 +2244,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/zstd-1.5.7-h534d264_7.conda
       - pypi: ./
       - pypi: https://files.pythonhosted.org/packages/0f/79/fb0d346499b08a2b0e48b07e57870c8ed5c6317f7e2f596d9b6eda7069ad/triku-2.2.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/22/1a/02500336853d92ae5543d1b5884afdadefa9116c3da5fe926f44588de29b/scikit_misc-0.5.3-cp312-cp312-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/2d/1e/65b59cf518c106aa755e7f7da3099027738687a862ec785060702a481320/ipython-9.17.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/33/ef/6d27fc118f58cb24886da413545a7efb0853d405fddbfd8b2d9ac09fbed4/jupyterlab_widgets-3.0.17-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/34/95/40e17e20046b7bc820d29d09ae84ec157ec8dd6e6f6cd722626292c31b2e/widgetsnbextension-4.0.16-py3-none-any.whl
@@ -13484,6 +13492,7 @@ packages:
   - scipy
   - plotly ; extra == 'plotting'
   - statannotations ; extra == 'plotting'
+  - statsmodels ; extra == 'plotting'
   - pacmap>=0.7.3 ; extra == 'single-cell'
   - scanpy ; extra == 'single-cell'
   - anndata ; extra == 'single-cell'
@@ -13492,6 +13501,7 @@ packages:
   - triku ; extra == 'single-cell'
   - leidenalg ; extra == 'single-cell'
   - adjusttext ; extra == 'single-cell'
+  - scikit-misc ; extra == 'single-cell'
   - pytest>=7.0.0 ; extra == 'dev'
   - marimo ; extra == 'dev'
   - pot ; extra == 'dev'
@@ -13548,6 +13558,30 @@ packages:
   - pytest-cov ; extra == 'test'
   - pytest-benchmark ; extra == 'benchmark'
   - geopandas ; extra == 'geopandas'
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/22/1a/02500336853d92ae5543d1b5884afdadefa9116c3da5fe926f44588de29b/scikit_misc-0.5.3-cp312-cp312-win_amd64.whl
+  name: scikit-misc
+  version: 0.5.3
+  sha256: c5b9e36ea639c87c033ae0981b358925d24119401163ddfb83676dd9465623c0
+  requires_dist:
+  - numpy>=1.26.4
+  - scikit-misc[doc] ; extra == 'all'
+  - scikit-misc[build] ; extra == 'all'
+  - scikit-misc[lint] ; extra == 'all'
+  - scikit-misc[test] ; extra == 'all'
+  - scikit-misc[dev] ; extra == 'all'
+  - numpydoc ; extra == 'doc'
+  - sphinx ; extra == 'doc'
+  - cython ; extra == 'build'
+  - build ; extra == 'build'
+  - spin ; extra == 'build'
+  - meson ; extra == 'build'
+  - meson-python ; extra == 'build'
+  - ninja ; extra == 'build'
+  - ruff ; extra == 'lint'
+  - pytest-cov ; extra == 'test'
+  - wheel ; extra == 'dev'
+  - twine ; extra == 'dev'
   requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/22/a6/858897256d0deac81a172289110f31629fc4cee19b6f01283303e18c8db3/ptyprocess-0.7.0-py2.py3-none-any.whl
   name: ptyprocess
@@ -13938,6 +13972,30 @@ packages:
   - html5lib ; extra == 'html5lib'
   - lxml ; extra == 'lxml'
   requires_python: '>=3.7.0'
+- pypi: https://files.pythonhosted.org/packages/8b/29/c82e425df0eccad26583225c2fc44470dfb5f731e111d37794a92aa8df93/scikit_misc-0.5.3.tar.gz
+  name: scikit-misc
+  version: 0.5.3
+  sha256: ae1bd75c9f903295dd4e90af8d28d09d31a5e6432909f89927da231b3fbcc1e1
+  requires_dist:
+  - numpy>=1.26.4
+  - scikit-misc[doc] ; extra == 'all'
+  - scikit-misc[build] ; extra == 'all'
+  - scikit-misc[lint] ; extra == 'all'
+  - scikit-misc[test] ; extra == 'all'
+  - scikit-misc[dev] ; extra == 'all'
+  - numpydoc ; extra == 'doc'
+  - sphinx ; extra == 'doc'
+  - cython ; extra == 'build'
+  - build ; extra == 'build'
+  - spin ; extra == 'build'
+  - meson ; extra == 'build'
+  - meson-python ; extra == 'build'
+  - ninja ; extra == 'build'
+  - ruff ; extra == 'lint'
+  - pytest-cov ; extra == 'test'
+  - wheel ; extra == 'dev'
+  - twine ; extra == 'dev'
+  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/8b/e0/fce035140da2730aaf0816dd49b6660d9feb91c6fe5cad7485517c80affd/agent_plugins-0.2.4-py3-none-any.whl
   name: agent-plugins
   version: 0.2.4
@@ -14510,6 +14568,30 @@ packages:
   version: 3.5.2
   sha256: 780fbe7cab297b81dad9fb8dc5eb003c0468ffb0d9e5f65068c53a34661a96bc
   requires_python: '>=3.7'
+- pypi: https://files.pythonhosted.org/packages/ec/52/3ba0bb75fe3d9a6d2edbe82463dfbc05f5f665ffa28fb4f123083a673071/scikit_misc-0.5.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
+  name: scikit-misc
+  version: 0.5.3
+  sha256: 1861b2fa1619dd6645154cdb7d9696d71f0a0e7ef8f5201f1e7bacf21507c858
+  requires_dist:
+  - numpy>=1.26.4
+  - scikit-misc[doc] ; extra == 'all'
+  - scikit-misc[build] ; extra == 'all'
+  - scikit-misc[lint] ; extra == 'all'
+  - scikit-misc[test] ; extra == 'all'
+  - scikit-misc[dev] ; extra == 'all'
+  - numpydoc ; extra == 'doc'
+  - sphinx ; extra == 'doc'
+  - cython ; extra == 'build'
+  - build ; extra == 'build'
+  - spin ; extra == 'build'
+  - meson ; extra == 'build'
+  - meson-python ; extra == 'build'
+  - ninja ; extra == 'build'
+  - ruff ; extra == 'lint'
+  - pytest-cov ; extra == 'test'
+  - wheel ; extra == 'dev'
+  - twine ; extra == 'dev'
+  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/ef/f9/058cd6dbdc2dee03e9ea65e81e8265244daa3e46536063de24cd58efff67/psygnal-0.16.1-cp312-cp312-macosx_10_13_x86_64.whl
   name: psygnal
   version: 0.16.1
@@ -14554,3 +14636,27 @@ packages:
   requires_dist:
   - numpy>=1.26
   requires_python: '>=3.11'
+- pypi: https://files.pythonhosted.org/packages/f8/93/2851c7467b831a4b31899fb6d1bdc3ef70c397fd48b6b2ca553d4ffbabe3/scikit_misc-0.5.3-cp312-cp312-macosx_11_0_arm64.whl
+  name: scikit-misc
+  version: 0.5.3
+  sha256: 64a7f19ced9bb8696312b6f19cead5afd7af3f089d8b5cb18c3826539e3e8259
+  requires_dist:
+  - numpy>=1.26.4
+  - scikit-misc[doc] ; extra == 'all'
+  - scikit-misc[build] ; extra == 'all'
+  - scikit-misc[lint] ; extra == 'all'
+  - scikit-misc[test] ; extra == 'all'
+  - scikit-misc[dev] ; extra == 'all'
+  - numpydoc ; extra == 'doc'
+  - sphinx ; extra == 'doc'
+  - cython ; extra == 'build'
+  - build ; extra == 'build'
+  - spin ; extra == 'build'
+  - meson ; extra == 'build'
+  - meson-python ; extra == 'build'
+  - ninja ; extra == 'build'
+  - ruff ; extra == 'lint'
+  - pytest-cov ; extra == 'test'
+  - wheel ; extra == 'dev'
+  - twine ; extra == 'dev'
+  requires_python: '>=3.10'
