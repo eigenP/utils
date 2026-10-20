@@ -31,23 +31,35 @@ xtick.top: False
 xtick.direction: out
 xtick.major.size: 4
 xtick.major.width: 2
-xtick.minor.size: 2
-xtick.minor.width: 2
+xtick.minor.size: 2.5    # minor ticks (visible on log axes): shorter and thinner than majors
+xtick.minor.width: 1
 
 # y-axis
 ytick.right: False
 ytick.direction: out
 ytick.major.size: 4
 ytick.major.width: 2
-ytick.minor.size: 2
-ytick.minor.width: 2
+ytick.minor.size: 2.5    # minor ticks (visible on log axes): shorter and thinner than majors
+ytick.minor.width: 1
 
 # Line properties
 lines.linewidth: 2
 
 # Legend properties
+# ~20% smaller than the base font, with a pale rounded frame so the box never reads as data
+legend.fontsize: 11
+legend.title_fontsize: 11
+legend.markerscale: 0.8
+legend.handlelength: 1.6
+legend.handleheight: 0.56
+legend.handletextpad: 0.6
+legend.labelspacing: 0.4
+legend.borderpad: 0.5
+legend.frameon: True
+legend.fancybox: True
 legend.framealpha: 1
-legend.frameon: False
+legend.facecolor: FFFFFF
+legend.edgecolor: E3E3E3
 
 # Grid Properies
 axes.grid          : False

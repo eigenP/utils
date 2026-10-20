@@ -17,3 +17,6 @@ ignored_tmp/
 .claude/settings.local.json
 .claude/worktrees/
 node_modules/
+
+# pixi environments
+.pixi/
