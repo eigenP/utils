@@ -266,9 +266,9 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # How far apart are two genes? Pearson, Spearman, Wasserstein and graph optimal transport
+    # How far apart are two genes? Pearson, Spearman, Wasserstein, and graph and tree optimal transport
 
-    "Find me genes in my dataset that are expressed like *BRCA1*" sounds like one question. But there are many ways to intepret _"like"_ - each similarity metric below anwers a different question:
+    "Find me genes in my dataset that are expressed like *BRCA1*" sounds like one question. But there are many ways to interpret _"like"_, and each similarity metric below answers a different question:
 
     $$
     \begin{array}{ccc}
@@ -282,15 +282,26 @@ def _(mo):
     "Cell space" means the space the cells live in after embedding (PCA, a kNN graph, a diffusion map):
     nearby cells in the embedding (manifold) are in similar states.
 
+    **The short answer**, which the rest of the notebook backs up:
+
+    | if your question is… | use | because |
+    |---|---|---|
+    | which genes rise and fall with X *in the same cells* (co-regulation) | Spearman | it ignores histogram shape, which Pearson counts against the pair (Part 1) |
+    | which genes are expressed *in the same region of cell space* as X, and how far apart | graph $W_1$, or tree $W_1$ for many genes | it keeps measuring distance after expression stops overlapping (Parts 3–4) |
+    | which genes have the same *value histogram* as X | 1D $W_1$ on values | but this is not co-expression: it cannot tell a gene from a cell-shuffled copy (Part 2) |
 
     **Roadmap.**
 
+    0. **The data**: one expression matrix, two of its columns.
     1. **Pearson and Spearman** measure co-variation in the same cells, and why Pearson is pulled down by
        distribution shape.
     2. **1D Wasserstein on values** compares histograms only, so it fails the shuffle test.
-    3. **Graph optimal transport** uses 1D Wasserstein, but *through cell space*.
-       This is the distance that answers the third question.
-    4. **Tree $W_1$** is a multiscale shortcut for (3), at a tiny fraction of the cost.
+    3. **Graph optimal transport** moves expression *between cells*, at a cost given by a cell–cell
+       distance. This is the distance that answers the third question. (When the cells are simply
+       ordered along a line, such as pseudotime, it is the 1D Wasserstein *along that ordering*: the
+       right-hand column of the first figure.)
+    4. **Multiscale coarsening** picks the metacell scale for (3) from the data, and **tree $W_1$**
+       on the same hierarchy gives a close approximation of (3) at a tiny fraction of the cost.
     5. **Scorecard**: all five metrics against a known answer.
 
     /// note | How claims are checked
@@ -385,13 +396,24 @@ def _(mo):
     rows by a 1D coordinate (here the position $t$ along the drawn trajectory; in practice a pseudotime or
     any other cell ordering) is only for our eyes, but it makes the structure visible (middle): each
     trajectory gene lights up in its own band of cells. The right panel pulls out the two columns under
-    comparison, gene A in blue and gene B in orange. The data are the dataset generated from your drawing
-    (built in Part 3); pick any two genes below. The same two selectors drive the transport figures in
-    Part 3.
+    comparison, gene A in blue and gene B in orange. Pick any two genes below; the same two selectors
+    drive the transport figures in Part 3.
+
+    The data are simulated with a known answer (Part 3 shows how, from a shape you can draw; the default
+    is a horseshoe-shaped trajectory). The gene names say what each gene is:
+
+    * `g07_t0.35`: a **trajectory gene**, expressed in a band of cells around position $t = 0.35$ along
+      the trajectory. The true distance between two trajectory genes is the distance between their
+      peaks along the trajectory.
+    * `twin_of_g07`: the **positive control**, same peak as `g07` at 6× the amplitude. A good metric puts
+      it next to its parent.
+    * `perm_of_g07`: the **negative control**, a copy of `g07` with its cells shuffled. A good metric
+      must *not* put it next to its source.
+    * `bg…` and `noise…`: background genes that give the cells their structure, and pure noise.
 
     Keep one fact in mind for Part 1: shuffling the rows of *both* columns together changes no metric in
     this notebook. Shuffling *one* column alone is what correlation notices and 1D Wasserstein does not.
-    Try gene B = `perm_of_…`, a copy of a trajectory gene with its cells shuffled.
+    Try gene B = `perm_of_…`.
     """)
     return
 
@@ -742,6 +764,14 @@ def _(mo):
 
     $$W_1(a, b) = \min_{\pi \ge 0,\ \pi\mathbf 1 = a,\ \pi^\top \mathbf 1 = b} \ \sum_{ij} \pi_{ij}\, d(i,j).$$
 
+    /// note | What the normalisation keeps and discards
+    Dividing by $\sum_i x_{g,i}$ keeps *where* a gene is expressed and discards *how much*: a gene and a
+    6× brighter copy of it are the same distribution, so their $W_1$ is ideally 0 (the twin control
+    below). The flip side: a constant background (ambient RNA, baseline expression) becomes mass spread
+    over all of cell space, and distances between low-specificity genes shrink toward each other.
+    Consider background subtraction or thresholding before forming $a_g$.
+    ///
+
     This is the core of **GeneTrajectory** (Qu *et al.*, *Nat. Biotechnol.* 2025). Both inputs come
     from the same expression matrix. Its rows (cells) give the cell distance $d$; its columns (genes)
     give the distributions that are transported. Optimal transport joins the two, and the resulting
@@ -1085,7 +1115,9 @@ def _(mo):
       between two genes is the geodesic distance between their peaks**. This works for any shape: an arc,
       a branch, a loop.
     * **Positive control, twin genes**: same peak as a parent gene, 6× the amplitude. A good metric puts
-      each twin next to its parent.
+      each twin next to its parent, or among the genes whose peaks are within a small tolerance ε of it:
+      with 60 randomly placed peaks (the default) along one drawing, those genes are equally legitimate
+      neighbours (Part 5).
     * **Negative control, permuted genes**: a copy of a trajectory gene with its cells shuffled (the
       shuffle test from Part 2). A good metric must *not* put it next to its source.
     * **200 background genes** vary smoothly across the canvas, so that PCA of the data reproduces the
@@ -1675,20 +1707,65 @@ def _(
     _fig.legend(*_axes[0].get_legend_handles_labels(), loc="upper center", ncol=2, bbox_to_anchor=(0.5, 1.0))
     _fig.tight_layout(rect=(0, 0, 1, 0.9))
     fig_panels(_fig)
+    readout1 = {
+        "nodes": [int(x) for x in _nodes], "acc": [float(x) for x in _acc], "agree": [float(x) for x in _agree],
+        "secs": [r["secs"] for r in level_w1], "M": _M, "ref_acc": float(_rho_gt(dists["W1_graph"])),
+        "ref_secs": dist_secs["W1_graph (exact OT per pair)"],
+    }
+    return (readout1,)
+
+
+@app.cell(hide_code=True)
+def _(mo, readout1):
+    def _readout1_text(r):
+        """Describe the coarsest level whose agreement is still at the fine-scale plateau, and the first drop."""
+        n, acc, agree, secs = r["nodes"], r["acc"], r["agree"], r["secs"]
+        order = sorted(range(len(n)), key=lambda i: -n[i])  # fine to coarse
+        top = max(agree)
+        keep = order[0]
+        for i in order:
+            if agree[i] < top - 0.01:
+                break
+            keep = i
+        drop = next((i for i in order if n[i] < n[keep]), None)
+        same = "as accurate as" if acc[keep] >= r["ref_acc"] - 0.01 else "close to"
+        out = (
+            f"On this dataset, the level with {n[keep]} clusters is {same} {r['M']} k-means metacells "
+            f"(ρ = {acc[keep]:.2f} against {r['ref_acc']:.2f}) and takes {secs[keep]:.1f} s instead of "
+            f"{r['ref_secs']:.1f} s. "
+        )
+        if drop is None:
+            return out + "No level in the range leaves the plateau, so the coarsest one is the choice."
+        if acc[drop] < acc[keep] - 0.01:
+            out += (
+                f"At {n[drop]} clusters both curves fall (accuracy {acc[keep]:.2f} → {acc[drop]:.2f}, "
+                f"agreement {agree[keep]:.2f} → {agree[drop]:.2f}), so the middle panel flags the step "
+                "without any ground truth. "
+            )
+        else:
+            out += (
+                f"At {n[drop]} clusters agreement falls ({agree[keep]:.2f} → {agree[drop]:.2f}) while accuracy "
+                f"barely moves ({acc[keep]:.2f} → {acc[drop]:.2f}): here the middle panel errs on the safe side. "
+            )
+        if any(agree[i] >= top - 0.01 for i in order if n[i] < n[drop]):
+            return out + "A coarser level climbs back to the plateau; read the first drop, not the rebound."
+        return out + (
+            "Coarser levels stay off the plateau; small rebounds in either curve there are not a reason to "
+            "pick them."
+        )
+
+    mo.md(
+        "The x-axes run from fine (left) to coarse (right). "
+        + _readout1_text(readout1)
+        + " Because the metacells come from the data's own cluster structure at a known resolution, the "
+        "coarsening is a choice you can justify, rather than a number of k-means centres."
+    )
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    The x-axes run from fine (left) to coarse (right). On this dataset, a level with roughly 80
-    clusters is as accurate as 200 k-means metacells at a fraction of the cost. At a few dozen clusters
-    accuracy drops, and the agreement with the fine scale drops at the same step, so the middle panel
-    flags it without any ground truth. (Very coarse levels are all poor; their agreement values do not
-    recover in any useful sense.) Because the metacells come from
-    the data's own cluster structure at a known resolution, the coarsening is a choice you can
-    justify, rather than a number of k-means centres.
-
     ### Readout 2: $W_1$ on the hierarchy itself
 
     The hierarchy can also *be* the cell distance. Put the cells at the leaves and a root on top; edge
@@ -1756,17 +1833,18 @@ def _(
     _tnode = [np.bincount(lv, weights=_t) / np.bincount(lv) for lv in _levels]
     _kids = [None] + [[np.where(_parents[l - 1] == k)[0] for k in range(_levels[l].max() + 1)] for l in range(1, _nlev + 1)]
     _xpos = [np.zeros(_levels[l].max() + 1) for l in range(_nlev + 1)]
-    _next_leaf = [0]
-
-    def _place(l, k):
-        if l == 0:
-            _xpos[0][k] = _next_leaf[0]
-            _next_leaf[0] += 1
+    # leaves in depth-first order (iterative: older marimo cannot resolve a recursive cell-private function)
+    _stack, _next_leaf = [(_nlev, 0)], 0
+    while _stack:
+        _l, _k = _stack.pop()
+        if _l == 0:
+            _xpos[0][_k] = _next_leaf
+            _next_leaf += 1
         else:
-            _xpos[l][k] = np.mean([_place(l - 1, c) for c in sorted(_kids[l][k], key=lambda c: _tnode[l - 1][c])])
-        return _xpos[l][k]
-
-    _place(_nlev, 0)
+            _order = sorted(_kids[_l][_k], key=lambda c, l=_l: _tnode[l - 1][c])
+            _stack.extend((_l - 1, c) for c in reversed(_order))
+    for _l in range(1, _nlev + 1):
+        _xpos[_l] = np.array([_xpos[_l - 1][_kids[_l][k]].mean() for k in range(len(_xpos[_l]))])
 
     def _shade(l):
         return str(0.7 - 0.55 * l / max(_nlev - 1, 1))
@@ -2116,6 +2194,11 @@ def _(mo):
       trajectory-gene pairs. Higher is better.
     * **kNN-5 overlap**: average fraction of each trajectory gene's 5 true nearest genes recovered.
     * **twin rank**: median rank of the twin among its parent's neighbours (1 = nearest). Lower is better.
+    * **twin rank beyond ε**: the same, ignoring trajectory genes whose peak lies within ε of the
+      parent's (ε = three average gene spacings along the trajectory). Those genes are expressed in
+      almost the same cells as the parent, so they are as legitimate a neighbour as the twin; a
+      distance that is exact up to sampling noise will order them at random. This is the fair version
+      of the positive control.
     * **perm→source rank**: median rank of the source gene among the permuted copy's neighbours.
       **Rank 1 means the metric confuses a gene with a cell-shuffled copy of itself.** Higher is better.
 
@@ -2137,6 +2220,10 @@ def _(adata, dists, genes_eval, np, pd, true_distance):
         iu = np.triu_indices(len(traj), 1)
         gt_nn = np.argsort(gt + np.diag(np.full(len(traj), np.inf)), axis=1)[:, :k]
         parent = v["parent"].to_numpy()
+        kind = v["kind"].to_numpy()
+        # Twin tolerance: trajectory genes whose peak lies within three average gene spacings of the
+        # parent's are as close to it as the twin is; at that distance their order is sampling noise.
+        eps = 3 * float(np.max(gt)) / max(len(traj), 1)
         rows = {}
         for name, D in dists.items():
             Dt = D[np.ix_(traj, traj)]
@@ -2149,10 +2236,22 @@ def _(adata, dists, genes_eval, np, pd, true_distance):
                 d[row_idx] = np.inf
                 return int(np.sum(d < d[target_idx]) + 1)
 
+            def twin_rank_beyond_eps(t):
+                p = parent[t]
+                d = D[p].copy()
+                d[p] = np.inf
+                near = (kind == "trajectory") & (true_distance(pt[p], pt) < eps)
+                d[near & (np.arange(len(d)) != t)] = np.inf
+                return int(np.sum(d < d[t]) + 1)
+
             twin_r = np.median([rank_of(parent[t], t) for t in twins]) if len(twins) else np.nan
+            twin_eps = np.median([twin_rank_beyond_eps(t) for t in twins]) if len(twins) else np.nan
             perm_r = np.median([rank_of(p, parent[p]) for p in perms]) if len(perms) else np.nan
-            rows[name] = {"ρ(GT)": rho, "kNN-5 overlap": overlap, "twin rank": twin_r, "perm→source rank": perm_r}
-        return pd.DataFrame(rows).T
+            rows[name] = {"ρ(GT)": rho, "kNN-5 overlap": overlap, "twin rank": twin_r,
+                          "twin rank beyond ε": twin_eps, "perm→source rank": perm_r}
+        out = pd.DataFrame(rows).T
+        out.attrs["eps"] = eps
+        return out
 
     score_df = scorecard(dists, adata.var, genes_eval)
     score_df.round(3).sort_values("ρ(GT)", ascending=False)
@@ -2182,7 +2281,11 @@ def _(fig_panels, log_ticks, mo, pal, plt, score_df):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    * Exact graph $W_1$ recovers the geometry best; tree $W_1$ comes next, ahead of the correlations.
+    * Exact graph $W_1$ has the highest ρ with the true distance; tree $W_1$ comes next, ahead of the
+      correlations, and matches or beats exact $W_1$ on kNN-5 overlap.
+    * Strict twin rank can exceed 1 for graph $W_1$: its distance between a gene and its twin is not exactly
+      0 (sampling noise on the metacells), while genes peaking a few cells away are just as close. Beyond
+      ε, the twin is first or close to it for every metric except `W1_values`.
     * Pearson and Spearman pass the shuffle test but recover the geometry less well, because of the
       saturation in Part 3: beyond overlap range, every distance looks the same.
     * `W1_values` has no relation to the true geometry and ranks each permuted copy as its source's
@@ -2234,7 +2337,7 @@ def _(adata, find_correlated_features, genes_eval, np, pd, true_distance):
             return f"{g}  (true distance {d:.2f})"
 
         cols = {}
-        for metric, label in [("spearman", "spearman"), ("pearson", "pearson"), ("wasserstein", "wasserstein (current name)")]:
+        for metric, label in [("spearman", "spearman"), ("pearson", "pearson"), ("wasserstein", "wasserstein (1D, on values)")]:
             res = find_correlated_features(sub, target, metrics=(metric,))
             hits = [g for g in res.index if g != target][:k]
             cols[label] = [describe(g) for g in hits]
@@ -2359,8 +2462,8 @@ def _(mo):
 
     /// tip | Recommendations (hypotheses to test on your own data)
     1. For **"what is co-regulated with X"**, use Spearman, and not `wasserstein`, which measures
-       distribution shape and ranks a gene's cell-shuffled copy first. The evidence and concrete API
-       changes are in "Genes like X" above.
+       distribution shape and ranks a gene's cell-shuffled copy first. The evidence, and what it means
+       for `find_correlated_features`, is in "Genes like X" above.
     2. For **"order genes along a trajectory / find gene programs in cell space"**, use graph $W_1$.
        Pick the metacell scale from a multiscale hierarchy: the coarsest level that still agrees with
        finer ones. For many genes, tree $W_1$ on the same hierarchy gives a close approximation
@@ -2371,9 +2474,9 @@ def _(mo):
     ///
 
     /// note | A caveat about normalisation
-    $a_g = x_g / \sum x_g$ turns a constant background (ambient RNA, baseline expression) into mass
-    spread over all of cell space. Distances between low-specificity genes then shrink toward each
-    other. Consider background subtraction or thresholding before forming $a_g$.
+    $a_g = x_g / \sum x_g$ keeps where a gene is expressed, not how much, and turns a constant
+    background into mass spread over all of cell space (see Part 3). Consider background subtraction
+    or thresholding before forming $a_g$.
     ///
 
     ### References

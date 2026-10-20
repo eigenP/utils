@@ -296,6 +296,9 @@ def _upscale_heightmap(surface_z_red, has_surface, s_tup, full_shape):
     surface_z_full = ndimage.gaussian_filter(
         surface_z_full, sigma=(0.75, 0.75)
     )
+    # Cubic interpolation overshoots next to sharp height steps; a surface lies
+    # inside the volume, so keep valid heights in [0, Z - 1] (-1 stays the sentinel)
+    np.clip(surface_z_full, 0.0, full_shape[0] - 1, out=surface_z_full)
 
     # Apply Mask and Sentinel
     surface_z_full[~mask_full] = -1.0
