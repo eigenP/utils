@@ -1,3 +1,4 @@
+from scipy import ndimage
 from scipy.ndimage import gaussian_filter
 import numpy as np
 import pytest
@@ -377,3 +378,113 @@ def test_expand_surface_z_zero_thickness_returns_copy():
     r[0, 0, 0] = True
     assert not s[0, 0, 0]
     assert expand_surface_z(s, 0, in_place=True) is s
+
+
+def _soft_slab(shape=(48, 64, 256), surface=16, gain=None, seed=0):
+    """Tissue below `surface` with a soft Z edge, an optional per-column gain and noise."""
+    rng = np.random.default_rng(seed)
+    vol = np.zeros(shape, np.float32)
+    vol[surface:] = 1.0
+    vol = ndimage.gaussian_filter(vol, (4, 0, 0))
+    if gain is not None:
+        vol *= gain[None, None, :].astype(np.float32)
+    return vol + rng.normal(0, 0.02, vol.shape).astype(np.float32)
+
+
+@pytest.mark.parametrize("tile_size", [16, 50, 64, (40, 24), 1024])
+def test_extract_surface_tiled_matches_whole_volume(tile_size):
+    """Tiled binning + one global threshold reproduces a single whole-volume call exactly,
+    for aligned, unaligned and rectangular tiles (incl. a short last tile)."""
+    from eigenp_utils.surface_extraction import extract_surface_tiled
+
+    vol = _soft_slab(shape=(40, 203, 157), gain=np.linspace(0.6, 1.0, 157))
+    kw = dict(downscale_factor=(2, 4, 4), gaussian_sigma=2.0, return_heightmap=True)
+    m0, h0 = extract_surface(vol, **kw)
+    m1, h1 = extract_surface_tiled(vol, tile_size=tile_size, **kw)
+    np.testing.assert_array_equal(m0, m1)
+    np.testing.assert_array_equal(h0, h1)
+    heights = extract_surface_tiled(vol, tile_size=tile_size, return_mask=False, **kw)
+    np.testing.assert_array_equal(heights, h0)
+
+
+def test_extract_surface_tiled_has_no_seams_unlike_per_chunk_calls():
+    """Running extract_surface per chunk (the old dask vignette) normalises and
+    Otsu-thresholds each chunk on its own, so a brightness gradient gives height
+    steps at chunk seams; the tiled path has none."""
+    from eigenp_utils.surface_extraction import extract_surface_tiled
+
+    vol = _soft_slab(gain=np.linspace(0.6, 1.0, 256))
+    kw = dict(downscale_factor=(1, 4, 4), gaussian_sigma=1.0, return_heightmap=True)
+
+    def seam_steps(h):
+        profile = h.mean(axis=0)
+        return np.array([profile[x] - profile[x - 1] for x in (64, 128, 192)])
+
+    per_chunk = np.concatenate(
+        [extract_surface(vol[:, :, x0:x0 + 64], **kw)[1] for x0 in range(0, 256, 64)], axis=1
+    )
+    _, tiled = extract_surface_tiled(vol, tile_size=64, **kw)
+    assert np.abs(seam_steps(per_chunk)).min() > 0.4  # control: the per-chunk seams exist
+    assert np.abs(seam_steps(tiled)).max() < 0.1
+
+
+def test_extract_surface_tiled_judges_debris_against_whole_sample():
+    """A floating blob that is >10% of one chunk's tissue but <10% of the sample's is
+    debris: per-chunk filtering keeps it (the surface jumps up to it), the tiled path
+    removes it."""
+    from eigenp_utils.surface_extraction import extract_surface_tiled
+
+    Z, Y, X = 40, 32, 128
+    vol = np.zeros((Z, Y, X), np.float32)
+    vol[24:] = 1.0                       # tissue: 16 x 32 x 128 voxels
+    vol[4:12, 8:24, 8:24] = 1.0          # debris: 8*16*16 = 2048 = 25% of one 32-wide chunk
+    kw = dict(downscale_factor=1, gaussian_sigma=0.5, return_heightmap=True)
+
+    _, per_chunk = extract_surface(vol[:, :, :32], **kw)
+    assert per_chunk[16, 16] < 12        # control: the chunk-level filter keeps the blob
+    _, tiled = extract_surface_tiled(vol, tile_size=32, **kw)
+    assert abs(tiled[16, 16] - 23.5) < 1.0
+
+
+def test_extract_surface_fixed_threshold():
+    """`threshold` is in input units: scaling the data and the threshold together gives
+    the same surface, and it cannot be combined with CLAHE."""
+    vol = _soft_slab(shape=(40, 32, 32))
+    m1, h1 = extract_surface(vol, downscale_factor=2, threshold=0.5, return_heightmap=True)
+    m2, h2 = extract_surface(vol * 10, downscale_factor=2, threshold=5.0, return_heightmap=True)
+    np.testing.assert_array_equal(m1, m2)
+    np.testing.assert_allclose(h1, h2, atol=1e-4)
+    # the 0.5 level of the soft edge sits at the true surface (16)
+    assert abs(np.median(h1) - 15.5) < 1.0
+    with pytest.raises(ValueError, match="CLAHE"):
+        extract_surface(vol, threshold=0.5, clahe_clip=0.01)
+
+
+def test_crop_edges_crops_z():
+    """crop_percentage_z zeroes the first and last slices like the y/x crops (it was ignored)."""
+    arr = np.ones((10, 20, 20))
+    for in_place in (False, True):
+        out = crop_edges(arr.copy(), 0.2, 0.0, 0.0, in_place=in_place)
+        assert out[:2].sum() == 0 and out[-2:].sum() == 0
+        assert np.all(out[2:-2] == 1)
+
+
+def test_extract_surface_tiled_reads_one_tile_at_a_time():
+    """Any array with .shape and slicing works (dask, zarr, memmap); no read is larger
+    than one block-aligned tile, and the result equals the in-memory call."""
+    from eigenp_utils.surface_extraction import extract_surface_tiled
+
+    vol = _soft_slab(shape=(24, 96, 80))
+
+    class LazyVolume:
+        shape = vol.shape
+        largest_read = 0
+
+        def __getitem__(self, key):
+            block = vol[key]
+            LazyVolume.largest_read = max(LazyVolume.largest_read, block.size)
+            return block
+
+    m_lazy = extract_surface_tiled(LazyVolume(), downscale_factor=4, gaussian_sigma=1.0, tile_size=32)
+    np.testing.assert_array_equal(m_lazy, extract_surface(vol, downscale_factor=4, gaussian_sigma=1.0))
+    assert LazyVolume.largest_read <= 24 * 32 * 32

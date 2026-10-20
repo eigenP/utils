@@ -20,23 +20,16 @@ from scipy.interpolate import RegularGridInterpolator
 from skimage import exposure, filters
 from typing import Union, Tuple
 
-def extract_surface(
-    image: np.ndarray,
-    downscale_factor: Union[int, Tuple[int, int, int]] = 4,
-    gaussian_sigma: float = 4.0,
-    clahe_clip: float = 0.00,
-    return_heightmap: bool = False
-) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
-
-    # --- 1. HANDLE ANISOTROPIC FACTORS ---
+def _parse_factors(downscale_factor):
     if isinstance(downscale_factor, (int, np.integer)):
-        s_tup = (int(downscale_factor),) * 3
-    else:
-        s_tup = tuple(int(f) for f in downscale_factor)
+        return (int(downscale_factor),) * 3
+    return tuple(int(f) for f in downscale_factor)
 
+
+def _bin_volume(image, s_tup):
+    """Block-average a (Z, Y, X) volume by `s_tup`, reflect-padding the trailing blocks."""
     sz, sy, sx = s_tup
 
-    # --- 2. BINNING & DOWNSAMPLING ---
     # Optimized to avoid large intermediate allocation and redundant computation
     # Uses chunk-based block averaging (binning) instead of padding the full volume.
 
@@ -61,39 +54,53 @@ def extract_surface(
 
         img_reduced[i] = z_chunk.reshape(sz, new_h, sy, new_w, sx).mean(axis=(0, 2, 4))
 
+    return img_reduced
+
+
+def _reduced_surface(img_reduced, gaussian_sigma, clahe_clip, threshold):
+    """
+    Find the top surface on a binned volume.
+
+    Returns the refined height of every reduced column (``surface_z_red``, -1 where
+    there is no surface) and the boolean ``has_surface`` map.
+    """
     # --- 3. SMOOTHING ---
     img_blurred = ndimage.gaussian_filter(
         img_reduced, sigma=gaussian_sigma, output=np.float32
     )
-    # Free memory
-    del img_reduced
 
-    # --- 4. NORMALIZE TO UINT8 ---
-    min_val = img_blurred.min()
-    max_val = img_blurred.max()
+    if threshold is None:
+        # --- 4. NORMALIZE TO UINT8 ---
+        min_val = img_blurred.min()
+        max_val = img_blurred.max()
 
-    if max_val > min_val:
-        # In-place normalization to avoid new array allocation
-        img_blurred -= min_val
-        img_blurred *= (255.0 / (max_val - min_val))
+        if max_val > min_val:
+            # In-place normalization to avoid new array allocation
+            img_blurred -= min_val
+            img_blurred *= (255.0 / (max_val - min_val))
+        else:
+            img_blurred.fill(0)
+
+        img_u8 = img_blurred.astype(np.uint8)
+        del img_blurred
+
+        # --- 5. CLAHE ---
+        if clahe_clip > 0.0:
+            img_proc = exposure.equalize_adapthist(img_u8, clip_limit=clahe_clip)
+            img_proc = (img_proc * 255).astype(np.uint8)
+        else:
+            img_proc = img_u8
+
+        if img_u8 is not img_proc:
+            del img_u8
+
+        # --- 6. THRESHOLD ---
+        thresh = filters.threshold_otsu(img_proc)
     else:
-        img_blurred.fill(0)
-
-    img_u8 = img_blurred.astype(np.uint8)
-    del img_blurred
-
-    # --- 5. CLAHE ---
-    if clahe_clip > 0.0:
-        img_proc = exposure.equalize_adapthist(img_u8, clip_limit=clahe_clip)
-        img_proc = (img_proc * 255).astype(np.uint8)
-    else:
-        img_proc = img_u8
-
-    if img_u8 is not img_proc:
-        del img_u8
-
-    # --- 6. THRESHOLD ---
-    thresh = filters.threshold_otsu(img_proc)
+        # A fixed threshold in the units of the binned, blurred input: no per-call
+        # normalisation, so separately processed tiles share one decision boundary
+        img_proc = img_blurred
+        thresh = float(threshold)
     img_mask = img_proc > thresh
 
     # --- 6.5 TOPOLOGICAL FILTERING ---
@@ -177,10 +184,15 @@ def extract_surface(
 
     del img_proc, img_mask
 
-    # --- 8. SURFACE UPSCALING VIA HEIGHT MAP ---
-    # Use float32 for the height map to preserve subpixel precision during zoom
-    surface_z_red = np.full((Y_red, X_red), -1.0, dtype=np.float32)
+    surface_z_red = np.full(has_surface.shape, -1.0, dtype=np.float32)
     surface_z_red[has_surface] = z_refined
+    return surface_z_red, has_surface
+
+
+def _upscale_heightmap(surface_z_red, has_surface, s_tup, full_shape):
+    """Upscale a reduced height map to the full (Y, X) grid; -1 where there is no surface."""
+    sz, sy, sx = s_tup
+    Y_red, X_red = has_surface.shape
 
     # matth: Robust Upscaling
     # 1. Inpaint invalid regions (-1.0) with nearest valid value to prevent
@@ -255,7 +267,7 @@ def extract_surface(
         )
 
         # Generate Full Resolution Grid
-        Z, Y, X = image.shape
+        Z, Y, X = full_shape
         # Open grids broadcast to (Y, X); a plain (gy, gx) tuple is read as a list of
         # points, which fails unless Y == X (and then samples only the diagonal).
         gy = np.arange(Y)[:, None]
@@ -268,7 +280,7 @@ def extract_surface(
             np.clip(gx, grid_x[0], grid_x[-1])
         )) > 0.5
     else:
-        Z, Y, X = image.shape
+        Z, Y, X = full_shape
         surface_z_full = np.zeros((Y, X), dtype=np.float32)
         mask_full = np.zeros((Y, X), dtype=bool)
 
@@ -287,17 +299,16 @@ def extract_surface(
 
     # Apply Mask and Sentinel
     surface_z_full[~mask_full] = -1.0
+    return surface_z_full
 
-    # Keep float map for return if requested
-    surface_z_float = surface_z_full.copy()
 
-    # Convert to integer indices for mask generation
-    Z = image.shape[0]
+def _rasterise_heightmap(surface_z_full, Z):
+    """Boolean (Z, Y, X) mask with one voxel per column at the rounded height."""
     z_dtype = np.int16 if Z <= 32767 else np.int32
     surface_z_int = np.round(surface_z_full).astype(z_dtype)
 
     # --- 8. RASTERIZE TO BOOLEAN MASK ---
-    Z, Y, X = image.shape
+    Y, X = surface_z_full.shape
     surface_upscaled = np.zeros((Z, Y, X), dtype=bool)
 
     # Optimization: Use nonzero indices instead of creating full 2D meshgrids (np.indices)
@@ -310,10 +321,117 @@ def extract_surface(
         y_idxs,
         x_idxs
     ] = True
-
-    if return_heightmap:
-        return surface_upscaled, surface_z_float
     return surface_upscaled
+
+
+def _upscale_surface(surface_z_red, has_surface, s_tup, full_shape, return_heightmap):
+    """Upscale a reduced height map to `full_shape` (Z, Y, X) and rasterise it."""
+    heights = _upscale_heightmap(surface_z_red, has_surface, s_tup, full_shape)
+    mask = _rasterise_heightmap(heights, full_shape[0])
+    if return_heightmap:
+        return mask, heights
+    return mask
+
+
+
+
+def extract_surface(
+    image: np.ndarray,
+    downscale_factor: Union[int, Tuple[int, int, int]] = 4,
+    gaussian_sigma: float = 4.0,
+    clahe_clip: float = 0.00,
+    return_heightmap: bool = False,
+    threshold: float = None,
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    """
+    Find the top (first along Z) surface of a (Z, Y, X) volume.
+
+    The volume is block-averaged by `downscale_factor`, blurred, thresholded
+    (Otsu on a uint8 rescaling, after optional CLAHE), stripped of floating debris
+    (3D components smaller than 10% of the largest), and the first foreground voxel
+    of each column is refined to sub-voxel height and upscaled.
+
+    `threshold` replaces the Otsu threshold with a fixed value in the units of the
+    block-averaged, blurred input (no per-call rescaling); it cannot be combined
+    with CLAHE. For volumes that do not fit in memory use `extract_surface_tiled`,
+    which gives the same result as one call on the whole volume.
+
+    Returns a boolean (Z, Y, X) surface mask, plus the float height map
+    (-1 where there is no surface) when `return_heightmap` is True.
+    """
+    if threshold is not None and clahe_clip > 0.0:
+        raise ValueError("`threshold` cannot be combined with CLAHE (clahe_clip > 0).")
+    s_tup = _parse_factors(downscale_factor)
+    img_reduced = _bin_volume(image, s_tup)
+    surface_z_red, has_surface = _reduced_surface(
+        img_reduced, gaussian_sigma, clahe_clip, threshold
+    )
+    del img_reduced
+    return _upscale_surface(surface_z_red, has_surface, s_tup, image.shape, return_heightmap)
+
+
+def _tile_bounds(n, tile, block):
+    """
+    (start, stop) tiles of length `tile` (a multiple of `block`) covering 0..n.
+
+    The trailing partial block is reflect-padded from the rows before it, so the last
+    tile must contain at least one full block before it; a shorter last tile is merged
+    into the previous one. This keeps tiled binning identical to whole-volume binning.
+    """
+    bounds = [[start, min(start + tile, n)] for start in range(0, n, tile)]
+    if len(bounds) > 1 and bounds[-1][1] - bounds[-1][0] < block + n % block:
+        bounds[-2][1] = n
+        bounds.pop()
+    return [tuple(b) for b in bounds]
+
+
+def extract_surface_tiled(
+    image,
+    downscale_factor: Union[int, Tuple[int, int, int]] = 4,
+    gaussian_sigma: float = 4.0,
+    clahe_clip: float = 0.00,
+    return_heightmap: bool = False,
+    threshold: float = None,
+    tile_size: Union[int, Tuple[int, int]] = 1024,
+    return_mask: bool = True,
+):
+    """
+    Memory-safe `extract_surface` for large volumes (NumPy memmap, dask, zarr, ...).
+
+    Only one (Z, tile_y, tile_x) tile of the full-resolution volume is read at a
+    time and block-averaged. Smoothing, the threshold and the debris filter then run
+    once on the whole reduced volume (`downscale_factor` times smaller), so the
+    result equals `extract_surface` on the full volume: no seams between tiles and
+    debris judged against the whole sample, unlike running `extract_surface` on each
+    chunk (e.g. via dask ``map_overlap``).
+
+    `image` only needs ``.shape`` and slicing; each tile is converted with
+    ``np.asarray`` (which computes dask tiles). Tiles are rounded up to multiples of
+    the block size. With `return_mask=False` only the (Y, X) height map is
+    returned, which avoids allocating the full-resolution boolean mask.
+    """
+    if threshold is not None and clahe_clip > 0.0:
+        raise ValueError("`threshold` cannot be combined with CLAHE (clahe_clip > 0).")
+    s_tup = _parse_factors(downscale_factor)
+    sz, sy, sx = s_tup
+    Z, Y, X = image.shape
+    ty, tx = (tile_size, tile_size) if np.isscalar(tile_size) else tile_size
+    # Block-aligned tiles: every tile but the last bins exactly as the whole volume does
+    ty = max(sy, int(np.ceil(ty / sy)) * sy)
+    tx = max(sx, int(np.ceil(tx / sx)) * sx)
+
+    reduced = np.empty((-(-Z // sz), -(-Y // sy), -(-X // sx)), dtype=np.float32)
+    for y0, y1 in _tile_bounds(Y, ty, sy):
+        for x0, x1 in _tile_bounds(X, tx, sx):
+            r = _bin_volume(np.asarray(image[:, y0:y1, x0:x1]), s_tup)
+            reduced[:, y0 // sy:y0 // sy + r.shape[1], x0 // sx:x0 // sx + r.shape[2]] = r
+
+    surface_z_red, has_surface = _reduced_surface(reduced, gaussian_sigma, clahe_clip, threshold)
+    del reduced
+
+    if not return_mask:
+        return _upscale_heightmap(surface_z_red, has_surface, s_tup, (Z, Y, X))
+    return _upscale_surface(surface_z_red, has_surface, s_tup, (Z, Y, X), return_heightmap)
 
 
 # if needed, add padding on the z axis
@@ -391,12 +509,13 @@ def pad_z_slices(arr,
 def crop_edges(image, crop_percentage_z, crop_percentage_y, crop_percentage_x, in_place=False):
     '''
 
-    Crop a percentage of the image from the x and y edges and return a new image with the same dimension
+    Zero a fraction of the image at its z, y and x edges and return an image with the same dimension
 
     Args:
     -- image: 3D numpy array to perform the cropping on
-    -- crop_percentage_y: float, percentage of the image to crop from the y edges
-    -- crop_percentage_x: float, percentage of the image to crop from the x edges
+    -- crop_percentage_z: float, fraction of the image to crop from each z edge (first and last slices)
+    -- crop_percentage_y: float, fraction of the image to crop from each y edge
+    -- crop_percentage_x: float, fraction of the image to crop from each x edge
     -- in_place: bool, if True modifies the image in place setting edges to zero. Defaults to False.
 
     Returns:
@@ -404,25 +523,24 @@ def crop_edges(image, crop_percentage_z, crop_percentage_y, crop_percentage_x, i
 
     '''
 
-    y_cropped = int(image.shape[1] * crop_percentage_y)
-    x_cropped = int(image.shape[2] * crop_percentage_x)
-
-    y_slice = slice(y_cropped, -y_cropped) if y_cropped > 0 else slice(None)
-    x_slice = slice(x_cropped, -x_cropped) if x_cropped > 0 else slice(None)
+    crops = [int(n * f) for n, f in zip(image.shape, (crop_percentage_z, crop_percentage_y, crop_percentage_x))]
+    keep = tuple(slice(c, n - c) if c > 0 else slice(None) for c, n in zip(crops, image.shape))
 
     if in_place:
         image_cropped = image
         # If we need to crop, we must zero out the edges we are removing
-        if y_cropped > 0:
-            image_cropped[:, :y_cropped, :] = 0
-            image_cropped[:, -y_cropped:, :] = 0
-        if x_cropped > 0:
-            image_cropped[:, :, :x_cropped] = 0
-            image_cropped[:, :, -x_cropped:] = 0
+        for axis, c in enumerate(crops):
+            if c > 0:
+                lead = [slice(None)] * 3
+                lead[axis] = slice(None, c)
+                trail = [slice(None)] * 3
+                trail[axis] = slice(image.shape[axis] - c, None)
+                image_cropped[tuple(lead)] = 0
+                image_cropped[tuple(trail)] = 0
     else:
         # Initialize the new array of the same shape with zeros, and set the central region to the cropped portion of the original image
         image_cropped = np.zeros_like(image)
-        image_cropped[:, y_slice, x_slice] = image[:, y_slice, x_slice]
+        image_cropped[keep] = image[keep]
 
     return image_cropped
 
@@ -579,59 +697,33 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, 
 def dask_extract_surface():
     """
     =====================================================================
-    Run surface extraction DASK (memory safe) vignette
+    Run surface extraction on a large (dask / zarr / memmap) volume
     =====================================================================
 
-    # NOTE: each chunk is normalised, Otsu-thresholded and component-filtered on its own,
-    # so chunks without tissue get spurious surfaces and brightness gradients give height
-    # steps at chunk seams. Prefer a single call on the whole volume when it fits in memory.
+    Use `extract_surface_tiled`: it reads one (Z, tile, tile) block of the volume at a
+    time, block-averages it, and runs smoothing, the threshold and the debris filter
+    once on the whole reduced volume. The result equals `extract_surface` on the full
+    volume. Do not map `extract_surface` over chunks (e.g. `da.map_overlap`): each chunk
+    would be rescaled and Otsu-thresholded on its own (height steps at chunk seams,
+    spurious surfaces in chunks without tissue) and debris would be judged against the
+    chunk instead of the sample.
 
-    # Overlap: the Gaussian (truncate=4) reaches ceil(4 * sigma) reduced pixels, i.e.
-    # ceil(4 * sigma) * factor full-resolution pixels (sigma=4.0, XY factor 8 -> 128).
-    # The value below equals that (ceil(8 * 4.0) * 4 = 128); recompute it if sigma or
-    # _BLOCK_SIZE change.
-    overlap_depth = int(np.ceil(8 * 4.0) * 4)
+    A single global threshold, like a single `extract_surface` call, assumes roughly
+    even illumination: correct strong intensity gradients first (e.g. flat-field
+    correction), or pass a fixed `threshold=` in the units of the binned, blurred data.
 
-    # da_image = img_raw.isel(S=0, T=0, C=0).data
+    # da_image = img_raw.isel(S=0, T=0, C=0).data      # dask array (Z, Y, X)
 
-    # 2. Slice and explicitly chunk the Xarray object to convert it to Dask backend
-    # Replace 'Z', 'Y', 'X' with your actual spatial dimension names
-    # Axis 0 (Z) must stay unchunked ({"Z": -1}) with 0 overlap: extract_surface needs
-    # each full Z column (chunking Z at 1 leaves ~99% of columns without a surface)
-
-    chunked_xr = img_raw.isel(S=0, T=0, C=0).chunk(
-        {"Z": -1, "Y": 1024, "X": 1024}
-    )
-
-    # 3. Extract the verified Dask array
-    da_image = chunked_xr.data
-
-
-    _BLOCK_SIZE = (2,8,8)
-
-    output_mask = da_image.map_overlap(
-        extract_surface,
-        depth={0: 0, 1: overlap_depth, 2: overlap_depth},
-        boundary="reflect",
-        dtype=bool,
-        chunks=da_image.chunks,
-        # Kwargs passed directly to your original function
-        downscale_factor=_BLOCK_SIZE,
+    surface_mask, height_map = extract_surface_tiled(
+        da_image,
+        downscale_factor=(2, 8, 8),
         gaussian_sigma=4.0,
         clahe_clip=0.00,
-        return_heightmap=False
+        tile_size=1024,            # rounded up to multiples of the block size
+        return_heightmap=True,
     )
 
-
-    # This triggers the Dask scheduler, runs the chunks in parallel, and returns a NumPy array
-    mask_numpy = output_mask.compute()
-
-    print(type(mask_numpy))  # <class 'numpy.ndarray'>
-    print(mask_numpy.shape) # (133, 14309, 1377)
-    print(mask_numpy.dtype) # bool
-
-
-    top_surface_cropped = mask_numpy.copy()
-    del mask_numpy, output_mask
+    # Height map only (avoids allocating the full-resolution boolean mask):
+    height_map = extract_surface_tiled(da_image, downscale_factor=(2, 8, 8), return_mask=False)
     """
     pass

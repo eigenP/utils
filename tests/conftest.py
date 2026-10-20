@@ -1,6 +1,43 @@
+import os
+
 import pytest
 import matplotlib.pyplot as plt
 import numpy as np
+
+# Browser tests (tests/test_frontend_*.py) need pytest-playwright (`dev` extra) and a
+# browser (`playwright install chromium`). Locally they are skipped when either is
+# missing; in CI (CI=true) they still error, so a broken browser setup is not hidden.
+_SKIP_BROWSER_TESTS = not os.environ.get("CI")
+_BROWSER_HINT = "install the dev extra and run `playwright install chromium`"
+
+try:
+    import pytest_playwright  # noqa: F401
+except ImportError:
+    @pytest.fixture
+    def page():
+        if _SKIP_BROWSER_TESTS:
+            pytest.skip(f"pytest-playwright is not installed ({_BROWSER_HINT})")
+        raise RuntimeError(f"pytest-playwright is not installed ({_BROWSER_HINT})")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if (
+        _SKIP_BROWSER_TESTS
+        and report.when == "setup"
+        and report.failed
+        and "page" in getattr(item, "fixturenames", ())
+        and call.excinfo is not None
+        and "Executable doesn't exist" in str(call.excinfo.value)
+    ):
+        report.outcome = "skipped"
+        report.longrepr = (
+            str(item.fspath), item.location[1],
+            f"Skipped: Playwright browser not installed ({_BROWSER_HINT})",
+        )
+
 
 @pytest.fixture(autouse=True)
 def auto_close_figures():

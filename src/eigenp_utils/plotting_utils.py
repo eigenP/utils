@@ -1191,15 +1191,16 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
         )
     print(f"Saved figure to {filename_str}")
 
-def brightness_diagnostic_plotter(diagnostic_data):
+def brightness_diagnostic_plotter(diagnostic_data, ax=None):
     """
     Plots the diagnostic data returned by `adjust_brightness_per_slice` when `return_diagnostic=True`.
 
     Args:
         diagnostic_data (dict): The diagnostic data containing `x_data`, `y_data_norm`, `y_fit_norm`, and `gamma_fit_func`.
+        ax (matplotlib.axes.Axes, optional): Axes to draw on. If None, a new figure is created.
 
     Returns:
-        matplotlib.figure.Figure: The diagnostic figure.
+        matplotlib.figure.Figure: The figure containing the plot.
     """
     if diagnostic_data is None:
         return None
@@ -1209,14 +1210,16 @@ def brightness_diagnostic_plotter(diagnostic_data):
     y_fit_norm = diagnostic_data['y_fit_norm']
     gamma_fit_func = diagnostic_data['gamma_fit_func']
 
-    fig = plt.figure(figsize=(8, 5))
-    plt.plot(x_data, y_data_norm, 'o', label='Raw 99th Percentile (Normalized)', alpha=0.7)
-    plt.plot(x_data, y_fit_norm, '-', label=f'Fitted Curve ({gamma_fit_func})', linewidth=2)
-    plt.xlabel('Z-slice index')
-    plt.ylabel('Normalized Intensity')
-    plt.title('Z-axis Intensity Decay Fit')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
-    plt.tight_layout()
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 5), layout='tight')
+    else:
+        fig = ax.figure
+    ax.plot(x_data, y_data_norm, 'o', label='Raw 99th Percentile (Normalized)', alpha=0.7)
+    ax.plot(x_data, y_fit_norm, '-', label=f'Fitted Curve ({gamma_fit_func})', linewidth=2)
+    ax.set_xlabel('Z-slice index')
+    ax.set_ylabel('Normalized Intensity')
+    ax.set_title('Z-axis Intensity Decay Fit')
+    ax.legend()
+    ax.grid(True, linestyle='--', alpha=0.6)
 
     return fig

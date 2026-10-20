@@ -143,6 +143,8 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
             If `pixel_sizes` is provided, this is assumed to be in physical units.
         axis (int): The axis along which to perform the operation. Default is 0 (Z-axis).
         operation (str): Operation to perform on the slices. Options are 'average' or 'max'.
+            'average' averages the slices of each window that lie inside the volume, so
+            the first and last slices are not dimmed by the padding.
         pixel_sizes (dict, optional): Dictionary specifying physical pixel dimensions, e.g., {'Z': 0.79, 'Y': 0.468, 'X': 0.468}.
 
     Returns:
@@ -193,9 +195,15 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
         else:
             nuclei_image_thick += current_slice
 
-    # Finalize the operation
+    # Finalize the operation: divide by the number of real slices in each window, so
+    # windows that overlap the zero padding at the ends are not dimmed
     if operation == 'average':
-        nuclei_image_thick /= window_size
+        n = nuclei_image.shape[axis]
+        k = np.arange(n)
+        counts = np.minimum(k + margin, n - 1) - np.maximum(k - margin, 0) + 1
+        shape = [1] * nuclei_image.ndim
+        shape[axis] = n
+        nuclei_image_thick /= counts.reshape(shape)
 
     return nuclei_image_thick
 
