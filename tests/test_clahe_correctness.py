@@ -128,3 +128,37 @@ class TestCLAHECorrectness(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_clahe_matches_skimage_reference():
+    """_my_clahe_ agrees with skimage.exposure.equalize_adapthist on natural images.
+
+    A port error set bin_size = 1 + nbins // nbins == 2, so only half the
+    histogram bins were used: on skimage's camera image the output mean was
+    0.376 against skimage's 0.515, with compressed highlights. Strategy: run both
+    implementations with the same clip limit on two reference images. Expected:
+    near-identical outputs (correlation > 0.999, means within 0.01); the small
+    residual comes from skimage quantising to 16384 gray levels internally.
+    """
+    import pytest
+    skd = pytest.importorskip("skimage.data")
+    from skimage.exposure import equalize_adapthist
+
+    for name in ("camera", "coins"):
+        image = getattr(skd, name)()
+        ours = _my_clahe_(image, clip_limit=0.01)
+        ref = equalize_adapthist(image, clip_limit=0.01)
+        assert np.corrcoef(ours.ravel(), ref.ravel())[0, 1] > 0.999, name
+        assert abs(ours.mean() - ref.mean()) < 0.01, name
+
+
+def test_clahe_rejects_kernel_size_of_wrong_length():
+    """A kernel_size whose length differs from image.ndim raises a clear ValueError.
+
+    The check built the exception without raising it, so the call failed later
+    with an unrelated broadcasting error. Expected: ValueError naming kernel_size.
+    """
+    import pytest
+    image = np.random.default_rng(0).random((32, 32))
+    with pytest.raises(ValueError, match="kernel_size"):
+        _my_clahe_(image, kernel_size=(8, 8, 8))

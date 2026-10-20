@@ -83,6 +83,49 @@ print("Hint: labels_cmap background is transparent by default. To set it to blac
 print("labels_cmap._init(); labels_cmap._lut[0] = [0, 0, 0, 1]")
 
 
+# --- Color Stops (White -> Pastel -> Pure -> Deep Saturated) ---
+# Each ramp starts at #FFFFFF and terminates in a deep, high-chroma shade.
+I_SERIES_STOPS = {
+    "I Blue": ["#FFFFFF", "#66B2FF", "#0066FF", "#003366"],
+    "I Bordeaux": ["#FFFFFF", "#C4526E", "#800020", "#4A0014"],
+    "I Forest": ["#FFFFFF", "#72CB72", "#228B22", "#0A3B18"],
+    # For orange, #7A2500 retains better chromatic identity than #591C00 (which borders on muddy brown)
+    "I Orange": ["#FFFFFF", "#FFC266", "#FF7F00", "#7A2500"],
+    "I Purple": ["#FFFFFF", "#D187D1", "#800080", "#3B003B"],
+    # Broadband subtractive primaries & counterstains
+    "I Teal": ["#FFFFFF", "#66E0D0", "#00A896", "#004D40"],     # Cyan-like (Absorbs R)
+    "I Rose": ["#FFFFFF", "#FF80BF", "#E6007A", "#59002E"],     # Magenta-like (Absorbs G)
+    "I Gold": ["#FFFFFF", "#FFE066", "#D49B00", "#664400"],     # Yellow-like (Absorbs B, dark anchor)
+    "I Slate": ["#FFFFFF", "#94A3B8", "#475569", "#0F172A"],    # Neutral DAPI/Histology counterstain
+}
+
+# --- Instantiate and Register ---
+I_SERIES_COLORMAPS = {
+    name: LinearSegmentedColormap.from_list(name, stops, N=256)
+    for name, stops in I_SERIES_STOPS.items()
+}
+
+i_blue = I_SERIES_COLORMAPS["I Blue"]
+i_bordeaux = I_SERIES_COLORMAPS["I Bordeaux"]
+i_forest = I_SERIES_COLORMAPS["I Forest"]
+i_orange = I_SERIES_COLORMAPS["I Orange"]
+i_purple = I_SERIES_COLORMAPS["I Purple"]
+i_teal = I_SERIES_COLORMAPS["I Teal"]
+i_rose = I_SERIES_COLORMAPS["I Rose"]
+i_gold = I_SERIES_COLORMAPS["I Gold"]
+i_slate = I_SERIES_COLORMAPS["I Slate"]
+
+for name, cmap in I_SERIES_COLORMAPS.items():
+    alias_name = name.lower().replace(" ", "_")
+
+    # Matplotlib >= 3.7 registry pattern with backward-compatibility fallback
+    for reg_name in (name, alias_name):
+        try:
+            mpl_colormaps.register(cmap, name=reg_name, force=True)
+        except AttributeError:
+            plt.register_cmap(name=reg_name, cmap=cmap)
+
+
 def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_kwargs):
     """
     Displays an image and its histogram.

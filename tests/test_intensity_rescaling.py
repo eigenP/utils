@@ -573,3 +573,254 @@ if __name__ == "__main__":
         print("Linear test passed.")
     except Exception as e:
         print(f"Test failed: {e}")
+
+
+def _radial_gradient(sizes):
+    grid = np.array(np.meshgrid(*[np.linspace(-s // 2 + 1, s // 2, s) for s in sizes], indexing='ij'))
+    gradient = np.sum(grid**2, axis=0)
+    return 0.01 * (np.max(gradient) - gradient) + 10
+
+
+@pytest.mark.parametrize("sizes, is_3d", [((8, 64, 64), True), ((64, 64), False)])
+def test_basic_single_sample_darkfield_is_unidentifiable(sizes, is_3d):
+    """With one image/volume, get_darkfield=True falls back to a flatfield-only fit.
+
+    BaSiC (I_i = B_i * S + D) separates the darkfield from the flatfield only
+    through variation of the baselines B_i across samples, so a single sample
+    cannot identify D. Previously the 'approximate' darkfield estimator averaged
+    over an empty set of samples, emitting "Mean of empty slice" RuntimeWarnings
+    every iteration, never converging (NaN residual) and returning all-NaN
+    results after max_iterations x max_reweight_iterations.
+
+    Strategy: fit a single Poisson volume (3D) / image (2D) with a known radial
+    flatfield. Expected outcome: exactly one UserWarning explaining the
+    fallback, no RuntimeWarning, finite outputs, a zero darkfield, results
+    identical to get_darkfield=False (the darkfield path is skipped, not
+    approximated), and the flatfield still recovered (positive control that the
+    fit itself works). Accuracy uses correlation and mean absolute error rather
+    than max error, which over 4096 pixels of one Poisson(~10) image is
+    dominated by noise; across seeds corr is ~0.99 (3D) / ~0.86 (2D) against
+    ~0.02 for a permuted truth, and MAE <= 0.09.
+    """
+    import warnings
+
+    rng = np.random.default_rng(0)
+    gradient = _radial_gradient(sizes)
+    image = rng.poisson(lam=gradient.astype(int)).astype(float)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = fit_basic_shading(image, is_3d=is_3d, get_darkfield=True, fitting_mode='approximate')
+
+    user = [w for w in caught if issubclass(w.category, UserWarning) and "not identifiable" in str(w.message)]
+    runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+    assert len(user) == 1
+    assert runtime == [], [str(w.message) for w in runtime]
+
+    for key in ("flatfield", "darkfield", "baseline"):
+        assert np.all(np.isfinite(res[key])), key
+    assert np.all(res["darkfield"] == 0)
+
+    ref = fit_basic_shading(image, is_3d=is_3d, get_darkfield=False, fitting_mode='approximate')
+    for key in ("flatfield", "darkfield", "baseline"):
+        np.testing.assert_array_equal(res[key], ref[key])
+
+    truth = gradient / np.mean(gradient)
+    assert np.corrcoef(res["flatfield"].ravel(), truth.ravel())[0, 1] > 0.75
+    assert np.mean(np.abs(res["flatfield"] - truth)) < 0.15
+
+
+def test_basic_identical_samples_darkfield_stays_finite():
+    """Identical samples carry no darkfield information but must not produce NaNs.
+
+    With N >= 2 identical images every baseline B_i is (numerically) 1, so the
+    darkfield estimator's sample set {B_i < 1} may be empty. Strategy: fit three
+    copies of one image with get_darkfield=True. Expected outcome: no
+    RuntimeWarning and finite flatfield, darkfield and baseline, whichever way
+    floating-point rounding decides the B_i < 1 test.
+    """
+    import warnings
+
+    rng = np.random.default_rng(1)
+    image = rng.poisson(lam=_radial_gradient((64, 64)).astype(int)).astype(float)
+    images = np.stack([image] * 3)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = fit_basic_shading(images, is_3d=False, get_darkfield=True, fitting_mode='approximate')
+
+    assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
+    for key in ("flatfield", "darkfield", "baseline"):
+        assert np.all(np.isfinite(res[key])), key
+
+
+# =========================================
+# Regression tests for the dtype round-trip, z-decay correction and BaSiC fixes
+# =========================================
+from eigenp_utils.intensity_rescaling import contrast_stretching, contrast_stretch_per_slice, normalize_image, test_z_axis_orientation as _z_orientation
+
+
+@pytest.mark.parametrize("dtype", [np.int64, np.int32, np.uint32])
+def test_dtype_roundtrip_preserves_wide_integer_images(dtype):
+    """32/64-bit integer images keep their levels through the float round-trip.
+
+    The decorator normalised by the dtype range in float32: an int64 ramp collapsed
+    to one value and the uint32 maximum wrapped to 0. Strategy: stretch a 0..4095
+    ramp over its full range. Expected: all 4096 levels survive, 0 maps to 0 and the
+    maximum stays the maximum (no wrap-around).
+    """
+    ramp = np.arange(4096).reshape(64, 64).astype(dtype)
+    out = contrast_stretching(ramp, 0, 100)
+    assert out.dtype == dtype
+    assert len(np.unique(out)) == 4096
+    assert out.min() == 0 and out.max() == out.flat[-1]
+
+
+def test_signed_integer_zero_background_stays_zero():
+    """Signed images keep 0 at 0 through intensity corrections.
+
+    Offsetting int16 by its minimum mapped 0 to 0.5, so z-decay correction lifted
+    a black background into hundreds of counts. Expected: background stays exactly
+    0 for both methods, and contrast stretching stays non-negative.
+    """
+    rng = np.random.default_rng(0)
+    decay = np.linspace(1, 0.3, 8)[:, None, None]
+    stack = (rng.uniform(0, 4000, (8, 32, 32)) * decay).astype(np.int16)
+    stack[:, :4, :4] = 0
+    for method in ("gain", "gamma"):
+        assert correct_z_intensity_decay(stack, method=method)[:, :4, :4].max() == 0
+    assert contrast_stretching(stack, 0, 100).min() >= 0
+
+
+def test_normalize_image_wide_ints_and_nans():
+    """normalize_image neither wraps int64 nor lets one NaN poison the image.
+
+    float(int64 max) rounds up to 2**63, which wrapped the brightest pixel to the
+    most negative value; np.percentile with a NaN returned NaN bounds, making every
+    pixel NaN. Expected: int64 output within [0, max]; exactly one NaN out for one in.
+    """
+    out = normalize_image(np.arange(4096).reshape(64, 64).astype(np.int64))
+    assert out.min() == 0 and out.max() > 0
+    img = np.random.default_rng(0).random((16, 16)).astype(np.float32)
+    img[3, 3] = np.nan
+    assert int(np.isnan(normalize_image(img)).sum()) == 1
+
+
+@pytest.mark.parametrize("method", ["gamma", "gain"])
+def test_z_decay_correction_on_raw_float_units(method):
+    """Float stacks in raw intensity units (not [0, 1]) are corrected, not ignored or saturated.
+
+    Previously 'gamma' returned the input unchanged and 'gain' clipped everything to
+    1.0. Strategy: a 0.3x exponential decay over 10 slices with values up to 1e4.
+    Expected: the last/first slice 99th-percentile ratio rises from 0.3 to ~1 and the
+    intensity scale is preserved (max of the same order as the input).
+    """
+    rng = np.random.default_rng(0)
+    decay = np.exp(np.log(0.3) * np.arange(10) / 9)[:, None, None]
+    raw = rng.uniform(0, 1e4, (10, 32, 32)) * decay
+    out = correct_z_intensity_decay(raw, method=method)
+    p99 = [np.percentile(out[i], 99) for i in range(10)]
+    assert 0.9 < p99[-1] / p99[0] < 1.1
+    assert 0.5e4 < out.max() < 2e4
+
+
+def test_gamma_correction_near_full_scale_does_not_flood():
+    """Gamma correction stays sane when the reference percentile is at full scale.
+
+    With gamma = log(y_ref) / log(y_fit) and y_ref -> 1 every factor collapsed to the
+    0.1 clip, so deep slices became brighter than the reference (slice 1 mean +66%).
+    Expected: each slice's 99th percentile maps to the reference's, and no slice mean
+    exceeds the reference mean by more than a modest gamma-curve margin (< 1.5x).
+    """
+    rng = np.random.default_rng(0)
+    decay = np.exp(np.log(0.5) * np.arange(10) / 9)[:, None, None]
+    stack = normalize_image(rng.uniform(0, 1, (10, 32, 32)) * decay, 0.5, 99.9)
+    out = correct_z_intensity_decay(stack, method="gamma")
+    p99 = np.array([np.percentile(out[i], 99) for i in range(10)])
+    assert np.allclose(p99, p99[0], rtol=0.05)
+    means = out.mean(axis=(1, 2))
+    assert means.max() < 1.5 * means[0]
+
+
+def test_gamma_correction_unchanged_for_mid_range_unit_data():
+    """For [0, 1] data with a reference percentile <= 0.5 the classic formula is kept.
+
+    Expected: identical to applying g_i = log(y_ref)/log(y_fit_i) slice by slice.
+    """
+    rng = np.random.default_rng(1)
+    decay = np.exp(np.log(0.5) * np.arange(6) / 5)[:, None, None]
+    stack = (rng.uniform(0, 0.4, (6, 16, 16)) * decay).astype(np.float32)
+    out = correct_z_intensity_decay(stack, method="gamma", return_diagnostic=True)
+    y_fit = np.clip(out["diagnostic_data"]["y_fit_norm"], 1e-9, 1.0)
+    g = np.clip(np.log(y_fit.max()) / np.log(y_fit), 0.1, 10.0)
+    expected = np.stack([stack[i] ** g[i] for i in range(6)])
+    np.testing.assert_allclose(out["image"], expected, rtol=1e-5, atol=1e-6)
+
+
+def test_z_decay_rejects_unknown_method():
+    """An unknown method raises instead of returning uninitialised memory."""
+    with pytest.raises(ValueError, match="Unknown correction method"):
+        correct_z_intensity_decay(np.full((4, 8, 8), 100, np.uint16), method="exponential", fit_model=None)
+
+
+def test_contrast_stretch_per_slice_single_bound():
+    """Passing only p_max_array (or only p_min_array) uses the slice's own other bound."""
+    img = np.random.default_rng(0).uniform(0, 1000, (4, 8, 8))
+    out = contrast_stretch_per_slice(img, p_max_array=np.full(4, 500.0))
+    assert out.shape == img.shape
+    out = contrast_stretch_per_slice(img, p_min_array=np.full(4, 100.0))
+    assert out.shape == img.shape
+
+
+def test_z_axis_orientation_uses_all_bottom_slices_and_channels():
+    """The bottom half includes the last slice, and (C,Z,Y,X) / (T,C,Z,Y,X) channels work.
+
+    Expected: a 3-slice stack bright only in its last slice is flagged for flipping;
+    4D and 5D inputs with channel= do not crash; Z < 2 raises a clear error.
+    """
+    v = np.zeros((3, 8, 8)); v[2] = 1
+    assert _z_orientation(v, return_image=False) is True
+    _z_orientation(np.random.rand(2, 10, 16, 16), channel=1, return_image=False)
+    _z_orientation(np.random.rand(1, 2, 10, 16, 16), channel=1, return_image=False)
+    with pytest.raises(ValueError):
+        _z_orientation(np.zeros((1, 8, 8)), return_image=False)
+
+
+@pytest.mark.parametrize("get_darkfield", [False, True])
+def test_basic_fit_ladmap_recovers_flatfield(get_darkfield):
+    """fitting_mode='ladmap' recovers a known flatfield and baselines.
+
+    It used to stop after one iteration (the update is ~0 while the tiny initial mu
+    still shrinks S to zero) and returned an all-zero flatfield and baseline.
+    Strategy: 20 Poisson images of a radial flatfield with per-image gains.
+    Expected: flatfield correlates > 0.99 with the truth and the baseline tracks the
+    gains (corr > 0.99), as in 'approximate' mode.
+    """
+    rng = np.random.default_rng(0)
+    yy, xx = np.mgrid[:64, :64]
+    flat = 1.2 - 0.4 * ((yy - 32) ** 2 + (xx - 32) ** 2) / 32 ** 2
+    gains = rng.uniform(0.8, 1.2, (20, 1, 1))
+    images = rng.poisson(200 * flat[None] * gains).astype(float)
+    res = fit_basic_shading(images, fitting_mode='ladmap', get_darkfield=get_darkfield)
+    assert np.corrcoef(res["flatfield"].ravel(), flat.ravel())[0, 1] > 0.99
+    assert np.corrcoef(res["baseline"], gains.ravel())[0, 1] > 0.99
+
+
+def test_basic_rejects_zero_reweight_iterations():
+    """max_reweight_iterations=0 raises a clear ValueError (was UnboundLocalError)."""
+    with pytest.raises(ValueError, match="max_reweight_iterations"):
+        fit_basic_shading(np.random.default_rng(0).random((5, 32, 32)), max_reweight_iterations=0)
+
+
+def test_apply_basic_shading_rounds_and_keeps_baseline_sign():
+    """Integer outputs are rounded; baseline-corrected output defaults to float32.
+
+    110 / 1.1 used to truncate to 99. Subtracting a timelapse baseline centres the
+    images on zero (as in BaSiCPy), which a uint16 output clipped to 0 for about half
+    of the background. Expected: 100, and signed float32 values when a baseline is given.
+    """
+    out = apply_basic_shading(np.full((2, 4, 4), 110, np.uint16), np.full((4, 4), 1.1))
+    assert out.dtype == np.uint16 and out[0, 0, 0] == 100
+    out = apply_basic_shading(np.full((3, 4, 4), 100, np.uint16), np.ones((4, 4)), baseline=np.array([90.0, 100, 110]))
+    assert out.dtype == np.float32
+    np.testing.assert_allclose(out[:, 0, 0], [10, 0, -10])

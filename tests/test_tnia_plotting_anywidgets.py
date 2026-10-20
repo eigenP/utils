@@ -410,6 +410,75 @@ def test_tnia_annotator_widget():
     with open("/tmp/test_points.csv", "r") as f:
         print(f.read())
 
+
+def test_sync_on_hover_defaults_to_true():
+    """Test that sync_on_hover defaults to True for all interactive widgets and wrapper functions."""
+    from eigenp_utils.tnia_plotting_anywidgets import (
+        TNIASliceWidget,
+        TNIAScatterWidget,
+        TNIAAnnotatorWidget,
+        show_zyx_max_slice_interactive,
+        show_zyx_max_slice_interactive_point_annotator,
+        show_zyx_max_scatter_interactive,
+    )
+
+    im = np.zeros((10, 20, 30))
+    X, Y, Z = np.random.rand(10), np.random.rand(10), np.random.rand(10)
+
+    # Class instantiations
+    w_slice = TNIASliceWidget(im)
+    assert w_slice.sync_on_hover is True
+
+    w_scatter = TNIAScatterWidget(X, Y, Z)
+    assert w_scatter.sync_on_hover is True
+
+    w_annot = TNIAAnnotatorWidget(im)
+    assert w_annot.sync_on_hover is True
+
+    # Wrapper function instantiations
+    w_fn_slice = show_zyx_max_slice_interactive(im)
+    assert w_fn_slice.sync_on_hover is True
+
+    w_fn_annot = show_zyx_max_slice_interactive_point_annotator(im)
+    assert w_fn_annot.sync_on_hover is True
+
+    w_fn_scatter = show_zyx_max_scatter_interactive((Z, Y, X))
+    assert w_fn_scatter.sync_on_hover is True
+
+
+def test_annotator_annotate_kwarg_and_property():
+    """Test annotate kwarg default, explicit boolean settings, and property getter/setter on TNIAAnnotatorWidget."""
+    from eigenp_utils.tnia_plotting_anywidgets import (
+        TNIAAnnotatorWidget,
+        show_zyx_max_slice_interactive_point_annotator,
+    )
+
+    im = np.zeros((10, 20, 30))
+
+    # Default should be annotate=False (annotation_mode is False)
+    w_default = show_zyx_max_slice_interactive_point_annotator(im)
+    assert w_default.annotation_mode is False
+    assert w_default.annotate is False
+
+    # Explicit annotate=True during wrapper function creation
+    w_active = show_zyx_max_slice_interactive_point_annotator(im, annotate=True)
+    assert w_active.annotation_mode is True
+    assert w_active.annotate is True
+
+    # Direct class instantiation with annotate=True
+    w_class = TNIAAnnotatorWidget(im, annotate=True)
+    assert w_class.annotation_mode is True
+    assert w_class.annotate is True
+
+    # Test programmatically modifying via annotate property
+    w_default.annotate = True
+    assert w_default.annotation_mode is True
+    assert w_default.annotate is True
+
+    w_default.annotate = False
+    assert w_default.annotation_mode is False
+    assert w_default.annotate is False
+
 # =========================================
 # Source: test_tnia_plotting_anywidgets_resolve_color.py
 # =========================================
@@ -516,7 +585,7 @@ def test_marimo_update(tmp_path):
     def __():
         import numpy as np
         from skimage.data import cells3d
-        from eigenp_utils.tnia_plotting_anywidgets import show_xyz_max_slice_interactive
+        from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
         try:
             im = cells3d()
@@ -529,7 +598,7 @@ def test_marimo_update(tmp_path):
         membrane = im[:, 0, :, :]
         nuclei = im[:, 1, :, :]
 
-        widget = show_xyz_max_slice_interactive(
+        widget = show_zyx_max_slice_interactive(
             [membrane, nuclei],
             colormap=['magma', 'viridis']
         )
@@ -547,6 +616,11 @@ def test_marimo_update(tmp_path):
     compile(written, str(app_path), "exec")
     assert "colormap=" in written
     assert "colors=" not in written
+
+    # The snippet must reference a function that exists and accepts colormap=
+    import inspect
+    import eigenp_utils.tnia_plotting_anywidgets as tpa
+    assert "colormap" in inspect.signature(tpa.show_zyx_max_slice_interactive).parameters
 
 # =========================================
 # Source: test_tnia_figsize_scale.py
@@ -1651,3 +1725,107 @@ def test_iso_scatter_handles_empty_input():
         assert any("No Data" in t.get_text() for t in fig.texts)
     finally:
         plt.close(fig)
+
+
+# =========================================
+# _rotate_expand (scipy replacement for skimage.transform.rotate(resize=True))
+# =========================================
+from eigenp_utils.tnia_plotting_anywidgets import _rotate_expand
+
+
+def test_rotate_expand_quarter_turns_are_exact():
+    """Multiples of 90 degrees reduce to exact array permutations.
+
+    At quarter turns every output pixel centre lands on an input pixel centre,
+    and an order-3 spline interpolates its nodes exactly. Strategy: compare
+    against ``np.rot90`` (counter-clockwise, matching skimage's sign convention)
+    for a non-square 2D image and a channels-last RGB image.
+
+    Expected outcome: identical shapes and values equal to ~1e-9; a sign error
+    in the rotation would swap 90 for 270 and fail.
+    """
+    rng = np.random.default_rng(0)
+    img = rng.random((7, 12))
+    rgb = rng.random((7, 12, 3))
+    for k, angle in [(1, 90), (2, 180), (3, 270)]:
+        np.testing.assert_allclose(_rotate_expand(img, angle), np.rot90(img, k), atol=1e-9)
+        np.testing.assert_allclose(_rotate_expand(rgb, angle), np.rot90(rgb, k, axes=(0, 1)), atol=1e-9)
+
+
+def test_rotate_expand_canvas_and_range():
+    """The canvas grows to hold the rotated image and spline overshoot is clipped.
+
+    Strategy: rotate a constant image by 45 degrees. The expanded canvas must
+    follow skimage's formula ``round(|(W-1) sin| + |(H-1) cos| + 1)`` (rows) and
+    the analogous columns, the rotated interior must stay at the constant value,
+    and no pixel may leave ``[0, value]`` even though cubic splines overshoot
+    at the hard edge of the rotated square.
+    """
+    h, w, a = 20, 31, 45.0
+    img = np.full((h, w), 2.0)
+    out = _rotate_expand(img, a)
+    c, s = np.cos(np.deg2rad(a)), np.sin(np.deg2rad(a))
+    assert out.shape == (int(np.around(abs((w - 1) * s) + abs((h - 1) * c) + 1)),
+                         int(np.around(abs((w - 1) * c) + abs((h - 1) * s) + 1)))
+    assert out.min() >= 0.0 and out.max() <= 2.0
+    cy, cx = (out.shape[0] - 1) // 2, (out.shape[1] - 1) // 2
+    # The B-spline prefilter is global: edge ringing decays ~0.27**d, leaving
+    # ~1e-5 residue at the centre of a 20 px image, hence the 1e-3 tolerance.
+    np.testing.assert_allclose(out[cy - 2:cy + 3, cx - 2:cx + 3], 2.0, atol=1e-3)
+
+
+def test_rotate_expand_matches_skimage_geometry():
+    """Output geometry is identical to skimage.transform.rotate(resize=True).
+
+    Interpolation kernels differ (skimage's 2D fast path uses its own bicubic,
+    scipy a cubic B-spline), so values are compared loosely while geometry is
+    compared tightly. Strategy: rotate a smooth off-centre blob by assorted
+    angles and require equal output shapes and centres of mass within 0.05 px.
+    Negative control: rotating by the opposite angle must move the centroid by
+    many pixels, proving the centroid check can detect direction errors.
+    """
+    skt = pytest.importorskip("skimage.transform")
+    from scipy import ndimage as ndi
+
+    for h, w in [(37, 64), (20, 101)]:
+        img = np.zeros((h, w))
+        img[h // 5:h // 2, w // 6:w // 3] = 1.0
+        img = ndi.gaussian_filter(img, 1.0)
+        for angle in [0.5, 15, 45, 133, -20, 271.3]:
+            ref = skt.rotate(img, angle, resize=True, order=3, preserve_range=True)
+            out = _rotate_expand(img, angle)
+            assert out.shape == ref.shape
+            assert np.abs(np.subtract(ndi.center_of_mass(ref), ndi.center_of_mass(out))).max() < 0.05
+            assert np.abs(ref - out).max() < 0.1 * img.max()
+
+        ref = skt.rotate(img, 30, resize=True, order=3, preserve_range=True)
+        wrong = _rotate_expand(img, -30)
+        assert np.abs(np.subtract(ndi.center_of_mass(ref), ndi.center_of_mass(wrong))).max() > 3.0
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide; covered by tests/wasm")
+def test_top_level_import_does_not_require_skimage():
+    """``import eigenp_utils`` must work without scikit-image installed.
+
+    scikit-image is an optional extra (``image-analysis``); the core plotting
+    API, and in particular browser/WASM environments installing only core
+    dependencies, must not need it. Strategy: in a fresh interpreter, make any
+    ``skimage`` import raise, then import the package and its ortho-view API.
+
+    Expected outcome: the subprocess exits cleanly and the core names exist.
+    """
+    import subprocess
+    code = textwrap.dedent("""
+        import sys, importlib.abc
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "skimage" or name.startswith("skimage."):
+                    raise ImportError("skimage blocked for test")
+        sys.meta_path.insert(0, Block())
+        import eigenp_utils
+        from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+        assert "show_zyx" in eigenp_utils.__all__
+        assert not any(m == "skimage" or m.startswith("skimage.") for m in sys.modules)
+    """)
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr

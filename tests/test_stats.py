@@ -257,3 +257,102 @@ def test_remove_outliers_robust_zscore_array():
     assert 100 not in cleaned_rz
     assert -100 not in cleaned_rz
     assert 0 in cleaned_rz
+
+
+# =========================================
+# Regression tests from the repo scan
+# =========================================
+def test_remove_outliers_zscore_ignores_constant_columns():
+    """A constant column has no z-score outliers and must not empty the DataFrame.
+
+    scipy's zscore is NaN for zero variance and NaN <= threshold is False, so every
+    row was dropped. Expected: all 10 rows kept, no RuntimeWarning, and a real outlier
+    in another column is still removed (positive control).
+    """
+    import warnings
+    from eigenp_utils.stats import remove_outliers
+
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({"a": rng.normal(size=10), "batch": np.ones(10)})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        assert len(remove_outliers(df, method="zscore", threshold=3)) == 10
+    df.loc[0, "a"] = 50
+    assert len(remove_outliers(df, method="zscore", threshold=2.5)) == 9
+    assert len(remove_outliers(np.ones(5), method="zscore", threshold=3)) == 5
+
+
+def test_remove_outliers_2d_array_filters_rows():
+    """2D arrays are filtered row-wise (observations) instead of pooled and flattened."""
+    from eigenp_utils.stats import remove_outliers
+
+    A = np.column_stack([np.linspace(0, 1, 10), np.linspace(5, 6, 10)])
+    A[0, 0] = 50  # the only outlier
+    out = remove_outliers(A, method="iqr")
+    assert out.shape == (9, 2)
+    np.testing.assert_array_equal(out, A[1:])
+
+
+def test_remove_outliers_mahalanobis_single_complete_row():
+    """With fewer than 2 complete rows the covariance is undefined: keep everything (no crash)."""
+    from eigenp_utils.stats import remove_outliers
+
+    X = np.array([[1, 2, 3], [np.nan, 1, 1], [np.nan, 2, 2]], dtype=float)
+    assert remove_outliers(X, method="mahalanobis", threshold=0.99).shape == (3, 3)
+
+
+def test_cohens_d_constant_groups():
+    """Zero-variance groups: 0 only if the means are equal, otherwise an unbounded effect."""
+    from eigenp_utils.stats import cohens_d
+
+    assert cohens_d([1, 1, 1], [2, 2, 2]) == -np.inf
+    assert cohens_d([2, 2, 2], [1, 1, 1]) == np.inf
+    assert cohens_d([2, 2, 2], [2, 2, 2]) == 0.0
+
+
+def test_bootstrap_bca_on_2d_data_uses_row_jackknife():
+    """BCa works for statistics of 2D data (rows = observations).
+
+    The jackknife used np.delete without an axis, flattening the data, so a
+    correlation statistic crashed. Expected: a finite interval containing the sample
+    correlation; and clear errors for n < 2 or NaN input.
+    """
+    from eigenp_utils.stats import bootstrap_ci
+
+    rng = np.random.default_rng(0)
+    pairs = rng.normal(size=(30, 2))
+    pairs[:, 1] += pairs[:, 0]
+    corr = lambda d: np.corrcoef(d[:, 0], d[:, 1])[0, 1]
+    lo, hi = bootstrap_ci(pairs, corr, random_state=0)
+    assert lo < corr(pairs) < hi
+    with pytest.raises(ValueError, match="at least 2"):
+        bootstrap_ci([3.0])
+    with pytest.raises(ValueError, match="NaN"):
+        bootstrap_ci([1.0, 2.0, np.nan, 4.0])
+
+
+def test_add_stat_annotations_follows_plot_order():
+    """Brackets land on the named groups even when the plot reorders categories.
+
+    raincloud_plot sorts groups alphabetically; statannotations assumed first-
+    appearance order, so ('ctrl', 'drug') was drawn over alpha and ctrl. Expected:
+    the bracket spans the x positions of 'ctrl' and 'drug' on the axis.
+    """
+    pytest.importorskip("statannotations")
+    from eigenp_utils.stats import add_stat_annotations
+    from eigenp_utils.plotting_utils import raincloud_plot
+
+    rng = np.random.default_rng(0)
+    d = pd.DataFrame({"g": np.repeat(["ctrl", "drug", "alpha"], 20),
+                      "v": np.r_[rng.normal(0, 1, 20), rng.normal(3, 1, 20), rng.normal(0, 1, 20)]})
+    fig, ax = plt.subplots()
+    try:
+        raincloud_plot(d, x="g", y="v", ax=ax)
+        labels = [t.get_text() for t in ax.get_xticklabels()]
+        n_lines = len(ax.lines)
+        add_stat_annotations(ax, d, [("ctrl", "drug")], x="g", y="v", verbose=False)
+        bracket = [l for l in ax.lines[n_lines:] if len(l.get_xdata()) == 4][-1]
+        spanned = sorted({labels[int(round(v))] for v in bracket.get_xdata()})
+        assert spanned == ["ctrl", "drug"]
+    finally:
+        plt.close(fig)

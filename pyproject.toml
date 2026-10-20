@@ -38,7 +38,10 @@ Repository = "https://github.com/eigenP/utils.git"
 [project.optional-dependencies]
 plotting = [
     "plotly",
-    "statannotations"
+    "statannotations",
+    # statannotations imports statsmodels lazily for multiple-comparison
+    # corrections (add_stat_annotations defaults to Holm-Bonferroni)
+    "statsmodels",
 ]
 single-cell = [
     "pacmap>=0.7.3",
@@ -48,6 +51,8 @@ single-cell = [
     "triku",
     "leidenalg",
     "adjustText",
+    # scanpy's default seurat_v3 HVG flavor (preprocess_subset, kknn_ingest)
+    "scikit-misc",
 ]
 dev = [
     "pytest>=7.0.0",

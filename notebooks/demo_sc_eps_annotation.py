@@ -11,6 +11,11 @@
 #     "eigenp-utils[single-cell] @ git+https://github.com/eigenP/utils.git@main",
 # ]
 # ///
+#
+# Not runnable in the browser (marimo WASM / Pyodide): scanpy, pacmap and their
+# numba dependency have no WebAssembly builds. Run it locally with
+#   uvx marimo edit --sandbox <this file>
+# or on molab (https://molab.marimo.io), which runs a regular Python kernel.
 
 import marimo
 
@@ -23,6 +28,22 @@ def _():
     import marimo as mo
 
     return (mo,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    import sys
+
+    mo.callout(
+        mo.md(
+            "**This notebook cannot run in the browser (WebAssembly).** scanpy, pacmap and their "
+            "numba dependency have no WebAssembly builds. Run it locally with "
+            "`uvx marimo edit --sandbox` on this file, or open it on "
+            "[molab](https://molab.marimo.io), which runs a regular Python kernel."
+        ),
+        kind="warn",
+    ) if sys.platform == "emscripten" else None
+    return
 
 
 @app.cell
@@ -42,9 +63,8 @@ def _():
     from eigenp_utils.single_cell import (
         tl_pacmap,
         annotate_clusters_by_markers,
-        sweep_leiden,
-        multiscale_coarsening,
-        plot_multiresolution_tree
+        sweep_leiden_and_annotate,
+        plot_clustering_tree,
     )
 
     # Load PBMC3k
@@ -54,11 +74,10 @@ def _():
     return (
         adata,
         annotate_clusters_by_markers,
-        multiscale_coarsening,
-        plot_multiresolution_tree,
+        plot_clustering_tree,
         plt,
         sc,
-        sweep_leiden,
+        sweep_leiden_and_annotate,
     )
 
 
@@ -85,27 +104,28 @@ def _(adata, annotate_clusters_by_markers, mo, plt, sc):
 
     with mo.status.spinner("Annotating..."):
         # We will use 'louvain' as the base clusters
+        # writes adata.obs['eps_cell_type'] (plus softmax probability / uncertainty)
         df_annot = annotate_clusters_by_markers(
             adata,
             cluster_key='louvain',
-            marker_dict=markers,
-            new_annotation_key='eps_annotation'
+            cell_type_markers_dict=markers,
+            obs_prefix='eps',
         )
 
-    sc.pl.embedding(adata, basis='pacmap', color=['louvain', 'eps_annotation'])
+    sc.pl.embedding(adata, basis='pacmap', color=['louvain', 'eps_cell_type'], show=False)
     _fig = plt.gcf()
 
     mo.vstack([
         mo.ui.table(df_annot),
         _fig
     ])
-    return
+    return (markers,)
 
 
 @app.cell
 def _(mo):
     mo.md("""
-    ## Sweep Leiden & Multiscale Coarsening Tree
+    ## Sweep Leiden & Clustering Tree
     """)
     return
 
@@ -120,29 +140,23 @@ def _(mo):
 @app.cell
 def _(
     adata,
+    markers,
     mo,
-    multiscale_coarsening,
-    plot_multiresolution_tree,
+    plot_clustering_tree,
     run_sweep_btn,
-    sweep_leiden,
+    sweep_leiden_and_annotate,
 ):
     if run_sweep_btn.value:
         with mo.status.spinner("Sweeping Leiden..."):
             resolutions = [0.1, 0.3, 0.5, 0.8, 1.2]
-            sweep_leiden(adata, resolutions=resolutions, key_prefix='leiden_')
+            # computes adata.obs['leiden_<res>'] and annotates each resolution
+            sweep_results = sweep_leiden_and_annotate(adata, markers, resolutions=resolutions)
 
-            ms_results = multiscale_coarsening(
-                adata,
-                resolutions=resolutions,
-                resolution_key_prefix='leiden_',
-                return_output=True
-            )
-
-            fig = plot_multiresolution_tree(
-                ms_results['mappings'],
-                resolutions=resolutions
-            )
-            _res = fig
+            _tree_fig = plot_clustering_tree(adata, [f"leiden_{r:.1f}" for r in resolutions])
+            _res = mo.vstack([
+                _tree_fig,
+                mo.ui.table(sweep_results["adjacent_ARI"]),
+            ])
     else:
         _res = mo.md("Click to sweep leiden and plot.")
     _res

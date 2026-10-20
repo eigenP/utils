@@ -74,7 +74,7 @@ You can choose to install optional dependencies if you need functionality such a
 
 - `[image-analysis]` - installs `scikit-image`.
 - `[single-cell]` - installs packages like `scanpy`, `pacmap`, `leidenalg`, etc.
-- `[plotting]` - installs `plotly`.
+- `[plotting]` - installs `plotly`, `statannotations` and `statsmodels`.
 - `[all]` - installs all of the optional dependencies above.
 - `[dev]` - installs all dependencies and additional tools for testing (e.g. `pytest`).
 
@@ -96,6 +96,37 @@ uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
 ```
 
 You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+
+### Browser / WASM (marimo, Pyodide)
+
+Everything except single-cell analysis runs in [Pyodide](https://pyodide.org), the WebAssembly runtime behind marimo's browser notebooks, including the interactive anywidget ortho viewers. CI runs the test suite inside Pyodide (`tests/wasm/`).
+
+| Module(s) | Needs | WASM |
+| --- | --- | --- |
+| `plotting_utils`, `tnia_plotting_anywidgets`, `stats`, `spline_utils`, `io` (file helpers) | core | yes |
+| `image_and_labels_utils`, `intensity_rescaling`, `extended_depth_of_focus`, `maxproj_registration`, `surface_extraction`, `clahe_equalize_adapthist` | `scikit-image` | yes |
+| `image_io` | `xarray`, `tifffile` | yes |
+| `stats.add_stat_annotations`, `plotting_utils.plotly_scatter_3d` | `[plotting]` | yes |
+| `single_cell` graph helpers (`smooth_expression_on_graph`, `find_correlated_features`, ...) | `anndata`, `scikit-learn` | yes (scanpy is imported lazily) |
+| `single_cell` functions that call scanpy / pacmap / leidenalg | `[single-cell]` (`numba` has no WASM build) | no |
+
+micropip installs only wheels, and only from hosts that send CORS headers, so a GitHub archive or `git+` URL does not work in the browser. CI publishes the latest `main` build to the `wasm-wheel` branch:
+
+```python
+import micropip
+await micropip.install([
+    "https://raw.githubusercontent.com/eigenP/utils/wasm-wheel/eigenp_utils-0-py3-none-any.whl",
+    "scikit-image", "tifffile",  # only for the image-analysis modules / reading TIFFs
+])
+```
+
+(`eigenp_utils-0-...whl` is a version-independent alias accepted by micropip; pip/uv reject it, so use the versioned file next to it or `git+` natively.)
+
+Install everything in **one** `micropip.install([...])` call: micropip never upgrades a package an earlier call installed (e.g. anndata needs a newer `typing-extensions` than Pyodide bundles).
+
+Notebooks keep `git+` in their PEP 723 header for native use, gated with `; sys_platform != 'emscripten'` so marimo WASM skips it (and anything else without a WASM build) instead of failing the whole header install. Demo notebooks that need scanpy (`demo_sc_*`) cannot run in the browser and say so; run them locally (`uvx marimo edit --sandbox <file>`) or on [molab](https://molab.marimo.io). `blog_gene_distances_ot.py` runs in WASM with substitutions it announces (kNN graph instead of UMAP connectivities, HiGHS instead of POT).
+
+The browser cannot block on network I/O, so use `await eigenp_utils.io.download_file_async(url, dest)` there (it uses `pyodide.http.pyfetch`; natively it runs `download_file` in a thread). The server must send CORS headers: e.g. for scikit-image's `cells3d`, use GitLab's API endpoint `https://gitlab.com/api/v4/projects/scikit-image%2Fdata/repository/files/cells3d.tif/raw?ref=master` rather than the `/-/raw/` URL.
 
 ## License
 

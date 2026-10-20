@@ -1,14 +1,13 @@
 from __future__ import annotations
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any, Union
+import importlib
 import warnings
 from collections import defaultdict
 from uuid import uuid4
 
 import numpy as np
 import pandas as pd
-import scanpy as sc
 from sklearn.neighbors import NearestNeighbors
-import anndata
 import scipy.sparse as sp
 from scipy.cluster import hierarchy
 from scipy.linalg import svd
@@ -20,6 +19,37 @@ import matplotlib.patheffects as m_fx
 import re
 from .plotting_utils import get_nice_number
 from .stats import robust_standardize
+
+
+
+class _LazyModule:
+    """Import a module on first attribute access.
+
+    scanpy (via numba) has no WebAssembly build, so importing it eagerly would
+    make the whole module unusable in Pyodide / marimo WASM, even for helpers
+    that only need numpy/scipy (e.g. ``smooth_expression_on_graph``). Type
+    annotations are not evaluated (``from __future__ import annotations``).
+    """
+
+    def __init__(self, name: str):
+        self._name = name
+        self._module = None
+
+    def __getattr__(self, attr):
+        if self._module is None:
+            try:
+                self._module = importlib.import_module(self._name)
+            except ImportError as e:
+                raise ImportError(
+                    f"This function needs '{self._name}' (`pip install eigenp-utils[single-cell]`). "
+                    "scanpy cannot be installed in the browser (WASM); run such notebooks "
+                    "locally or on molab instead."
+                ) from e
+        return getattr(self._module, attr)
+
+
+sc = _LazyModule("scanpy")
+anndata = _LazyModule("anndata")
 
 # Try importing third-party libraries that might be installed via the inline dependencies
 try:
@@ -546,6 +576,9 @@ def plot_clustering_tree(
                           (e.g., 'viridis') for a gradient based on proportion.
         num_layout_iterations (int): Number of iterations for the barycenter layout
                                      algorithm to stabilize node positions.
+
+    Returns:
+        matplotlib.figure.Figure: The figure (call ``plt.show()`` yourself in scripts).
     """
 
     # 0. Validate Keys
@@ -729,7 +762,7 @@ def plot_clustering_tree(
     )  # Adjust figsize for better readability
 
     # -- Define Colors per Node based on adata.uns --
-    fallback_cmap = plt.cm.get_cmap("Spectral", len(cluster_keys))
+    fallback_cmap = plt.colormaps["Spectral"].resampled(len(cluster_keys))
     node_colors = {}
 
     for i, key in enumerate(cluster_keys):
@@ -905,8 +938,8 @@ def plot_clustering_tree(
     )
 
     ax.autoscale_view()
-    plt.subplots_adjust(right=0.75)  # Adjust right margin
-    plt.show()
+    fig.subplots_adjust(right=0.75)  # Adjust right margin
+    return fig
 
 
 def import_obs_to_adata_from_csv(

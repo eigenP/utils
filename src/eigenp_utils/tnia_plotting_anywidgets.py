@@ -1,4 +1,3 @@
-from skimage.transform import resize, rotate
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
@@ -6,7 +5,7 @@ from skimage.transform import resize, rotate
 #     "traitlets",
 #     "matplotlib",
 #     "numpy",
-#     "scikit-image",
+#     "scipy",
 # ]
 # ///
 
@@ -51,10 +50,52 @@ import base64
 import importlib.resources as ir
 from matplotlib import gridspec
 
-from skimage.transform import resize
+from scipy import ndimage as ndi
 from matplotlib.colors import PowerNorm, to_rgb, LinearSegmentedColormap
 import matplotlib.colors as mcolors
 from matplotlib.figure import Figure
+
+
+def _rotate_expand(image, angle_deg, order=3):
+    """
+    Rotate a 2D (H, W) or channels-last (H, W, C) image counter-clockwise by
+    ``angle_deg`` about its centre, expanding the canvas to fit the result.
+
+    Pure scipy replacement for
+    ``skimage.transform.rotate(image, angle_deg, resize=True, order=order, preserve_range=True)``:
+    same output shape, rotation centre ``((W - 1) / 2, (H - 1) / 2)``, zero fill
+    and clipping of spline overshoot to the input range.
+    """
+    image = np.asarray(image)
+    if not np.issubdtype(image.dtype, np.floating):
+        image = image.astype(np.float64)
+    rows, cols = image.shape[:2]
+    theta = np.deg2rad(angle_deg)
+    c, s = np.cos(theta), np.sin(theta)
+    cy, cx = (rows - 1) / 2.0, (cols - 1) / 2.0
+
+    # Output-space positions of the input corners (forward rotation)
+    corners = np.array([[0, 0], [0, rows - 1], [cols - 1, rows - 1], [cols - 1, 0]], dtype=float)
+    dx, dy = corners[:, 0] - cx, corners[:, 1] - cy
+    out_x = c * dx + s * dy + cx
+    out_y = -s * dx + c * dy + cy
+    minc, minr = out_x.min(), out_y.min()
+    out_shape = (int(np.around(out_y.max() - minr + 1)), int(np.around(out_x.max() - minc + 1)))
+
+    # Inverse map in (row, col) index order: input = M @ output + offset
+    M = np.array([[c, s], [-s, c]])
+    offset = M @ np.array([minr - cy, minc - cx]) + np.array([cy, cx])
+
+    def _warp(plane):
+        out = ndi.affine_transform(plane, M, offset=offset, output_shape=out_shape,
+                                   order=order, mode='grid-constant', cval=0.0)
+        if order > 1:
+            out = np.clip(out, min(plane.min(), 0.0), max(plane.max(), 0.0))
+        return out
+
+    if image.ndim == 2:
+        return _warp(image)
+    return np.stack([_warp(image[..., k]) for k in range(image.shape[-1])], axis=-1)
 
 
 def _rotate_points_2d(px, py, angle_deg, cx, cy):
@@ -333,11 +374,11 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     rot_z, rot_y, rot_x = _parse_rotation(rotate_view)
 
     if rot_z != 0.0:
-        xy = rotate(xy, rot_z, resize=True, order=3, preserve_range=True)
+        xy = _rotate_expand(xy, rot_z, order=3)
     if rot_y != 0.0:
-        xz = rotate(xz, rot_y, resize=True, order=3, preserve_range=True)
+        xz = _rotate_expand(xz, rot_y, order=3)
     if rot_x != 0.0:
-        zy = rotate(zy, rot_x, resize=True, order=3, preserve_range=True)
+        zy = _rotate_expand(zy, rot_x, order=3)
 
     if use_plt:
         fig = plt.figure(figsize=figsize, constrained_layout=False)
@@ -1081,7 +1122,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     # UI Toggles
     show_crosshair = traitlets.Bool(True).tag(sync=True)
-    sync_on_hover = traitlets.Bool(False).tag(sync=True)
+    sync_on_hover = traitlets.Bool(True).tag(sync=True)
 
     warning_msg = traitlets.Unicode("").tag(sync=True)
 
@@ -1097,7 +1138,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     copy_params_trigger = traitlets.Int(0).tag(sync=True)
     copy_params_string = traitlets.Unicode("").tag(sync=True)
 
-    def __init__(self, X, Y, Z, show_crosshair=True, sync_on_hover=False, **kwargs):
+    def __init__(self, X, Y, Z, show_crosshair=True, sync_on_hover=True, **kwargs):
         super().__init__(**kwargs)
         self.show_crosshair = show_crosshair
         self.sync_on_hover = sync_on_hover
@@ -1429,7 +1470,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
 class TNIASliceWidget(TNIAWidgetBase):
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
-                 show_crosshair=True, sync_on_hover=False, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=True, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
 
         self.rotate_view = rotate_view
         self.channel_labels_input = channel_labels
@@ -1761,7 +1802,15 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     # Data
     points = traitlets.List().tag(sync=True) # List of [z, y, x] lists
 
-    def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, *args, **kwargs):
+    @property
+    def annotate(self):
+        return self.annotation_mode
+
+    @annotate.setter
+    def annotate(self, value):
+        self.annotation_mode = bool(value)
+
+    def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, annotate=False, *args, **kwargs):
         if colors is not None:
             warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
             if colormap is None:
@@ -1847,6 +1896,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
         # Initialize superclass
         super().__init__(im_list, colormap=colors_list, opacity=opacity_list, *args, **kwargs)
+
+        self.annotation_mode = bool(annotate)
 
         # Override the last channel name
         self.channel_names = self.channel_names[:-1] + ['Annotations']
@@ -2031,7 +2082,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=False, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
+                 show_crosshair=True, sync_on_hover=True, subplot_bg='black', slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, **kwargs):
         self.rotate_view = rotate_view
         self.channel_label_fontsize_pt = channel_label_fontsize_pt
         if colors is not None:
@@ -2706,7 +2757,7 @@ def show_zyx_max_slice_interactive(
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
-    show_crosshair=True, sync_on_hover=False,
+    show_crosshair=True, sync_on_hover=True,
     colors=None, opacity=None,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
@@ -2817,9 +2868,10 @@ def show_zyx_max_slice_interactive_point_annotator(
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
-    show_crosshair=True, sync_on_hover=False,
+    show_crosshair=True, sync_on_hover=True,
     colors=None, opacity=None,
     point_size_scale=0.01,
+    annotate=False,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
@@ -2909,7 +2961,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     w = TNIAAnnotatorWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
-        point_size_scale=point_size_scale,
+        point_size_scale=point_size_scale, annotate=annotate,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
         channel_label_fontsize_pt=channel_label_fontsize_pt
     )
@@ -2925,7 +2977,7 @@ def show_zyx_max_scatter_interactive(
     colormap=None, colors=None, opacity=None,
     gamma=1, vmin=None, vmax=None,
     figsize=None, figsize_scale=1.0,
-    show_crosshair=True, sync_on_hover=False,
+    show_crosshair=True, sync_on_hover=True,
     subplot_bg='black',
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,

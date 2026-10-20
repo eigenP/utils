@@ -100,7 +100,7 @@ def _my_clahe_(image, kernel_size=None,
     elif isinstance(kernel_size, numbers.Number):
         kernel_size = (kernel_size,) * image.ndim
     elif len(kernel_size) != image.ndim:
-        ValueError(f'Incorrect value of `kernel_size`: {kernel_size}')
+        raise ValueError(f'Incorrect value of `kernel_size`: {kernel_size}')
 
     kernel_size = [int(k) for k in kernel_size]
 
@@ -150,12 +150,10 @@ def _clahe(image, kernel_size, clip_limit, nbins):
                            zip(pad_start_per_dim, pad_end_per_dim)],
                    mode='reflect')
 
-    # determine gray value bins
-    bin_size = 1 + nbins // nbins
-    lut = np.arange(nbins, dtype=np.min_scalar_type(nbins))
-    lut //= bin_size
-
-    image = lut[image]
+    # The image was already quantised to [0, nbins - 1] by the caller, so each
+    # gray level is its own histogram bin. (skimage quantises to NR_OF_GRAY
+    # levels and bins with 1 + NR_OF_GRAY // nbins; substituting nbins for
+    # NR_OF_GRAY there gave bin_size == 2 and used only half the bins.)
 
     # calculate graylevel mappings for each contextual region
     # rearrange image into flattened contextual regions
