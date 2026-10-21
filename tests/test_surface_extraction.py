@@ -488,3 +488,19 @@ def test_extract_surface_tiled_reads_one_tile_at_a_time():
     m_lazy = extract_surface_tiled(LazyVolume(), downscale_factor=4, gaussian_sigma=1.0, tile_size=32)
     np.testing.assert_array_equal(m_lazy, extract_surface(vol, downscale_factor=4, gaussian_sigma=1.0))
     assert LazyVolume.largest_read <= 24 * 32 * 32
+
+
+def test_heightmap_stays_inside_the_volume_at_a_sharp_step():
+    """Cubic upscaling overshoots next to a 40-voxel step; valid heights are clamped to [0, Z - 1]."""
+    rng = np.random.default_rng(0)
+    vol = np.zeros((96, 64, 64), np.uint8)
+    vol[:, :, :32] = 200          # tissue from the first slice: surface at z = 0
+    vol[40:, :, 32:] = 200        # surface at z = 40
+    vol = (vol + rng.integers(0, 10, vol.shape)).astype(np.uint8)
+    mask, h = extract_surface(vol, return_heightmap=True)
+    valid = h != -1.0
+    assert valid.all()
+    assert h[valid].min() >= 0.0 and h[valid].max() <= vol.shape[0] - 1
+    assert mask.any(axis=0).all()  # every column keeps one surface voxel
+    # control: the step itself is preserved
+    assert np.median(h[:, :24]) < 3 and np.median(h[:, 40:]) > 35
