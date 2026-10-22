@@ -1421,7 +1421,7 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
 
 
-def compute_histogram(arr, bins=128, max_samples=1_000_000):
+def compute_histogram(arr, bins=128, max_samples=1_000_000, value_range=None):
     """
     Computes a 1D histogram for array values.
 
@@ -1429,6 +1429,10 @@ def compute_histogram(arr, bins=128, max_samples=1_000_000):
     widgets, the returned bin counts are transformed into log frequencies (using log1p).
     If the array size exceeds `max_samples`, it subsamples the array to improve performance
     without noticeably degrading the visual overlay.
+
+    `value_range` ``(lo, hi)`` fixes the outer bin edges (see
+    `infer_histogram_range`); by default uint8/uint16/bool channels span their
+    dtype range and other channels their data range.
     """
     if arr.size == 0:
         return {'counts': [], 'bin_edges': []}
@@ -1445,8 +1449,11 @@ def compute_histogram(arr, bins=128, max_samples=1_000_000):
         return {'counts': [], 'bin_edges': []}
 
     # Determine absolute range based on dtype
-    range_val = None
-    if arr.dtype == np.uint8:
+    range_val = None if value_range is None else (float(value_range[0]), float(value_range[1]))
+    if range_val is not None:
+        if arr.dtype == bool:
+            arr_clean = arr_clean.astype(np.uint8)
+    elif arr.dtype == np.uint8:
         range_val = (0, 255)
     elif arr.dtype == np.uint16:
         range_val = (0, 65535)
@@ -1468,6 +1475,141 @@ def compute_histogram(arr, bins=128, max_samples=1_000_000):
     counts = np.log1p(counts)
 
     return {'counts': counts.tolist(), 'bin_edges': bin_edges.tolist()}
+
+
+# Bit depths of common detectors (8-bit cameras, 10/12/14/16-bit sCMOS/CCD/EMCCD)
+# and of wider containers. Inferred depths snap up to the next of these.
+_COMMON_BIT_DEPTHS = (8, 10, 12, 14, 16, 24, 32, 64)
+
+
+def _snap_bit_depth(needed, cap=64):
+    for b in _COMMON_BIT_DEPTHS:
+        if b >= needed:
+            return min(b, cap)
+    return cap
+
+
+def _bit_depth_range(bits, signed):
+    """Inclusive integer range of a `bits`-bit signed/unsigned type."""
+    if signed:
+        return -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+    return 0, 2 ** bits - 1
+
+
+def _is_integer_valued(arr, max_samples=100_000):
+    """True if the (strided sample of the) finite values of a float array are all integers."""
+    flat = arr.ravel()
+    if flat.size > max_samples:
+        flat = flat[::flat.size // max_samples]
+    flat = flat[np.isfinite(flat)]
+    return flat.size > 0 and bool(np.all(flat == np.round(flat)))
+
+
+def infer_bit_depth(arr):
+    """
+    Smallest common detector bit depth (8, 10, 12, 14, 16, 24, 32, 64) that
+    holds every value of an integer-valued image.
+
+    The depth is inferred from the data, not the container: 12-bit camera data
+    stored as uint16 (max <= 4095) gives 12, a dim 16-bit acquisition whose
+    maximum happens to stay below 4096 also gives 12 (the data cannot tell the
+    two apart; pass ``bit_depth`` to the viewer to enforce one). Negative values
+    count the sign bit (int16 data in [-2048, 2047] gives 12, signed). Float
+    images whose finite values are all integers (e.g. camera counts converted
+    to float32) are treated the same way. The result never exceeds the integer
+    dtype's own width.
+
+    Returns
+    -------
+    (bits, signed) : (int, bool), or None for bool, empty or non-integer data.
+    """
+    arr = np.asarray(arr)
+    if arr.size == 0 or arr.dtype == bool:
+        return None
+    if np.issubdtype(arr.dtype, np.integer):
+        cap = arr.dtype.itemsize * 8
+        lo, hi = int(arr.min()), int(arr.max())
+    elif np.issubdtype(arr.dtype, np.floating):
+        lo, hi = _finite_min(arr), _finite_max(arr)
+        if lo is None or max(abs(lo), abs(hi)) >= 2.0 ** 53 or not _is_integer_valued(arr):
+            return None
+        cap = 64
+        lo, hi = int(lo), int(hi)
+    else:
+        return None
+    signed = lo < 0
+    # Magnitude bits; a signed type of b bits holds [-2**(b-1), 2**(b-1) - 1].
+    needed = max(hi, -lo - 1 if signed else 0).bit_length() + int(signed)
+    return _snap_bit_depth(max(needed, 1), cap), signed
+
+
+def infer_histogram_range(arr, bit_depth=None):
+    """
+    Value range ``(lo, hi)`` the channel histogram should span, and the bit
+    depth it corresponds to.
+
+    bit_depth : None | 'auto' | int | 'dtype' | 'data'
+        None / 'auto' (default): floats in [0, 1] (or [-1, 1]) span that
+        normalised range; other integer-valued data span the full range of
+        their inferred bit depth (`infer_bit_depth`), e.g. 0..4095 for 12-bit
+        data in a uint16 array; remaining floats span their data range.
+        int: enforce that bit depth (signed if the data go below 0).
+        'dtype': the full range of the integer dtype (uint16 -> 0..65535),
+        the data range for floats. 'data': the data range.
+
+    Returns
+    -------
+    (value_range, bits) : value_range is ``(lo, hi)`` for `compute_histogram`
+        (integer levels are centred in their bins, so the edges sit half a
+        level outside the range), or None to let `compute_histogram` choose;
+        bits is the bit depth used, or None.
+    """
+    arr = np.asarray(arr)
+    if bit_depth is None:
+        bit_depth = 'auto'
+    if arr.dtype == bool:
+        return (-0.5, 1.5), 1
+
+    def _levels(bits, signed):
+        lo, hi = _bit_depth_range(bits, signed)
+        return (lo - 0.5, hi + 0.5), bits
+
+    if isinstance(bit_depth, str):
+        mode = bit_depth.lower()
+        if mode == 'data':
+            lo, hi = _finite_min(arr), _finite_max(arr)
+            if lo is None:
+                return None, None
+            if np.issubdtype(arr.dtype, np.integer):
+                return (lo - 0.5, hi + 0.5), None
+            return (None, None) if lo == hi else ((lo, hi), None)
+        if mode == 'dtype':
+            if np.issubdtype(arr.dtype, np.integer):
+                info = np.iinfo(arr.dtype)
+                return (info.min - 0.5, info.max + 0.5), info.bits
+            return None, None
+        if mode != 'auto':
+            raise ValueError(f"bit_depth must be None, 'auto', 'dtype', 'data' or an int, got {bit_depth!r}")
+        if np.issubdtype(arr.dtype, np.floating):
+            # Normalised floats (incl. 0/1 masks) keep their [0, 1] / [-1, 1] range
+            lo, hi = _finite_min(arr), _finite_max(arr)
+            if lo is not None and hi <= 1.0:
+                if lo >= 0.0:
+                    return (0.0, 1.0), None
+                if lo >= -1.0:
+                    return (-1.0, 1.0), None
+        inferred = infer_bit_depth(arr)
+        if inferred is not None:
+            return _levels(*inferred)
+        return None, None
+
+    if isinstance(bit_depth, (bool, np.bool_)) or not isinstance(bit_depth, (int, np.integer)):
+        raise ValueError(f"bit_depth must be None, 'auto', 'dtype', 'data' or an int, got {bit_depth!r}")
+    bits = int(bit_depth)
+    if not 1 <= bits <= 64:
+        raise ValueError(f"bit_depth must be between 1 and 64, got {bits}")
+    lo = _finite_min(arr) if arr.size else None
+    return _levels(bits, lo is not None and lo < 0)
 
 def _draw_slab_crosshairs(axes, geoms, x_edges, y_edges, z_edges, widths, origin=(0.0, 0.0, 0.0)):
     """
@@ -1949,10 +2091,15 @@ class TNIASliceWidget(TNIAWidgetBase):
     - ``projection`` / ``attenuation``: how each slab is projected, 'mip'
       (default), 'minip', 'average' or 'attenuated_mip' (see
       `show_zyx_projection_slabs`).
+    - ``bit_depth``: range of the channel histograms. None / 'auto' infers
+      the detector bit depth from the data (8, 10, 12, 14, 16, ... bits, e.g.
+      0..4095 for 12-bit data stored as uint16); an int enforces one; 'dtype'
+      uses the full dtype range; 'data' the data range. A list sets it per
+      channel. See `infer_histogram_range`.
     """
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
                  show_crosshair=True, sync_on_hover=True, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-                 blending=None, projection=None, attenuation=0.05, **kwargs):
+                 blending=None, projection=None, attenuation=0.05, bit_depth=None, **kwargs):
 
         self.blending = _check_blending(blending)
         self.projection = None if projection is None else _check_projection(projection, attenuation)
@@ -2091,13 +2238,14 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.y_s = y_s_idx
         self.z_s = z_s_idx
 
-        # Compute histograms
+        # Compute histograms over each channel's (inferred or enforced) bit-depth range
         hists = []
-        if isinstance(im, list):
-            for img in im:
-                hists.append(compute_histogram(img))
-        else:
-            hists.append(compute_histogram(im))
+        channels = im if isinstance(im, list) else [im]
+        for img, bd in zip(channels, _to_list(bit_depth, len(channels), None)):
+            value_range, bits = infer_histogram_range(img, bd)
+            h = compute_histogram(img, value_range=value_range)
+            h['bit_depth'] = bits
+            hists.append(h)
         self.histograms_data = hists
 
         # Initialize observers and render
@@ -2347,6 +2495,15 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         else:
             vmax_list = [vmax] * (len(im_list) - 1) + [255.0]
             kwargs['vmax'] = vmax_list
+
+        # The annotation channel is always 8-bit, whatever is set for the image channels
+        bit_depth = kwargs.get('bit_depth', None)
+        n_img = len(im_list) - 1
+        if isinstance(bit_depth, (list, tuple)):
+            bd_list = (list(bit_depth) + [None] * n_img)[:n_img]
+        else:
+            bd_list = [bit_depth] * n_img
+        kwargs['bit_depth'] = bd_list + [8]
 
         # Initialize superclass
         super().__init__(im_list, colormap=colors_list, opacity=opacity_list, *args, **kwargs)
@@ -3220,7 +3377,7 @@ def show_zyx_max_slice_interactive(
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-    blending=None, projection=None, attenuation=0.05,
+    blending=None, projection=None, attenuation=0.05, bit_depth=None,
 ):
     """
     Interactive 3D slice viewer using AnyWidget.
@@ -3238,6 +3395,12 @@ def show_zyx_max_slice_interactive(
         'attenuated_mip' (napari's rendering names). Keyword only.
     attenuation : float, optional
         Attenuation per voxel for 'attenuated_mip' (default 0.05).
+    bit_depth : None, 'auto', int, 'dtype', 'data' or list, optional
+        Range of the channel histograms. By default the detector bit depth is
+        inferred from the data (the smallest of 8, 10, 12, 14, 16, ... bits
+        holding the maximum, e.g. 0..4095 for 12-bit data stored as uint16).
+        An int (e.g. 12) enforces a bit depth, 'dtype' uses the full dtype
+        range, 'data' the data range; a list sets it per channel.
     rotate_view : float or tuple of floats, optional
         Rotates the 2D projected views purely for visualization.
         If a single float is provided, it rotates the XY projection (in degrees).
@@ -3328,6 +3491,7 @@ def show_zyx_max_slice_interactive(
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
         channel_label_fontsize_pt=channel_label_fontsize_pt,
         blending=blending, projection=projection, attenuation=attenuation,
+        bit_depth=bit_depth,
     )
     return w
 
@@ -3344,7 +3508,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-    blending=None, projection=None, attenuation=0.05,
+    blending=None, projection=None, attenuation=0.05, bit_depth=None,
 ):
     """
     Interactive 3D slice viewer with point annotation using AnyWidget.
@@ -3364,6 +3528,12 @@ def show_zyx_max_slice_interactive_point_annotator(
         'attenuated_mip' (napari's rendering names). Keyword only.
     attenuation : float, optional
         Attenuation per voxel for 'attenuated_mip' (default 0.05).
+    bit_depth : None, 'auto', int, 'dtype', 'data' or list, optional
+        Range of the channel histograms. By default the detector bit depth is
+        inferred from the data (the smallest of 8, 10, 12, 14, 16, ... bits
+        holding the maximum, e.g. 0..4095 for 12-bit data stored as uint16).
+        An int (e.g. 12) enforces a bit depth, 'dtype' uses the full dtype
+        range, 'data' the data range; a list sets it per channel.
     rotate_view : float or tuple of floats, optional
         Rotates the 2D projected views purely for visualization.
         If a single float is provided, it rotates the XY projection (in degrees).
@@ -3445,6 +3615,7 @@ def show_zyx_max_slice_interactive_point_annotator(
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
         channel_label_fontsize_pt=channel_label_fontsize_pt,
         blending=blending, projection=projection, attenuation=attenuation,
+        bit_depth=bit_depth,
     )
     return w
 

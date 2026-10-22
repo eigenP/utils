@@ -436,11 +436,14 @@ export default {
     // generation of listeners firing against detached DOM nodes forever.
     const inputRefreshers = [];   // { trait, fn } - one per channel input box
     const histogramRedraws = [];  // one per channel histogram canvas
+    const histogramObservers = []; // ResizeObservers of the current rows
 
     function updateChannelsUI() {
       channelsContainer.innerHTML = "";
       inputRefreshers.length = 0;
       histogramRedraws.length = 0;
+      for (const ro of histogramObservers) ro.disconnect();
+      histogramObservers.length = 0;
       const channelNames = model.get("channel_names");
       const channelDtypes = model.get("channel_dtypes");
       const channelColors = model.get("channel_colors");
@@ -531,16 +534,177 @@ export default {
         chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0.05, 2.0, false));
         chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
 
+        // Histogram (fills the rest of the row, at least 160px) with a
+        // vmin/vmax range slider underneath, styled like the X/Y/Z sliders.
+        const histWrap = document.createElement("div");
+        histWrap.style.display = "flex";
+        histWrap.style.flexDirection = "column";
+        histWrap.style.flex = "1 1 160px";
+        histWrap.style.minWidth = "160px";
+        histWrap.style.marginLeft = "10px";
+
         const histCanvas = document.createElement("canvas");
         histCanvas.width = 160;
         histCanvas.height = 30;
-        histCanvas.style.marginLeft = "10px";
+        histCanvas.style.width = "100%";
+        histCanvas.style.height = "30px";
+        histCanvas.style.boxSizing = "border-box";
         histCanvas.style.border = "1px solid #ccc";
         histCanvas.style.borderRadius = "2px";
         histCanvas.style.backgroundColor = "#fff";
-        chDiv.appendChild(histCanvas);
+        histWrap.appendChild(histCanvas);
+
+        const vTrack = document.createElement("div");
+        vTrack.style.position = "relative";
+        vTrack.style.height = "16px";
+        vTrack.style.width = "100%";
+        vTrack.style.userSelect = "none";
+        vTrack.style.touchAction = "none";
+
+        const vTrackBg = document.createElement("div");
+        vTrackBg.style.position = "absolute";
+        vTrackBg.style.left = "0";
+        vTrackBg.style.right = "0";
+        vTrackBg.style.top = "50%";
+        vTrackBg.style.transform = "translateY(-50%)";
+        vTrackBg.style.height = "4px";
+        vTrackBg.style.backgroundColor = "#e0e0e0";
+        vTrackBg.style.borderRadius = "2px";
+        vTrackBg.style.pointerEvents = "none";
+
+        const vBar = document.createElement("div");
+        vBar.style.position = "absolute";
+        vBar.style.top = "50%";
+        vBar.style.transform = "translateY(-50%)";
+        vBar.style.height = "4px";
+        vBar.style.backgroundColor = color;
+        vBar.style.opacity = "0.6";
+        vBar.style.borderRadius = "2px";
+        vBar.style.pointerEvents = "none";
+
+        const makeThumb = (title, bg, cursor, zIndex) => {
+          const t = document.createElement("div");
+          t.style.position = "absolute";
+          t.style.width = "11px";
+          t.style.height = "11px";
+          t.style.borderRadius = "50%";
+          t.style.backgroundColor = bg;
+          t.style.border = "2px solid #ffffff";
+          t.style.boxShadow = "0 1px 3px rgba(0,0,0,0.4)";
+          t.style.cursor = cursor;
+          t.style.zIndex = zIndex;
+          t.style.top = "50%";
+          t.style.transform = "translate(-50%, -50%)";
+          t.title = title;
+          return t;
+        };
+        const vminThumb = makeThumb("vmin", "#d0d0d0", "ew-resize", "2");
+        const vmidThumb = makeThumb("Shift vmin and vmax", "#000000", "grab", "3");
+        const vmaxThumb = makeThumb("vmax", "#d0d0d0", "ew-resize", "2");
+        vTrack.appendChild(vTrackBg);
+        vTrack.appendChild(vBar);
+        vTrack.appendChild(vminThumb);
+        vTrack.appendChild(vmidThumb);
+        vTrack.appendChild(vmaxThumb);
+        histWrap.appendChild(vTrack);
+        chDiv.appendChild(histWrap);
+
+        // Histogram value range [lo, hi] for the slider. Integer channels have
+        // bin edges half a level outside their levels.
+        const isIntChannel = !isFloatDtype && dtype !== "unknown";
+        const histRange = () => {
+          const hists = model.get("histograms_data");
+          const edges = hists && hists[index] && hists[index].bin_edges;
+          if (!edges || edges.length < 2) return null;
+          let lo = edges[0], hi = edges[edges.length - 1];
+          if (isIntChannel) { lo = Math.ceil(lo); hi = Math.floor(hi); }
+          return hi > lo ? [lo, hi] : null;
+        };
+        const currentV = (trait, fallback) => {
+          const arr = model.get(trait);
+          const v = arr && arr[index] !== "" && arr[index] !== null && arr[index] !== undefined ? parseFloat(arr[index]) : NaN;
+          return isNaN(v) ? fallback : v;
+        };
+        const roundV = (v, lo, hi) => {
+          if (isIntChannel) return Math.round(v);
+          // Floats: snap to 1/1000 of the histogram range, without float noise.
+          const step = (hi - lo) / 1000;
+          return parseFloat((Math.round(v / step) * step).toPrecision(6));
+        };
+        const valFromX = (clientX, lo, hi) => {
+          const rect = vTrack.getBoundingClientRect();
+          const frac = rect.width > 0 ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) : 0;
+          return lo + frac * (hi - lo);
+        };
+        const setV = (vmin, vmax) => {
+          const vminArr = [...model.get("vmin_list")];
+          const vmaxArr = [...model.get("vmax_list")];
+          if (vminArr[index] === vmin && vmaxArr[index] === vmax) return;
+          vminArr[index] = vmin;
+          vmaxArr[index] = vmax;
+          model.set("vmin_list", vminArr);
+          model.set("vmax_list", vmaxArr);
+          model.save_changes();
+        };
+        const updateVSlider = () => {
+          const r = histRange();
+          vTrack.style.visibility = r ? "visible" : "hidden";
+          if (!r) return;
+          const [lo, hi] = r;
+          const pct = (v) => Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
+          const a = pct(currentV("vmin_list", lo));
+          const b = pct(currentV("vmax_list", hi));
+          vminThumb.style.left = `${a}%`;
+          vmaxThumb.style.left = `${b}%`;
+          vmidThumb.style.left = `${(a + b) / 2}%`;
+          vBar.style.left = `${Math.min(a, b)}%`;
+          vBar.style.width = `${Math.abs(b - a)}%`;
+        };
+        const dragThumb = (thumb, onMove) => {
+          thumb.addEventListener("pointerdown", (e) => {
+            const r = histRange();
+            if (!r) return;
+            e.preventDefault();
+            e.stopPropagation();
+            thumb.setPointerCapture(e.pointerId);
+            const start = { x: e.clientX, vmin: currentV("vmin_list", r[0]), vmax: currentV("vmax_list", r[1]) };
+            const move = (ev) => onMove(ev, r[0], r[1], start);
+            const up = (ev) => {
+              thumb.releasePointerCapture(ev.pointerId);
+              thumb.removeEventListener("pointermove", move);
+              thumb.removeEventListener("pointerup", up);
+              if (thumb === vmidThumb) thumb.style.cursor = "grab";
+            };
+            if (thumb === vmidThumb) thumb.style.cursor = "grabbing";
+            thumb.addEventListener("pointermove", move);
+            thumb.addEventListener("pointerup", up);
+          });
+        };
+        dragThumb(vminThumb, (ev, lo, hi) => {
+          const vmax = currentV("vmax_list", hi);
+          setV(roundV(Math.min(valFromX(ev.clientX, lo, hi), vmax), lo, hi), model.get("vmax_list")[index]);
+        });
+        dragThumb(vmaxThumb, (ev, lo, hi) => {
+          const vmin = currentV("vmin_list", lo);
+          setV(model.get("vmin_list")[index], roundV(Math.max(valFromX(ev.clientX, lo, hi), vmin), lo, hi));
+        });
+        dragThumb(vmidThumb, (ev, lo, hi, start) => {
+          const rect = vTrack.getBoundingClientRect();
+          if (rect.width <= 0) return;
+          const span = start.vmax - start.vmin;
+          let d = ((ev.clientX - start.x) / rect.width) * (hi - lo);
+          // Keep the window inside the histogram range while it fits.
+          d = Math.max(Math.min(d, hi - start.vmax), lo - start.vmin);
+          if (span > hi - lo) d = 0;
+          setV(roundV(start.vmin + d, lo, hi), roundV(start.vmax + d, lo, hi));
+        });
 
         const drawHistogram = () => {
+          updateVSlider();
+          // Match the canvas resolution to its laid-out width.
+          const cssW = Math.round(histCanvas.clientWidth);
+          if (cssW > 0 && histCanvas.width !== cssW) histCanvas.width = cssW;
+
           const ctx = histCanvas.getContext("2d");
           ctx.clearRect(0, 0, histCanvas.width, histCanvas.height);
 
@@ -554,6 +718,11 @@ export default {
           const minData = edges[0];
           const maxData = edges[edges.length - 1];
           const dataRange = maxData - minData;
+
+          const bits = hists[index].bit_depth;
+          histCanvas.title = bits
+            ? `${bits}-bit histogram (${Math.round(minData + 0.5)} to ${Math.round(maxData - 0.5)})`
+            : `Histogram (${minData.toPrecision(4)} to ${maxData.toPrecision(4)})`;
 
           if (maxCount > 0) {
             ctx.fillStyle = color;
@@ -600,6 +769,11 @@ export default {
 
         drawHistogram();
         histogramRedraws.push(drawHistogram);
+        if (typeof ResizeObserver !== "undefined") {
+          const ro = new ResizeObserver(() => drawHistogram());
+          ro.observe(histCanvas);
+          histogramObservers.push(ro);
+        }
 
         channelsContainer.appendChild(chDiv);
       });
