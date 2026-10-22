@@ -1,4 +1,5 @@
 import functools
+import json
 import http.server
 from pathlib import Path
 import tempfile
@@ -51,7 +52,7 @@ def static_rangeslider_server():
             vmax_list: {w.vmax_list},
             gamma_list: {w.gamma_list},
             opacity_list: {w.opacity_list},
-            histograms_data: {w.histograms_data},
+            histograms_data: {json.dumps(w.histograms_data)},
             show_crosshair: {str(w.show_crosshair).lower()},
             sync_on_hover: {str(w.sync_on_hover).lower()},
             warning_msg: '{w.warning_msg}',
@@ -211,3 +212,61 @@ def test_frontend_channel_inputs_allow_negative_signed_limits_and_positive_gamma
     type_into("gamma", 0, "0")
     assert page.evaluate("window.mockModel.get('vmin_list')") == [-300, 0]
     assert page.evaluate("window.mockModel.get('gamma_list')")[0] == 0.05
+
+
+def test_frontend_histogram_vrange_slider_and_width(page, static_rangeslider_server):
+    """The vmin/vmax slider under each histogram drives the model; the histogram fills the row.
+
+    The fixture channels are uint8 (histogram range 0..255). Strategy: drag the
+    vmax thumb of channel 0 to the middle of its track; mid-drag the thumb must
+    follow the pointer while the model is untouched (no re-render per pointer
+    move); after release vmax must be an integer near 128 and vmin untouched; drag the middle thumb and check
+    vmin and vmax shift together with the window width preserved. Then compare
+    the histogram width in a wide and a narrow viewport: it must grow beyond
+    its 160 px minimum when space is available and never shrink below it.
+    """
+    page.set_viewport_size({"width": 1800, "height": 900})
+    page.goto(static_rangeslider_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+
+    track = page.locator("div[title='vmax']").first.locator("..")
+    tbox = track.bounding_box()
+    vmax_thumb = page.locator("div[title='vmax']").first
+    b = vmax_thumb.bounding_box()
+    vmax_before = page.evaluate("window.mockModel.get('vmax_list')[0]")
+    page.evaluate("window.saveTriggered = false")
+    page.mouse.move(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(tbox["x"] + tbox["width"] / 2, b["y"] + b["height"] / 2, steps=5)
+    # While dragging only the slider moves; the model (and the Python render)
+    # is updated once, on release.
+    assert page.evaluate("window.mockModel.get('vmax_list')[0]") == vmax_before
+    assert page.evaluate("window.saveTriggered") is False
+    moved = vmax_thumb.bounding_box()
+    assert abs(moved["x"] + moved["width"] / 2 - (tbox["x"] + tbox["width"] / 2)) < 4
+    page.mouse.up()
+    assert page.evaluate("window.saveTriggered") is True
+
+    vmin0 = page.evaluate("window.mockModel.get('vmin_list')[0]")
+    vmax0 = page.evaluate("window.mockModel.get('vmax_list')[0]")
+    assert isinstance(vmax0, int) and abs(vmax0 - 128) <= 3
+    assert vmin0 == 0
+
+    mid = page.locator("div[title='Shift vmin and vmax']").first.bounding_box()
+    page.mouse.move(mid["x"] + mid["width"] / 2, mid["y"] + mid["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(mid["x"] + mid["width"] / 2 + tbox["width"] / 8, mid["y"] + mid["height"] / 2)
+    page.mouse.up()
+    vmin1 = page.evaluate("window.mockModel.get('vmin_list')[0]")
+    vmax1 = page.evaluate("window.mockModel.get('vmax_list')[0]")
+    assert vmin1 > 0 and vmax1 - vmin1 == vmax0 - vmin0
+
+    canvas_w = "() => document.querySelector('canvas').getBoundingClientRect().width"
+    wide = page.evaluate(canvas_w)
+    page.set_viewport_size({"width": 700, "height": 900})
+    page.wait_for_timeout(100)
+    narrow = page.evaluate(canvas_w)
+    assert wide > 200
+    assert narrow >= 160 and narrow < wide
+    # The drawing buffer follows the laid-out width (no blurry stretching).
+    assert abs(page.evaluate("() => document.querySelector('canvas').width") - narrow) <= 2

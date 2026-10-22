@@ -19,7 +19,7 @@ from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_slabs, show_zyx
 from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, show_zyx_max_scatter_interactive
 from eigenp_utils.tnia_plotting_anywidgets import show_zyx_slice, show_zyx_max_slabs, create_multichannel_rgb
-from eigenp_utils.tnia_plotting_anywidgets import compute_histogram, show_iso_scatter, IsoScatterWidget
+from eigenp_utils.tnia_plotting_anywidgets import compute_histogram, show_iso_scatter, IsoScatterWidget, infer_bit_depth, infer_histogram_range
 
 
 
@@ -1627,6 +1627,157 @@ def test_compute_histogram_excludes_nans_from_float_channels():
 
     assert np.all(np.isfinite(result['bin_edges']))
     np.testing.assert_allclose(np.expm1(result['counts']).sum(), 3, rtol=1e-6)
+
+
+# =========================================
+# Bit-depth inference for the histogram range
+# =========================================
+@pytest.mark.parametrize("values, dtype, expected", [
+    ([0, 200], np.uint8, (8, False)),
+    ([0, 3], np.uint16, (8, False)),          # never narrower than 8 bits
+    ([0, 1000], np.uint16, (10, False)),
+    ([0, 2531], np.uint16, (12, False)),      # 12-bit camera, dim channel
+    ([0, 4095], np.uint16, (12, False)),      # boundary: 2**12 - 1 still fits
+    ([0, 4096], np.uint16, (14, False)),      # boundary: one level more does not
+    ([0, 65535], np.uint16, (16, False)),
+    ([-2048, 2047], np.int16, (12, True)),    # sign bit counted
+    ([-2049, 0], np.int16, (14, True)),
+    ([0, 4095], np.float32, (12, False)),     # counts converted to float
+    ([0, 70000], np.uint32, (24, False)),
+])
+def test_infer_bit_depth_snaps_to_common_detector_depths(values, dtype, expected):
+    """The bit depth is the smallest common depth (8/10/12/14/16/24/...) holding the data.
+
+    Strategy: place the maximum on both sides of each 2**b - 1 boundary, so an
+    off-by-one in the bit count (2**b needs b + 1 bits) or a failure to snap up
+    to the next common depth changes the result. Signed data must count the
+    sign bit, and integer-valued floats must behave like their integer source.
+    """
+    assert infer_bit_depth(np.array(values, dtype=dtype)) == expected
+
+
+@pytest.mark.parametrize("arr", [
+    np.array([0.0, 0.5, 4095.5], dtype=np.float32),   # non-integer floats
+    np.array([True, False]),
+    np.array([], dtype=np.uint16),
+])
+def test_infer_bit_depth_returns_none_without_integer_levels(arr):
+    """Data without integer intensity levels have no bit depth (negative control).
+
+    Strategy: non-integer floats, boolean masks and empty arrays must return
+    None rather than a guessed depth, so their histograms keep the data range.
+    """
+    assert infer_bit_depth(arr) is None
+
+
+def test_slice_widget_histogram_spans_inferred_12bit_range():
+    """12-bit data stored as uint16 get a 0..4095 histogram, not 0..65535.
+
+    With the dtype range, 12-bit data occupy only the left 1/16 of the canvas.
+    Strategy: build two uint16 channels from a 12-bit source (one dim, max 2531),
+    and check that both histograms span the 4096 levels with integer levels
+    centred in their bins (every bin covers exactly 4096 / 128 = 32 levels, so
+    no comb artefact), that the recovered counts total every voxel, and that
+    the inferred depth is reported for the frontend tooltip.
+    """
+    rng = np.random.default_rng(0)
+    bright = rng.integers(0, 4096, (4, 16, 16)).astype(np.uint16)
+    dim = rng.integers(0, 2532, (4, 16, 16)).astype(np.uint16)
+    w = show_zyx_max_slice_interactive([bright, dim], pixel_sizes=(1, 1, 1))
+
+    for h in w.histograms_data:
+        edges = np.array(h['bin_edges'])
+        assert h['bit_depth'] == 12
+        assert (edges[0], edges[-1]) == (-0.5, 4095.5)
+        np.testing.assert_allclose(np.diff(edges), 32.0)
+        np.testing.assert_allclose(np.expm1(h['counts']).sum(), bright.size, rtol=1e-6)
+
+
+def test_slice_widget_bit_depth_kwarg_enforces_range_per_channel():
+    """`bit_depth` overrides the inference: an int, 'dtype', 'data', or a per-channel list.
+
+    Strategy: give the same 12-bit uint16 channel three times with a different
+    setting each and check the bin edges: enforced 16 bits and 'dtype' span
+    0..65535, 'data' spans exactly the data min..max. A scalar is broadcast.
+    """
+    rng = np.random.default_rng(1)
+    ch = rng.integers(3, 2532, (4, 16, 16)).astype(np.uint16)
+    lo, hi = int(ch.min()), int(ch.max())
+
+    w = show_zyx_max_slice_interactive([ch, ch, ch], pixel_sizes=(1, 1, 1), bit_depth=[16, 'dtype', 'data'])
+    ranges = [(h['bin_edges'][0], h['bin_edges'][-1]) for h in w.histograms_data]
+    assert ranges == [(-0.5, 65535.5), (-0.5, 65535.5), (lo - 0.5, hi + 0.5)]
+    assert [h['bit_depth'] for h in w.histograms_data] == [16, 16, None]
+
+    w = show_zyx_max_slice_interactive([ch, ch], pixel_sizes=(1, 1, 1), bit_depth=14)
+    assert all(h['bin_edges'][-1] == 16383.5 for h in w.histograms_data)
+
+
+def test_annotator_annotation_channel_stays_8bit_under_enforced_bit_depth():
+    """A scalar `bit_depth` applies to the image channels only; annotations stay 8-bit.
+
+    The annotation channel is an internal uint8 mask drawn at 255. Broadcasting
+    e.g. 12 bits to it would squeeze its histogram into the left 1/16.
+    """
+    rng = np.random.default_rng(2)
+    ch = rng.integers(0, 4096, (4, 16, 16)).astype(np.uint16)
+    w = show_zyx_max_slice_interactive_point_annotator([ch, ch], pixel_sizes=(1, 1, 1), bit_depth=16)
+    assert [h['bit_depth'] for h in w.histograms_data] == [16, 16, 8]
+
+
+@pytest.mark.parametrize("bad", [0, 65, 'bits', 12.0, True])
+def test_infer_histogram_range_rejects_invalid_bit_depth(bad):
+    """Invalid `bit_depth` values raise instead of silently falling back to auto."""
+    with pytest.raises(ValueError):
+        infer_histogram_range(np.zeros(4, dtype=np.uint16), bad)
+
+
+def test_infer_histogram_range_float_conventions():
+    """Floats: normalised data keep [0, 1] / [-1, 1], integer-valued ones get a bit depth.
+
+    Strategy: a float 0/1 mask must stay in [0, 1] (not be read as 8-bit counts),
+    signed normalised data in [-1, 1], and generic floats return None so the
+    histogram falls back to the data range (the previous behaviour).
+    """
+    assert infer_histogram_range(np.array([0.0, 1.0], dtype=np.float32)) == ((0.0, 1.0), None)
+    assert infer_histogram_range(np.array([-0.3, 0.9])) == ((-1.0, 1.0), None)
+    assert infer_histogram_range(np.array([0.0, 4095.0])) == ((-0.5, 4095.5), 12)
+    assert infer_histogram_range(np.array([0.2, 7.5])) == (None, None)
+
+
+def test_slice_widget_default_vmax_is_robust_to_hot_pixels():
+    """Default vmax is the 99.9th percentile, so a few hot pixels do not set the range.
+
+    Strategy: a 12-bit-like channel whose values stay <= 1000 except 10 hot
+    pixels at 4095 (0.01% of the voxels). The plain maximum (4095) would map
+    the real signal to < 25% brightness; the default must instead land within
+    the bulk of the data (<= 1000) and be an integer for integer data. An
+    explicit vmax must still win, and a channel whose signal covers fewer
+    voxels than the 0.1% tail (here 5 bright voxels on a zero background,
+    where the percentile is 0) falls back to the maximum, so it is not blank.
+    """
+    rng = np.random.default_rng(3)
+    ch = rng.integers(0, 1001, (10, 100, 100)).astype(np.uint16)
+    ch.flat[rng.choice(ch.size, 10, replace=False)] = 4095
+    sparse = np.zeros((10, 100, 100), dtype=np.uint16)
+    sparse.flat[:5] = 3000
+
+    w = show_zyx_max_slice_interactive([ch, sparse], pixel_sizes=(1, 1, 1))
+    vmax_ch, vmax_sparse = w.vmax_list
+    assert 990 <= vmax_ch <= 1000 and float(vmax_ch).is_integer()
+    assert vmax_sparse == 3000.0
+
+    w = show_zyx_max_slice_interactive([ch, sparse], pixel_sizes=(1, 1, 1), vmax=[4095, None])
+    assert w.vmax_list == [4095.0, 3000.0]
+
+
+def test_annotator_default_vmax_is_robust_and_annotations_stay_255():
+    """The annotator uses the same robust default for image channels; annotations keep 255."""
+    rng = np.random.default_rng(4)
+    ch = rng.integers(0, 1001, (10, 100, 100)).astype(np.uint16)
+    ch.flat[:10] = 4095
+    w = show_zyx_max_slice_interactive_point_annotator(ch, pixel_sizes=(1, 1, 1))
+    assert w.vmax_list[0] <= 1000 and w.vmax_list[-1] == 255.0
 
 
 # =========================================
