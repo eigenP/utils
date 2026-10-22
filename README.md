@@ -7,7 +7,7 @@
 ### Image Analysis
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
 * **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`. Memory optimized for large datasets, with a parallelization vignette available via `dask_extract_surface`.
-* **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction_2D`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
+* **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction`, `apply_subpixel_drift_correction`, `estimate_drift`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
 * **Intensity Rescaling**: Tools for contrast enhancement (including CLAHE), Z-axis intensity decay correction using exact analytical Ordinary Least Squares (OLS) fitting and gamma adjustment (`correct_z_intensity_decay`), and pure-NumPy/SciPy BaSiCPy shading correction (`fit_basic_shading`, `apply_basic_shading`).
 * **Segmentation**: Fast 2D/3D spot labeling using `voronoi_otsu_labeling`.
 * **Anisotropic Pixel Support**: Core spatial processing and morphology functions natively handle physical pixel sizes to accurately support anisotropic microscopy data without structural distortion.
@@ -17,7 +17,7 @@
 ### Plotting & Visualization
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers) with rotatable crosshairs, interactive point cloud visualization (`IsoScatterWidget`, `show_iso_scatter`), and 3D point annotation (`TNIAAnnotatorWidget`). Includes thick-slab projections (`show_zyx_max_slabs`, `show_zyx_projection_slabs`) and a one-click UI parameter copy feature for reproducibility.
 * **Interactive 3D Scatter Plots**: Utilities for generating interactive 3D scatter plots with Plotly, including native support for AnnData embeddings (`plotly_scatter_3d`, `plotly_scatter_3d_from_adata_obsm`).
-* **Publication-Ready Plots**: Set global styles including editable SVG text (`set_plotting_style`). `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), pre-KDE outlier filtering, and data subset highlighting. Custom Matplotlib colormap generation via `colormap_maker`, threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`, and colormap truncation/modification (`adjust_colormap`).
+* **Publication-Ready Plots**: Set global styles including editable SVG text (`set_plotting_style`). `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), pre-KDE outlier filtering, and data subset highlighting. Custom Matplotlib colormap generation via `colormap_maker`, threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`, and colormap truncation/modification (`adjust_colormap`). Includes `labels_cmap` for label images and `I Series` colormaps (`i_blue`, `i_bordeaux`, `i_forest`, `i_orange`, `i_purple`, `i_teal`, `i_rose`, `i_gold`, `i_slate`).
 * **Image Projections & Compositing**: Generate histograms over image plots (`hist_imshow`), produce depth color-coded projections (`color_coded_projection`), perform advanced multi-channel color blending (`create_multichannel_rgb`), and visualize intensity transformations (`brightness_diagnostic_plotter`).
 
 ### Single-Cell Analysis
@@ -41,8 +41,8 @@
 
 ### Core Utilities
 * **Spline Utilities**: Fit cubic splines (`fit_cubic_spline`), resample them uniformly (`create_resampled_spline`), render them into ND image volumes (`create_nd_image_from_spline`), calculate tangent vectors, project points onto planes, and calculate real-world arc lengths (`calculate_spline_length`) (`spline_utils.py`).
-* **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`.
-* **I/O Utilities**: Functions to streamline file and data reading, check files before saving (`check_file_before_save`), ensure directory existence (`ensure_directory`), and fast file downloading (`download_file`).
+* **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`, and extract voxel sizes with `get_tiff_voxel_size`.
+* **I/O Utilities**: Functions to streamline file and data reading, check files before saving (`check_file_before_save`), ensure directory existence (`ensure_directory`), and fast file downloading (`download_file`, `download_file_async`), and unzipping (`un_gzip`).
 
 ### Examples
 * **Notebooks**: The `notebooks/` directory contains Marimo notebooks demonstrating package functionalities, such as using statistical utilities with classic datasets.
