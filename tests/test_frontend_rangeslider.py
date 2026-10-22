@@ -218,8 +218,9 @@ def test_frontend_histogram_vrange_slider_and_width(page, static_rangeslider_ser
     """The vmin/vmax slider under each histogram drives the model; the histogram fills the row.
 
     The fixture channels are uint8 (histogram range 0..255). Strategy: drag the
-    vmax thumb of channel 0 to the middle of its track and check vmax becomes
-    an integer near 128 while vmin is untouched; drag the middle thumb and check
+    vmax thumb of channel 0 to the middle of its track; mid-drag the thumb must
+    follow the pointer while the model is untouched (no re-render per pointer
+    move); after release vmax must be an integer near 128 and vmin untouched; drag the middle thumb and check
     vmin and vmax shift together with the window width preserved. Then compare
     the histogram width in a wide and a narrow viewport: it must grow beyond
     its 160 px minimum when space is available and never shrink below it.
@@ -232,10 +233,19 @@ def test_frontend_histogram_vrange_slider_and_width(page, static_rangeslider_ser
     tbox = track.bounding_box()
     vmax_thumb = page.locator("div[title='vmax']").first
     b = vmax_thumb.bounding_box()
+    vmax_before = page.evaluate("window.mockModel.get('vmax_list')[0]")
+    page.evaluate("window.saveTriggered = false")
     page.mouse.move(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
     page.mouse.down()
-    page.mouse.move(tbox["x"] + tbox["width"] / 2, b["y"] + b["height"] / 2)
+    page.mouse.move(tbox["x"] + tbox["width"] / 2, b["y"] + b["height"] / 2, steps=5)
+    # While dragging only the slider moves; the model (and the Python render)
+    # is updated once, on release.
+    assert page.evaluate("window.mockModel.get('vmax_list')[0]") == vmax_before
+    assert page.evaluate("window.saveTriggered") is False
+    moved = vmax_thumb.bounding_box()
+    assert abs(moved["x"] + moved["width"] / 2 - (tbox["x"] + tbox["width"] / 2)) < 4
     page.mouse.up()
+    assert page.evaluate("window.saveTriggered") is True
 
     vmin0 = page.evaluate("window.mockModel.get('vmin_list')[0]")
     vmax0 = page.evaluate("window.mockModel.get('vmax_list')[0]")

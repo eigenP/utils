@@ -620,9 +620,18 @@ export default {
           if (isIntChannel) { lo = Math.ceil(lo); hi = Math.floor(hi); }
           return hi > lo ? [lo, hi] : null;
         };
-        const currentV = (trait, fallback) => {
+        // While a thumb is dragged, the new vmin/vmax live here and only the
+        // slider and tone curve follow; the model (and the Python render) is
+        // updated once, on release.
+        let pending = null;  // { vmin_list, vmax_list } raw values
+        const rawV = (trait) => {
+          if (pending) return pending[trait];
           const arr = model.get(trait);
-          const v = arr && arr[index] !== "" && arr[index] !== null && arr[index] !== undefined ? parseFloat(arr[index]) : NaN;
+          return arr ? arr[index] : undefined;
+        };
+        const currentV = (trait, fallback) => {
+          const raw = rawV(trait);
+          const v = raw !== "" && raw !== null && raw !== undefined ? parseFloat(raw) : NaN;
           return isNaN(v) ? fallback : v;
         };
         const roundV = (v, lo, hi) => {
@@ -636,7 +645,11 @@ export default {
           const frac = rect.width > 0 ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) : 0;
           return lo + frac * (hi - lo);
         };
-        const setV = (vmin, vmax) => {
+        const stageV = (vmin, vmax) => {
+          pending = { vmin_list: vmin, vmax_list: vmax };
+          drawHistogram();
+        };
+        const commitV = (vmin, vmax) => {
           const vminArr = [...model.get("vmin_list")];
           const vmaxArr = [...model.get("vmax_list")];
           if (vminArr[index] === vmin && vmaxArr[index] === vmax) return;
@@ -673,20 +686,28 @@ export default {
               thumb.releasePointerCapture(ev.pointerId);
               thumb.removeEventListener("pointermove", move);
               thumb.removeEventListener("pointerup", up);
+              thumb.removeEventListener("pointercancel", up);
               if (thumb === vmidThumb) thumb.style.cursor = "grab";
+              if (pending) {
+                const p = pending;
+                pending = null;
+                commitV(p.vmin_list, p.vmax_list);
+                drawHistogram();
+              }
             };
             if (thumb === vmidThumb) thumb.style.cursor = "grabbing";
             thumb.addEventListener("pointermove", move);
             thumb.addEventListener("pointerup", up);
+            thumb.addEventListener("pointercancel", up);
           });
         };
         dragThumb(vminThumb, (ev, lo, hi) => {
           const vmax = currentV("vmax_list", hi);
-          setV(roundV(Math.min(valFromX(ev.clientX, lo, hi), vmax), lo, hi), model.get("vmax_list")[index]);
+          stageV(roundV(Math.min(valFromX(ev.clientX, lo, hi), vmax), lo, hi), rawV("vmax_list"));
         });
         dragThumb(vmaxThumb, (ev, lo, hi) => {
           const vmin = currentV("vmin_list", lo);
-          setV(model.get("vmin_list")[index], roundV(Math.max(valFromX(ev.clientX, lo, hi), vmin), lo, hi));
+          stageV(rawV("vmin_list"), roundV(Math.max(valFromX(ev.clientX, lo, hi), vmin), lo, hi));
         });
         dragThumb(vmidThumb, (ev, lo, hi, start) => {
           const rect = vTrack.getBoundingClientRect();
@@ -696,7 +717,7 @@ export default {
           // Keep the window inside the histogram range while it fits.
           d = Math.max(Math.min(d, hi - start.vmax), lo - start.vmin);
           if (span > hi - lo) d = 0;
-          setV(roundV(start.vmin + d, lo, hi), roundV(start.vmax + d, lo, hi));
+          stageV(roundV(start.vmin + d, lo, hi), roundV(start.vmax + d, lo, hi));
         });
 
         const drawHistogram = () => {
@@ -736,12 +757,10 @@ export default {
             ctx.globalAlpha = 1.0;
           }
 
-          const vmin_arr = model.get("vmin_list");
-          const vmax_arr = model.get("vmax_list");
           const gamma_arr = model.get("gamma_list");
 
-          let vmin = vmin_arr && vmin_arr[index] !== "" && vmin_arr[index] !== null ? parseFloat(vmin_arr[index]) : minData;
-          let vmax = vmax_arr && vmax_arr[index] !== "" && vmax_arr[index] !== null ? parseFloat(vmax_arr[index]) : maxData;
+          let vmin = currentV("vmin_list", minData);
+          let vmax = currentV("vmax_list", maxData);
           let gamma = gamma_arr && gamma_arr[index] !== undefined ? parseFloat(gamma_arr[index]) : 1.0;
 
           if (isNaN(vmin)) vmin = minData;

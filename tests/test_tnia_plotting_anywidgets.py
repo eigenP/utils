@@ -1745,6 +1745,41 @@ def test_infer_histogram_range_float_conventions():
     assert infer_histogram_range(np.array([0.2, 7.5])) == (None, None)
 
 
+def test_slice_widget_default_vmax_is_robust_to_hot_pixels():
+    """Default vmax is the 99.9th percentile, so a few hot pixels do not set the range.
+
+    Strategy: a 12-bit-like channel whose values stay <= 1000 except 10 hot
+    pixels at 4095 (0.01% of the voxels). The plain maximum (4095) would map
+    the real signal to < 25% brightness; the default must instead land within
+    the bulk of the data (<= 1000) and be an integer for integer data. An
+    explicit vmax must still win, and a channel whose signal covers fewer
+    voxels than the 0.1% tail (here 5 bright voxels on a zero background,
+    where the percentile is 0) falls back to the maximum, so it is not blank.
+    """
+    rng = np.random.default_rng(3)
+    ch = rng.integers(0, 1001, (10, 100, 100)).astype(np.uint16)
+    ch.flat[rng.choice(ch.size, 10, replace=False)] = 4095
+    sparse = np.zeros((10, 100, 100), dtype=np.uint16)
+    sparse.flat[:5] = 3000
+
+    w = show_zyx_max_slice_interactive([ch, sparse], pixel_sizes=(1, 1, 1))
+    vmax_ch, vmax_sparse = w.vmax_list
+    assert 990 <= vmax_ch <= 1000 and float(vmax_ch).is_integer()
+    assert vmax_sparse == 3000.0
+
+    w = show_zyx_max_slice_interactive([ch, sparse], pixel_sizes=(1, 1, 1), vmax=[4095, None])
+    assert w.vmax_list == [4095.0, 3000.0]
+
+
+def test_annotator_default_vmax_is_robust_and_annotations_stay_255():
+    """The annotator uses the same robust default for image channels; annotations keep 255."""
+    rng = np.random.default_rng(4)
+    ch = rng.integers(0, 1001, (10, 100, 100)).astype(np.uint16)
+    ch.flat[:10] = 4095
+    w = show_zyx_max_slice_interactive_point_annotator(ch, pixel_sizes=(1, 1, 1))
+    assert w.vmax_list[0] <= 1000 and w.vmax_list[-1] == 255.0
+
+
 # =========================================
 # Copy-parameters round trip
 # =========================================

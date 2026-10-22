@@ -984,6 +984,37 @@ def _finite_max(*arrays):
     return best
 
 
+def _robust_vmax(arr, q=99.9, max_samples=1_000_000):
+    """
+    Default display maximum: the `q`-th percentile of the finite values.
+
+    A few hot pixels, saturated debris or a single bright cell set the plain
+    maximum and leave the rest of the image dark. The percentile is estimated
+    on a fixed-seed random sample of at most `max_samples` values (a strided
+    sample can alias with the image rows). When the signal is sparser than
+    (100 - q)% of the voxels the percentile equals the background level; the
+    plain maximum is used then. Integer images get an integer (rounded up).
+    Returns None if there is no finite value.
+    """
+    arr = np.asarray(arr)
+    hi = _finite_max(arr)
+    if hi is None:
+        return None
+    flat = arr.ravel()
+    if flat.size > max_samples:
+        flat = flat[np.random.default_rng(0).integers(0, flat.size, max_samples)]
+    if np.issubdtype(flat.dtype, np.floating):
+        flat = flat[np.isfinite(flat)]
+    if flat.size == 0:
+        return hi
+    v = float(np.percentile(flat, q))
+    if not v > float(flat.min()):
+        return hi
+    if np.issubdtype(arr.dtype, np.integer):
+        v = float(np.ceil(v))
+    return min(v, hi)
+
+
 def create_multichannel_rgb(
     xy_list, xz_list, zy_list,
     vmin=None, vmax=None, gamma=1, colormap=None, colors=None, opacity=None,
@@ -2201,10 +2232,13 @@ class TNIASliceWidget(TNIAWidgetBase):
                 if x is not None:
                     res.append(float(x))
                 else:
-                    m = _finite_max(im_orig[i] if isinstance(im_orig, list) else im_orig)
-                    res.append(1.0 if m is None else m)
+                    res.append(self._auto_vmax[i])
             return res
 
+        # Robust default display maximum per channel (99.9th percentile), also
+        # used when a vmax box is cleared in the GUI.
+        channels = im if isinstance(im, list) else [im]
+        self._auto_vmax = [1.0 if m is None else m for m in (_robust_vmax(c) for c in channels)]
         self.vmin_list = _resolve_vmin(vmin, self.num_channels)
         self.vmax_list = _resolve_vmax(vmax, self.num_channels, self.im_orig)
         self.gamma_list = _to_list(gamma, self.num_channels, 1.0)
@@ -2282,7 +2316,7 @@ class TNIASliceWidget(TNIAWidgetBase):
         if isinstance(self.im_orig, list):
             # Map "" to None for vmin/vmax
             vmin_resolved = [None if v == "" else float(v) for v in self.vmin_list]
-            vmax_resolved = [None if v == "" else float(v) for v in self.vmax_list]
+            vmax_resolved = [self._auto_vmax[i] if v == "" else float(v) for i, v in enumerate(self.vmax_list)]
             gamma_resolved = [float(g) for g in self.gamma_list]
             opacity_resolved = [float(o) for o in self.opacity_list]
 
@@ -2319,9 +2353,9 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmin_val = None if self.vmin_list[0] == "" else float(self.vmin_list[0])
             vmax_val = None if self.vmax_list[0] == "" else float(self.vmax_list[0])
 
-            # Auto-calculate max if vmax is not explicitly set
+            # Robust default if vmax is not explicitly set
             if vmax_val is None:
-                vmax_val = float(np.max(self.im_orig))
+                vmax_val = self._auto_vmax[0]
 
             gamma_val = float(self.gamma_list[0])
             opacity_val = float(self.opacity_list[0])
@@ -2473,28 +2507,14 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         # Ensure vmax is padded correctly for the annotation channel
         vmax = kwargs.get('vmax', None)
 
-        def resolve_vmax(img):
-            m = float(np.nanmax(img))
-            if np.isnan(m):
-                m = 1.0
-            return m
-
         if vmax is None:
-            vmax_list = [resolve_vmax(im_list[i]) for i in range(len(im_list) - 1)] + [255.0]
-            kwargs['vmax'] = vmax_list
+            vmax_list = [None] * (len(im_list) - 1)
         elif isinstance(vmax, (list, tuple)):
-            vmax_list = list(vmax)
-            while len(vmax_list) < len(im_list) - 1:
-                vmax_list.append(None)
-            vmax_list = vmax_list[:len(im_list) - 1]
-            for i in range(len(vmax_list)):
-                if vmax_list[i] is None:
-                    vmax_list[i] = resolve_vmax(im_list[i])
-            vmax_list.append(255.0)
-            kwargs['vmax'] = vmax_list
+            vmax_list = (list(vmax) + [None] * len(im_list))[:len(im_list) - 1]
         else:
-            vmax_list = [vmax] * (len(im_list) - 1) + [255.0]
-            kwargs['vmax'] = vmax_list
+            vmax_list = [vmax] * (len(im_list) - 1)
+        # None entries get the superclass's robust default; annotations are 0/255.
+        kwargs['vmax'] = vmax_list + [255.0]
 
         # The annotation channel is always 8-bit, whatever is set for the image channels
         bit_depth = kwargs.get('bit_depth', None)
@@ -3409,8 +3429,10 @@ def show_zyx_max_slice_interactive(
         For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
 
     Notes:
-        - When `vmax` is not explicitly provided, it defaults to the largest finite value of each
-          channel (1.0 for an all-NaN channel); `vmin` defaults to 0.
+        - When `vmax` is not explicitly provided (or its box is cleared in the GUI), it defaults to
+          the 99.9th percentile of each channel's finite values, so a few hot pixels do not set the
+          display range (the maximum when the signal covers less than 0.1% of the voxels; 1.0 for an
+          all-NaN channel); `vmin` defaults to 0.
         - Interactive widgets compute a 128-bin histogram per channel in the Python backend (excluding NaNs for floats)
           and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
           underneath the channel controls, overlaid with a curve reflecting the current `vmin`, `vmax`, and `gamma` settings.
