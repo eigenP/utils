@@ -279,8 +279,22 @@ def _(mo):
     \end{array}
     $$
 
-    "Cell space" means the space the cells live in after embedding (PCA, a kNN graph, a diffusion map):
-    nearby cells in the embedding (manifold) are in similar states.
+    /// note | Four ideas to keep in mind
+    1. **A gene is a stain on a map of cells.** After embedding (PCA, a kNN graph), each cell is a point,
+       and nearby points are similar cell states. A gene's expression across the cells is like an in situ
+       stain on that map.
+    2. **Distance between cells means walking along the map.** Cells change state gradually, so the
+       meaningful distance between two cells follows the chain of similar cells between them (a path on
+       the kNN graph), not a straight line across empty space.
+    3. **A gene can be summarised in two ways:** by its *histogram* (how often each expression level
+       occurs: *how much*) or by its *location* (which cells express it: *where*). Most of this notebook
+       is about the difference.
+    4. **The earth mover's distance** (Wasserstein-1, $W_1$) is the least work needed to reshape one pile
+       of sand into another, where work is amount × distance moved. Its answer depends on the *ground* the
+       sand moves across.
+
+    Every metric below makes two choices: **what it compares**, and **what counts as near**.
+    ///
 
     **The short answer**, which the rest of the notebook backs up:
 
@@ -292,17 +306,18 @@ def _(mo):
 
     **Roadmap.**
 
-    0. **The data**: one expression matrix, two of its columns.
-    1. **Pearson and Spearman** measure co-variation in the same cells, and why Pearson is pulled down by
-       distribution shape.
-    2. **1D Wasserstein on values** compares histograms only, so it fails the shuffle test.
-    3. **Graph optimal transport** moves expression *between cells*, at a cost given by a cell–cell
-       distance. This is the distance that answers the third question. (When the cells are simply
-       ordered along a line, such as pseudotime, it is the 1D Wasserstein *along that ordering*: the
-       right-hand column of the first figure.)
-    4. **Multiscale coarsening** picks the metacell scale for (3) from the data, and **tree $W_1$**
-       on the same hierarchy gives a close approximation of (3) at a tiny fraction of the cost.
-    5. **Scorecard**: all five metrics against a known answer.
+    0. **The data and the test bench**: a simulated branching trajectory with a known answer, and three
+       tests every metric has to pass.
+    1. **Correlation** (Pearson, Spearman) compares each cell only with itself. Spearman removes
+       Pearson's penalty on histogram shape, but neither can tell a neighbouring gene from one at the far
+       end of the trajectory.
+    2. **1D Wasserstein on values** is the right tool on the wrong ground: it moves sand along the axis of
+       expression values, so it compares histograms only and fails both controls.
+    3. **Graph optimal transport** is the same tool on the right ground: it moves expression *between
+       cells*, along the cell graph. It passes every test, but costs one transport problem per gene pair.
+    4. **Making it affordable**: the data choose the metacell scale, and on a hierarchy of clusters $W_1$
+       has a closed form (tree $W_1$).
+    5. **Scorecard**: all five metrics against the known answer, and back to "genes like X".
 
     /// note | How claims are checked
     Everything runs on synthetic data with a known answer, so each claim is checked against ground
@@ -384,7 +399,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Part 0. The data: one matrix, two columns
+    ## Part 0. The data and the test bench
 
     Single-cell data arrive as an expression matrix $X \in \mathbb{R}^{n \times p}$: **rows are cells**
     (`adata.obs`), **columns are genes** (`adata.var`), and $X_{ig}$ is the normalised expression of gene
@@ -392,760 +407,28 @@ def _(mo):
     $$x = X_{:,A}, \qquad y = X_{:,B},$$
     and returns one number. The only question is *what else* the number is allowed to look at.
 
-    Row order carries no information: cells come off the sequencer in arbitrary order (left). Sorting the
-    rows by a 1D coordinate (here the position $t$ along the drawn trajectory; in practice a pseudotime or
-    any other cell ordering) is only for our eyes, but it makes the structure visible (middle): each
-    trajectory gene lights up in its own band of cells. The right panel pulls out the two columns under
-    comparison, gene A in blue and gene B in orange. Pick any two genes below; the same two selectors
-    drive the transport figures in Part 3.
-
-    The data are simulated with a known answer (Part 3 shows how, from a shape you can draw; the default
-    is a horseshoe-shaped trajectory with a side branch). The gene names say what each gene is:
-
-    * `g07_t0.35`: a **trajectory gene**, expressed in a band of cells around position $t = 0.35$ along
-      the trajectory. The true distance between two trajectory genes is the distance between their
-      peaks along the trajectory.
-    * `twin_of_g07`: the **positive control**, same peak as `g07` at 6× the amplitude. A good metric puts
-      it next to its parent.
-    * `perm_of_g07`: the **negative control**, a copy of `g07` with its cells shuffled. A good metric
-      must *not* put it next to its source.
-    * `bg…` and `noise…`: background genes that give the cells their structure, and pure noise.
-
-    Keep one fact in mind for Part 1: shuffling the rows of *both* columns together changes no metric in
-    this notebook. Shuffling *one* column alone is what correlation notices and 1D Wasserstein does not.
-    Try gene B = `perm_of_…`.
-    """)
-    return
-
-
-@app.cell
-def _(gene_a_dd, gene_b_dd, mo):
-    # the same two dropdowns as in Part 3; changing either one updates both places
-    mo.hstack([gene_a_dd, gene_b_dd], wrap=True, justify="start")
-    return
-
-
-@app.cell(hide_code=True)
-def _(adata, fig_row, gene_a_dd, gene_b_dd, genes_eval, mo, np, pal, plt):
-    from matplotlib.patches import Rectangle
-
-    _cols = list(genes_eval) + [g for g in adata.var_names if g.startswith("noise")][:15]
-    _Xs = np.asarray(adata[:, _cols].X)
-    _t = adata.obs["t"].to_numpy()
-    _order = np.argsort(_t)
-    _vmax = np.percentile(_Xs, 99)
-    _ia, _ib = _cols.index(gene_a_dd.value), _cols.index(gene_b_dd.value)
-
-    def _matrix_panel(rows, title):
-        fig, (ax_s, ax) = plt.subplots(
-            1, 2, figsize=(3.6, 4.4), sharey=True, gridspec_kw={"width_ratios": [1, 14], "wspace": 0.04}
-        )
-        # left strip: each cell's position t along the 1D coordinate
-        ax_s.imshow(_t[rows, None], aspect="auto", cmap="viridis", vmin=0, vmax=1, interpolation="nearest")
-        ax_s.set_xticks([])
-        ax_s.set_ylabel(f"cells, n = {len(rows)}")
-        ax.imshow(_Xs[rows], aspect="auto", cmap="Purples", vmin=0, vmax=_vmax, interpolation="nearest")
-        for j, c, lab in ((_ia, pal["a"], "A"), (_ib, pal["b"], "B")):
-            ax.add_patch(Rectangle((j - 0.5, -0.5), 1, len(rows), fill=False, edgecolor=c, lw=2.2))
-            ax.text(j, -0.03 * len(rows), lab, color=c, ha="center", va="bottom", fontsize=12, fontweight="bold")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_xlabel(f"genes, p = {len(_cols)}")
-        ax.set_title(title, fontsize=12, pad=30)
-        return fig
-
-    _fig1 = _matrix_panel(np.arange(adata.n_obs), "X, cells as acquired")
-    _fig2 = _matrix_panel(_order, "rows sorted by t")
-
-    _fig3, _axs = plt.subplots(1, 2, figsize=(3.2, 4.4), sharey=True, gridspec_kw={"wspace": 0.08})
-    _ypos = np.arange(adata.n_obs)
-    _k = max(adata.n_obs // 40, 5)
-    for _ax, _j, _c, _lab in ((_axs[0], _ia, pal["a"], "x = X[:, A]"), (_axs[1], _ib, pal["b"], "y = X[:, B]")):
-        _v = _Xs[_order, _j]
-        _ax.scatter(_v, _ypos, s=1.5, color=_c, alpha=0.25, rasterized=True, lw=0)
-        _ax.plot(np.convolve(_v, np.ones(_k) / _k, mode="same"), _ypos, color=_c, lw=2)
-        _ax.set_title(_lab, color=_c, fontsize=11)
-        _ax.set_xlabel("expression\n[log(1 + CP10k)]")
-        _ax.tick_params(labelsize=9)
-    _axs[0].set_ylim(adata.n_obs - 0.5, -0.5)
-    _axs[0].set_yticks([])
-    _axs[0].set_ylabel("cells, sorted by t")
-    _fig3.suptitle("the two columns we compare", fontsize=12, y=1.02)
-
-    mo.vstack([
-        fig_row(_fig1, _fig2, _fig3, arrows=["sort rows (cells) by their 1D coordinate t", "take columns A and B"], min_px=220, max_px=340),
-        mo.Html('<div style="font-size:.8rem;color:#666;text-align:center">colour strip = position t along the 1D coordinate (dark = start, yellow = end); line = running mean</div>'),
-    ])
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Part 1. Pearson and Spearman: co-variation in the same cells
-
-    Let $x, y \in \mathbb{R}^n$ be the expression of two genes over the same $n$ cells, and $z_x, z_y$
-    their z-scores (population SD, so $\tfrac1n\sum_i z_{x,i}^2 = 1$).
-
-    * **Pearson** is the mean product of the z-scores over the *observed* pairing,
-      $r = \tfrac1n \sum_i z_{x,i}\, z_{y,i}$.
-    * **Spearman** is Pearson applied to ranks, $\rho_S = r\big(\operatorname{rank}(x), \operatorname{rank}(y)\big)$.
-      Ranks do not change under any strictly increasing transform, so $\rho_S$ measures monotone (not
-      linear) association.
-
-    The controls simulate $y = f(x) + \text{noise}$ with skewed (gamma-distributed) $x$, as for
-    expression data. The two panels show the data as each metric sees it: raw values for Pearson, ranks
-    for Spearman. With the default **monotone (exp)** link, the raw cloud is curved and fanned out while
-    the rank cloud is a tight diagonal. That difference *is* the gap between the two numbers.
-    """)
-    return
-
-
-@app.cell
-def _(mo):
-    relation_dd = mo.ui.dropdown(
-        options=["linear", "monotone (exp)", "non-monotone (quadratic)", "independent"],
-        value="monotone (exp)",
-        label="relationship y = f(x)",
-    )
-    noise_sl = mo.ui.slider(0.0, 2.0, 0.05, value=0.3, label="noise SD", show_value=True)
-    dropout_sl = mo.ui.slider(0.0, 0.9, 0.05, value=0.1, label="dropout (fraction set to 0)", show_value=True)
-    mo.hstack([relation_dd, noise_sl, dropout_sl], wrap=True)
-    return dropout_sl, noise_sl, relation_dd
-
-
-@app.cell(hide_code=True)
-def _(np, rankdata):
-    def zscore_pop(v):
-        """z-score with population SD (ddof=0) so mean(z**2) == 1 exactly."""
-        v = np.asarray(v, dtype=float)
-        sd = v.std()
-        return (v - v.mean()) / sd if sd > 0 else np.zeros_like(v)
-
-    def pair_metrics(x, y):
-        """Pearson, Spearman, 1D W1/W2 on z-scores and the coupling decomposition."""
-        zx, zy = zscore_pop(x), zscore_pop(y)
-        sx, sy = np.sort(zx), np.sort(zy)
-        r = float(np.mean(zx * zy))
-        r_max = float(np.mean(sx * sy))
-        rx, ry = zscore_pop(rankdata(x)), zscore_pop(rankdata(y))
-        return {
-            "pearson r": r,
-            "spearman ρ": float(np.mean(rx * ry)),
-            "W1(z_x, z_y)": float(np.mean(np.abs(sx - sy))),
-            "W2²(z_x, z_y)": float(np.mean((sx - sy) ** 2)),
-            "r_max = 1 − W2²/2": r_max,
-            "coupling gap r_max − r": r_max - r,
-        }
-
-    return pair_metrics, zscore_pop
-
-
-@app.cell(hide_code=True)
-def _(dropout_sl, noise_sl, np, relation_dd):
-    def simulate_pair(relation, noise, dropout, shuffle=False, n=600, seed=1):
-        rng = np.random.default_rng(seed)
-        x = rng.gamma(2.0, 1.0, n)
-        # noise enters the latent driver, so f is applied to a noisy copy of x
-        latent = x + noise * rng.standard_normal(n)
-        y = {
-            "linear": lambda v: v,
-            "monotone (exp)": lambda v: np.exp(0.5 * v),
-            "non-monotone (quadratic)": lambda v: (v - np.median(x)) ** 2,
-            "independent": lambda v: rng.gamma(2.0, 1.0, v.size),
-        }[relation](latent)
-        y = y - min(y.min(), 0.0)
-        if dropout > 0:
-            x = np.where(rng.random(n) < dropout, 0.0, x)
-            y = np.where(rng.random(n) < dropout, 0.0, y)
-        if shuffle:
-            y = rng.permutation(y)
-        return x, y
-
-    pair_x, pair_y = simulate_pair(relation_dd.value, noise_sl.value, dropout_sl.value)
-    pair_y_shuffled = simulate_pair(relation_dd.value, noise_sl.value, dropout_sl.value, shuffle=True)[1]
-    return pair_x, pair_y, pair_y_shuffled
-
-
-@app.cell(hide_code=True)
-def _(fig_panels, mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
-    _m = pair_metrics(pair_x, pair_y)
-    _fig, _axes = plt.subplots(1, 2, figsize=(9.5, 3.9))
-    _axes[0].scatter(pair_x, pair_y, s=6, alpha=0.5, color=pal["dark"], lw=0)
-    _axes[0].set(xlabel="gene x expression [a.u.]", ylabel="gene y expression [a.u.]")
-    _axes[0].set_title(f"raw values: Pearson r = {_m['pearson r']:+.2f}", fontsize=11)
-    _axes[1].scatter(rankdata(pair_x), rankdata(pair_y), s=6, alpha=0.5, color=pal["dark"], lw=0)
-    _axes[1].set(xlabel="rank of x among cells", ylabel="rank of y among cells")
-    _axes[1].set_title(f"ranks: Spearman ρ = {_m['spearman ρ']:+.2f}", fontsize=11)
-    for _ax in _axes:
-        _ax.set_box_aspect(1)
-    _fig.tight_layout()
-    fig_panels(_fig)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### Where Pearson's shortfall comes from
-
-    Compare Pearson with the *best possible* pairing of the same values: sort both vectors and pair the
-    $k$-th smallest values. This maximises the correlation (rearrangement inequality); call the maximum
-    $r_{\max}$. For z-scored data the distance from perfect agreement splits exactly in two:
-
-    $$
-    \underbrace{\tfrac1n\textstyle\sum_i (z_{x,i}-z_{y,i})^2}_{=\,2 - 2r}
-    \;=\;
-    \underbrace{W_2^2(z_x, z_y)}_{\text{marginal mismatch}}
-    \;+\;
-    \underbrace{2\,(r_{\max} - r)}_{\text{coupling mismatch}\ \ge 0}.
-    $$
-
-    * The **marginal** term depends only on the two histograms. It is a Wasserstein distance between
-      the z-scores, and Part 2 is about it.
-    * The **coupling** term depends on *which cells* carry which values. Only this part is about
-      co-regulation.
-
-    The bars apply the split to raw values (Pearson) and to ranks (Spearman). Ranks give both genes
-    the same uniform histogram, so for Spearman the marginal term vanishes when there are no ties.
-    That is the exact sense in which Spearman "removes distribution shape".
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(fig_panels, mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
-    def _split(x, y):
-        m = pair_metrics(x, y)
-        return m["W2²(z_x, z_y)"], 2 * m["coupling gap r_max − r"]
-
-    _rows = {"Pearson (raw values)": _split(pair_x, pair_y), "Spearman (ranks)": _split(rankdata(pair_x), rankdata(pair_y))}
-    _fig, _ax = plt.subplots(figsize=(10, 2.4))
-    for _k, (_name, (_marg, _coup)) in enumerate(_rows.items()):
-        _ax.barh(_k, _marg, color=pal["dark"], height=0.6, label="marginal mismatch $W_2^2$" if _k == 0 else None)
-        _ax.barh(_k, _coup, left=_marg, color=pal["light"], edgecolor=pal["dark"], hatch="///", lw=0, height=0.6,
-                 label="coupling mismatch $2(r_{max}-r)$" if _k == 0 else None)
-        _ax.text(_marg + _coup + 0.02, _k, f"2 − 2r = {_marg + _coup:.2f}", va="center", fontsize=10)
-    _ax.set_yticks(range(len(_rows)), list(_rows))
-    _ax.invert_yaxis()
-    _ax.set_xlim(0, max(sum(v) for v in _rows.values()) * 1.3 + 0.05)
-    _ax.set_xlabel("2 − 2r, distance from perfect agreement [SD²] (0 = identical z-scores)")
-    _ax.legend(loc=(1.02, 0.25))
-    _fig.tight_layout()
-    fig_panels(_fig)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    With the default **monotone (exp)** link, almost all of Pearson's bar is the solid marginal part: the
-    genes are perfectly co-ordered, but $e^{x}$ has a heavier tail than $x$, so their z-scores cannot
-    line up. Pearson is penalising *shape*, not a lack of co-regulation. Two more settings to try:
-
-    * **dropout 0.7**: a solid segment appears in Spearman's bar too. Ties at zero make the rank
-      histograms unequal and cap Spearman below 1, so zero-inflation partly turns Spearman into a
-      detection statistic.
-    * **non-monotone (quadratic), noise 0**: $y$ is a deterministic function of $x$, yet both bars are
-      long. Neither metric measures general dependence.
-
-    /// tip | Part 1 in one line
-    Use Spearman for co-variation: it removes histogram shape, which Pearson silently counts against
-    the pair.
-    ///
-
-    ## Part 2. 1D Wasserstein: comparing value histograms
-
-    **1D Wasserstein** treats $x$ and $y$ as two *bags of numbers*. On the real line, optimal transport
-    pairs the $k$-th smallest value of one with the $k$-th smallest of the other:
-
-    $$W_1(x, y) = \tfrac1n \sum_k \big|x_{(k)} - y_{(k)}\big| = \int_{\mathbb{R}} |F_x(t) - F_y(t)|\,dt .$$
-
-    The figure shows this definition on z-scores. **Left:** $W_1$ is the area between the two quantile
-    functions. **Middle and right:** 30 random cells drawn as lines between two number lines, $z_x$ on top
-    and $z_y$ below. The middle panel joins each cell's own two values, the pairing Pearson uses. The
-    right panel joins values by rank, the pairing Wasserstein uses, and no cell identity survives in it.
-    For the default monotone pair the two panels nearly coincide, because the cells already come almost
-    sorted. Switch to **independent**: the middle panel's lines cross in every direction, while the
-    right panel, and $W_1$, barely change.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(fig_panels, mo, np, pair_metrics, pair_x, pair_y, pal, plt, zscore_pop):
-    _zx, _zy = zscore_pop(pair_x), zscore_pop(pair_y)
-    _w1 = pair_metrics(pair_x, pair_y)["W1(z_x, z_y)"]
-    _fig, _axes = plt.subplots(1, 3, figsize=(12, 3.5), gridspec_kw={"width_ratios": [1.1, 1, 1]})
-    _u = (np.arange(_zx.size) + 0.5) / _zx.size
-    _axes[0].fill_between(_u, np.sort(_zx), np.sort(_zy), color=pal["faint"], lw=0)
-    _axes[0].plot(_u, np.sort(_zx), color=pal["a"], lw=2, label="gene x")
-    _axes[0].plot(_u, np.sort(_zy), color=pal["b"], lw=2, ls="--", label="gene y")
-    _axes[0].set(xlabel="quantile u, fraction of cells [0–1]", ylabel="z-score [SD] (top 1% clipped)")
-    _axes[0].set_ylim(np.quantile(np.r_[_zx, _zy], 0.001) - 0.2, np.quantile(np.r_[_zx, _zy], 0.99) + 0.5)
-    _axes[0].set_title(f"shaded area = $W_1$ = {_w1:.2f}", fontsize=11)
-    _axes[0].legend(loc="upper left")
-
-    _rng = np.random.default_rng(0)
-    _idx = _rng.choice(_zx.size, 30, replace=False)
-    _sx, _sy = _zx[_idx], _zy[_idx]
-    _lo, _hi = np.quantile(np.r_[_zx, _zy], [0.005, 0.995])
-    for _ax, _top, _bot, _title in [
-        (_axes[1], _sx, _sy, "observed pairing (cell i ↔ cell i)"),
-        (_axes[2], np.sort(_sx), np.sort(_sy), "sorted pairing (k-th ↔ k-th)"),
-    ]:
-        for _a, _b in zip(_top, _bot):
-            _ax.plot([_a, _b], [1, 0], color=pal["mid"], lw=0.8, alpha=0.7)
-        _ax.scatter(_top, np.ones_like(_top), color=pal["a"], s=22, zorder=3, edgecolor="white", lw=0.2)
-        _ax.scatter(_bot, np.zeros_like(_bot), color=pal["b"], s=22, zorder=3, edgecolor="white", lw=0.2)
-        _ax.set_yticks([0, 1], ["gene y", "gene x"])
-        _ax.set_xlim(_lo, _hi)
-        _ax.set_ylim(-0.2, 1.2)
-        _ax.set_xlabel("z-score [SD]")
-        _ax.set_title(_title, fontsize=11)
-    _fig.tight_layout()
-    fig_panels(_fig)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### The shuffle test
-
-    If a metric ignores which cell is which, shuffling the cells of one gene cannot change it. This is
-    the simplest negative control for a co-expression score. Each panel shows one metric on the
-    current pair before and after shuffling the cells of $y$.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(fig_panels, mo, pair_metrics, pair_x, pair_y, pair_y_shuffled, pal, plt):
-    _orig, _shuf = pair_metrics(pair_x, pair_y), pair_metrics(pair_x, pair_y_shuffled)
-    _keys = [("pearson r", "Pearson r"), ("spearman ρ", "Spearman ρ"), ("W1(z_x, z_y)", "$W_1$ on z-scores")]
-    _fig, _axes = plt.subplots(1, 3, figsize=(10, 2.9))
-    for _ax, (_k, _label) in zip(_axes, _keys):
-        _vals = [_orig[_k], _shuf[_k]]
-        _ax.bar(0, _vals[0], color=pal["dark"], width=0.6)
-        _ax.bar(1, _vals[1], color=pal["light"], edgecolor=pal["dark"], hatch="///", lw=0, width=0.6)
-        for _x, _v in enumerate(_vals):
-            _ax.text(_x, max(_v, 0) + 0.03, f"{_v:.3f}", ha="center", fontsize=10)
-        _ax.axhline(0, color=pal["mid"], lw=0.8)
-        _ax.set_xticks([0, 1], ["original", "y shuffled"])
-        _ax.set_ylim(min(0, min(_vals)) - 0.1, max(1.0, max(_vals)) + 0.15)
-        _ax.set_title(_label, fontsize=11)
-        _ax.set_ylabel({"pearson r": "Pearson r", "spearman ρ": "Spearman ρ", "W1(z_x, z_y)": "$W_1$ [SD]"}[_k])
-    _fig.tight_layout()
-    fig_panels(_fig)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    Pearson and Spearman drop to about zero, as they should. $W_1$ does not change at all: the two
-    numbers are *bit-identical*, because shuffling leaves the sorted values untouched. Setting the
-    relationship to **independent** shows the converse: two unrelated genes with similar histograms get
-    $W_1 \approx 0$.
-
-    /// tip | Part 2 in one line
-    Value-Wasserstein is a **distribution-shape** similarity, not a co-expression score. It answers "do
-    these genes have the same expression profile shape?", and is misleading as a "genes like X" ranking.
-    ///
-
-    ## Part 3. Graph optimal transport: moving expression through cell space
-
-    Wasserstein becomes useful once the transport happens between **cells** rather than between
-    expression values. Normalise each gene's expression to a distribution over cells,
-    $a_g = x_g / \sum_i x_{g,i}$. Give the cells a distance $d(i, j)$ that says how far apart two cell
-    states are. Then $W_1(a, b)$ is the cheapest way to move gene A's expression onto gene B's, when
-    moving one unit from cell $i$ to cell $j$ costs $d(i,j)$:
-
-    $$W_1(a, b) = \min_{\pi \ge 0,\ \pi\mathbf 1 = a,\ \pi^\top \mathbf 1 = b} \ \sum_{ij} \pi_{ij}\, d(i,j).$$
-
-    /// note | What the normalisation keeps and discards
-    Dividing by $\sum_i x_{g,i}$ keeps *where* a gene is expressed and discards *how much*: a gene and a
-    6× brighter copy of it are the same distribution, so their $W_1$ is ideally 0 (the twin control
-    below). The flip side: a constant background (ambient RNA, baseline expression) becomes mass spread
-    over all of cell space, and distances between low-specificity genes shrink toward each other.
-    Consider background subtraction or thresholding before forming $a_g$.
-    ///
-
-    This is the core of **GeneTrajectory** (Qu *et al.*, *Nat. Biotechnol.* 2025). Both inputs come
-    from the same expression matrix. Its rows (cells) give the cell distance $d$; its columns (genes)
-    give the distributions that are transported. Optimal transport joins the two, and the resulting
-    gene–gene distances are then embedded to order genes into trajectories. To keep OT affordable, both
-    arms are computed on metacells (groups of similar cells) rather than single cells.
-
-    $$
-    X = \begin{array}{cc} & \hspace{0.35em}\begin{array}{cccc}\hspace{0.85em}\mathclap{{\scriptsize\text{gene } 1}}\hspace{0.85em} & \hspace{0.85em}\mathclap{{\scriptsize\text{gene } 2}}\hspace{0.85em} & \hspace{0.85em}\mathclap{\cdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{{\scriptsize\text{gene } m}}\hspace{0.85em}\end{array} \\ \begin{array}{r}{\scriptsize\text{cell } 1} \\ {\scriptsize\text{cell } 2} \\ \vdots \\ {\scriptsize\text{cell } n}\end{array} & \left[\begin{array}{cccc}\hspace{0.85em}\mathclap{x_{11}}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{12}}\hspace{0.85em} & \hspace{0.85em}\mathclap{\cdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{1m}}\hspace{0.85em} \\ \hspace{0.85em}\mathclap{x_{21}}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{22}}\hspace{0.85em} & \hspace{0.85em}\mathclap{\cdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{2m}}\hspace{0.85em} \\ \hspace{0.85em}\mathclap{\vdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{\vdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{\ddots}\hspace{0.85em} & \hspace{0.85em}\mathclap{\vdots}\hspace{0.85em} \\ \hspace{0.85em}\mathclap{x_{n1}}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{n2}}\hspace{0.85em} & \hspace{0.85em}\mathclap{\cdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{nm}}\hspace{0.85em}\end{array}\right] \end{array}
-    \;\left.\begin{array}{l}
-    \nearrow\; \xrightarrow[\text{cells}]{\textcolor{#6b6b6b}{\text{(rows)}}\text{: PCA, kNN}} \;\textcolor{#6b6b6b}{d_{\text{geo}}(i,j)}  \\[2.2em]
-    \searrow\; \xrightarrow{\textcolor{#6a51a3}{\text{genes}}\text{: normalise}} \;\textcolor{#6a51a3}{a_g}
-    \end{array}\right\}
-    \xrightarrow{\textcolor{#1baf7a}{\text{OT}}} \textcolor{#1baf7a}{W_1(a_g, a_h)}
-    $$
-
-    ### A useful distance must not saturate
-
-    Correlation compares expression cell by cell. Once two genes are expressed in disjoint sets of
-    cells, there is nothing left for it to compare: every non-overlapping pair gets the same value,
-    whether the genes are expressed at neighbouring stages or at opposite ends. A distance between
-    distributions should keep telling those cases apart. Below, two expression bumps sit at separation
-    $s$ along the cell order. $1 - r$ reaches its ceiling as soon as the bumps stop overlapping and
-    stays there. $W_1$ equals $s$ exactly, at every separation.
-    """)
-    return
-
-
-@app.cell
-def _(mo):
-    shift_sl = mo.ui.slider(0.0, 0.8, 0.01, value=0.2, label="separation s", show_value=True)
-    shift_sl
-    return (shift_sl,)
-
-
-@app.cell(hide_code=True)
-def _(fig_panels, mo, np, pal, plt, shift_sl):
-    def _path_metrics(s, w=0.05, n=400):
-        xs = np.linspace(0, 1, n)
-        a = np.exp(-((xs - (0.5 - s / 2)) ** 2) / (2 * w**2))
-        b = np.exp(-((xs - (0.5 + s / 2)) ** 2) / (2 * w**2))
-        a, b = a / a.sum(), b / b.sum()
-        w1 = float(np.sum(np.abs(np.cumsum(a) - np.cumsum(b))) * (xs[1] - xs[0]))
-        return xs, a, b, float(np.corrcoef(a, b)[0, 1]), w1
-
-    _grid = np.linspace(0, 0.8, 81)
-    _curves = np.array([_path_metrics(s)[3:] for s in _grid])
-    _xs, _a, _b, _r, _w1 = _path_metrics(shift_sl.value)
-    _fig, _axes = plt.subplots(1, 2, figsize=(10.5, 3.5))
-    _axes[0].fill_between(_xs, _a, color=pal["a"], alpha=0.5, lw=0, label="gene A")
-    _axes[0].fill_between(_xs, _b, color=pal["b"], alpha=0.5, lw=0, label="gene B")
-    _axes[0].set(xlabel="pseudotime, cell order [0–1]", ylabel="expression [a.u.]", yticks=[])
-    _axes[0].set_title(f"s = {shift_sl.value:.2f}: Pearson {_r:+.2f}, $W_1$ = {_w1:.2f}", fontsize=11)
-    _axes[0].legend(loc="upper left")
-    _axes[1].plot(_grid, _curves[:, 1], color=pal["dark"], lw=2)
-    _axes[1].plot(_grid, 1 - _curves[:, 0], color=pal["mid"], lw=2, ls="--")
-    _axes[1].text(0.6, 0.72, "$W_1$", fontsize=11)
-    _axes[1].text(0.42, 1.27, "1 − Pearson (saturated)", fontsize=10)
-    _axes[1].axvline(shift_sl.value, color=pal["light"], ls=":")
-    _axes[1].set(xlabel="true separation s [pseudotime units]", ylabel="reported distance\n($W_1$ in pseudotime units; 1 − r unitless)", ylim=(0, 1.45))
-    _fig.tight_layout()
-    fig_panels(_fig)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### The cell distance matters: draw two genes in PCA space
-
-    $W_1$ is only as good as the cell distance $d(i, j)$ it is given. Treat the canvas below as a PCA
-    plot: each dot is a cell. Paint with brush **a** for cells expressing gene A, **b** for gene B, and
-    **c** for cells expressing neither (they only shape cell space).
-
-    From the drawing, the notebook simulates a plausible **cells × genes count matrix**: 200 background
-    genes whose expression varies smoothly across the canvas, plus genes A and B, expressed in the cells
-    painted for them. The usual pipeline then runs on that matrix: normalise, log, PCA, kNN graph. Its
-    PCA recovers the drawing (up to noise), so what you draw is what the metrics see.
-
-    * **Left, the simulated matrix:** genes A and B and a dozen background genes, with cells grouped
-      as painted.
-    * **Middle, Euclidean OT in the recovered PCA:** the optimal coupling is straight lines, free to jump
-      across empty space.
-    * **Right, graph OT:** with the kNN graph as the cell distance, expression has to travel through
-      cells. $W_1$ is computed as a flow along the edges (explained further down), and line width shows
-      how much crosses each edge.
-
-    The table under the figure gives every metric in this notebook for the same two genes.
-    """)
-    return
-
-
-@app.cell
-def _(
-    NearestNeighbors,
-    connected_components,
-    linprog,
-    np,
-    ot,
-    shortest_path,
-    sp,
-):
-    def knn_graph(X, k=8):
-        """Symmetric kNN graph with Euclidean edge lengths; k is raised until the graph is connected."""
-        n = len(X)
-        for kk in range(min(k, n - 1), n):
-            dist, idx = NearestNeighbors(n_neighbors=kk + 1).fit(X).kneighbors(X)
-            W = sp.csr_matrix((dist[:, 1:].ravel(), (np.repeat(np.arange(n), kk), idx[:, 1:].ravel())), shape=(n, n))
-            W = W.maximum(W.T)
-            if connected_components(W, directed=False)[0] == 1:
-                break
-        return W, kk
-
-    def beckmann_w1_edges(u, v, ell, delta):
-        """
-        W1 as a min-cost flow on an explicit edge list (u_e, v_e, ℓ_e):
-        min Σ ℓ_e |J_e| subject to B J = δ (flow out minus flow in = δ at every node).
-        Returns (W1, J). Zero-length edges are fine here, unlike in a sparse matrix.
-        """
-        E = len(ell)
-        B = sp.csr_matrix(
-            (np.r_[np.ones(E), -np.ones(E)], (np.r_[u, v], np.r_[np.arange(E), np.arange(E)])),
-            shape=(len(delta), E),
-        )
-        lp = linprog(np.r_[ell, ell], A_eq=sp.hstack([B, -B]), b_eq=delta, bounds=(0, None), method="highs")
-        return lp.fun, lp.x[:E] - lp.x[E:]
-
-    def beckmann_w1(W, delta):
-        """Graph W1 on a weighted graph W. Returns (W1, J, edge tails, edge heads) for the edges of triu(W)."""
-        T = sp.triu(W).tocoo()
-        w1, J = beckmann_w1_edges(T.row, T.col, T.data, delta)
-        return w1, J, T.row, T.col
-
-    def metacell_graph_from_labels(Z, X, labels, k=8):
-        """
-        Metacells from any partition of the cells (k-means, a Leiden level, ...).
-
-        Returns a dict with
-          centroids: (M, d) metacell centroids in Z
-          Xm       : (M, g) mean expression per metacell
-          W        : (M, M) sparse symmetric kNN graph, entries = Euclidean edge length
-          D_geo    : (M, M) shortest-path distances on W
-          k_used   : kNN k after raising it until the graph is connected
-        """
-        M = labels.max() + 1
-        H = sp.csr_matrix((np.ones(len(labels)), (labels, np.arange(len(labels)))), shape=(M, len(labels)))
-        H = sp.diags(1.0 / np.asarray(H.sum(1)).ravel()) @ H
-        centroids = np.asarray(H @ Z)
-        W, k_used = knn_graph(centroids, min(k, M - 1))
-        return dict(centroids=centroids, Xm=np.asarray(H @ X), W=W, D_geo=shortest_path(W, directed=False), k_used=k_used)
-
-    def graph_w1_matrix(P, D):
-        """Exact pairwise W1 between columns of P (each a probability vector) under ground cost D."""
-        g = P.shape[1]
-        cols = [np.ascontiguousarray(P[:, i]) for i in range(g)]
-        out = np.zeros((g, g))
-        for i in range(g):
-            for j in range(i + 1, g):
-                out[i, j] = out[j, i] = ot.emd2(cols[i], cols[j], D)
-        return out
-
-    return (
-        beckmann_w1,
-        beckmann_w1_edges,
-        graph_w1_matrix,
-        knn_graph,
-        metacell_graph_from_labels,
-    )
-
-
-@app.cell
-def _(Path, ScatterWidget, mo, np, pal, wigglystuff):
-    # ScatterWidget with the notebook's colours: a = gene A, b = gene B, c = background cells (grey)
-    _js = (Path(wigglystuff.__file__).parent / "static" / "scatter-widget.js").read_text()
-    _default = '["#1f77b4","#ff7f0e","#2ca02c","#d62728"]'
-    _ours = f'["{pal["a"]}","{pal["b"]}","#9a9a9a","#d62728"]'
-
-    class CellCanvas(ScatterWidget):
-        # Two patches to wigglystuff's scatter-widget.js: our class colours, and a fix for an upstream
-        # bug. While building the class buttons, render() auto-clicks the first one, and that click
-        # handler touches the brush cursor `B`, which is declared later in render(): a temporal-dead-zone
-        # ReferenceError that aborts rendering (the canvas shows up empty, seen in app mode). Deferring
-        # the first click until render() has returned fixes it. Both replacements are no-ops if a future
-        # wigglystuff changes this code.
-        _esm = _js.replace(_default, _ours).replace(
-            "p===0&&(C=g,g.click())", "p===0&&(C=g,setTimeout(()=>g.click(),0))"
-        )
-
-    def _branched_horseshoe(seed=3, R=130.0, cx=370.0, cy=180.0, branch_len=200.0):
-        """A horseshoe with a side branch leaving its outer edge halfway along: a bifurcation."""
-        rng = np.random.default_rng(seed)
-        pts = []
-
-        def add(xs, ys, label, color):
-            for x, y in zip(xs, ys):
-                pts.append({"x": float(x), "y": float(y), "color": color, "label": label, "batch": 0})
-
-        for label, color, lo, hi, n in [
-            ("a", pal["a"], 35, 62, 22),
-            ("c", "#9a9a9a", 62, 298, 120),
-            ("b", pal["b"], 298, 325, 22),
-        ]:
-            th = np.deg2rad(rng.uniform(lo, hi, n))
-            r = R + rng.normal(0, 9, n)
-            add(cx + r * np.cos(th), cy + r * np.sin(th), label, color)
-        # the branch starts on the arc at 180 degrees and heads outwards, away from the opening
-        root = np.array([cx - R, cy])
-        direction = np.array([-1.0, 0.0])
-        u = rng.uniform(0, branch_len, 45)
-        side = rng.normal(0, 9, 45)
-        xy = root + u[:, None] * direction + side[:, None] * np.array([-direction[1], direction[0]])
-        add(xy[:, 0], xy[:, 1], "c", "#9a9a9a")
-        return pts
-
-    default_drawing = _branched_horseshoe()
-    draw_widget = mo.ui.anywidget(CellCanvas(n_classes=3, width=640, height=360, brushsize=20, data=default_drawing))
-    draw_widget
-    return default_drawing, draw_widget
-
-
-@app.cell(hide_code=True)
-def _(draw_widget, get_drawing, mo, set_drawing):
-    use_drawing_btn = mo.ui.button(
-        label="↻ Rebuild dataset",
-        kind="success",
-        tooltip="Rebuild Parts 3–5 from the current drawing (about 20 s)",
-        on_click=lambda _: set_drawing(list(draw_widget.widget.data)),
-    )
-    _n_canvas, _n_data = len(draw_widget.widget.data), len(get_drawing())
-    _status = (
-        "✓ dataset matches the drawing"
-        if list(draw_widget.widget.data) == list(get_drawing())
-        else f"canvas changed ({_n_canvas} vs {_n_data} points): rebuild to update Parts 3–5"
-    )
-    mo.hstack([use_drawing_btn, mo.md(_status)], justify="start", align="center", gap=1)
-    return
-
-
-@app.cell
-def _(
-    beckmann_w1,
-    draw_widget,
-    fig_panels,
-    knn_graph,
-    mo,
-    np,
-    orthogonal_procrustes,
-    ot,
-    pair_metrics,
-    pal,
-    pd,
-    pdist,
-    plt,
-    sp,
-    squareform,
-):
-    def matrix_from_drawing(points, n_background=200, seed=0):
-        """
-        Treat the drawing as PCA space and simulate a cells x genes count matrix consistent with it.
-
-        Background genes have log-rates linear in the drawn coordinates (random loadings), so their
-        PCA recovers the drawing; genes A and B are expressed in the cells painted 'a' and 'b'.
-        Returns labels, drawn coordinates, log-normalised matrix (A, B, background...) and the
-        recovered 2D PCA, rotated onto the drawing for display.
-        """
-        rng = np.random.default_rng(seed)
-        lab = np.array([p["label"] for p in points])
-        Z = np.array([[p["x"], p["y"]] for p in points], dtype=float)
-        Z = (Z - Z.mean(0)) / Z.std()
-        lib = rng.lognormal(np.log(5), 0.3, len(Z))
-        loadings = rng.normal(size=(n_background, 2))
-        background = rng.poisson(lib[:, None] * np.exp(-0.5 + 0.8 * Z @ loadings.T))
-        gene_a = rng.poisson(lib * (0.02 + 3.0 * (lab == "a")))
-        gene_b = rng.poisson(lib * (0.02 + 3.0 * (lab == "b")))
-        counts = np.c_[gene_a, gene_b, background].astype(float)
-        X = np.log1p(counts / counts.sum(1, keepdims=True) * 1e4)
-        U, S, _ = np.linalg.svd(X - X.mean(0), full_matrices=False)
-        pcs = U[:, :2] * S[:2]
-        R, _ = orthogonal_procrustes(pcs / pcs.std(), Z)
-        return lab, Z, X, (pcs / pcs.std()) @ R
-
-    def draw_two_genes(points):
-        lab = np.array([p["label"] for p in points])
-        if (lab == "a").sum() == 0 or (lab == "b").sum() == 0:
-            return mo.md("Paint at least one **a** cell and one **b** cell.")
-        lab, Z, X, P = matrix_from_drawing(points)
-        a, b = np.expm1(X[:, 0]), np.expm1(X[:, 1])
-        a, b = a / a.sum(), b / b.sum()
-
-        D = squareform(pdist(P))
-        plan = ot.emd(a, b, D)
-        w1_euc = float((plan * D).sum())
-        W, _ = knn_graph(P, k=6)
-        w1_graph, J, er, ec = beckmann_w1(W, a - b)
-        m = pair_metrics(X[:, 0], X[:, 1])
-
-        fig, axes = plt.subplots(1, 3, figsize=(13.5, 3.8), gridspec_kw={"width_ratios": [1, 1.1, 1.1]})
-        order = np.lexsort((P[:, 0], np.array([{"a": 0, "c": 1, "b": 2}[l] for l in lab])))
-        # cells (observations) as rows, genes as columns, like X in the pipeline above
-        axes[0].imshow(X[order][:, :14], aspect="auto", cmap="Purples", interpolation="nearest")
-        axes[0].set_xticks(range(14), ["gene A", "gene B"] + [f"bg {i}" for i in range(1, 13)], fontsize=8, rotation=90)
-        axes[0].axvline(1.5, color=pal["dark"], lw=1)
-        _bounds = np.cumsum([np.sum(lab == g) for g in ["a", "c", "b"]])
-        for y in _bounds[:-1]:
-            axes[0].axhline(y - 0.5, color=pal["dark"], lw=1)
-        axes[0].set_yticks((np.r_[0, _bounds[:-1]] + _bounds) / 2 - 0.5, ["a cells", "c cells", "b cells"], fontsize=9)
-        axes[0].set_title("simulated matrix X (log expression)", fontsize=11)
-
-        cols = {"a": pal["a"], "b": pal["b"], "c": pal["light"]}
-        for ax in axes[1:]:
-            ax.scatter(P[:, 0], P[:, 1], s=12, c=[cols[l] for l in lab], zorder=3, lw=0)
-            ax.set_aspect("equal")
-            ax.set_axis_off()
-        for i, j in zip(*np.nonzero(plan > 1e-3 * plan.max())):
-            if i != j:
-                axes[1].plot(*P[[i, j]].T, color=pal["flow"], lw=0.3 + 20 * plan[i, j], alpha=0.6)
-        axes[1].set_title(f"Euclidean in PCA: $W_1$ = {w1_euc:.2f}", fontsize=11)
-        Tw = sp.triu(W).tocoo()
-        for u, v in zip(Tw.row, Tw.col):
-            axes[2].plot(*P[[u, v]].T, color=pal["faint"], lw=0.5, zorder=1)
-        flow = np.abs(J) > 1e-9
-        for u, v, f in zip(er[flow], ec[flow], np.abs(J[flow])):
-            axes[2].plot(*P[[u, v]].T, color=pal["flow"], lw=0.5 + 6 * f, zorder=2)
-        axes[2].set_title(f"kNN graph: $W_1$ = {w1_graph:.2f}", fontsize=11)
-        fig.tight_layout()
-        table = pd.DataFrame(
-            {
-                "Pearson r": [m["pearson r"]],
-                "Spearman ρ": [m["spearman ρ"]],
-                "W1 on values (z-scores)": [m["W1(z_x, z_y)"]],
-                "W1, Euclidean in PCA": [w1_euc],
-                "W1, kNN graph": [w1_graph],
-                "graph / Euclidean": [w1_graph / w1_euc],
-            },
-            index=["gene A vs gene B"],
-        ).round(3)
-        return mo.vstack([fig_panels(fig), table])
-
-    draw_two_genes(draw_widget.widget.data)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### A dataset with a known answer, generated from your drawing
-
-    To score metrics we need data where the true gene–gene distance is known. This dataset is built from
-    the canvas above (a horseshoe with a side branch until you press the rebuild button under it): the drawing *is* the cell space.
+    ### A dataset with a known answer
+
+    To score metrics we need data where the true gene–gene distance is known, so the data are simulated
+    from a drawing: the drawing *is* the cell space, the map of idea 1. The default is a horseshoe-shaped
+    trajectory with a side branch. You can redraw it on the canvas in Part 3, and every part of the
+    notebook, this one included, recomputes.
 
     * **Cells** are sampled around the drawn points, with a little jitter.
     * **Trajectory genes** each peak at one drawn point; their expression falls off with the distance
       *along the drawing* (geodesic distance on the kNN graph of drawn points). So the **true distance
       between two genes is the geodesic distance between their peaks**. This works for any shape: an arc,
       a branch, a loop.
-    * **Positive control, twin genes**: same peak as a parent gene, 6× the amplitude. A good metric puts
-      each twin next to its parent, or among the genes whose peaks are within a small tolerance ε of it:
-      with 60 randomly placed peaks (the default) along one drawing, those genes are equally legitimate
-      neighbours (Part 5).
-    * **Negative control, permuted genes**: a copy of a trajectory gene with its cells shuffled (the
-      shuffle test from Part 2). A good metric must *not* put it next to its source.
     * **200 background genes** vary smoothly across the canvas, so that PCA of the data reproduces the
       drawing, and **300 noise genes** add unstructured background.
 
-    Draw a shape, press **↻ Rebuild the dataset** under the canvas, and Parts 3–5 recompute (about 20 s).
-    Drawing strokes alone only update the quick A/B demo above.
-
     The figure checks the simulation. **Left:** cells in PCA, coloured by their position $t$ along the
-    drawing (geodesic distance from one end). With the default drawing, the two ends of the horseshoe sit
-    close in PCA but far apart along the shape: exactly where a straight-line distance between cells
-    misleads. **Right:** read it like a stack of in situ stains. Each row is one trajectory gene (sorted
-    by peak position), each column one cell (sorted by $t$). The diagonal band is the structure a good
-    distance should recover. Past the branch point the band splits in two: cells on the side branch
-    and on the main arc share the same values of $t$, so no single ordering of the cells lines up every
-    gene. That is why the distances below are computed on a graph of the cells, not along $t$.
+    drawing (geodesic distance from one end). The two ends of the horseshoe sit close in PCA but far apart
+    along the shape: exactly where a straight-line distance between cells misleads. **Right:** read it
+    like a stack of in situ stains. Each row is one trajectory gene (sorted by peak position), each column
+    one cell (sorted by $t$). The diagonal band is the structure a good distance should recover. Past the
+    branch point the band splits in two: cells on the side branch and on the main arc share the same
+    values of $t$, so no single ordering of the cells lines up every gene.
     """)
     return
 
@@ -1315,6 +598,783 @@ def _(adata, fig_panels, mo, np, pal, plt):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    ### The test bench
+
+    Control genes are mixed into the data, and their names say what they are:
+
+    | test | pair | a good metric says |
+    |---|---|---|
+    | **twin** (positive control) | `g07` and `twin_of_g07`: same peak, 6× the amplitude | *near*: the same cells, only brighter |
+    | **shuffled copy** (negative control) | `g07` and `perm_of_g07`: the same values, dealt out to random cells | *far*: the same histogram, but no biology left |
+    | **distance** | trajectory genes peaking further and further apart | *keeps growing*: a neighbour is closer than a gene at the far end |
+
+    Trajectory genes are named by their peak (`g07_t0.35` peaks at $t = 0.35$); `bg…` and `noise…` are
+    the background genes. With about 60 randomly placed peaks, several genes peak within a few cells of
+    any twin's parent. Those are as legitimate a neighbour as the twin, so Part 5 scores the twin with a
+    small tolerance ε. Each part ends with this test bench filled in for the metrics it covers, and Part 5
+    checks the table against the known answer.
+
+    Row order carries no information: cells come off the sequencer in arbitrary order (left). Sorting the
+    rows by $t$ is only for our eyes, but it makes the structure visible (middle). The right panel pulls
+    out the two columns under comparison, gene A in blue and gene B in orange. Pick any two genes below;
+    the same two selectors drive the transport figures in Part 4.
+
+    Keep one fact in mind for Part 1: shuffling the rows of *both* columns together changes no metric in
+    this notebook. Shuffling *one* column alone is what correlation notices and 1D Wasserstein does not.
+    Try gene B = `perm_of_…`.
+    """)
+    return
+
+
+@app.cell
+def _(gene_a_dd, gene_b_dd, mo):
+    # the same two dropdowns as in Part 4; changing either one updates both places
+    mo.hstack([gene_a_dd, gene_b_dd], wrap=True, justify="start")
+    return
+
+
+@app.cell(hide_code=True)
+def _(adata, fig_row, gene_a_dd, gene_b_dd, genes_eval, mo, np, pal, plt):
+    from matplotlib.patches import Rectangle
+
+    _cols = list(genes_eval) + [g for g in adata.var_names if g.startswith("noise")][:15]
+    _Xs = np.asarray(adata[:, _cols].X)
+    _t = adata.obs["t"].to_numpy()
+    _order = np.argsort(_t)
+    _vmax = np.percentile(_Xs, 99)
+    _ia, _ib = _cols.index(gene_a_dd.value), _cols.index(gene_b_dd.value)
+
+    def _matrix_panel(rows, title):
+        fig, (ax_s, ax) = plt.subplots(
+            1, 2, figsize=(3.6, 4.4), sharey=True, gridspec_kw={"width_ratios": [1, 14], "wspace": 0.04}
+        )
+        # left strip: each cell's position t along the 1D coordinate
+        ax_s.imshow(_t[rows, None], aspect="auto", cmap="viridis", vmin=0, vmax=1, interpolation="nearest")
+        ax_s.set_xticks([])
+        ax_s.set_ylabel(f"cells, n = {len(rows)}")
+        ax.imshow(_Xs[rows], aspect="auto", cmap="Purples", vmin=0, vmax=_vmax, interpolation="nearest")
+        for j, c, lab in ((_ia, pal["a"], "A"), (_ib, pal["b"], "B")):
+            ax.add_patch(Rectangle((j - 0.5, -0.5), 1, len(rows), fill=False, edgecolor=c, lw=2.2))
+            ax.text(j, -0.03 * len(rows), lab, color=c, ha="center", va="bottom", fontsize=12, fontweight="bold")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel(f"genes, p = {len(_cols)}")
+        ax.set_title(title, fontsize=12, pad=30)
+        return fig
+
+    _fig1 = _matrix_panel(np.arange(adata.n_obs), "X, cells as acquired")
+    _fig2 = _matrix_panel(_order, "rows sorted by t")
+
+    _fig3, _axs = plt.subplots(1, 2, figsize=(3.2, 4.4), sharey=True, gridspec_kw={"wspace": 0.08})
+    _ypos = np.arange(adata.n_obs)
+    _k = max(adata.n_obs // 40, 5)
+    for _ax, _j, _c, _lab in ((_axs[0], _ia, pal["a"], "x = X[:, A]"), (_axs[1], _ib, pal["b"], "y = X[:, B]")):
+        _v = _Xs[_order, _j]
+        _ax.scatter(_v, _ypos, s=1.5, color=_c, alpha=0.25, rasterized=True, lw=0)
+        _ax.plot(np.convolve(_v, np.ones(_k) / _k, mode="same"), _ypos, color=_c, lw=2)
+        _ax.set_title(_lab, color=_c, fontsize=11)
+        _ax.set_xlabel("expression\n[log(1 + CP10k)]")
+        _ax.tick_params(labelsize=9)
+    _axs[0].set_ylim(adata.n_obs - 0.5, -0.5)
+    _axs[0].set_yticks([])
+    _axs[0].set_ylabel("cells, sorted by t")
+    _fig3.suptitle("the two columns we compare", fontsize=12, y=1.02)
+
+    mo.vstack([
+        fig_row(_fig1, _fig2, _fig3, arrows=["sort rows (cells) by their 1D coordinate t", "take columns A and B"], min_px=220, max_px=340),
+        mo.Html('<div style="font-size:.8rem;color:#666;text-align:center">colour strip = position t along the 1D coordinate (dark = start, yellow = end); line = running mean</div>'),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Part 1. Pearson and Spearman: co-variation in the same cells
+
+    Let $x, y \in \mathbb{R}^n$ be the expression of two genes over the same $n$ cells, and $z_x, z_y$
+    their z-scores (population SD, so $\tfrac1n\sum_i z_{x,i}^2 = 1$).
+
+    * **Pearson** is the mean product of the z-scores over the *observed* pairing,
+      $r = \tfrac1n \sum_i z_{x,i}\, z_{y,i}$.
+    * **Spearman** is Pearson applied to ranks, $\rho_S = r\big(\operatorname{rank}(x), \operatorname{rank}(y)\big)$.
+      Ranks do not change under any strictly increasing transform, so $\rho_S$ measures monotone (not
+      linear) association.
+
+    The sliders below simulate $y = f(x) + \text{noise}$ with skewed (gamma-distributed) $x$, as for
+    expression data. The two panels show the data as each metric sees it: raw values for Pearson, ranks
+    for Spearman. With the default **monotone (exp)** link, the raw cloud is curved and fanned out while
+    the rank cloud is a tight diagonal. That difference *is* the gap between the two numbers.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    relation_dd = mo.ui.dropdown(
+        options=["linear", "monotone (exp)", "non-monotone (quadratic)", "independent"],
+        value="monotone (exp)",
+        label="relationship y = f(x)",
+    )
+    noise_sl = mo.ui.slider(0.0, 2.0, 0.05, value=0.3, label="noise SD", show_value=True)
+    dropout_sl = mo.ui.slider(0.0, 0.9, 0.05, value=0.1, label="dropout (fraction set to 0)", show_value=True)
+    mo.hstack([relation_dd, noise_sl, dropout_sl], wrap=True)
+    return dropout_sl, noise_sl, relation_dd
+
+
+@app.cell(hide_code=True)
+def _(np, rankdata):
+    def zscore_pop(v):
+        """z-score with population SD (ddof=0) so mean(z**2) == 1 exactly."""
+        v = np.asarray(v, dtype=float)
+        sd = v.std()
+        return (v - v.mean()) / sd if sd > 0 else np.zeros_like(v)
+
+    def pair_metrics(x, y):
+        """Pearson, Spearman, 1D W1/W2 on z-scores and the coupling decomposition."""
+        zx, zy = zscore_pop(x), zscore_pop(y)
+        sx, sy = np.sort(zx), np.sort(zy)
+        r = float(np.mean(zx * zy))
+        r_max = float(np.mean(sx * sy))
+        rx, ry = zscore_pop(rankdata(x)), zscore_pop(rankdata(y))
+        return {
+            "pearson r": r,
+            "spearman ρ": float(np.mean(rx * ry)),
+            "W1(z_x, z_y)": float(np.mean(np.abs(sx - sy))),
+            "W2²(z_x, z_y)": float(np.mean((sx - sy) ** 2)),
+            "r_max = 1 − W2²/2": r_max,
+            "coupling gap r_max − r": r_max - r,
+        }
+
+    return pair_metrics, zscore_pop
+
+
+@app.cell(hide_code=True)
+def _(dropout_sl, noise_sl, np, relation_dd):
+    def simulate_pair(relation, noise, dropout, shuffle=False, n=600, seed=1):
+        rng = np.random.default_rng(seed)
+        x = rng.gamma(2.0, 1.0, n)
+        # noise enters the latent driver, so f is applied to a noisy copy of x
+        latent = x + noise * rng.standard_normal(n)
+        y = {
+            "linear": lambda v: v,
+            "monotone (exp)": lambda v: np.exp(0.5 * v),
+            "non-monotone (quadratic)": lambda v: (v - np.median(x)) ** 2,
+            "independent": lambda v: rng.gamma(2.0, 1.0, v.size),
+        }[relation](latent)
+        y = y - min(y.min(), 0.0)
+        if dropout > 0:
+            x = np.where(rng.random(n) < dropout, 0.0, x)
+            y = np.where(rng.random(n) < dropout, 0.0, y)
+        if shuffle:
+            y = rng.permutation(y)
+        return x, y
+
+    pair_x, pair_y = simulate_pair(relation_dd.value, noise_sl.value, dropout_sl.value)
+    pair_y_shuffled = simulate_pair(relation_dd.value, noise_sl.value, dropout_sl.value, shuffle=True)[1]
+    return pair_x, pair_y, pair_y_shuffled
+
+
+@app.cell(hide_code=True)
+def _(fig_panels, mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
+    _m = pair_metrics(pair_x, pair_y)
+    _fig, _axes = plt.subplots(1, 2, figsize=(9.5, 3.9))
+    _axes[0].scatter(pair_x, pair_y, s=6, alpha=0.5, color=pal["dark"], lw=0)
+    _axes[0].set(xlabel="gene x expression [a.u.]", ylabel="gene y expression [a.u.]")
+    _axes[0].set_title(f"raw values: Pearson r = {_m['pearson r']:+.2f}", fontsize=11)
+    _axes[1].scatter(rankdata(pair_x), rankdata(pair_y), s=6, alpha=0.5, color=pal["dark"], lw=0)
+    _axes[1].set(xlabel="rank of x among cells", ylabel="rank of y among cells")
+    _axes[1].set_title(f"ranks: Spearman ρ = {_m['spearman ρ']:+.2f}", fontsize=11)
+    for _ax in _axes:
+        _ax.set_box_aspect(1)
+    _fig.tight_layout()
+    fig_panels(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Where Pearson's shortfall comes from
+
+    Compare Pearson with the *best possible* pairing of the same values: sort both vectors and pair the
+    $k$-th smallest values. This maximises the correlation; call the maximum $r_{\max}$. The distance from
+    perfect agreement then splits exactly into two parts:
+
+    * a **marginal** part, which depends only on the two histograms. It is a Wasserstein distance between
+      the z-scores, the subject of Part 2.
+    * a **coupling** part, $2(r_{\max} - r) \ge 0$, which depends on *which cells* carry which values.
+      Only this part is about co-regulation.
+
+    /// details | The exact split
+    For z-scored data (rearrangement inequality for $r_{\max}$):
+
+    $$
+    \underbrace{\tfrac1n\textstyle\sum_i (z_{x,i}-z_{y,i})^2}_{=\,2 - 2r}
+    \;=\;
+    \underbrace{W_2^2(z_x, z_y)}_{\text{marginal mismatch}}
+    \;+\;
+    \underbrace{2\,(r_{\max} - r)}_{\text{coupling mismatch}\ \ge 0}.
+    $$
+
+    So $r \le 1 - W_2^2/2$: two genes whose histograms differ in shape can never reach $r = 1$, however
+    tightly they are co-regulated.
+    ///
+
+    The bars apply the split to raw values (Pearson) and to ranks (Spearman). Ranks give both genes
+    the same uniform histogram, so for Spearman the marginal term vanishes when there are no ties.
+    That is the exact sense in which Spearman "removes distribution shape".
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(fig_panels, mo, pair_metrics, pair_x, pair_y, pal, plt, rankdata):
+    def _split(x, y):
+        m = pair_metrics(x, y)
+        return m["W2²(z_x, z_y)"], 2 * m["coupling gap r_max − r"]
+
+    _rows = {"Pearson (raw values)": _split(pair_x, pair_y), "Spearman (ranks)": _split(rankdata(pair_x), rankdata(pair_y))}
+    _fig, _ax = plt.subplots(figsize=(10, 2.4))
+    for _k, (_name, (_marg, _coup)) in enumerate(_rows.items()):
+        _ax.barh(_k, _marg, color=pal["dark"], height=0.6, label="marginal mismatch $W_2^2$" if _k == 0 else None)
+        _ax.barh(_k, _coup, left=_marg, color=pal["light"], edgecolor=pal["dark"], hatch="///", lw=0, height=0.6,
+                 label="coupling mismatch $2(r_{max}-r)$" if _k == 0 else None)
+        _ax.text(_marg + _coup + 0.02, _k, f"2 − 2r = {_marg + _coup:.2f}", va="center", fontsize=10)
+    _ax.set_yticks(range(len(_rows)), list(_rows))
+    _ax.invert_yaxis()
+    _ax.set_xlim(0, max(sum(v) for v in _rows.values()) * 1.3 + 0.05)
+    _ax.set_xlabel("2 − 2r, distance from perfect agreement [SD²] (0 = identical z-scores)")
+    _ax.legend(loc=(1.02, 0.25))
+    _fig.tight_layout()
+    fig_panels(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    With the default **monotone (exp)** link, almost all of Pearson's bar is the solid marginal part: the
+    genes are perfectly co-ordered, but $e^{x}$ has a heavier tail than $x$, so their z-scores cannot
+    line up. Pearson is penalising *shape*, not a lack of co-regulation. Two more settings to try:
+
+    * **dropout 0.7**: a solid segment appears in Spearman's bar too. Ties at zero make the rank
+      histograms unequal and cap Spearman below 1, so zero-inflation partly turns Spearman into a
+      detection statistic.
+    * **non-monotone (quadratic), noise 0**: $y$ is a deterministic function of $x$, yet both bars are
+      long. Neither metric measures general dependence.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Where correlation stops
+
+    Correlation compares each cell only with itself. Once two genes are expressed in disjoint sets of
+    cells, there is nothing left for it to compare: every non-overlapping pair gets the same value,
+    whether the genes are expressed at neighbouring stages or at opposite ends. Below, two expression
+    bumps sit at separation $s$ along the cell order. $1 - r$ (dashed) reaches its ceiling as soon as the
+    bumps stop overlapping, and stays there. The solid line is the transport distance $W_1$ of Part 3: it
+    equals $s$ at every separation. The two are in different units ($1 - r$ has none, $W_1$ is in
+    pseudotime units), so compare their shapes, not their heights.
+
+    Smoothing each gene over neighbouring cells before correlating only moves the ceiling further out;
+    Part 4 explains why.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    shift_sl = mo.ui.slider(0.0, 0.8, 0.01, value=0.2, label="separation s", show_value=True)
+    shift_sl
+    return (shift_sl,)
+
+
+@app.cell(hide_code=True)
+def _(fig_panels, mo, np, pal, plt, shift_sl):
+    def _path_metrics(s, w=0.05, n=400):
+        xs = np.linspace(0, 1, n)
+        a = np.exp(-((xs - (0.5 - s / 2)) ** 2) / (2 * w**2))
+        b = np.exp(-((xs - (0.5 + s / 2)) ** 2) / (2 * w**2))
+        a, b = a / a.sum(), b / b.sum()
+        w1 = float(np.sum(np.abs(np.cumsum(a) - np.cumsum(b))) * (xs[1] - xs[0]))
+        return xs, a, b, float(np.corrcoef(a, b)[0, 1]), w1
+
+    _grid = np.linspace(0, 0.8, 81)
+    _curves = np.array([_path_metrics(s)[3:] for s in _grid])
+    _xs, _a, _b, _r, _w1 = _path_metrics(shift_sl.value)
+    _fig, _axes = plt.subplots(1, 2, figsize=(10.5, 3.5))
+    _axes[0].fill_between(_xs, _a, color=pal["a"], alpha=0.5, lw=0, label="gene A")
+    _axes[0].fill_between(_xs, _b, color=pal["b"], alpha=0.5, lw=0, label="gene B")
+    _axes[0].set(xlabel="pseudotime, cell order [0–1]", ylabel="expression [a.u.]", yticks=[])
+    _axes[0].set_title(f"s = {shift_sl.value:.2f}: Pearson {_r:+.2f}, $W_1$ = {_w1:.2f}", fontsize=11)
+    _axes[0].legend(loc="upper left")
+    _axes[1].plot(_grid, _curves[:, 1], color=pal["dark"], lw=2)
+    _axes[1].plot(_grid, 1 - _curves[:, 0], color=pal["mid"], lw=2, ls="--")
+    _axes[1].text(0.6, 0.72, "$W_1$", fontsize=11)
+    _axes[1].text(0.42, 1.27, "1 − Pearson (saturated)", fontsize=10)
+    _axes[1].axvline(shift_sl.value, color=pal["light"], ls=":")
+    _axes[1].set(xlabel="true separation s [pseudotime units]", ylabel="reported distance\n($W_1$ in pseudotime units; 1 − r unitless)", ylim=(0, 1.45))
+    _fig.tight_layout()
+    fig_panels(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    /// tip | Part 1 in one line
+    Use Spearman for co-variation: it removes histogram shape, which Pearson silently counts against the
+    pair. But correlation is local: beyond the overlap range, every distance looks the same.
+
+    | test bench | twin near? | shuffled copy far? | distance keeps growing? | cost |
+    |---|---|---|---|---|
+    | Pearson, Spearman | ✓ | ✓ | ✗ saturates | one matrix product |
+    ///
+
+    ## Part 2. 1D Wasserstein on values: the right tool on the wrong ground
+
+    Correlation's ceiling suggests a different kind of measure: a distance between two *distributions*,
+    which keeps growing as they move apart. The earth mover's distance (idea 4) is exactly that. Its
+    tempting first use, and the one behind `find_correlated_features(metrics=("wasserstein",))`, applies
+    it to each gene's **values**: it treats $x$ and $y$ as two *bags of numbers*, their histograms (idea 3).
+    On the real line, optimal transport pairs the $k$-th smallest value of one with the $k$-th smallest of
+    the other:
+
+    $$W_1(x, y) = \tfrac1n \sum_k \big|x_{(k)} - y_{(k)}\big| = \int_{\mathbb{R}} |F_x(t) - F_y(t)|\,dt .$$
+
+    The figure shows this definition on z-scores. **Left:** $W_1$ is the area between the two quantile
+    functions. **Middle and right:** 30 random cells drawn as lines between two number lines, $z_x$ on top
+    and $z_y$ below. The middle panel joins each cell's own two values, the pairing Pearson uses. The
+    right panel joins values by rank, the pairing Wasserstein uses, and no cell identity survives in it.
+    For the default monotone pair the two panels nearly coincide, because the cells already come almost
+    sorted. Switch to **independent**: the middle panel's lines cross in every direction, while the
+    right panel, and $W_1$, barely change.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(fig_panels, mo, np, pair_metrics, pair_x, pair_y, pal, plt, zscore_pop):
+    _zx, _zy = zscore_pop(pair_x), zscore_pop(pair_y)
+    _w1 = pair_metrics(pair_x, pair_y)["W1(z_x, z_y)"]
+    _fig, _axes = plt.subplots(1, 3, figsize=(12, 3.5), gridspec_kw={"width_ratios": [1.1, 1, 1]})
+    _u = (np.arange(_zx.size) + 0.5) / _zx.size
+    _axes[0].fill_between(_u, np.sort(_zx), np.sort(_zy), color=pal["faint"], lw=0)
+    _axes[0].plot(_u, np.sort(_zx), color=pal["a"], lw=2, label="gene x")
+    _axes[0].plot(_u, np.sort(_zy), color=pal["b"], lw=2, ls="--", label="gene y")
+    _axes[0].set(xlabel="quantile u, fraction of cells [0–1]", ylabel="z-score [SD] (top 1% clipped)")
+    _axes[0].set_ylim(np.quantile(np.r_[_zx, _zy], 0.001) - 0.2, np.quantile(np.r_[_zx, _zy], 0.99) + 0.5)
+    _axes[0].set_title(f"shaded area = $W_1$ = {_w1:.2f}", fontsize=11)
+    _axes[0].legend(loc="upper left")
+
+    _rng = np.random.default_rng(0)
+    _idx = _rng.choice(_zx.size, 30, replace=False)
+    _sx, _sy = _zx[_idx], _zy[_idx]
+    _lo, _hi = np.quantile(np.r_[_zx, _zy], [0.005, 0.995])
+    for _ax, _top, _bot, _title in [
+        (_axes[1], _sx, _sy, "observed pairing (cell i ↔ cell i)"),
+        (_axes[2], np.sort(_sx), np.sort(_sy), "sorted pairing (k-th ↔ k-th)"),
+    ]:
+        for _a, _b in zip(_top, _bot):
+            _ax.plot([_a, _b], [1, 0], color=pal["mid"], lw=0.8, alpha=0.7)
+        _ax.scatter(_top, np.ones_like(_top), color=pal["a"], s=22, zorder=3, edgecolor="white", lw=0.2)
+        _ax.scatter(_bot, np.zeros_like(_bot), color=pal["b"], s=22, zorder=3, edgecolor="white", lw=0.2)
+        _ax.set_yticks([0, 1], ["gene y", "gene x"])
+        _ax.set_xlim(_lo, _hi)
+        _ax.set_ylim(-0.2, 1.2)
+        _ax.set_xlabel("z-score [SD]")
+        _ax.set_title(_title, fontsize=11)
+    _fig.tight_layout()
+    fig_panels(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### The shuffle test
+
+    If a metric ignores which cell is which, shuffling the cells of one gene cannot change it. This is
+    the simplest negative control for a co-expression score. Each panel shows one metric on the
+    current pair before and after shuffling the cells of $y$.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(fig_panels, mo, pair_metrics, pair_x, pair_y, pair_y_shuffled, pal, plt):
+    _orig, _shuf = pair_metrics(pair_x, pair_y), pair_metrics(pair_x, pair_y_shuffled)
+    _keys = [("pearson r", "Pearson r"), ("spearman ρ", "Spearman ρ"), ("W1(z_x, z_y)", "$W_1$ on z-scores")]
+    _fig, _axes = plt.subplots(1, 3, figsize=(10, 2.9))
+    for _ax, (_k, _label) in zip(_axes, _keys):
+        _vals = [_orig[_k], _shuf[_k]]
+        _ax.bar(0, _vals[0], color=pal["dark"], width=0.6)
+        _ax.bar(1, _vals[1], color=pal["light"], edgecolor=pal["dark"], hatch="///", lw=0, width=0.6)
+        for _x, _v in enumerate(_vals):
+            _ax.text(_x, max(_v, 0) + 0.03, f"{_v:.3f}", ha="center", fontsize=10)
+        _ax.axhline(0, color=pal["mid"], lw=0.8)
+        _ax.set_xticks([0, 1], ["original", "y shuffled"])
+        _ax.set_ylim(min(0, min(_vals)) - 0.1, max(1.0, max(_vals)) + 0.15)
+        _ax.set_title(_label, fontsize=11)
+        _ax.set_ylabel({"pearson r": "Pearson r", "spearman ρ": "Spearman ρ", "W1(z_x, z_y)": "$W_1$ [SD]"}[_k])
+    _fig.tight_layout()
+    fig_panels(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Pearson and Spearman drop to about zero, as they should. $W_1$ does not change at all: the two
+    numbers are *bit-identical*, because shuffling leaves the sorted values untouched. Setting the
+    relationship to **independent** shows the converse: two unrelated genes with similar histograms get
+    $W_1 \approx 0$.
+
+    /// tip | Part 2 in one line
+    Value-Wasserstein is a **histogram-shape** similarity, not a co-expression score. It moves sand along
+    the axis of expression values, where no cell identity survives, so it fails both controls: it calls
+    the shuffled copy identical, and the twin, whose histogram is stretched, far (Part 5).
+
+    | test bench | twin near? | shuffled copy far? | distance keeps growing? | cost |
+    |---|---|---|---|---|
+    | Pearson, Spearman | ✓ | ✓ | ✗ saturates | one matrix product |
+    | 1D $W_1$ on values | ✗ | ✗ | ✗ no notion of *where* | one sort per gene |
+    ///
+
+    ## Part 3. Graph optimal transport: the right ground
+
+    Keep the tool, change the ground: transport expression between **cells** rather than between
+    expression values. Normalise each gene's expression to a distribution over cells,
+    $a_g = x_g / \sum_i x_{g,i}$. Give the cells a distance $d(i, j)$ that says how far apart two cell
+    states are. Then $W_1(a, b)$ is the cheapest way to move gene A's expression onto gene B's, when
+    moving one unit from cell $i$ to cell $j$ costs $d(i,j)$:
+
+    $$W_1(a, b) = \min_{\pi \ge 0,\ \pi\mathbf 1 = a,\ \pi^\top \mathbf 1 = b} \ \sum_{ij} \pi_{ij}\, d(i,j).$$
+
+    Two different distances now appear, and it helps to keep them apart: $d(i, j)$ between **cells** is
+    the ground the sand moves across, and $W_1(a, b)$ between **genes** is the output.
+
+    /// note | What the normalisation keeps and discards
+    Dividing by $\sum_i x_{g,i}$ keeps *where* a gene is expressed and discards *how much*: a gene and a
+    6× brighter copy of it are the same distribution, so their $W_1$ is ideally 0 (the twin control
+    below). The flip side: a constant background (ambient RNA, baseline expression) becomes mass spread
+    over all of cell space, and distances between low-specificity genes shrink toward each other.
+    Consider background subtraction or thresholding before forming $a_g$.
+    ///
+
+    **On a line, transport has a closed form.** When the cells can be ordered along one coordinate $t$
+    (a pseudotime), $W_1(a, b) = \int |F_a(t) - F_b(t)|\,dt$, with $F$ the cumulative expression along
+    $t$: no solver needed. This is the right-hand column of the first figure, and the solid line in
+    Part 1. It is only as good as the ordering: on the branched default, cells on the side branch and on
+    the main arc share the same $t$ (Part 0), so genes on different branches would look close. A graph of
+    the cells needs no ordering, and follows branches and loops.
+
+    This is the core of **GeneTrajectory** (Qu *et al.*, *Nat. Biotechnol.* 2025). Both inputs come
+    from the same expression matrix. Its rows (cells) give the cell distance $d$; its columns (genes)
+    give the distributions that are transported. Optimal transport joins the two, and the resulting
+    gene–gene distances are then embedded to order genes into trajectories. To keep OT affordable, both
+    arms are computed on metacells (groups of similar cells) rather than single cells.
+
+    $$
+    X = \begin{array}{cc} & \hspace{0.35em}\begin{array}{cccc}\hspace{0.85em}\mathclap{{\scriptsize\text{gene } 1}}\hspace{0.85em} & \hspace{0.85em}\mathclap{{\scriptsize\text{gene } 2}}\hspace{0.85em} & \hspace{0.85em}\mathclap{\cdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{{\scriptsize\text{gene } m}}\hspace{0.85em}\end{array} \\ \begin{array}{r}{\scriptsize\text{cell } 1} \\ {\scriptsize\text{cell } 2} \\ \vdots \\ {\scriptsize\text{cell } n}\end{array} & \left[\begin{array}{cccc}\hspace{0.85em}\mathclap{x_{11}}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{12}}\hspace{0.85em} & \hspace{0.85em}\mathclap{\cdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{1m}}\hspace{0.85em} \\ \hspace{0.85em}\mathclap{x_{21}}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{22}}\hspace{0.85em} & \hspace{0.85em}\mathclap{\cdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{2m}}\hspace{0.85em} \\ \hspace{0.85em}\mathclap{\vdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{\vdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{\ddots}\hspace{0.85em} & \hspace{0.85em}\mathclap{\vdots}\hspace{0.85em} \\ \hspace{0.85em}\mathclap{x_{n1}}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{n2}}\hspace{0.85em} & \hspace{0.85em}\mathclap{\cdots}\hspace{0.85em} & \hspace{0.85em}\mathclap{x_{nm}}\hspace{0.85em}\end{array}\right] \end{array}
+    \;\left.\begin{array}{l}
+    \nearrow\; \xrightarrow[\text{cells}]{\textcolor{#6b6b6b}{\text{(rows)}}\text{: PCA, kNN}} \;\textcolor{#6b6b6b}{d_{\text{geo}}(i,j)}  \\[2.2em]
+    \searrow\; \xrightarrow{\textcolor{#6a51a3}{\text{genes}}\text{: normalise}} \;\textcolor{#6a51a3}{a_g}
+    \end{array}\right\}
+    \xrightarrow{\textcolor{#1baf7a}{\text{OT}}} \textcolor{#1baf7a}{W_1(a_g, a_h)}
+    $$
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### The cell distance matters: draw two genes in PCA space
+
+    $W_1$ is only as good as the cell distance $d(i, j)$ it is given. Treat the canvas below as a PCA
+    plot: each dot is a cell. Paint with brush **a** for cells expressing gene A, **b** for gene B, and
+    **c** for cells expressing neither (they only shape cell space).
+
+    From the drawing, the notebook simulates a plausible **cells × genes count matrix**: 200 background
+    genes whose expression varies smoothly across the canvas, plus genes A and B, expressed in the cells
+    painted for them. The usual pipeline then runs on that matrix: normalise, log, PCA, kNN graph. Its
+    PCA recovers the drawing (up to noise), so what you draw is what the metrics see.
+
+    * **Left, the simulated matrix:** genes A and B and a dozen background genes, with cells grouped
+      as painted.
+    * **Middle, Euclidean OT in the recovered PCA:** the optimal coupling is straight lines, free to jump
+      across empty space.
+    * **Right, graph OT:** with the kNN graph as the cell distance, expression has to travel through
+      cells. $W_1$ is computed as a flow along the edges (explained further down), and line width shows
+      how much crosses each edge.
+
+    The table under the figure gives every metric in this notebook for the same two genes.
+
+    The same canvas defines the dataset used everywhere else (Part 0); the default is a horseshoe with a
+    side branch. Draw a new shape and press **↻ Rebuild dataset** under the canvas to recompute every
+    part from it (about 20 s). Painting alone only updates the A/B demo below.
+    """)
+    return
+
+
+@app.cell
+def _(
+    NearestNeighbors,
+    connected_components,
+    linprog,
+    np,
+    ot,
+    shortest_path,
+    sp,
+):
+    def knn_graph(X, k=8):
+        """Symmetric kNN graph with Euclidean edge lengths; k is raised until the graph is connected."""
+        n = len(X)
+        for kk in range(min(k, n - 1), n):
+            dist, idx = NearestNeighbors(n_neighbors=kk + 1).fit(X).kneighbors(X)
+            W = sp.csr_matrix((dist[:, 1:].ravel(), (np.repeat(np.arange(n), kk), idx[:, 1:].ravel())), shape=(n, n))
+            W = W.maximum(W.T)
+            if connected_components(W, directed=False)[0] == 1:
+                break
+        return W, kk
+
+    def beckmann_w1_edges(u, v, ell, delta):
+        """
+        W1 as a min-cost flow on an explicit edge list (u_e, v_e, ℓ_e):
+        min Σ ℓ_e |J_e| subject to B J = δ (flow out minus flow in = δ at every node).
+        Returns (W1, J). Zero-length edges are fine here, unlike in a sparse matrix.
+        """
+        E = len(ell)
+        B = sp.csr_matrix(
+            (np.r_[np.ones(E), -np.ones(E)], (np.r_[u, v], np.r_[np.arange(E), np.arange(E)])),
+            shape=(len(delta), E),
+        )
+        lp = linprog(np.r_[ell, ell], A_eq=sp.hstack([B, -B]), b_eq=delta, bounds=(0, None), method="highs")
+        return lp.fun, lp.x[:E] - lp.x[E:]
+
+    def beckmann_w1(W, delta):
+        """Graph W1 on a weighted graph W. Returns (W1, J, edge tails, edge heads) for the edges of triu(W)."""
+        T = sp.triu(W).tocoo()
+        w1, J = beckmann_w1_edges(T.row, T.col, T.data, delta)
+        return w1, J, T.row, T.col
+
+    def metacell_graph_from_labels(Z, X, labels, k=8):
+        """
+        Metacells from any partition of the cells (k-means, a Leiden level, ...).
+
+        Returns a dict with
+          centroids: (M, d) metacell centroids in Z
+          Xm       : (M, g) mean expression per metacell
+          W        : (M, M) sparse symmetric kNN graph, entries = Euclidean edge length
+          D_geo    : (M, M) shortest-path distances on W
+          k_used   : kNN k after raising it until the graph is connected
+        """
+        M = labels.max() + 1
+        H = sp.csr_matrix((np.ones(len(labels)), (labels, np.arange(len(labels)))), shape=(M, len(labels)))
+        H = sp.diags(1.0 / np.asarray(H.sum(1)).ravel()) @ H
+        centroids = np.asarray(H @ Z)
+        W, k_used = knn_graph(centroids, min(k, M - 1))
+        return dict(centroids=centroids, Xm=np.asarray(H @ X), W=W, D_geo=shortest_path(W, directed=False), k_used=k_used)
+
+    def graph_w1_matrix(P, D):
+        """Exact pairwise W1 between columns of P (each a probability vector) under ground cost D."""
+        g = P.shape[1]
+        cols = [np.ascontiguousarray(P[:, i]) for i in range(g)]
+        out = np.zeros((g, g))
+        for i in range(g):
+            for j in range(i + 1, g):
+                out[i, j] = out[j, i] = ot.emd2(cols[i], cols[j], D)
+        return out
+
+    return (
+        beckmann_w1,
+        beckmann_w1_edges,
+        graph_w1_matrix,
+        knn_graph,
+        metacell_graph_from_labels,
+    )
+
+
+@app.cell
+def _(Path, ScatterWidget, mo, np, pal, wigglystuff):
+    # ScatterWidget with the notebook's colours: a = gene A, b = gene B, c = background cells (grey)
+    _js = (Path(wigglystuff.__file__).parent / "static" / "scatter-widget.js").read_text()
+    _default = '["#1f77b4","#ff7f0e","#2ca02c","#d62728"]'
+    _ours = f'["{pal["a"]}","{pal["b"]}","#9a9a9a","#d62728"]'
+
+    class CellCanvas(ScatterWidget):
+        # Two patches to wigglystuff's scatter-widget.js: our class colours, and a fix for an upstream
+        # bug. While building the class buttons, render() auto-clicks the first one, and that click
+        # handler touches the brush cursor `B`, which is declared later in render(): a temporal-dead-zone
+        # ReferenceError that aborts rendering (the canvas shows up empty, seen in app mode). Deferring
+        # the first click until render() has returned fixes it. Both replacements are no-ops if a future
+        # wigglystuff changes this code.
+        _esm = _js.replace(_default, _ours).replace(
+            "p===0&&(C=g,g.click())", "p===0&&(C=g,setTimeout(()=>g.click(),0))"
+        )
+
+    def _branched_horseshoe(seed=3, R=130.0, cx=370.0, cy=180.0, branch_len=200.0):
+        """A horseshoe with a side branch leaving its outer edge halfway along: a bifurcation."""
+        rng = np.random.default_rng(seed)
+        pts = []
+
+        def add(xs, ys, label, color):
+            for x, y in zip(xs, ys):
+                pts.append({"x": float(x), "y": float(y), "color": color, "label": label, "batch": 0})
+
+        for label, color, lo, hi, n in [
+            ("a", pal["a"], 35, 62, 22),
+            ("c", "#9a9a9a", 62, 298, 120),
+            ("b", pal["b"], 298, 325, 22),
+        ]:
+            th = np.deg2rad(rng.uniform(lo, hi, n))
+            r = R + rng.normal(0, 9, n)
+            add(cx + r * np.cos(th), cy + r * np.sin(th), label, color)
+        # the branch starts on the arc at 180 degrees and heads outwards, away from the opening
+        root = np.array([cx - R, cy])
+        direction = np.array([-1.0, 0.0])
+        u = rng.uniform(0, branch_len, 45)
+        side = rng.normal(0, 9, 45)
+        xy = root + u[:, None] * direction + side[:, None] * np.array([-direction[1], direction[0]])
+        add(xy[:, 0], xy[:, 1], "c", "#9a9a9a")
+        return pts
+
+    default_drawing = _branched_horseshoe()
+    draw_widget = mo.ui.anywidget(CellCanvas(n_classes=3, width=640, height=360, brushsize=20, data=default_drawing))
+    draw_widget
+    return default_drawing, draw_widget
+
+
+@app.cell(hide_code=True)
+def _(draw_widget, get_drawing, mo, set_drawing):
+    use_drawing_btn = mo.ui.button(
+        label="↻ Rebuild dataset",
+        kind="success",
+        tooltip="Rebuild the dataset used in every part from the current drawing (about 20 s)",
+        on_click=lambda _: set_drawing(list(draw_widget.widget.data)),
+    )
+    _n_canvas, _n_data = len(draw_widget.widget.data), len(get_drawing())
+    _status = (
+        "✓ dataset matches the drawing"
+        if list(draw_widget.widget.data) == list(get_drawing())
+        else f"canvas changed ({_n_canvas} vs {_n_data} points): rebuild to update the dataset"
+    )
+    mo.hstack([use_drawing_btn, mo.md(_status)], justify="start", align="center", gap=1)
+    return
+
+
+@app.cell
+def _(
+    beckmann_w1,
+    draw_widget,
+    fig_panels,
+    knn_graph,
+    mo,
+    np,
+    orthogonal_procrustes,
+    ot,
+    pair_metrics,
+    pal,
+    pd,
+    pdist,
+    plt,
+    sp,
+    squareform,
+):
+    def matrix_from_drawing(points, n_background=200, seed=0):
+        """
+        Treat the drawing as PCA space and simulate a cells x genes count matrix consistent with it.
+
+        Background genes have log-rates linear in the drawn coordinates (random loadings), so their
+        PCA recovers the drawing; genes A and B are expressed in the cells painted 'a' and 'b'.
+        Returns labels, drawn coordinates, log-normalised matrix (A, B, background...) and the
+        recovered 2D PCA, rotated onto the drawing for display.
+        """
+        rng = np.random.default_rng(seed)
+        lab = np.array([p["label"] for p in points])
+        Z = np.array([[p["x"], p["y"]] for p in points], dtype=float)
+        Z = (Z - Z.mean(0)) / Z.std()
+        lib = rng.lognormal(np.log(5), 0.3, len(Z))
+        loadings = rng.normal(size=(n_background, 2))
+        background = rng.poisson(lib[:, None] * np.exp(-0.5 + 0.8 * Z @ loadings.T))
+        gene_a = rng.poisson(lib * (0.02 + 3.0 * (lab == "a")))
+        gene_b = rng.poisson(lib * (0.02 + 3.0 * (lab == "b")))
+        counts = np.c_[gene_a, gene_b, background].astype(float)
+        X = np.log1p(counts / counts.sum(1, keepdims=True) * 1e4)
+        U, S, _ = np.linalg.svd(X - X.mean(0), full_matrices=False)
+        pcs = U[:, :2] * S[:2]
+        R, _ = orthogonal_procrustes(pcs / pcs.std(), Z)
+        return lab, Z, X, (pcs / pcs.std()) @ R
+
+    def draw_two_genes(points):
+        lab = np.array([p["label"] for p in points])
+        if (lab == "a").sum() == 0 or (lab == "b").sum() == 0:
+            return mo.md("Paint at least one **a** cell and one **b** cell.")
+        lab, Z, X, P = matrix_from_drawing(points)
+        a, b = np.expm1(X[:, 0]), np.expm1(X[:, 1])
+        a, b = a / a.sum(), b / b.sum()
+
+        D = squareform(pdist(P))
+        plan = ot.emd(a, b, D)
+        w1_euc = float((plan * D).sum())
+        W, _ = knn_graph(P, k=6)
+        w1_graph, J, er, ec = beckmann_w1(W, a - b)
+        m = pair_metrics(X[:, 0], X[:, 1])
+
+        fig, axes = plt.subplots(1, 3, figsize=(13.5, 3.8), gridspec_kw={"width_ratios": [1, 1.1, 1.1]})
+        order = np.lexsort((P[:, 0], np.array([{"a": 0, "c": 1, "b": 2}[l] for l in lab])))
+        # cells (observations) as rows, genes as columns, like X in the pipeline above
+        axes[0].imshow(X[order][:, :14], aspect="auto", cmap="Purples", interpolation="nearest")
+        axes[0].set_xticks(range(14), ["gene A", "gene B"] + [f"bg {i}" for i in range(1, 13)], fontsize=8, rotation=90)
+        axes[0].axvline(1.5, color=pal["dark"], lw=1)
+        _bounds = np.cumsum([np.sum(lab == g) for g in ["a", "c", "b"]])
+        for y in _bounds[:-1]:
+            axes[0].axhline(y - 0.5, color=pal["dark"], lw=1)
+        axes[0].set_yticks((np.r_[0, _bounds[:-1]] + _bounds) / 2 - 0.5, ["a cells", "c cells", "b cells"], fontsize=9)
+        axes[0].set_title("simulated matrix X (log expression)", fontsize=11)
+
+        cols = {"a": pal["a"], "b": pal["b"], "c": pal["light"]}
+        for ax in axes[1:]:
+            ax.scatter(P[:, 0], P[:, 1], s=12, c=[cols[l] for l in lab], zorder=3, lw=0)
+            ax.set_aspect("equal")
+            ax.set_axis_off()
+        for i, j in zip(*np.nonzero(plan > 1e-3 * plan.max())):
+            if i != j:
+                axes[1].plot(*P[[i, j]].T, color=pal["flow"], lw=0.3 + 20 * plan[i, j], alpha=0.6)
+        axes[1].set_title(f"Euclidean in PCA: $W_1$ = {w1_euc:.2f}", fontsize=11)
+        Tw = sp.triu(W).tocoo()
+        for u, v in zip(Tw.row, Tw.col):
+            axes[2].plot(*P[[u, v]].T, color=pal["faint"], lw=0.5, zorder=1)
+        flow = np.abs(J) > 1e-9
+        for u, v, f in zip(er[flow], ec[flow], np.abs(J[flow])):
+            axes[2].plot(*P[[u, v]].T, color=pal["flow"], lw=0.5 + 6 * f, zorder=2)
+        axes[2].set_title(f"kNN graph: $W_1$ = {w1_graph:.2f}", fontsize=11)
+        fig.tight_layout()
+        table = pd.DataFrame(
+            {
+                "Pearson r": [m["pearson r"]],
+                "Spearman ρ": [m["spearman ρ"]],
+                "W1 on values (z-scores)": [m["W1(z_x, z_y)"]],
+                "W1, Euclidean in PCA": [w1_euc],
+                "W1, kNN graph": [w1_graph],
+                "graph / Euclidean": [w1_graph / w1_euc],
+            },
+            index=["gene A vs gene B"],
+        ).round(3)
+        return mo.vstack([fig_panels(fig), table])
+
+    draw_two_genes(draw_widget.widget.data)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     ### Building the cell distance
 
     Exact OT on $n$ cells costs roughly $O(n^3 \log n)$ per gene pair, so GeneTrajectory first groups
@@ -1398,109 +1458,18 @@ def _(adata, fig_panels, meta, mo, np, pal, pd, pdist, plt, squareform):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### Two views of the same transport: a plan and a flow
-
-    The OT formula gives a **plan** $\pi_{ij}$: how much of gene A's expression at metacell $i$ goes to
-    metacell $j$. On a graph there is an equivalent view that matters for the rest of the notebook. The
-    same $W_1$ is the cheapest **flow** $J$ along the edges whose net outflow at each node is
-    $\delta = a - b$ (the Beckmann problem; Santambrogio 2015, ch. 4):
-
-    $$W_1(a,b) \;=\; \min_{\pi} \sum_{ij}\pi_{ij}\,d_{\text{geo}}(i,j) \;=\; \min_{J:\ BJ = \delta}\ \sum_e \ell_e\, |J_e| ,$$
-
-    with $B$ the node–edge incidence matrix and $\ell_e$ the edge lengths. The plan says *who sends to
-    whom*; the flow says *how much traffic crosses each edge*. Two reasons the flow view matters: it
-    needs only the graph's edges, not an $M \times M$ cost matrix, and on a **tree** it has a closed form
-    (Part 4).
-
-    The default pair below peaks at the two ends of the trajectory, which the arch brings close together
-    in PCA; all of its transport still has to travel the arc. The panel titles give $W_1$ from both
-    solvers, and they agree. Also try a gene with its
-    `perm_of_` copy (spread everywhere, so transport goes in all directions) and with its `twin_of_`
-    (almost nothing moves).
-
-    Why the plan looks busy: every gene has some low-level expression in every metacell, and OT has to
-    move that too, in many small pieces. The plan is still sparse (an exact OT plan uses at most $2M - 1$
-    of the $M^2$ possible pairs), so the panel draws only the largest pairings that together carry 80% of
-    the moved mass. Read each line as a pairing, not a path: mass never crosses the empty middle of the
-    horseshoe; it travels along the graph, as the flow panel shows.
-    """)
-    return
-
-
-@app.cell
-def _(adata, genes_eval, mo):
-    _v = adata.var.loc[genes_eval]
-    _traj = _v[_v["kind"] == "trajectory"]
-    gene_a_dd = mo.ui.dropdown(genes_eval, value=_traj["peak_t"].idxmin(), label="gene A", searchable=True)
-    gene_b_dd = mo.ui.dropdown(genes_eval, value=_traj["peak_t"].idxmax(), label="gene B", searchable=True)
-    mo.hstack([gene_a_dd, gene_b_dd], wrap=True, justify="start")
-    return gene_a_dd, gene_b_dd
-
-
-@app.cell(hide_code=True)
-def _(
-    beckmann_w1,
-    fig_panels,
-    gene_a_dd,
-    gene_b_dd,
-    gene_dist,
-    genes_eval,
-    meta,
-    mo,
-    np,
-    ot,
-    pal,
-    plt,
-):
-    _ia, _ib = genes_eval.index(gene_a_dd.value), genes_eval.index(gene_b_dd.value)
-    _a, _b = gene_dist[:, _ia], gene_dist[:, _ib]
-    _plan = ot.emd(_a, _b, meta["D_geo"])
-    _w1_plan = float((_plan * meta["D_geo"]).sum())
-    _w1_flow, _J, _er, _ec = beckmann_w1(meta["W"], _a - _b)
-    _xy = meta["centroids"][:, :2]
-    _fig, _axes = plt.subplots(1, 3, figsize=(13.5, 4), sharex=True, sharey=True)
-    _r, _c = meta["W"].nonzero()
-    for _ax in _axes:
-        _ax.plot(np.c_[_xy[_r, 0], _xy[_c, 0]].T, np.c_[_xy[_r, 1], _xy[_c, 1]].T, color=pal["faint"], lw=0.5, zorder=0)
-        _ax.set_xlabel("PC1")
-    _axes[0].set_ylabel("PC2")
-    _axes[0].scatter(*_xy.T, s=_a * 100 * len(_a), color=pal["a"], alpha=0.55, lw=0, label="gene A")
-    _axes[0].scatter(*_xy.T, s=_b * 100 * len(_b), color=pal["b"], alpha=0.55, lw=0, label="gene B")
-    _axes[0].legend(loc=(1.02, 0.7), markerscale=0.6)
-    _axes[0].set_title("expression of A and B per metacell", fontsize=11)
-    # Exact OT plans are sparse (at most 2M - 1 nonzero entries), but every gene also has low-level
-    # expression spread over all metacells, which gets moved in many small pieces. Draw only the largest
-    # off-diagonal entries that together carry 80% of the moved mass, line width proportional to mass.
-    # A straight line is a pairing (who sends to whom), not a route: the mass travels along the graph's
-    # shortest path between the two metacells, which is what the flow panel shows.
-    _off = _plan.copy()
-    np.fill_diagonal(_off, 0)
-    _order = np.argsort(_off.ravel())[::-1]
-    _w = _off.ravel()[_order]
-    _keep = _order[: int(np.searchsorted(np.cumsum(_w) / _w.sum(), 0.8)) + 1]
-    for _i, _j in zip(*np.unravel_index(_keep, _off.shape)):
-        _axes[1].plot(*np.c_[_xy[_i], _xy[_j]], color=pal["flow"], lw=0.4 + 4 * _off[_i, _j] / _w[0], alpha=0.7)
-    _axes[1].scatter(*_xy.T, s=3, color=pal["mid"], lw=0)
-    _axes[1].set_title(f"plan: {len(_keep)} largest pairings (80% of moved mass)\n$W_1$ = {_w1_plan:.4f}", fontsize=11)
-    _on = np.abs(_J) > 1e-6
-    for _u, _v, _f in zip(_er[_on], _ec[_on], np.abs(_J[_on])):
-        _axes[2].plot(*np.c_[_xy[_u], _xy[_v]], color=pal["flow"], lw=0.4 + 12 * _f, solid_capstyle="round")
-    _axes[2].scatter(*_xy.T, s=3, color=pal["mid"], lw=0)
-    _axes[2].set_title(f"flow: traffic along each graph edge\n$W_1$ = {_w1_flow:.4f}", fontsize=11)
-    _fig.tight_layout()
-    fig_panels(_fig)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
     /// tip | Part 3 in one line
     Graph $W_1$ measures how far one gene's expression must travel *through cell space* to become the
-    other's. It keeps growing with distance, and it is not fooled by shuffling.
+    other's. It passes every test, but it costs one transport problem per gene pair.
+
+    | test bench | twin near? | shuffled copy far? | distance keeps growing? | cost |
+    |---|---|---|---|---|
+    | Pearson, Spearman | ✓ | ✓ | ✗ saturates | one matrix product |
+    | 1D $W_1$ on values | ✗ | ✗ | ✗ no notion of *where* | one sort per gene |
+    | graph $W_1$ | ✓ | ✓ | ✓ | ✗ one OT solve per gene pair |
     ///
 
-    ## Part 4. Multiscale coarsening: choosing the scale, then reading off $W_1$
+    ## Part 4. Making it affordable: choose the scale, then read off $W_1$
 
     **The problem.** Graph $W_1$ needs coarsening, and Part 3 used k-means with a hand-picked number of
     metacells $M$. That choice is arbitrary: too fine and every one of the $g(g-1)/2$ OT solves is
@@ -1531,7 +1500,7 @@ def _(mo):
 
     The controls set the resolutions of the hierarchy used for the tree readout.
 
-    /// note | How the hierarchy is made nested
+    /// details | How the hierarchy is made nested
     Leiden levels are independent runs, so the majority-vote hierarchy is not strictly nested. Here
     each cell follows its finest cluster's chain of majority parents, which makes it nested by
     construction; *impurity* below is the fraction of cells this reassigns, averaged over levels.
@@ -1780,11 +1749,110 @@ def _(mo, readout1):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    ### From a plan to a flow
+
+    The OT formula of Part 3 gives a **plan** $\pi_{ij}$: how much of gene A's expression at metacell $i$
+    goes to metacell $j$. On a graph there is an equivalent view: the same $W_1$ is the cheapest **flow**
+    along the graph's edges that turns $a$ into $b$. The plan says *who sends to whom*; the flow says *how
+    much traffic crosses each road*. The flow needs only the graph's edges, not an $M \times M$ cost
+    matrix, and it is what makes the next shortcut possible: on a **tree**, the flow is forced.
+
+    /// details | The flow formulation (Beckmann problem)
+    With $\delta = a - b$ the net outflow required at each node, $B$ the node–edge incidence matrix and
+    $\ell_e$ the edge lengths (Santambrogio 2015, ch. 4):
+
+    $$W_1(a,b) \;=\; \min_{\pi} \sum_{ij}\pi_{ij}\,d_{\text{geo}}(i,j) \;=\; \min_{J:\ BJ = \delta}\ \sum_e \ell_e\, |J_e| .$$
+    ///
+
+    The default pair below peaks at the two ends of the trajectory, which the arch brings close together
+    in PCA; all of its transport still has to travel the arc. The panel titles give $W_1$ from both
+    solvers, and they agree. Also try a gene with its `perm_of_` copy (spread everywhere, so transport goes
+    in all directions) and with its `twin_of_` (almost nothing moves).
+
+    /// details | Why the plan looks busy
+    Every gene has some low-level expression in every metacell, and OT has to move that too, in many small
+    pieces. The plan is still sparse (an exact OT plan uses at most $2M - 1$ of the $M^2$ possible pairs),
+    so the panel draws only the largest pairings that together carry 80% of the moved mass. Read each line
+    as a pairing, not a path: mass never crosses the empty middle of the horseshoe; it travels along the
+    graph, as the flow panel shows.
+    ///
+    """)
+    return
+
+
+@app.cell
+def _(adata, genes_eval, mo):
+    _v = adata.var.loc[genes_eval]
+    _traj = _v[_v["kind"] == "trajectory"]
+    gene_a_dd = mo.ui.dropdown(genes_eval, value=_traj["peak_t"].idxmin(), label="gene A", searchable=True)
+    gene_b_dd = mo.ui.dropdown(genes_eval, value=_traj["peak_t"].idxmax(), label="gene B", searchable=True)
+    mo.hstack([gene_a_dd, gene_b_dd], wrap=True, justify="start")
+    return gene_a_dd, gene_b_dd
+
+
+@app.cell(hide_code=True)
+def _(
+    beckmann_w1,
+    fig_panels,
+    gene_a_dd,
+    gene_b_dd,
+    gene_dist,
+    genes_eval,
+    meta,
+    mo,
+    np,
+    ot,
+    pal,
+    plt,
+):
+    _ia, _ib = genes_eval.index(gene_a_dd.value), genes_eval.index(gene_b_dd.value)
+    _a, _b = gene_dist[:, _ia], gene_dist[:, _ib]
+    _plan = ot.emd(_a, _b, meta["D_geo"])
+    _w1_plan = float((_plan * meta["D_geo"]).sum())
+    _w1_flow, _J, _er, _ec = beckmann_w1(meta["W"], _a - _b)
+    _xy = meta["centroids"][:, :2]
+    _fig, _axes = plt.subplots(1, 3, figsize=(13.5, 4), sharex=True, sharey=True)
+    _r, _c = meta["W"].nonzero()
+    for _ax in _axes:
+        _ax.plot(np.c_[_xy[_r, 0], _xy[_c, 0]].T, np.c_[_xy[_r, 1], _xy[_c, 1]].T, color=pal["faint"], lw=0.5, zorder=0)
+        _ax.set_xlabel("PC1")
+    _axes[0].set_ylabel("PC2")
+    _axes[0].scatter(*_xy.T, s=_a * 100 * len(_a), color=pal["a"], alpha=0.55, lw=0, label="gene A")
+    _axes[0].scatter(*_xy.T, s=_b * 100 * len(_b), color=pal["b"], alpha=0.55, lw=0, label="gene B")
+    _axes[0].legend(loc=(1.02, 0.7), markerscale=0.6)
+    _axes[0].set_title("expression of A and B per metacell", fontsize=11)
+    # Exact OT plans are sparse (at most 2M - 1 nonzero entries), but every gene also has low-level
+    # expression spread over all metacells, which gets moved in many small pieces. Draw only the largest
+    # off-diagonal entries that together carry 80% of the moved mass, line width proportional to mass.
+    # A straight line is a pairing (who sends to whom), not a route: the mass travels along the graph's
+    # shortest path between the two metacells, which is what the flow panel shows.
+    _off = _plan.copy()
+    np.fill_diagonal(_off, 0)
+    _order = np.argsort(_off.ravel())[::-1]
+    _w = _off.ravel()[_order]
+    _keep = _order[: int(np.searchsorted(np.cumsum(_w) / _w.sum(), 0.8)) + 1]
+    for _i, _j in zip(*np.unravel_index(_keep, _off.shape)):
+        _axes[1].plot(*np.c_[_xy[_i], _xy[_j]], color=pal["flow"], lw=0.4 + 4 * _off[_i, _j] / _w[0], alpha=0.7)
+    _axes[1].scatter(*_xy.T, s=3, color=pal["mid"], lw=0)
+    _axes[1].set_title(f"plan: {len(_keep)} largest pairings (80% of moved mass)\n$W_1$ = {_w1_plan:.4f}", fontsize=11)
+    _on = np.abs(_J) > 1e-6
+    for _u, _v, _f in zip(_er[_on], _ec[_on], np.abs(_J[_on])):
+        _axes[2].plot(*np.c_[_xy[_u], _xy[_v]], color=pal["flow"], lw=0.4 + 12 * _f, solid_capstyle="round")
+    _axes[2].scatter(*_xy.T, s=3, color=pal["mid"], lw=0)
+    _axes[2].set_title(f"flow: traffic along each graph edge\n$W_1$ = {_w1_flow:.4f}", fontsize=11)
+    _fig.tight_layout()
+    fig_panels(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     ### Readout 2: $W_1$ on the hierarchy itself
 
     The hierarchy can also *be* the cell distance. Put the cells at the leaves and a root on top; edge
     lengths are PCA distances between a node's centroid and its parent's. On a tree, the flow problem
-    from Part 3 needs no solver: each edge splits the tree in two, so the flow across it must be exactly
+    above needs no solver: each edge splits the tree in two, so the flow across it must be exactly
     the net expression on the far side:
 
     $$
@@ -1811,7 +1879,7 @@ def _(mo):
     bottom (coloured by mean pseudotime, ordered start to end). Each coarser node sits above the
     clusters it contains, so the levels of the pyramid are the resolutions of the hierarchy.
 
-    **Bottom row, where the tree distance for the gene pair from Part 3 comes from.** Each edge's width
+    **Bottom row, where the tree distance for the selected gene pair comes from.** Each edge's width
     is its term $\ell_e\,|a(\text{below } e) - b(\text{below } e)|$: the edge length times the
     difference in expression below it. On the dendrogram this is the closed form made visible: for
     genes at opposite ends of the trajectory, the large terms are the coarse edges that separate the
@@ -1967,119 +2035,6 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### Does tree $W_1$ need tree-shaped biology? A cell-cycle test
-
-    A tree distance can cut a loop: two neighbouring cells on either side of a coarse cluster boundary
-    are joined only through the root. If that mattered, tree $W_1$ would overstate the distance between
-    genes whose expression sits on opposite sides of a boundary.
-
-    The test is a simulated **cell cycle**: 1,500 cells around a ring, and 40 genes, each peaking at one
-    phase. The true distance between two genes is the circular distance between their peak phases.
-    Both readouts are computed from one hierarchy (resolutions 0.5, 2, 8, 30). **Left:** cells in PCA,
-    coloured by true phase (a cyclic colormap, since phase wraps around). **Middle and right:** each
-    gene pair, placed by true distance and by the metric. Dark points are pairs whose genes sit in
-    *different* top-level clusters, which is where cutting the loop would show up.
-    """)
-    return
-
-
-@app.cell
-def _(
-    ad,
-    build_cluster_tree,
-    graph_w1_matrix,
-    metacell_graph_from_labels,
-    np,
-    pdist,
-    sc,
-    squareform,
-    tree_w1_embedding,
-):
-    def simulate_cycle(n_cells=1500, n_genes=40, n_noise=300, seed=0):
-        """Cells uniform on a ring; each gene is a bump in circular distance from its peak phase."""
-        rng = np.random.default_rng(seed)
-        theta = rng.uniform(0, 2 * np.pi, n_cells)
-        peak = np.sort(rng.uniform(0, 2 * np.pi, n_genes))
-        width, amp = rng.uniform(0.35, 0.6, n_genes), rng.lognormal(0, 0.4, n_genes)
-        d_circ = np.abs(np.angle(np.exp(1j * (theta[:, None] - peak[None]))))
-        lib = rng.lognormal(np.log(3), 0.3, n_cells)[:, None]
-        counts = np.c_[
-            rng.poisson(lib * (0.05 + amp * np.exp(-(d_circ**2) / (2 * width**2)))),
-            rng.poisson(lib * rng.lognormal(-1, 1, n_noise)[None]),
-        ].astype(np.float32)
-        a = ad.AnnData(counts)
-        a.var_names = [f"cyc{i:02d}" for i in range(n_genes)] + [f"noise{i:03d}" for i in range(n_noise)]
-        a.obs["phase"] = theta
-        a.uns["peak"] = peak
-        sc.pp.normalize_total(a, target_sum=1e4)
-        sc.pp.log1p(a)
-        sc.pp.pca(a, n_comps=20, random_state=0)
-        return a
-
-    def ring_test():
-        ring = simulate_cycle()
-        genes = [g for g in ring.var_names if g.startswith("cyc")]
-        peak = ring.uns["peak"]
-        truth = np.abs(np.angle(np.exp(1j * (peak[:, None] - peak[None]))))
-        Z, X = ring.obsm["X_pca"], np.asarray(ring[:, genes].X)
-        A = X / X.sum(0, keepdims=True)
-        levels = build_cluster_tree(ring, [0.5, 2, 8, 30], seed=0)[0]
-        D_tree = squareform(pdist(tree_w1_embedding(Z, A, levels).T, "cityblock"))
-        mid = [lv for lv in levels if 40 <= lv.max() + 1 <= 150][0]
-        m = metacell_graph_from_labels(Z, X, mid)
-        D_graph = graph_w1_matrix(m["Xm"] / m["Xm"].sum(0, keepdims=True), m["D_geo"])
-        top = levels[-2]  # coarsest level below the root
-        home = np.array([np.bincount(top, weights=A[:, j], minlength=top.max() + 1).argmax() for j in range(len(genes))])
-        return dict(Z=Z, phase=ring.obs["phase"].to_numpy(), truth=truth, D_tree=D_tree, D_graph=D_graph,
-                    split=home[:, None] != home[None], n_mid=int(mid.max() + 1), n_top=int(top.max() + 1))
-
-    ring_res = ring_test()
-    return (ring_res,)
-
-
-@app.cell(hide_code=True)
-def _(fig_panels, mo, np, pal, pd, plt, ring_res):
-    _iu = np.triu_indices(len(ring_res["truth"]), 1)
-    _t, _split = ring_res["truth"][_iu], ring_res["split"][_iu]
-    _fig, _axes = plt.subplots(1, 3, figsize=(13, 3.8))
-    _sc = _axes[0].scatter(*ring_res["Z"][:, :2].T, c=ring_res["phase"], cmap="hsv", s=3, lw=0)
-    _fig.colorbar(_sc, ax=_axes[0], label="true phase [rad]")
-    _axes[0].set(xlabel="PC1", ylabel="PC2")
-    _axes[0].set_title("simulated cell cycle", fontsize=11)
-    for _ax, _key, _name in [
-        (_axes[1], "D_tree", "tree $W_1$"),
-        (_axes[2], "D_graph", "graph $W_1$"),
-    ]:
-        _d = ring_res[_key][_iu]
-        _rho = pd.Series(_d).corr(pd.Series(_t), method="spearman")
-        _ax.scatter(_t[~_split], _d[~_split], s=6, color=pal["light"], lw=0, label="same top-level cluster")
-        _ax.scatter(_t[_split], _d[_split], s=6, color=pal["dark"], lw=0, label="different top-level clusters")
-        _ax.set(xlabel="true distance between peaks [rad]", ylabel=f"{_name} [PCA units]")
-        _ax.set_title(f"{_name}:\nρ = {_rho:.3f}", fontsize=11)
-    _axes[2].set_title(f"graph $W_1$, {ring_res['n_mid']}-cluster level:\nρ = {pd.Series(ring_res['D_graph'][_iu]).corr(pd.Series(_t), method='spearman'):.3f}", fontsize=11)
-    _axes[2].legend(loc=(0.6, 0.15), markerscale=2.5)
-    _fig.tight_layout()
-    fig_panels(_fig)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo, ring_res):
-    mo.md(rf"""
-    Dark pairs (genes in different top-level clusters, {ring_res["n_top"]} clusters here) and light
-    pairs follow the same curve in *both* panels. Whatever small offset there is shows up in exact
-    graph $W_1$ too, so it is not caused by the tree cutting the loop. Tree $W_1$ ranks gene pairs
-    about as well as exact graph $W_1$. The reason is that
-    each gene's expression is spread over many clusters, so a single cut edge carries only a small part
-    of the transport. Gene programs much narrower than the coarsest clusters are where this could
-    break, and graph $W_1$ at a chosen level (readout 1) remains the topology-agnostic fallback.
-    """)
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
     ### Is the shortcut faithful, and how much does it save?
 
     First, all five metrics as gene × gene matrices over the evaluation genes (trajectory genes, twins
@@ -2203,18 +2158,142 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    ### Going further (optional): does tree $W_1$ need tree-shaped biology? A cell-cycle test
+
+    A tree distance can cut a loop: two neighbouring cells on either side of a coarse cluster boundary
+    are joined only through the root. If that mattered, tree $W_1$ would overstate the distance between
+    genes whose expression sits on opposite sides of a boundary.
+
+    The test is a simulated **cell cycle**: 1,500 cells around a ring, and 40 genes, each peaking at one
+    phase. The true distance between two genes is the circular distance between their peak phases.
+    Both readouts are computed from one hierarchy (resolutions 0.5, 2, 8, 30). **Left:** cells in PCA,
+    coloured by true phase (a cyclic colormap, since phase wraps around). **Middle and right:** each
+    gene pair, placed by true distance and by the metric. Dark points are pairs whose genes sit in
+    *different* top-level clusters, which is where cutting the loop would show up.
+    """)
+    return
+
+
+@app.cell
+def _(
+    ad,
+    build_cluster_tree,
+    graph_w1_matrix,
+    metacell_graph_from_labels,
+    np,
+    pdist,
+    sc,
+    squareform,
+    tree_w1_embedding,
+):
+    def simulate_cycle(n_cells=1500, n_genes=40, n_noise=300, seed=0):
+        """Cells uniform on a ring; each gene is a bump in circular distance from its peak phase."""
+        rng = np.random.default_rng(seed)
+        theta = rng.uniform(0, 2 * np.pi, n_cells)
+        peak = np.sort(rng.uniform(0, 2 * np.pi, n_genes))
+        width, amp = rng.uniform(0.35, 0.6, n_genes), rng.lognormal(0, 0.4, n_genes)
+        d_circ = np.abs(np.angle(np.exp(1j * (theta[:, None] - peak[None]))))
+        lib = rng.lognormal(np.log(3), 0.3, n_cells)[:, None]
+        counts = np.c_[
+            rng.poisson(lib * (0.05 + amp * np.exp(-(d_circ**2) / (2 * width**2)))),
+            rng.poisson(lib * rng.lognormal(-1, 1, n_noise)[None]),
+        ].astype(np.float32)
+        a = ad.AnnData(counts)
+        a.var_names = [f"cyc{i:02d}" for i in range(n_genes)] + [f"noise{i:03d}" for i in range(n_noise)]
+        a.obs["phase"] = theta
+        a.uns["peak"] = peak
+        sc.pp.normalize_total(a, target_sum=1e4)
+        sc.pp.log1p(a)
+        sc.pp.pca(a, n_comps=20, random_state=0)
+        return a
+
+    def ring_test():
+        ring = simulate_cycle()
+        genes = [g for g in ring.var_names if g.startswith("cyc")]
+        peak = ring.uns["peak"]
+        truth = np.abs(np.angle(np.exp(1j * (peak[:, None] - peak[None]))))
+        Z, X = ring.obsm["X_pca"], np.asarray(ring[:, genes].X)
+        A = X / X.sum(0, keepdims=True)
+        levels = build_cluster_tree(ring, [0.5, 2, 8, 30], seed=0)[0]
+        D_tree = squareform(pdist(tree_w1_embedding(Z, A, levels).T, "cityblock"))
+        mid = [lv for lv in levels if 40 <= lv.max() + 1 <= 150][0]
+        m = metacell_graph_from_labels(Z, X, mid)
+        D_graph = graph_w1_matrix(m["Xm"] / m["Xm"].sum(0, keepdims=True), m["D_geo"])
+        top = levels[-2]  # coarsest level below the root
+        home = np.array([np.bincount(top, weights=A[:, j], minlength=top.max() + 1).argmax() for j in range(len(genes))])
+        return dict(Z=Z, phase=ring.obs["phase"].to_numpy(), truth=truth, D_tree=D_tree, D_graph=D_graph,
+                    split=home[:, None] != home[None], n_mid=int(mid.max() + 1), n_top=int(top.max() + 1))
+
+    ring_res = ring_test()
+    return (ring_res,)
+
+
+@app.cell(hide_code=True)
+def _(fig_panels, mo, np, pal, pd, plt, ring_res):
+    _iu = np.triu_indices(len(ring_res["truth"]), 1)
+    _t, _split = ring_res["truth"][_iu], ring_res["split"][_iu]
+    _fig, _axes = plt.subplots(1, 3, figsize=(13, 3.8))
+    _sc = _axes[0].scatter(*ring_res["Z"][:, :2].T, c=ring_res["phase"], cmap="hsv", s=3, lw=0)
+    _fig.colorbar(_sc, ax=_axes[0], label="true phase [rad]")
+    _axes[0].set(xlabel="PC1", ylabel="PC2")
+    _axes[0].set_title("simulated cell cycle", fontsize=11)
+    for _ax, _key, _name in [
+        (_axes[1], "D_tree", "tree $W_1$"),
+        (_axes[2], "D_graph", "graph $W_1$"),
+    ]:
+        _d = ring_res[_key][_iu]
+        _rho = pd.Series(_d).corr(pd.Series(_t), method="spearman")
+        _ax.scatter(_t[~_split], _d[~_split], s=6, color=pal["light"], lw=0, label="same top-level cluster")
+        _ax.scatter(_t[_split], _d[_split], s=6, color=pal["dark"], lw=0, label="different top-level clusters")
+        _ax.set(xlabel="true distance between peaks [rad]", ylabel=f"{_name} [PCA units]")
+        _ax.set_title(f"{_name}:\nρ = {_rho:.3f}", fontsize=11)
+    _axes[2].set_title(f"graph $W_1$, {ring_res['n_mid']}-cluster level:\nρ = {pd.Series(ring_res['D_graph'][_iu]).corr(pd.Series(_t), method='spearman'):.3f}", fontsize=11)
+    _axes[2].legend(loc=(0.6, 0.15), markerscale=2.5)
+    _fig.tight_layout()
+    fig_panels(_fig)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, ring_res):
+    mo.md(rf"""
+    Dark pairs (genes in different top-level clusters, {ring_res["n_top"]} clusters here) and light
+    pairs follow the same curve in *both* panels. Whatever small offset there is shows up in exact
+    graph $W_1$ too, so it is not caused by the tree cutting the loop. Tree $W_1$ ranks gene pairs
+    about as well as exact graph $W_1$. The reason is that
+    each gene's expression is spread over many clusters, so a single cut edge carries only a small part
+    of the transport. Gene programs much narrower than the coarsest clusters are where this could
+    break, and graph $W_1$ at a chosen level (readout 1) remains the topology-agnostic fallback.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     /// tip | Part 4 in one line
     Multiscale coarsening replaces an arbitrary metacell count with a hierarchy the data can choose a
     scale from. Exact graph $W_1$ at the coarsest stable level works for any topology. Tree $W_1$ on
-    the same hierarchy keeps most of the ranking (ρ ≈ 0.9 with the exact distances on the default drawing, and it held up on a cell cycle) for the cost of one matrix operation.
+    the same hierarchy keeps most of the ranking (ρ ≈ 0.9 with the exact distances on the default
+    drawing, and it held up on a cell cycle) for the cost of one matrix operation.
+
+    | test bench | twin near? | shuffled copy far? | distance keeps growing? | cost |
+    |---|---|---|---|---|
+    | Pearson, Spearman | ✓ | ✓ | ✗ saturates | one matrix product |
+    | 1D $W_1$ on values | ✗ | ✗ | ✗ no notion of *where* | one sort per gene |
+    | graph $W_1$ | ✓ | ✓ | ✓ | ✗ one OT solve per gene pair |
+    | tree $W_1$ | ✓ | ✓ | ✓ | ✓ one $L_1$ distance computation |
     ///
 
     ## Part 5. Scorecard against the known answer
 
-    Every metric is scored against the true distance between gene peaks (geodesic distance along the drawing):
+    Every metric is scored against the true distance between gene peaks (geodesic distance along the
+    drawing). This turns the test bench into numbers:
 
-    * **ρ(GT)**: Spearman correlation between the metric and the true distance, over all
-      trajectory-gene pairs. Higher is better.
+    * **ρ(GT)**: rank agreement with the truth, the Spearman correlation between the metric's distances
+      and the true distances over all trajectory-gene pairs. Here Spearman is the judge, not a
+      contestant: it asks only whether the metric orders the gene pairs as the truth does. Higher is
+      better.
     * **kNN-5 overlap**: average fraction of each trajectory gene's 5 true nearest genes recovered.
     * **twin rank**: median rank of the twin among its parent's neighbours (1 = nearest). Lower is better.
     * **twin rank beyond ε**: the same, ignoring trajectory genes whose peak lies within ε of the
@@ -2310,11 +2389,11 @@ def _(mo):
       0 (sampling noise on the metacells), while genes peaking a few cells away are just as close. Beyond
       ε, the twin is first or close to it for every metric except `W1_values`.
     * Pearson and Spearman pass the shuffle test but recover the geometry less well, because of the
-      saturation in Part 3: beyond overlap range, every distance looks the same.
+      saturation in Part 1: beyond overlap range, every distance looks the same.
     * `W1_values` has no relation to the true geometry and ranks each permuted copy as its source's
       nearest neighbour, as Part 2 predicted.
 
-    For the gene pair selected in Part 3, the table compares each metric's distance with gene A's
+    For the selected gene pair (the gene A and gene B selectors), the table compares each metric's distance with gene A's
     typical distance to the other genes. `ratio < 1` means "closer than typical".
     """)
     return
@@ -2336,7 +2415,7 @@ def _(mo):
     mo.md(r"""
     ### "Genes like X": which metric, and why
 
-    The everyday use of `find_correlated_features` is a ranking: give it a target gene and read the top
+    Back to the opening question. The everyday use of `find_correlated_features` is a ranking: give it a target gene and read the top
     of the list. Below is that exact call, with each of its three metrics, for a target gene that has a
     cell-shuffled copy in the data. Next to each hit is what it really is: its true distance to the
     target along the trajectory, or a warning if it is the shuffled copy.
@@ -2377,7 +2456,7 @@ def _(mo, query_target):
     mo.md(rf"""
     For the target `{query_target}` (with the default data), every Spearman and Pearson hit is a gene
     expressed nearby along the trajectory, although not in exact nearest-first order, because correlation
-    saturates (Part 3). The `wasserstein` metric puts the target's own cell-shuffled copy at rank 1: a
+    saturates (Part 1). The `wasserstein` metric puts the target's own cell-shuffled copy at rank 1: a
     gene with no biological relation to the target, chosen *because* it has the same histogram. Its
     other hits are genes whose histograms happen to look similar, some of them far away along the trajectory.
 
@@ -2391,7 +2470,7 @@ def _(mo, query_target):
     | Pearson is pulled down by histogram shape | Part 1, split bars | for a monotone link, Pearson's bar is almost all *marginal* mismatch, which says nothing about co-regulation |
     | Spearman removes that shape term | Part 1, raw vs rank scatter and split bars | the rank cloud is a tight diagonal; Spearman's bar has no marginal part (without ties) |
     | but dropout brings it back | Part 1, dropout slider at 0.7 | a marginal segment appears in Spearman's bar: tied zeros cap it below 1 |
-    | correlations are local | Part 3, saturation curve; Part 5, scorecard | $1 - r$ saturates once expression stops overlapping; ρ with truth clearly below graph $W_1$ |
+    | correlations are local | Part 1, saturation curve; Part 5, scorecard | $1 - r$ saturates once expression stops overlapping; ρ with truth clearly below graph $W_1$ |
 
     **What this means for `find_correlated_features`:**
 
@@ -2412,7 +2491,7 @@ def _(mo, query_target):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### What the distances are for: a gene embedding
+    ### Going further (optional): what the distances are for, a gene embedding
 
     GeneTrajectory's last step embeds the *genes* with a diffusion map built from the gene–gene
     distance. This is the downstream use, and it makes the differences visible at a glance. A good
@@ -2511,7 +2590,6 @@ def _(mo):
     * Tong A., Huguet G., Natik A., MacDonald K., Kuchroo M., Coifman R., Wolf G. & Krishnaswamy S. Diffusion earth mover's distance and distribution embeddings. *ICML* (2021).
     """)
     return
-
 
 if __name__ == "__main__":
     app.run()
