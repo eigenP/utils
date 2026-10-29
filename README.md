@@ -12,10 +12,12 @@
 * **Segmentation**: Fast 2D/3D spot labeling using `voronoi_otsu_labeling`.
 * **Anisotropic Pixel Support**: Core spatial processing and morphology functions natively handle physical pixel sizes to accurately support anisotropic microscopy data without structural distortion.
 * **3D Plane Sampling & Geometry**: Utilities to fit planes using RANSAC (`fit_plane_ransac`), compute orthonormal bases (`generate_plane_basis`), and dynamically extract or sample 2D oriented planes from anisotropic 3D volumes (`sample_volume_plane`).
+* **Label Operations**: Optimization tools like `optimized_entire_labels_touching_mask`.
+* **Intensity Sampling**: Sample intensities from volumes (`sample_intensity_around_points`, `sample_intensity_along_surface_normals`).
 * **Projection Utilities**: Generate windowed slice projections (`windowed_slice_projection`).
 
 ### Plotting & Visualization
-* **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers) with rotatable crosshairs, interactive point cloud visualization (`IsoScatterWidget`, `show_iso_scatter`), and 3D point annotation (`TNIAAnnotatorWidget`). Includes thick-slab projections (`show_zyx_max_slabs`, `show_zyx_projection_slabs`) and a one-click UI parameter copy feature for reproducibility.
+* **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers) with rotatable crosshairs, bit-depth-aware histograms, vmin/vmax sliders, robust default vmax, interactive point cloud visualization (`IsoScatterWidget`, `show_iso_scatter`), and 3D point annotation (`TNIAAnnotatorWidget`). Includes thick-slab projections (`show_zyx_max_slabs`, `show_zyx_projection_slabs`) and a one-click UI parameter copy feature for reproducibility.
 * **Interactive 3D Scatter Plots**: Utilities for generating interactive 3D scatter plots with Plotly, including native support for AnnData embeddings (`plotly_scatter_3d`, `plotly_scatter_3d_from_adata_obsm`).
 * **Publication-Ready Plots**: Set global styles including editable SVG text (`set_plotting_style`). `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), pre-KDE outlier filtering, and data subset highlighting. Custom Matplotlib colormap generation via `colormap_maker`, threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`, and colormap truncation/modification (`adjust_colormap`). Includes `labels_cmap` for label images and `I Series` colormaps (`i_blue`, `i_bordeaux`, `i_forest`, `i_orange`, `i_purple`, `i_teal`, `i_rose`, `i_gold`, `i_slate`).
 * **Image Projections & Compositing**: Generate histograms over image plots (`hist_imshow`), produce depth color-coded projections (`color_coded_projection`), perform advanced multi-channel color blending (`create_multichannel_rgb`), and visualize intensity transformations (`brightness_diagnostic_plotter`).
@@ -23,7 +25,7 @@
 ### Single-Cell Analysis
 * **Normalization**: Fast `pflogpf` normalization wrapper leveraging Rust-based PFlog / shifted-CLR approaches.
 * **Feature Selection**: Integration with `triku` (`run_triku`) for OT distance based feature selection.
-* **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`).
+* **Robust Cluster Annotation**: Score cell types via the Empirical Probability of Superiority ($P(S_1 > S_2)$) to ensure robustness against outliers and non-normal distributions (`annotate_clusters_by_markers`). Include functionality to sweep parameters and evaluate cluster purity (`sweep_leiden_and_annotate`, `plot_celltype_ari`, `barplot_cluster_uncertainty`).
 * **Dataset Integration (kkNN)**: Adaptive curvature-based k-nearest neighbors mapping (`kknn_ingest`) to dynamically project metadata and embeddings across references based on local manifold geometry.
 * **Label Classification & Smoothing**: Distance-weighted majority voting or averaging (`kknn_classifier`) to smooth categorical or continuous cell metadata using the kkNN backbone. Graph-based smoothing of expression data (`smooth_expression_on_graph`).
 * **Gene Archetypes**: Cluster genes by expression patterns to find dominant archetypes using hierarchical Ward clustering and SVD (`find_expression_archetypes`).
@@ -33,6 +35,8 @@
 * **Spatial Autocorrelation**: Fast Moran's I implementation (`morans_i_all_fast`) that correctly handles general (non-row-standardized) spatial weights.
 * **Dimensionality Reduction**: `tl_pacmap` for PaCMAP embeddings supporting versatile initialization strategies (e.g., PAGA, PCA, random).
 * **Palette Management**: Utilities for transferring color palettes between `AnnData` objects (`carry_palette`).
+* **Visualizations**: Dedicated functions for Volcano plots (`plot_volcano_adata`) and marker genes embedding overviews (`plot_marker_genes_dict_on_embedding`).
+* **I/O**: Helper functions to efficiently export and import embeddings / observations (`export_obs_from_adata_to_csv`, `import_obs_to_adata_from_csv`).
 
 ### Statistical Utilities
 * **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci` (with bias-corrected and accelerated (BCa) bootstrap methods), `summary_stats`, robust outlier removal (`remove_outliers`) supporting Mahalanobis distance, `robust_standardize` with principled hierarchical dispersion fallback (MAD -> MeanAD -> STD) for zero-inflated or heavily tied data, and `add_stat_annotations` for annotating plots with significance markers.
@@ -40,7 +44,7 @@
 
 
 ### Core Utilities
-* **Spline Utilities**: Fit cubic splines (`fit_cubic_spline`), resample them uniformly (`create_resampled_spline`), render them into ND image volumes (`create_nd_image_from_spline`), calculate tangent vectors, project points onto planes, and calculate real-world arc lengths (`calculate_spline_length`) (`spline_utils.py`).
+* **Spline Utilities**: Fit cubic splines (`fit_cubic_spline`), resample them uniformly (`create_resampled_spline`), render them into ND image volumes (`create_nd_image_from_spline`, `create_3d_image_from_spline`), calculate tangent vectors, project points onto planes, calculate real-world arc lengths (`calculate_spline_length`), compute vector differences (`calculate_vector_difference`), normalize vectors (`normalize_vectors`), and plot them (`plot_3d_spline`). Includes generation of random coordinates for testing (`generate_random_3d_coordinates`) (`spline_utils.py`).
 * **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`, and extract voxel sizes with `get_tiff_voxel_size`.
 * **I/O Utilities**: Functions to streamline file and data reading, check files before saving (`check_file_before_save`), ensure directory existence (`ensure_directory`), and fast file downloading (`download_file`, `download_file_async`), and unzipping (`un_gzip`).
 
