@@ -3023,7 +3023,12 @@ def calculate_lineage_coupling(
         std_counts[std_counts == 0] = 1.0 # Avoid division by zero
 
         # 4. Calculate Statistics
-        z_scores_vals = (observed_counts.values - expected_counts) / std_counts
+        diff = observed_counts.values - expected_counts
+
+        # Yates's Continuity Correction
+        diff_corrected = np.sign(diff) * np.maximum(0.0, np.abs(diff) - 0.5)
+
+        z_scores_vals = diff_corrected / std_counts
 
         # Calculate analytical P-values (Right-tailed test for enrichment)
         p_values_vals = norm.sf(z_scores_vals)

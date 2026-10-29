@@ -3207,7 +3207,13 @@ def test_lineage_coupling_hypergeometric_matches_per_clone_formula():
     expected = p.sum(-1)
     std = np.sqrt(np.maximum((p * (1 - p)).sum(-1), 0))
     std[std == 0] = 1
-    np.testing.assert_allclose(z.to_numpy(), (obs.to_numpy() - expected) / std, atol=1e-10)
+
+    # Apply Yates's Continuity Correction to expected calculation in test
+    diff = obs.to_numpy() - expected
+    diff_corrected = np.sign(diff) * np.maximum(0.0, np.abs(diff) - 0.5)
+    expected_z = diff_corrected / std
+
+    np.testing.assert_allclose(z.to_numpy(), expected_z, atol=1e-10)
 
 
 def test_sweep_leiden_keeps_close_resolutions_apart():
