@@ -345,11 +345,20 @@ def test_run_bonsai_argument_checks(fake_bonsai, tmp_path):
 
 
 @needs_subprocess
-def test_run_bonsai_thread_env(fake_bonsai, tmp_path):
+def test_run_bonsai_thread_env(fake_bonsai, tmp_path, monkeypatch):
     run_bonsai(np.ones((4, 2)) + np.arange(4)[:, None], results_folder=tmp_path / "r",
                bonsai_dir=fake_bonsai, n_threads=1, env={"SOMETHING": "1"})
     seen = json.loads((tmp_path / "r" / "seen.json").read_text())
     assert seen["omp"] == "1" and seen["openblas"] == "1"
+
+    # default is 1 thread; None leaves the caller's environment alone
+    monkeypatch.setenv("OMP_NUM_THREADS", "7")
+    run_bonsai(np.ones((4, 2)) + np.arange(4)[:, None], results_folder=tmp_path / "r2",
+               bonsai_dir=fake_bonsai)
+    assert json.loads((tmp_path / "r2" / "seen.json").read_text())["omp"] == "1"
+    run_bonsai(np.ones((4, 2)) + np.arange(4)[:, None], results_folder=tmp_path / "r3",
+               bonsai_dir=fake_bonsai, n_threads=None)
+    assert json.loads((tmp_path / "r3" / "seen.json").read_text())["omp"] == "7"
 
 
 def test_find_mpiexec_next_to_python(tmp_path, monkeypatch):

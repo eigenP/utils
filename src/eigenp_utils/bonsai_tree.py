@@ -552,7 +552,7 @@ def run_bonsai(
     dataset: str = "eigenp_bonsai",
     verbose: bool = False,
     timeout: Optional[float] = None,
-    n_threads: Optional[int] = None,
+    n_threads: Optional[int] = 1,
     env: Optional[Dict[str, str]] = None,
 ) -> BonsaiTree:
     """Reconstruct a Bonsai tree and return it as a :class:`BonsaiTree`.
@@ -581,12 +581,16 @@ def run_bonsai(
         Interpreter that runs Bonsai (default: this one). Use it to point at a separate
         environment, e.g. the Python 3.14 conda env the Bonsai README recommends.
     n_procs
-        > 1 runs ``mpiexec -n n_procs python -m mpi4py bonsai_main.py``. Bonsai then
+        > 1 runs ``mpiexec -n n_procs python -m mpi4py bonsai_main.py``; Bonsai then
         spreads the candidate-pair search and the ``nnn_n_randomtrees`` random trees
-        (each with its own fixed seed) over the processes, so the tree is the same as
-        with one process, only faster; pair it with ``n_threads=1``. Needs mpi4py and
-        an MPI runtime: ``pip install 'eigenp-utils[bonsai-mpi]'`` (MPICH wheels; no
-        system MPI needed) or your cluster's OpenMPI.
+        over the processes. Faster (256 cells: 148 s -> 109 s with 2, 78 s with 4
+        processes on 4 cores), but the greedy merge order depends on the process
+        count, so the tree is a different local optimum: equal likelihood in our test
+        (log L -3500.8 vs -3499.6 / -3500.3; tree-distance Spearman 0.99 against the
+        1-process tree) but not identical, and not reproducible across ``n_procs``.
+        Keep ``n_procs`` fixed within a study. Needs mpi4py and an MPI runtime:
+        ``pip install 'eigenp-utils[bonsai-mpi]'`` (MPICH wheels; no system MPI
+        needed) or your cluster's OpenMPI.
     mpiexec
         MPI launcher; looked up on ``PATH`` and next to ``python`` (where the MPICH
         wheel installs it).
@@ -603,8 +607,13 @@ def run_bonsai(
         Seconds before the run is killed (``subprocess.TimeoutExpired``).
     n_threads
         BLAS / OpenMP threads per Bonsai process (sets ``OMP_NUM_THREADS``,
-        ``OPENBLAS_NUM_THREADS``, ``MKL_NUM_THREADS``, ...). ``None`` leaves the
-        environment as is.
+        ``OPENBLAS_NUM_THREADS``, ``MKL_NUM_THREADS``, ...). Default 1: Bonsai works on
+        many small arrays, where BLAS threads only add overhead (256 cells: 148-151 s
+        with 1 thread vs 193-255 s with the default 4, byte-identical trees), and one
+        thread makes the floating-point summation order, hence the tree, independent
+        of the machine's core count. ``None`` leaves the environment as is. (Bonsai
+        sets ``OPENBLAS_NUM_THREADS=1`` itself only under MPI and only after numpy
+        is imported, which has no effect.)
     env
         Extra environment variables for the Bonsai processes.
 
