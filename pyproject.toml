@@ -54,20 +54,30 @@ single-cell = [
     # scanpy's default seurat_v3 HVG flavor (preprocess_subset, kknn_ingest)
     "scikit-misc",
 ]
+# Bonsai cell-tree reconstruction (eigenp_utils.bonsai_tree). Bonsai itself is a
+# script repository (github.com/dhdegroot/Bonsai-data-representation, CC BY-NC 4.0),
+# not a pip package: clone it and set BONSAI_DIR. These are its run-time requirements
+# beyond our core ones; independent of [single-cell]. For parallel runs also install
+# OpenMPI + mpi4py.
+bonsai = [
+    "scikit-learn",
+    "ruamel.yaml",
+    "psutil",
+]
 dev = [
     "pytest>=7.0.0",
     # browser tests (tests/test_frontend_*.py); also run `playwright install chromium`
     "pytest-playwright",
     "marimo",
     "pot",
-    "eigenp_utils[image-analysis,plotting,single-cell]"
+    "eigenp_utils[image-analysis,plotting,single-cell,bonsai]"
 ]
 image-analysis = [
     "scikit-image",
     "xarray",
 ]
 all = [
-    "eigenp_utils[image-analysis,plotting,single-cell,dev]"
+    "eigenp_utils[image-analysis,plotting,single-cell,bonsai,dev]"
 ]
 
 [tool.setuptools]

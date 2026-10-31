@@ -33,6 +33,7 @@
 * **Spatial Autocorrelation**: Fast Moran's I implementation (`morans_i_all_fast`) that correctly handles general (non-row-standardized) spatial weights.
 * **Dimensionality Reduction**: `tl_pacmap` for PaCMAP embeddings supporting versatile initialization strategies (e.g., PAGA, PCA, random).
 * **Palette Management**: Utilities for transferring color palettes between `AnnData` objects (`carry_palette`).
+* **Bonsai Cell Trees** (`bonsai_tree`, extra `[bonsai]`): wrapper around [Bonsai](https://doi.org/10.1038/s41587-026-03220-2) (de Groot et al., Nat. Biotechnol. 2026), which reconstructs the maximum-likelihood tree over cells from feature estimates with error bars. `run_bonsai` / `tl_bonsai` write Bonsai's inputs (or take a Sanity output folder), run it in a subprocess (optionally with MPI) and return a `BonsaiTree` with patristic distances and tree k-nearest neighbours; `poisson_log_quotients` gives quick inputs from raw counts. Bonsai is not pip-installable: clone [Bonsai-data-representation](https://github.com/dhdegroot/Bonsai-data-representation) (CC BY-NC 4.0) and set `BONSAI_DIR`. `benchmarks/bonsai_vs_pacmap.py` compares it with `tl_pacmap` on simulated trees.
 
 ### Statistical Utilities
 * **General Statistics**: `stats.py` provides comprehensive statistical functions including `cohens_d`, `bootstrap_ci` (with bias-corrected and accelerated (BCa) bootstrap methods), `summary_stats`, robust outlier removal (`remove_outliers`) supporting Mahalanobis distance, `robust_standardize` with principled hierarchical dispersion fallback (MAD -> MeanAD -> STD) for zero-inflated or heavily tied data, and `add_stat_annotations` for annotating plots with significance markers.
@@ -75,6 +76,7 @@ You can choose to install optional dependencies if you need functionality such a
 - `[image-analysis]` - installs `scikit-image`.
 - `[single-cell]` - installs packages like `scanpy`, `pacmap`, `leidenalg`, etc.
 - `[plotting]` - installs `plotly`, `statannotations` and `statsmodels`.
+- `[bonsai]` - installs Bonsai's run-time requirements (`scikit-learn`, `ruamel.yaml`, `psutil`); independent of `[single-cell]`. Bonsai itself is cloned separately (see `eigenp_utils.bonsai_tree`).
 - `[all]` - installs all of the optional dependencies above.
 - `[dev]` - installs all dependencies and additional tools for testing (e.g. `pytest`).
 
@@ -109,6 +111,7 @@ Everything except single-cell analysis runs in [Pyodide](https://pyodide.org), t
 | `stats.add_stat_annotations`, `plotting_utils.plotly_scatter_3d` | `[plotting]` | yes |
 | `single_cell` graph helpers (`smooth_expression_on_graph`, `find_correlated_features`, ...) | `anndata`, `scikit-learn` | yes (scanpy is imported lazily) |
 | `single_cell` functions that call scanpy / pacmap / leidenalg | `[single-cell]` (`numba` has no WASM build) | no |
+| `bonsai_tree` (`BonsaiTree`, `poisson_log_quotients`) / (`run_bonsai`, `tl_bonsai`) | core / `[bonsai]` + a Bonsai clone | yes / no (subprocess) |
 
 micropip installs only wheels, and only from hosts that send CORS headers, so a GitHub archive or `git+` URL does not work in the browser. CI publishes the latest `main` build to the `wasm-wheel` branch:
 
