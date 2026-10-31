@@ -19,6 +19,7 @@ import scipy.sparse as sp
 
 from eigenp_utils.bonsai_tree import (
     BonsaiTree,
+    bonsai_neighbors,
     find_bonsai_dir,
     get_bonsai_tree,
     poisson_log_quotients,
@@ -112,7 +113,10 @@ FAKE_MAIN = textwrap.dedent(
     with open(os.path.join(out, 'tree.nwk'), 'w') as f:
         f.write('fake;')
     with open(os.path.join(cfg['results_folder'], 'seen.json'), 'w') as f:
-        json.dump({'cfg': cfg, 'n_features': n_feat, 'cwd': os.getcwd()}, f)
+        json.dump({'cfg': cfg, 'n_features': n_feat, 'cwd': os.getcwd(),
+                   'omp': os.environ.get('OMP_NUM_THREADS'),
+                   'openblas': os.environ.get('OPENBLAS_NUM_THREADS'),
+                   'via_mpi4py': os.environ.get('FAKE_MPI4PY_MAIN')}, f)
     """
 )
 
@@ -340,6 +344,70 @@ def test_run_bonsai_argument_checks(fake_bonsai, tmp_path):
         run_bonsai(sanity_dir=tmp_path, stds=np.ones((4, 2)), bonsai_dir=fake_bonsai)
 
 
+@needs_subprocess
+def test_run_bonsai_thread_env(fake_bonsai, tmp_path):
+    run_bonsai(np.ones((4, 2)) + np.arange(4)[:, None], results_folder=tmp_path / "r",
+               bonsai_dir=fake_bonsai, n_threads=1, env={"SOMETHING": "1"})
+    seen = json.loads((tmp_path / "r" / "seen.json").read_text())
+    assert seen["omp"] == "1" and seen["openblas"] == "1"
+
+
+def test_find_mpiexec_next_to_python(tmp_path, monkeypatch):
+    from eigenp_utils.bonsai_tree import _find_mpiexec
+
+    bindir = tmp_path / "venv" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "python").write_text("")
+    launcher = bindir / "mpiexec"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert _find_mpiexec("mpiexec", str(bindir / "python")) == str(launcher)
+    assert _find_mpiexec(str(launcher), "/nonexistent/python") == str(launcher)
+    with pytest.raises(FileNotFoundError, match="bonsai-mpi"):
+        _find_mpiexec("mpiexec", str(tmp_path / "other" / "python"))
+
+
+@needs_subprocess
+def test_run_bonsai_mpi_command(fake_bonsai, tmp_path, monkeypatch):
+    """n_procs > 1 runs `mpiexec -n N python -m mpi4py bonsai_main.py ...`; checked with
+    a stand-in launcher (drops '-n N') and a stand-in mpi4py whose __main__ runs the
+    script, as the real one does."""
+    import importlib
+
+    fake_pkgs = tmp_path / "pkgs"
+    (fake_pkgs / "mpi4py").mkdir(parents=True)
+    (fake_pkgs / "mpi4py" / "__init__.py").write_text("")
+    (fake_pkgs / "mpi4py" / "__main__.py").write_text(
+        "import os, runpy, sys\n"
+        "os.environ['FAKE_MPI4PY_MAIN'] = '1'\n"
+        "sys.argv = sys.argv[1:]\n"
+        "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+    )
+    launcher = tmp_path / "bin" / "mpiexec"
+    launcher.parent.mkdir()
+    launcher.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/argv.txt"\nshift 2\nexec "$@"\n'
+    )
+    launcher.chmod(0o755)
+    X = np.ones((4, 2)) + np.arange(4)[:, None]
+
+    with pytest.raises(ImportError, match="mpi4py"):
+        run_bonsai(X, results_folder=tmp_path / "r0", bonsai_dir=fake_bonsai,
+                   n_procs=3, mpiexec=str(launcher))
+
+    monkeypatch.syspath_prepend(str(fake_pkgs))
+    importlib.invalidate_caches()
+    tree = run_bonsai(X, results_folder=tmp_path / "r1", bonsai_dir=fake_bonsai,
+                      n_procs=3, n_threads=1, mpiexec=str(launcher),
+                      env={"PYTHONPATH": str(fake_pkgs)})
+    argv = (launcher.parent / "argv.txt").read_text().split()
+    assert argv[:2] == ["-n", "3"] and argv[3:5] == ["-m", "mpi4py"]
+    seen = json.loads((tmp_path / "r1" / "seen.json").read_text())
+    assert seen["via_mpi4py"] == "1" and seen["omp"] == "1"
+    assert tree.n_cells == 4
+
+
 # ------------------------- AnnData round trip -------------------------
 
 
@@ -376,6 +444,163 @@ def test_tl_bonsai_stores_and_reloads(fake_bonsai, tmp_path):
         get_bonsai_tree(back, key="nope")
 
 
+def test_poisson_log_quotients_external_totals():
+    counts = np.array([[1, 3, 6], [2, 2, 0]])
+    x, s = poisson_log_quotients(counts[:, :2], totals=counts.sum(1))
+    np.testing.assert_allclose(x, np.log((counts[:, :2] + 0.5) / counts.sum(1, keepdims=True)))
+    with pytest.raises(ValueError, match="row sums"):
+        poisson_log_quotients(counts, totals=[1, 1])
+
+
+# ------------------------- standard scanpy / AnnData objects -------------------------
+
+
+def _scanpy_adata(n_cells=40, n_genes=60, seed=3):
+    """AnnData as a standard scanpy workflow leaves it: sparse log1p X, raw counts in
+    layers['counts'], seurat_v3 HVGs in var, PCA in obsm."""
+    anndata = pytest.importorskip("anndata")
+    sc = pytest.importorskip("scanpy")
+    rng = np.random.default_rng(seed)
+    groups = np.repeat([0, 1], n_cells // 2)
+    rates = rng.gamma(2.0, 2.0, size=(2, n_genes))
+    counts = rng.poisson(rates[groups] * rng.uniform(0.5, 2.0, size=(n_cells, 1)))
+    adata = anndata.AnnData(sp.csr_matrix(counts.astype(np.float32)))
+    adata.obs_names = pd.Index([f"AAAC-{i}:x" for i in range(n_cells)], dtype=object)
+    adata.var_names = pd.Index([f"Gene{i}" for i in range(n_genes)], dtype=object)
+    adata.obs["group"] = pd.Categorical(groups.astype(str))
+    adata.layers["counts"] = adata.X.copy()
+    sc.pp.normalize_total(adata, target_sum=1e4)
+    sc.pp.log1p(adata)
+    sc.pp.highly_variable_genes(adata, flavor="seurat_v3", layer="counts", n_top_genes=20)
+    sc.pp.pca(adata, n_comps=5)
+    return adata, counts
+
+
+def _bonsai_input(res):
+    seen = json.loads((res / "seen.json").read_text())
+    data = Path(seen["cfg"]["data_folder"])
+    feats = np.loadtxt(data / "features.txt", delimiter="\t", ndmin=2).T
+    stds = np.loadtxt(data / "standard_deviations.txt", delimiter="\t", ndmin=2).T
+    genes = (data / "geneID.txt").read_text().split()
+    return feats, stds, genes
+
+
+@needs_subprocess
+def test_tl_bonsai_scanpy_object_counts_hvg_and_downstream(fake_bonsai, tmp_path):
+    sc = pytest.importorskip("scanpy")
+    adata, counts = _scanpy_adata()
+    hvg = adata.var["highly_variable"].to_numpy()
+
+    # default input: layers['counts']; HVG subset keeps library sizes over all genes
+    tree = tl_bonsai(adata, mask_var="highly_variable", bonsai_dir=fake_bonsai,
+                     results_folder=tmp_path / "res", zscore_cutoff=-1)
+    feats, stds, genes = _bonsai_input(tmp_path / "res")
+    totals = counts.sum(1, keepdims=True)
+    np.testing.assert_allclose(feats, np.log((counts[:, hvg] + 0.5) / totals), rtol=1e-8)
+    np.testing.assert_allclose(stds, 1 / np.sqrt(counts[:, hvg] + 0.5), rtol=1e-8)
+    assert genes == list(adata.var_names[hvg])
+    assert list(tree.cell_ids) == list(adata.obs_names)
+    assert adata.uns["bonsai"]["params"]["input"] == "counts:counts"
+    assert adata.uns["bonsai"]["params"]["n_features"] == int(hvg.sum())
+
+    # scanpy-compatible neighbour graph from the tree
+    k = 6
+    bonsai_neighbors(adata, n_neighbors=k)
+    D = adata.obsp["bonsai_neighbors_distances"]
+    C = adata.obsp["bonsai_neighbors_connectivities"]
+    assert D.shape == C.shape == (adata.n_obs, adata.n_obs)
+    assert np.all(np.diff(D.indptr) == k - 1)  # self excluded, as in sc.pp.neighbors
+    idx, dist = tree.kneighbors(k - 1)
+    np.testing.assert_allclose(np.sort(D.toarray(), axis=1)[:, -(k - 1):], np.sort(dist, axis=1))
+    assert abs(C - C.T).max() < 1e-12
+
+    # identical to scanpy's own UMAP weights for the same kNN (incl. self)
+    from scanpy.neighbors._connectivity import umap as sc_umap
+    n = adata.n_obs
+    ref = sc_umap(np.hstack([np.arange(n)[:, None], idx]), np.hstack([np.zeros((n, 1)), dist]),
+                  n_obs=n, n_neighbors=k)
+    np.testing.assert_allclose(C.toarray(), ref.toarray())
+
+    sc.tl.leiden(adata, neighbors_key="bonsai_neighbors", key_added="bonsai_leiden",
+                 flavor="igraph", n_iterations=2, directed=False)
+    sc.tl.umap(adata, neighbors_key="bonsai_neighbors")
+    sc.tl.paga(adata, groups="bonsai_leiden", neighbors_key="bonsai_neighbors")
+    assert adata.obsm["X_umap"].shape == (n, 2)
+    assert adata.obs["bonsai_leiden"].nunique() >= 1
+
+    # h5ad round trip of the tree and graph. obs columns are dropped: the locked
+    # anndata 0.10 cannot write pandas 3 string categoricals (unrelated to Bonsai)
+    path = tmp_path / "a.h5ad"
+    slim = adata.copy()
+    slim.obs = slim.obs[[]]
+    slim.uns = {k: slim.uns[k] for k in ("bonsai", "bonsai_neighbors")}
+    slim.write_h5ad(path)
+    import anndata
+    back = anndata.read_h5ad(path)
+    np.testing.assert_allclose(get_bonsai_tree(back).patristic_distances(),
+                               tree.patristic_distances())
+    assert back.uns["bonsai_neighbors"]["params"]["n_neighbors"] == k
+
+    with pytest.raises(ValueError, match="overwrite the tree"):
+        bonsai_neighbors(adata, key_added="bonsai")
+
+
+@needs_subprocess
+def test_tl_bonsai_raw_uses_all_raw_genes_for_library_size(fake_bonsai, tmp_path):
+    import anndata
+    adata, counts = _scanpy_adata()
+    # .raw holds the counts of all genes; adata itself is then gene-filtered
+    adata.raw = anndata.AnnData(sp.csr_matrix(counts.astype(np.float32)), var=adata.var[[]].copy())
+    sub = adata[:, adata.var["highly_variable"].to_numpy()].copy()
+    tl_bonsai(sub, counts_layer="raw", bonsai_dir=fake_bonsai,
+              results_folder=tmp_path / "res", zscore_cutoff=-1)
+    feats, _, genes = _bonsai_input(tmp_path / "res")
+    cols = adata.var_names.get_indexer(sub.var_names)
+    np.testing.assert_allclose(
+        feats, np.log((counts[:, cols] + 0.5) / counts.sum(1, keepdims=True)), rtol=1e-8
+    )
+    assert genes == list(sub.var_names)
+
+
+@needs_subprocess
+def test_tl_bonsai_view_obsm_dataframe_and_dense(fake_bonsai, tmp_path):
+    adata, counts = _scanpy_adata()
+    adata.obsm["pcs_df"] = pd.DataFrame(adata.obsm["X_pca"], index=adata.obs_names)
+    view = adata[:30]
+    assert view.is_view
+    tree = tl_bonsai(view, use_rep="pcs_df", bonsai_dir=fake_bonsai,
+                     results_folder=tmp_path / "res", zscore_cutoff=-1)
+    assert tree.n_cells == 30
+    assert "bonsai" in view.uns  # anndata turns the view into a real object on write
+    seen = json.loads((tmp_path / "res" / "seen.json").read_text())
+    assert seen["cfg"]["filenames_data"] == "features.txt"  # no error bars given
+    assert seen["n_features"] == adata.obsm["X_pca"].shape[1]
+
+    dense = adata.copy()
+    dense.X = counts.astype(np.float64)  # dense integer counts in X, no counts layer
+    del dense.layers["counts"]
+    tl_bonsai(dense, bonsai_dir=fake_bonsai, results_folder=tmp_path / "res2", zscore_cutoff=-1)
+    assert dense.uns["bonsai"]["params"]["input"] == "counts:X"
+
+
+def test_tl_bonsai_input_errors(fake_bonsai, tmp_path):
+    adata, _ = _scanpy_adata()
+    kw = dict(bonsai_dir=fake_bonsai, results_folder=tmp_path / "res")
+    with pytest.raises(ValueError, match="raw counts"):
+        tl_bonsai(adata, counts_layer="X", **kw)  # X holds log1p values
+    with pytest.raises(ValueError, match="not both"):
+        tl_bonsai(adata, counts_layer="counts", use_rep="X_pca", **kw)
+    with pytest.raises(ValueError, match="gene-space"):
+        tl_bonsai(adata, use_rep="X_pca", mask_var="highly_variable", **kw)
+    with pytest.raises(KeyError, match="mask_var"):
+        tl_bonsai(adata, mask_var="nope", **kw)
+    with pytest.raises(ValueError, match="adata.raw is None"):
+        tl_bonsai(adata, counts_layer="raw", **kw)
+    del adata.layers["counts"]
+    with pytest.raises(ValueError, match="No input given"):
+        tl_bonsai(adata, **kw)
+
+
 # ------------------------- real Bonsai (optional) -------------------------
 
 
@@ -393,3 +618,23 @@ def test_real_bonsai_recovers_two_clades(tmp_path):
                       nnn_n_randommoves=20, nnn_n_randomtrees=1, timeout=600)
     idx, _ = tree.kneighbors(n_neighbors=1)
     assert np.all(labels[idx[:, 0]] == labels)
+
+
+@pytest.mark.skipif(not os.environ.get("BONSAI_DIR"), reason="BONSAI_DIR not set")
+def test_real_bonsai_on_scanpy_object(tmp_path):
+    """End to end on a standard scanpy object: counts layer -> Bonsai -> neighbour graph
+    -> Leiden. Two expression programmes must not mix in the tree's nearest neighbours."""
+    sc = pytest.importorskip("scanpy")
+    adata, _ = _scanpy_adata(n_cells=24, n_genes=60, seed=5)
+    tl_bonsai(adata, results_folder=tmp_path / "res", nnn_n_randommoves=20,
+              nnn_n_randomtrees=1, timeout=600)
+    tree = get_bonsai_tree(adata)
+    idx, _ = tree.kneighbors(n_neighbors=1)
+    g = adata.obs["group"].to_numpy()
+    assert np.all(g[idx[:, 0]] == g)
+    bonsai_neighbors(adata, n_neighbors=5)
+    sc.tl.leiden(adata, neighbors_key="bonsai_neighbors", flavor="igraph", n_iterations=2,
+                 directed=False, resolution=0.3)
+    # every Leiden cluster lies within one programme
+    ct = pd.crosstab(adata.obs["leiden"], adata.obs["group"])
+    assert np.all((ct > 0).sum(axis=1) == 1)

@@ -64,6 +64,14 @@ bonsai = [
     "ruamel.yaml",
     "psutil",
 ]
+# Parallel Bonsai runs (run_bonsai(n_procs=...)) without a system MPI: mpi4py plus the
+# MPICH runtime wheels (which ship mpiexec). On clusters prefer mpi4py built against
+# the site MPI instead.
+bonsai-mpi = [
+    "eigenp_utils[bonsai]",
+    "mpi4py",
+    "mpich; sys_platform != 'win32'",
+]
 dev = [
     "pytest>=7.0.0",
     # browser tests (tests/test_frontend_*.py); also run `playwright install chromium`

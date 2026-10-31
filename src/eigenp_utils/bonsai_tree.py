@@ -63,11 +63,16 @@ __all__ = [
     "run_bonsai",
     "tl_bonsai",
     "get_bonsai_tree",
+    "bonsai_neighbors",
 ]
 
 BONSAI_REPO_URL = "https://github.com/dhdegroot/Bonsai-data-representation"
 _CELL_PREFIX = "cell_"
 _INTERNAL_PREFIX = "internal_"
+_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS",
+)
 
 
 # ------------------------- Locating Bonsai -------------------------
@@ -101,7 +106,7 @@ def find_bonsai_dir(bonsai_dir: Optional[Union[str, os.PathLike]] = None) -> Pat
 
 
 def poisson_log_quotients(
-    counts, pseudocount: float = 0.5
+    counts, pseudocount: float = 0.5, totals=None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Log transcription quotients with Poisson error bars, as a quick Bonsai input.
 
@@ -125,6 +130,10 @@ def poisson_log_quotients(
         Raw counts, cells x genes (dense or scipy sparse), non-negative.
     pseudocount
         Added to every count (``a`` above). Must be > 0.
+    totals
+        Per-cell total counts ``N_c``. Default: row sums of ``counts``. Pass the totals
+        over *all* genes when ``counts`` is a gene subset (e.g. highly variable genes),
+        so that the quotients keep their meaning; :func:`tl_bonsai` does this.
 
     Returns
     -------
@@ -140,7 +149,14 @@ def poisson_log_quotients(
         raise ValueError(f"counts must be 2-D (cells x genes), got shape {n.shape}.")
     if not np.all(np.isfinite(n)) or np.any(n < 0):
         raise ValueError("counts must be finite and non-negative.")
-    totals = n.sum(axis=1)
+    if totals is None:
+        totals = n.sum(axis=1)
+    else:
+        totals = np.asarray(totals, dtype=np.float64).ravel()
+        if totals.shape[0] != n.shape[0]:
+            raise ValueError(f"{totals.shape[0]} totals for {n.shape[0]} cells.")
+        if np.any(totals + 1e-9 < n.sum(axis=1)):
+            raise ValueError("totals must be >= the row sums of counts.")
     if np.any(totals <= 0):
         bad = np.flatnonzero(totals <= 0)
         raise ValueError(
@@ -474,6 +490,35 @@ def _find_final_folder(results_folder: Path, zscore_cutoff: float) -> Path:
     return finals[-1]
 
 
+def _find_mpiexec(mpiexec: str, python: str) -> str:
+    """``mpiexec`` on PATH, or next to the Python that runs Bonsai (pip-installed MPICH
+    puts it in the environment's bin/, which is not on PATH in e.g. a Jupyter kernel)."""
+    if os.path.dirname(mpiexec):
+        if os.path.isfile(mpiexec):
+            return mpiexec
+    else:
+        for folder in (Path(python).parent, Path(sys.executable).parent):
+            cand = folder / mpiexec
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+        found = shutil.which(mpiexec)
+        if found:
+            return found
+    raise FileNotFoundError(
+        f"'{mpiexec}' not found on PATH or next to {python}. Install an MPI runtime, e.g. "
+        "`pip install 'eigenp-utils[bonsai-mpi]'`."
+    )
+
+
+def _has_mpi4py(python: str) -> bool:
+    if os.path.realpath(python) == os.path.realpath(sys.executable):
+        import importlib.util
+
+        return importlib.util.find_spec("mpi4py") is not None
+    proc = subprocess.run([python, "-c", "import mpi4py"], capture_output=True)
+    return proc.returncode == 0
+
+
 def _bool(x: bool) -> str:
     return "True" if x else "False"
 
@@ -507,6 +552,8 @@ def run_bonsai(
     dataset: str = "eigenp_bonsai",
     verbose: bool = False,
     timeout: Optional[float] = None,
+    n_threads: Optional[int] = None,
+    env: Optional[Dict[str, str]] = None,
 ) -> BonsaiTree:
     """Reconstruct a Bonsai tree and return it as a :class:`BonsaiTree`.
 
@@ -534,8 +581,15 @@ def run_bonsai(
         Interpreter that runs Bonsai (default: this one). Use it to point at a separate
         environment, e.g. the Python 3.14 conda env the Bonsai README recommends.
     n_procs
-        > 1 runs ``mpiexec -n n_procs python -m mpi4py bonsai_main.py`` (needs OpenMPI
-        and mpi4py; without mpi4py Bonsai silently runs on one core).
+        > 1 runs ``mpiexec -n n_procs python -m mpi4py bonsai_main.py``. Bonsai then
+        spreads the candidate-pair search and the ``nnn_n_randomtrees`` random trees
+        (each with its own fixed seed) over the processes, so the tree is the same as
+        with one process, only faster; pair it with ``n_threads=1``. Needs mpi4py and
+        an MPI runtime: ``pip install 'eigenp-utils[bonsai-mpi]'`` (MPICH wheels; no
+        system MPI needed) or your cluster's OpenMPI.
+    mpiexec
+        MPI launcher; looked up on ``PATH`` and next to ``python`` (where the MPICH
+        wheel installs it).
     zscore_cutoff, rescale_by_var, use_knn, nnn_n_randommoves, nnn_n_randomtrees,
     UB_ellipsoid_size, spr_strategy
         Bonsai's run configuration; defaults are Bonsai's (see its README). Lowering
@@ -547,6 +601,12 @@ def run_bonsai(
         ``results_folder`` either way.
     timeout
         Seconds before the run is killed (``subprocess.TimeoutExpired``).
+    n_threads
+        BLAS / OpenMP threads per Bonsai process (sets ``OMP_NUM_THREADS``,
+        ``OPENBLAS_NUM_THREADS``, ``MKL_NUM_THREADS``, ...). ``None`` leaves the
+        environment as is.
+    env
+        Extra environment variables for the Bonsai processes.
 
     Returns
     -------
@@ -613,15 +673,23 @@ def run_bonsai(
     ]
     main_args = ["bonsai/bonsai_main.py", "--config_filepath", str(config_path), "--step", "all"]
     if n_procs > 1:
-        if shutil.which(mpiexec) is None:
-            raise FileNotFoundError(f"n_procs={n_procs} needs '{mpiexec}' on PATH (OpenMPI).")
-        run_cmd = [mpiexec, "-n", str(n_procs), python, "-m", "mpi4py", *main_args]
+        mpiexec_path = _find_mpiexec(mpiexec, python)
+        if not _has_mpi4py(python):
+            raise ImportError(
+                f"n_procs={n_procs} needs mpi4py in the interpreter that runs Bonsai "
+                f"({python}): `pip install 'eigenp-utils[bonsai-mpi]'` (mpi4py + MPICH "
+                "wheels) or mpi4py built against your cluster's MPI."
+            )
+        run_cmd = [mpiexec_path, "-n", str(n_procs), python, "-m", "mpi4py", *main_args]
     else:
         run_cmd = [python, *main_args]
 
-    env = dict(os.environ)
+    env = {**os.environ, **(env or {})}
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("MPLBACKEND", "Agg")
+    if n_threads is not None:
+        for var in _THREAD_ENV_VARS:
+            env[var] = str(int(n_threads))
     t0 = time.perf_counter()
     with open(log_path, "w") as log:
         for cmd in (config_cmd, run_cmd):
@@ -652,9 +720,24 @@ def run_bonsai(
 # ------------------------- AnnData convenience -------------------------
 
 
+def _to_numpy_or_sparse(M):
+    """Materialise AnnData containers (DataFrame obsm, backed / dask arrays)."""
+    if hasattr(M, "to_memory"):  # backed sparse dataset
+        M = M.to_memory()
+    if hasattr(M, "compute"):  # dask
+        M = M.compute()
+    if hasattr(M, "to_numpy"):  # DataFrame in obsm
+        M = M.to_numpy()
+    if not sp.issparse(M):
+        M = np.asarray(M)
+    return M
+
+
 def _get_matrix(adata, key, what: str):
-    if isinstance(key, (np.ndarray, sp.spmatrix)) or hasattr(key, "toarray"):
+    if isinstance(key, np.ndarray) or sp.issparse(key):
         M = key
+    elif not isinstance(key, str):
+        raise TypeError(f"{what} must be a key or an array, got {type(key).__name__}.")
     elif key == "X":
         M = adata.X
     elif key in adata.obsm:
@@ -663,40 +746,109 @@ def _get_matrix(adata, key, what: str):
         M = adata.layers[key]
     else:
         raise KeyError(f"{what} '{key}' is not 'X', an obsm key or a layer.")
-    if hasattr(M, "to_numpy"):
-        M = M.to_numpy()
+    if M is None:
+        raise ValueError(f"{what} '{key}' is empty (adata.X is None?).")
+    M = _to_numpy_or_sparse(M)
     if M.shape[0] != adata.n_obs:
         raise ValueError(f"{what} has {M.shape[0]} rows for {adata.n_obs} cells.")
     return M
 
 
+def _var_mask(adata, mask_var) -> np.ndarray:
+    if mask_var is None:
+        return np.ones(adata.n_vars, dtype=bool)
+    if isinstance(mask_var, str):
+        if mask_var not in adata.var:
+            raise KeyError(f"mask_var '{mask_var}' is not a column of adata.var.")
+        mask = np.asarray(adata.var[mask_var])
+    else:
+        mask = np.asarray(mask_var)
+    if mask.dtype != bool or mask.shape != (adata.n_vars,):
+        raise ValueError("mask_var must be a boolean adata.var column or array of length n_vars.")
+    if not mask.any():
+        raise ValueError("mask_var selects no genes.")
+    return mask
+
+
+def _is_integer_like(M, n_check: int = 200_000) -> bool:
+    vals = M.data if sp.issparse(M) else np.asarray(M).ravel()
+    vals = vals[:n_check]
+    return bool(np.all(vals >= 0) and np.allclose(vals, np.round(vals)))
+
+
+def _counts_and_totals(adata, counts_layer: str):
+    """Counts for ``adata.var_names`` and per-cell totals over all measured genes."""
+    if counts_layer == "raw":
+        if adata.raw is None:
+            raise ValueError("counts_layer='raw' but adata.raw is None.")
+        raw_X = _to_numpy_or_sparse(adata.raw.X)
+        totals = np.asarray(raw_X.sum(axis=1)).ravel()
+        # adata.raw usually keeps every gene while adata is gene-filtered
+        idx = adata.raw.var_names.get_indexer(adata.var_names)
+        if np.any(idx < 0):
+            raise ValueError("Some adata.var_names are missing from adata.raw.var_names.")
+        counts = raw_X[:, idx]
+    else:
+        counts = _get_matrix(adata, counts_layer, "counts_layer")
+        if counts.shape[1] != adata.n_vars:
+            raise ValueError("counts_layer must be a cells x genes matrix (X or a layer).")
+        totals = np.asarray(counts.sum(axis=1)).ravel()
+    if not _is_integer_like(counts):
+        raise ValueError(
+            f"counts_layer '{counts_layer}' does not look like raw counts (non-integer or "
+            "negative values). Pass raw UMI counts, or use use_rep= / stds= for other inputs."
+        )
+    return counts, totals
+
+
 def tl_bonsai(
     adata,
-    use_rep: Union[str, np.ndarray] = "X",
+    use_rep: Optional[Union[str, np.ndarray]] = None,
     stds: Optional[Union[str, np.ndarray]] = None,
+    *,
+    counts_layer: Optional[str] = None,
+    mask_var: Optional[Union[str, np.ndarray]] = None,
+    pseudocount: float = 0.5,
     key_added: str = "bonsai",
     **run_kwargs,
 ) -> BonsaiTree:
     """Run Bonsai on an AnnData object and store the tree in ``adata.uns[key_added]``.
 
+    Input is chosen in this order:
+
+    1. ``counts_layer`` (``'X'``, a layer name, or ``'raw'``): raw counts, turned into
+       log transcription quotients with Poisson error bars by
+       :func:`poisson_log_quotients`. Library sizes are the totals over all genes of
+       that matrix (``adata.raw``: all raw genes), also when ``mask_var`` subsets them.
+    2. ``use_rep`` (``'X'``, an ``obsm`` key, a layer name, or an array) with optional
+       ``stds`` (same lookup), passed to Bonsai as is. Bonsai expects per-feature
+       estimates with error bars; PCA scores or log1p values have no error bars
+       (``stds=None`` makes Bonsai treat them as negligible), which in our benchmark
+       (``benchmarks/bonsai_vs_pacmap.py``) loses most of Bonsai's advantage.
+    3. Neither: ``layers['counts']`` if present, else ``X`` if it holds integer counts.
+
     Parameters
     ----------
     adata
-        AnnData (used duck-typed; ``[single-cell]`` is not required).
-    use_rep
-        Features: ``'X'``, an ``obsm`` key, a layer name, or an array (cells x features).
-        Bonsai is meant for per-feature estimates with error bars (e.g. log
-        transcription quotients from :func:`poisson_log_quotients` or Sanity), not for
-        PCA scores: PCA mixes features with different noise levels, and the error bars
-        are then unknown (``stds=None`` makes Bonsai treat them as negligible).
-    stds
-        Error bars for ``use_rep``, looked up the same way; same shape.
+        AnnData (also a view; sparse, dense or backed matrices). Used duck-typed, so
+        the ``[single-cell]`` extra is not required.
+    use_rep, stds, counts_layer
+        See above.
+    mask_var
+        Boolean ``adata.var`` column (e.g. ``'highly_variable'``) or array: genes given
+        to Bonsai (only for gene-space inputs). Fewer genes make Bonsai faster, but the
+        tree is then built on those genes only; Bonsai's own ``zscore_cutoff`` already
+        drops noise-dominated genes.
+    pseudocount
+        For :func:`poisson_log_quotients`.
     key_added
-        ``adata.uns`` key. The stored dict holds the tree (``edges``, ``lengths``,
-        ``vert_names``, ``cell_vertices``, ``cell_ids``, ``newick``), the cell names
-        (``obs_names``) and the run ``params``. Reload with :func:`get_bonsai_tree`.
+        ``adata.uns`` key for the tree (``edges``, ``lengths``, ``vert_names``,
+        ``cell_vertices``, ``cell_ids``, ``newick``) and the run ``params``. Reload it
+        with :func:`get_bonsai_tree`; build a scanpy neighbour graph from it with
+        :func:`bonsai_neighbors`.
     **run_kwargs
-        Passed to :func:`run_bonsai` (``bonsai_dir``, ``n_procs``, ``zscore_cutoff``, ...).
+        Passed to :func:`run_bonsai` (``bonsai_dir``, ``n_procs``, ``n_threads``,
+        ``zscore_cutoff``, ...).
 
     Returns
     -------
@@ -707,11 +859,43 @@ def tl_bonsai(
             "With Sanity output call run_bonsai(sanity_dir=...) directly; tl_bonsai takes "
             "features from adata."
         )
-    X = _get_matrix(adata, use_rep, "use_rep")
-    S = None if stds is None else _get_matrix(adata, stds, "stds")
+    if counts_layer is not None and (use_rep is not None or stds is not None):
+        raise ValueError("Give either counts_layer or use_rep / stds, not both.")
+    if counts_layer is None and use_rep is None:
+        if "counts" in adata.layers:
+            counts_layer = "counts"
+        elif adata.X is not None and _is_integer_like(_to_numpy_or_sparse(adata.X)):
+            counts_layer = "X"
+        else:
+            raise ValueError(
+                "No input given and found neither layers['counts'] nor integer counts in X. "
+                "Pass counts_layer= (raw counts) or use_rep= (+ stds=)."
+            )
+        print(f"tl_bonsai: using raw counts from {'layers[counts]' if counts_layer == 'counts' else 'X'}.")
+
     feature_ids = None
-    if isinstance(use_rep, str) and (use_rep == "X" or use_rep in adata.layers):
-        feature_ids = list(map(str, adata.var_names))
+    if counts_layer is not None:
+        mask = _var_mask(adata, mask_var)
+        counts, totals = _counts_and_totals(adata, counts_layer)
+        counts = counts[:, np.flatnonzero(mask)] if not mask.all() else counts
+        X, S = poisson_log_quotients(counts, pseudocount=pseudocount, totals=totals)
+        feature_ids = list(map(str, adata.var_names[mask]))
+        source = f"counts:{counts_layer}"
+    else:
+        X = _get_matrix(adata, use_rep, "use_rep")
+        S = None if stds is None else _get_matrix(adata, stds, "stds")
+        gene_space = isinstance(use_rep, str) and (use_rep == "X" or use_rep in adata.layers)
+        if gene_space:
+            mask = _var_mask(adata, mask_var)
+            if not mask.all():
+                cols = np.flatnonzero(mask)
+                X = X[:, cols]
+                S = None if S is None else S[:, cols]
+            feature_ids = list(map(str, adata.var_names[mask]))
+        elif mask_var is not None:
+            raise ValueError("mask_var only applies to gene-space inputs (X, layers, counts).")
+        source = use_rep if isinstance(use_rep, str) else "<array>"
+
     tree = run_bonsai(X, S, feature_ids=feature_ids, **run_kwargs)
     # Bonsai saw cell_<i>; re-label with the real cell names (row order is preserved)
     tree.cell_ids = np.asarray(adata.obs_names, dtype=str)
@@ -720,9 +904,11 @@ def tl_bonsai(
         k: v for k, v in run_kwargs.items()
         if isinstance(v, (int, float, str, bool)) and k not in ("python", "mpiexec")
     }
-    params["use_rep"] = use_rep if isinstance(use_rep, str) else "<array>"
+    params["input"] = source
     # h5ad cannot store None
     params["stds"] = "None" if stds is None else (stds if isinstance(stds, str) else "<array>")
+    params["mask_var"] = "None" if mask_var is None else (mask_var if isinstance(mask_var, str) else "<array>")
+    params["n_features"] = int(X.shape[1])
     params["results_folder"] = str(tree.folder)
     adata.uns[key_added] = {**tree.to_dict(), "params": params}
     print(
@@ -744,3 +930,83 @@ def get_bonsai_tree(adata, key: str = "bonsai") -> BonsaiTree:
             "AnnData?); rerun tl_bonsai."
         )
     return tree
+
+
+def _umap_connectivities(knn_indices, knn_dists, n_obs, n_neighbors):
+    """UMAP fuzzy-union weights, as ``sc.pp.neighbors(method='umap')`` computes them."""
+    try:
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r"Tensorflow not installed")
+            from umap.umap_ import fuzzy_simplicial_set
+    except ImportError as e:
+        raise ImportError(
+            "bonsai_neighbors needs umap-learn (installed with scanpy, "
+            "`pip install eigenp-utils[single-cell]`)."
+        ) from e
+    conn, _, _ = fuzzy_simplicial_set(
+        sp.coo_matrix((n_obs, 1)), n_neighbors, None, None,
+        knn_indices=knn_indices, knn_dists=knn_dists,
+    )
+    return sp.csr_matrix(conn)
+
+
+def bonsai_neighbors(
+    adata,
+    n_neighbors: int = 15,
+    key: str = "bonsai",
+    key_added: str = "bonsai_neighbors",
+) -> None:
+    """Store a scanpy-style neighbour graph built from Bonsai tree distances.
+
+    The k nearest cells of each cell by patristic (along-the-tree) distance give
+    ``adata.obsp[f'{key_added}_distances']`` and UMAP connectivities
+    ``adata.obsp[f'{key_added}_connectivities']``, described in ``adata.uns[key_added]``,
+    with the conventions of ``sc.pp.neighbors(key_added=...)`` (``n_neighbors`` counts
+    the cell itself). Use it with ``neighbors_key=key_added``, e.g.
+    ``sc.tl.leiden(adata, neighbors_key='bonsai_neighbors')``, ``sc.tl.umap`` or
+    ``sc.tl.paga``.
+
+    Parameters
+    ----------
+    adata
+        AnnData with a tree from :func:`tl_bonsai` in ``adata.uns[key]``.
+    n_neighbors
+        Neighbourhood size including the cell itself (scanpy convention).
+    key
+        ``adata.uns`` key of the tree.
+    key_added
+        ``uns`` key of the graph description and prefix of the two ``obsp`` keys.
+    """
+    if key_added == key:
+        raise ValueError("key_added must differ from key (it would overwrite the tree).")
+    tree = get_bonsai_tree(adata, key)
+    n = adata.n_obs
+    if not 2 <= n_neighbors <= n:
+        raise ValueError(f"n_neighbors must be in [2, {n}] (it counts the cell itself).")
+    idx, dist = tree.kneighbors(n_neighbors - 1)
+    rows = np.repeat(np.arange(n), n_neighbors - 1)
+    distances = sp.csr_matrix((dist.ravel(), (rows, idx.ravel())), shape=(n, n))
+    # scanpy/umap convention: the cell itself is the first neighbour, at distance 0
+    knn_idx = np.hstack([np.arange(n)[:, None], idx])
+    knn_dist = np.hstack([np.zeros((n, 1)), dist])
+    connectivities = _umap_connectivities(knn_idx, knn_dist, n, n_neighbors)
+
+    dists_key, conns_key = f"{key_added}_distances", f"{key_added}_connectivities"
+    adata.obsp[dists_key] = distances
+    adata.obsp[conns_key] = connectivities
+    adata.uns[key_added] = {
+        "connectivities_key": conns_key,
+        "distances_key": dists_key,
+        "params": {
+            "n_neighbors": int(n_neighbors),
+            "method": "umap",
+            "metric": "bonsai_patristic",
+            "random_state": 0,
+        },
+    }
+    print(
+        f"Bonsai neighbour graph stored in adata.obsp['{dists_key}'] / ['{conns_key}']; "
+        f"use neighbors_key='{key_added}'."
+    )
