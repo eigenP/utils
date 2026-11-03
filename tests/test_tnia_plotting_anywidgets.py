@@ -2505,7 +2505,7 @@ def test_points_mode_scale_bar_matches_rotated_panel():
     w = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(1, 1, 1), rotate_view=(45, 0, 0))
     fig = w._render()
     try:
-        label = fig.axBar.texts[0].get_text()
+        label = _scale_bar_artists(fig)[1].get_text()
         seg = [c for c in fig.axXY.collections if hasattr(c, 'get_segments')][-1].get_segments()[0]
         bar_units = (seg[1][0] - seg[0][0]) * abs(np.diff(fig.axXY.get_xlim())[0])
         assert bar_units == pytest.approx(float(label.split()[0]), rel=1e-6)

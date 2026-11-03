@@ -270,3 +270,24 @@ def test_frontend_histogram_vrange_slider_and_width(page, static_rangeslider_ser
     assert narrow >= 160 and narrow < wide
     # The drawing buffer follows the laid-out width (no blurry stretching).
     assert abs(page.evaluate("() => document.querySelector('canvas').width") - narrow) <= 2
+
+
+def test_frontend_scale_bar_checkbox_toggles_model(page, static_rangeslider_server):
+    """The "Scale Bar" checkbox writes `scale_bar_show` and follows model changes.
+
+    Strategy: the checkbox starts checked (default on), unchecking it must set
+    the trait to false and save, and a change pushed from Python must be
+    reflected back in the checkbox.
+    """
+    page.goto(static_rangeslider_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+
+    cb = page.get_by_label("Scale Bar")
+    assert cb.is_checked()
+    page.evaluate("window.saveTriggered = false")
+    cb.uncheck()
+    assert page.evaluate("window.mockModel.get('scale_bar_show')") is False
+    assert page.evaluate("window.saveTriggered") is True
+
+    page.evaluate("window.mockModel.set('scale_bar_show', true)")
+    assert cb.is_checked()
