@@ -790,8 +790,7 @@ def test_show_zyx_max_slabs_scale_bar():
     fig3 = show_zyx_max_slabs(im, pixel_sizes={'Z': 1.5, 'Y': 0.5, 'X': 0.5})
 
     def get_text_from_fig(fig):
-        axBar = fig.axes[-1]
-        for t in axBar.texts:
+        for t in fig.axXY.texts:
             if "µm" in t.get_text() or "pixel_sizes" in t.get_text() or "sxy" in t.get_text():
                 return t.get_text()
         return None
@@ -799,6 +798,91 @@ def test_show_zyx_max_slabs_scale_bar():
     # Assert
     assert "µm" in get_text_from_fig(fig2)
     assert "µm" in get_text_from_fig(fig3)
+
+def _scale_bar_artists(fig):
+    """(bar LineCollection or None, label Text or None) drawn on the XY panel."""
+    from matplotlib.collections import LineCollection
+    bars = [c for c in fig.axXY.collections if isinstance(c, LineCollection)]
+    labels = [t for t in fig.axXY.texts if 'µm' in t.get_text() or 'pixel_sizes' in t.get_text()]
+    return (bars[-1] if bars else None), (labels[0] if labels else None)
+
+
+@pytest.mark.parametrize("figsize", [(4, 4), (10, 10)])
+def test_scale_bar_label_sits_centred_right_above_the_bar(figsize):
+    """The scale-bar label is centred on the bar and just above it, at any figure size.
+
+    It used to be centred in the empty bottom-right panel, away from the bar.
+    Strategy: render, then compare display coordinates of the label's bounding
+    box with the bar segment: horizontal centres agree within 1 px, the label's
+    bottom is above the line but within about one font height of it, and the
+    label is no wider than the canvas region left of the right edge.
+    """
+    im = np.random.default_rng(0).integers(0, 255, (10, 100, 100)).astype(np.uint8)
+    fig = show_zyx_max_slabs(im, pixel_sizes=(1.0, 0.5, 0.5), figsize=figsize)
+    try:
+        bar, label = _scale_bar_artists(fig)
+        assert bar is not None and label is not None
+        renderer = fig.canvas.get_renderer()
+        (x0, y0), (x1, y1) = fig.axXY.transAxes.transform(np.asarray(bar.get_segments()[0]))
+        bbox = label.get_window_extent(renderer)
+        assert abs((bbox.x0 + bbox.x1) / 2 - (x0 + x1) / 2) < 1.0
+        gap = bbox.y0 - y0
+        font_px = label.get_fontsize() * fig.dpi / 72
+        assert 0 < gap < font_px
+        assert label.get_color() == 'white'
+    finally:
+        plt.close(fig)
+
+
+def test_scale_bar_show_false_hides_bar_and_label():
+    """`scale_bar_show=False` removes both the bar and its label (static and widgets).
+
+    Strategy: the static function and both widget types are rendered with the
+    flag off (negative control: on), and the GUI trait can turn it back on.
+    The copied parameters keep the setting so a paste reproduces the view.
+    """
+    im = np.random.default_rng(1).integers(0, 255, (10, 60, 60)).astype(np.uint8)
+    for show in (True, False):
+        fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_show=show)
+        try:
+            bar, label = _scale_bar_artists(fig)
+            assert (bar is not None, label is not None) == (show, show)
+        finally:
+            plt.close(fig)
+
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1), scale_bar_show=False)
+    fig = w._render()
+    try:
+        assert _scale_bar_artists(fig) == (None, None)
+    finally:
+        plt.close(fig)
+    w.copy_params_trigger += 1
+    assert "scale_bar_show=False," in w.copy_params_string
+    w.scale_bar_show = True
+    fig = w._render()
+    try:
+        assert _scale_bar_artists(fig)[1] is not None
+    finally:
+        plt.close(fig)
+
+    pts = (np.array([0.0, 9.0]), np.array([0.0, 59.0]), np.array([0.0, 59.0]))
+    for render in ('points', 'density'):
+        ws = show_zyx_max_scatter_interactive(pts, pixel_sizes=(1, 1, 1), render=render, scale_bar_show=False)
+        fig = ws._render()
+        try:
+            assert _scale_bar_artists(fig)[1] is None
+        finally:
+            plt.close(fig)
+
+
+def test_scale_bar_toggle_triggers_one_rerender():
+    """Toggling the GUI checkbox re-renders the widget (the trait is part of the render state)."""
+    im = np.random.default_rng(2).integers(0, 255, (10, 40, 40)).astype(np.uint8)
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1))
+    before = w.image_data
+    w.scale_bar_show = False
+    assert w.image_data != before
+
 
 def test_interactive_factory_passes_pixel_sizes():
     """Test that interactive factory passes pixel sizes works as expected."""
@@ -2127,7 +2211,7 @@ def test_scatter_density_panels_scale_bar_and_hover_use_data_units():
         np.testing.assert_allclose(span(fig.axXZ), (1001, 21), rtol=1e-6)
         np.testing.assert_allclose(span(fig.axZY), (21, 1001), rtol=1e-6)
 
-        label = [t.get_text() for t in fig.axBar.texts][0]
+        label = [t.get_text() for t in fig.axXY.texts][0]
         bar = fig.axXY.collections[-1].get_segments()[0]
         bar_units = (bar[1][0] - bar[0][0]) * span(fig.axXY)[0]
         assert bar_units == pytest.approx(float(label.split()[0]), rel=1e-6)

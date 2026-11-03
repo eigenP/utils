@@ -404,7 +404,7 @@ def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
 
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None):
+def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None, scale_bar_show=True):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
@@ -422,10 +422,10 @@ def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), co
     slice_xz = image_to_show[:,y,:]
     slice_xy = image_to_show[z,:,:]
 
-    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity)
+    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity, scale_bar_show=scale_bar_show)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05):
+def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True):
     """ plots max xy, xz, and zy projections of a 3D image
 
     Args:
@@ -451,10 +451,10 @@ def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None
         if colormap is None:
             colormap = colors
 
-    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity, blending=blending, projection=projection, attenuation=attenuation)
+    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show)
 
 
-def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05):
+def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Args:
@@ -481,10 +481,10 @@ def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projec
         if colormap is None:
             colormap = colors
     full = slice(None)
-    return show_zyx_projection_slabs(image_to_show, full, full, full, pixel_sizes=pixel_sizes, figsize=figsize, projector=projector, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, blending=blending, projection=projection, attenuation=attenuation)
+    return show_zyx_projection_slabs(image_to_show, full, full, full, pixel_sizes=pixel_sizes, figsize=figsize, projector=projector, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show)
 
 # Copyright tnia 2021 - BSD License
-def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None):
+def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None, scale_bar_show=True):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -762,8 +762,9 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     else:
         fig.patch.set_alpha(0.0)  # set transparent bgnd
 
-    _add_scale_bar(axXY, axBar, xy_w, both_given, figsize, unit=_length_unit(pixel_sizes),
-                   color='black' if white_theme else 'white')
+    if scale_bar_show:
+        _add_scale_bar(axXY, xy_w, both_given, figsize, unit=_length_unit(pixel_sizes),
+                       color='black' if white_theme else 'white')
 
     fig.axXY = axXY
     fig.axZY = axZY
@@ -774,7 +775,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     fig.canvas.draw()
     return fig
 
-def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, figsize, unit=None, color='white'):
+def _add_scale_bar(ax_line, ax_physical_width_um, pixel_sizes_given, figsize, unit=None, color='white'):
     # ``ax_physical_width_um`` is in the units of the pixel sizes: ``unit``
     # (a pixel-size dict's 'unit'; µm when None). Known length units are
     # converted so the bar is labelled in µm; an unknown unit is shown as is.
@@ -823,12 +824,21 @@ def _add_scale_bar(ax_line, ax_text, ax_physical_width_um, pixel_sizes_given, fi
     else:
         text_label = "`pixel_sizes`"
 
-    # Put the text centered in ax_text
-    ax_text.text(0.5, 0.5, text_label, transform=ax_text.transAxes, clip_on=False,
-            ha='center', va='center', color='gray', fontsize=fontsize_pt)
+    # Label centred right above the bar, in the bar's colour. The gap is in
+    # points (half the line width plus a fraction of the font), so it does not
+    # depend on the panel size. A thin contrasting outline keeps it legible
+    # over bright (or, on a white canvas, dark) pixels.
+    from matplotlib import patheffects
+    outline = 'black' if mcolors.to_rgb(color) == (1.0, 1.0, 1.0) else 'white'
+    ax_line.annotate(
+        text_label, xy=((x0 + x1) / 2, y_line), xycoords='axes fraction',
+        xytext=(0, linewidth / 2 + 0.2 * fontsize_pt), textcoords='offset points',
+        ha='center', va='bottom', color=color, fontsize=fontsize_pt, annotation_clip=False,
+        path_effects=[patheffects.withStroke(linewidth=max(1.0, fontsize_pt * 0.08), foreground=outline, alpha=0.6)],
+    )
 
 ### New function
-def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05):
+def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
@@ -872,11 +882,11 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show)
 
 
 ### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -937,7 +947,7 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
     else:
         projection_y, projection_x, projection_z = _project(image_to_show, 0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, scale_bar_show=scale_bar_show)
 
 
 def _finite_min(*arrays):
@@ -1725,6 +1735,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     # UI Toggles
     show_crosshair = traitlets.Bool(True).tag(sync=True)
+    scale_bar_show = traitlets.Bool(True).tag(sync=True)
     sync_on_hover = traitlets.Bool(True).tag(sync=True)
 
     warning_msg = traitlets.Unicode("").tag(sync=True)
@@ -1741,9 +1752,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     copy_params_trigger = traitlets.Int(0).tag(sync=True)
     copy_params_string = traitlets.Unicode("").tag(sync=True)
 
-    def __init__(self, X, Y, Z, show_crosshair=True, sync_on_hover=True, **kwargs):
+    def __init__(self, X, Y, Z, show_crosshair=True, sync_on_hover=True, scale_bar_show=True, **kwargs):
         super().__init__(**kwargs)
         self.show_crosshair = show_crosshair
+        self.scale_bar_show = bool(scale_bar_show)
         self.sync_on_hover = sync_on_hover
         self.dims = (Z, Y, X) # (Z, Y, X) convention from numpy shape
 
@@ -1767,7 +1779,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         self.observe(self._render_wrapper, names=['vmin_list', 'vmax_list', 'gamma_list', 'opacity_list'])
 
         # Observe crosshair toggle
-        self.observe(self._render_wrapper, names=['show_crosshair'])
+        self.observe(self._render_wrapper, names=['show_crosshair', 'scale_bar_show'])
 
         # Observe hover synchronization
         self.observe(self._handle_hover_sync, names=['hover_coords'])
@@ -1963,6 +1975,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         'x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t',
         'x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end',
         'vmin_list', 'vmax_list', 'gamma_list', 'opacity_list', 'show_crosshair',
+        'scale_bar_show',
     )
 
     def _render_state(self):
@@ -2097,6 +2110,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
         if hasattr(self, 'rotate_view') and self.rotate_view is not None:
             s.append(f"rotate_view={self.rotate_view},")
+        if not self.scale_bar_show:
+            s.append("scale_bar_show=False,")
         # Keyword-only rendering options (not in the GUI), kept so a paste reproduces the view
         if getattr(self, 'blending', None) is not None:
             s.append(f"blending={self.blending!r},")
@@ -2129,7 +2144,7 @@ class TNIASliceWidget(TNIAWidgetBase):
       channel. See `infer_histogram_range`.
     """
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
-                 show_crosshair=True, sync_on_hover=True, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
+                 show_crosshair=True, sync_on_hover=True, scale_bar_show=True, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
                  blending=None, projection=None, attenuation=0.05, bit_depth=None, **kwargs):
 
         self.blending = _check_blending(blending)
@@ -2153,7 +2168,7 @@ class TNIASliceWidget(TNIAWidgetBase):
         im_shape = (im[0].shape if isinstance(im, list) else im.shape)
         Z, Y, X = im_shape
 
-        super().__init__(X, Y, Z, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover)
+        super().__init__(X, Y, Z, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show)
 
         # Override Base Trait defaults with physical scaling properly
         self.sx = px
@@ -2395,6 +2410,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             rotate_view=self.rotate_view, channel_labels=channel_labels_curr,
             channel_label_fontsize_pt=self.channel_label_fontsize_pt,
             blending=self.blending, projection=self.projection, attenuation=self.attenuation,
+            scale_bar_show=self.scale_bar_show,
         )
 
         if self.show_crosshair and fig:
@@ -2728,7 +2744,7 @@ def _finite_points(X, Y, Z, channels=None):
 class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
-                 show_crosshair=True, sync_on_hover=True, subplot_bg=None, slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
+                 show_crosshair=True, sync_on_hover=True, scale_bar_show=True, subplot_bg=None, slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
                  blending=None, **kwargs):
         # Keyword-only channel compositing (not in the GUI); see `show_zyx`.
         # 'minimum' also switches to a white canvas and inverted default colours.
@@ -2754,7 +2770,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         Y_dim = int(np.ceil(ymax - ymin + 1))
         Z_dim = int(np.ceil(zmax - zmin + 1))
 
-        super().__init__(X_dim, Y_dim, Z_dim, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover)
+        super().__init__(X_dim, Y_dim, Z_dim, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show)
 
         self.channels = channels
         self._pixel_sizes_given = pixel_sizes is not None
@@ -3155,7 +3171,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 rotate_view=self.rotate_view, channel_labels=channel_labels,
                 channel_label_fontsize_pt=self.channel_label_fontsize_pt,
                 channel_label_colors=self._label_colors(),
-                blending=self.blending,
+                blending=self.blending, scale_bar_show=self.scale_bar_show,
             )
 
             if self.blending != 'minimum':  # the white theme keeps its white canvas
@@ -3378,8 +3394,9 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Scale bar (kept opaque), measured against the drawn XY width
             fig.patch.set_alpha(1.0)
-            _add_scale_bar(axXY, axBar, w_x_xy, self._pixel_sizes_given, (figW, figH), unit=self._length_unit,
-                           color='black' if self.blending == 'minimum' else 'white')
+            if self.scale_bar_show:
+                _add_scale_bar(axXY, w_x_xy, self._pixel_sizes_given, (figW, figH), unit=self._length_unit,
+                               color='black' if self.blending == 'minimum' else 'white')
 
             # FORCE MATPLOTLIB TRANSFORMS BEFORE RETURN <<<
             fig.canvas.draw()
@@ -3392,7 +3409,7 @@ def show_zyx_max_slice_interactive(
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
-    show_crosshair=True, sync_on_hover=True,
+    show_crosshair=True, sync_on_hover=True, scale_bar_show=True,
     colors=None, opacity=None,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
@@ -3509,7 +3526,7 @@ def show_zyx_max_slice_interactive(
 
     w = TNIASliceWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
-        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
+        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
         channel_label_fontsize_pt=channel_label_fontsize_pt,
         blending=blending, projection=projection, attenuation=attenuation,
@@ -3523,7 +3540,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     figsize=None, colormap=None,
     vmin=None, vmax=None,
     gamma=1, figsize_scale=1,
-    show_crosshair=True, sync_on_hover=True,
+    show_crosshair=True, sync_on_hover=True, scale_bar_show=True,
     colors=None, opacity=None,
     point_size_scale=0.01,
     annotate=False,
@@ -3632,7 +3649,7 @@ def show_zyx_max_slice_interactive_point_annotator(
 
     w = TNIAAnnotatorWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
-        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
+        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show,
         point_size_scale=point_size_scale, annotate=annotate,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
         channel_label_fontsize_pt=channel_label_fontsize_pt,
@@ -3651,7 +3668,7 @@ def show_zyx_max_scatter_interactive(
     colormap=None, colors=None, opacity=None,
     gamma=1, vmin=None, vmax=None,
     figsize=None, figsize_scale=1.0,
-    show_crosshair=True, sync_on_hover=True,
+    show_crosshair=True, sync_on_hover=True, scale_bar_show=True,
     subplot_bg=None,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
@@ -3797,7 +3814,7 @@ def show_zyx_max_scatter_interactive(
         X, Y, Z,
         channels=channels, pixel_sizes=pixel_sizes, render=render, bins=bins,
         point_size=point_size, alpha=alpha, colormap=colormap if colormap is not None else colors, opacity=opacity,
-        gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover,
+        gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show,
         subplot_bg=subplot_bg,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t),
         rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt,

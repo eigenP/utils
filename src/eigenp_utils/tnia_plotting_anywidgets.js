@@ -824,6 +824,7 @@ export default {
     uiTogglesContainer.style.gap = "10px";
     uiTogglesContainer.style.alignItems = "center";
     uiTogglesContainer.style.marginBottom = "10px";
+    uiTogglesContainer.style.flexWrap = "wrap";
 
     const warningSpan = document.createElement("span");
     warningSpan.style.color = "red";
@@ -859,6 +860,29 @@ export default {
     crosshairLabel.appendChild(crosshairCb);
     crosshairLabel.appendChild(document.createTextNode("Show Crosshair"));
     uiTogglesContainer.appendChild(crosshairLabel);
+
+    const scaleBarLabel = document.createElement("label");
+    scaleBarLabel.style.display = "flex";
+    scaleBarLabel.style.alignItems = "center";
+    scaleBarLabel.style.gap = "4px";
+    scaleBarLabel.style.fontSize = "14px";
+    scaleBarLabel.style.marginLeft = "10px";
+
+    const scaleBarCb = document.createElement("input");
+    scaleBarCb.type = "checkbox";
+    scaleBarCb.checked = model.get("scale_bar_show") !== false;
+    scaleBarCb.addEventListener("change", () => {
+      model.set("scale_bar_show", scaleBarCb.checked);
+      model.save_changes();
+    });
+
+    model.on("change:scale_bar_show", () => {
+      scaleBarCb.checked = model.get("scale_bar_show") !== false;
+    });
+
+    scaleBarLabel.appendChild(scaleBarCb);
+    scaleBarLabel.appendChild(document.createTextNode("Scale Bar"));
+    uiTogglesContainer.appendChild(scaleBarLabel);
 
     const syncLabel = document.createElement("label");
     syncLabel.style.display = "flex";
