@@ -884,6 +884,40 @@ export default {
     scaleBarLabel.appendChild(document.createTextNode("Scale Bar"));
     uiTogglesContainer.appendChild(scaleBarLabel);
 
+    // Scale-bar font size in pt (empty = auto from the figure height, 0 hides it)
+    const scaleBarSize = document.createElement("input");
+    scaleBarSize.type = "text";
+    scaleBarSize.title = "Scale bar font size (pt); empty = auto, 0 = hidden";
+    scaleBarSize.placeholder = "auto";
+    scaleBarSize.style.width = "36px";
+    scaleBarSize.style.fontSize = "11px";
+    const refreshScaleBarSize = () => {
+      const v = model.get("scale_bar_fontsize_pt");
+      scaleBarSize.value = v === null || v === undefined ? "" : v;
+    };
+    refreshScaleBarSize();
+    scaleBarSize.addEventListener("change", () => {
+      const txt = scaleBarSize.value.trim();
+      let val = null;
+      if (txt !== "") {
+        val = parseFloat(txt);
+        if (isNaN(val)) { refreshScaleBarSize(); return; }
+        val = Math.max(0, val);
+      }
+      model.set("scale_bar_fontsize_pt", val);
+      model.save_changes();
+      refreshScaleBarSize();
+    });
+    model.on("change:scale_bar_fontsize_pt", refreshScaleBarSize);
+    const scaleBarSizeWrap = document.createElement("span");
+    scaleBarSizeWrap.style.display = "flex";
+    scaleBarSizeWrap.style.alignItems = "center";
+    scaleBarSizeWrap.style.gap = "2px";
+    scaleBarSizeWrap.style.fontSize = "11px";
+    scaleBarSizeWrap.appendChild(scaleBarSize);
+    scaleBarSizeWrap.appendChild(document.createTextNode("pt"));
+    uiTogglesContainer.appendChild(scaleBarSizeWrap);
+
     const syncLabel = document.createElement("label");
     syncLabel.style.display = "flex";
     syncLabel.style.alignItems = "center";

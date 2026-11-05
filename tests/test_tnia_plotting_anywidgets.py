@@ -875,6 +875,73 @@ def test_scale_bar_show_false_hides_bar_and_label():
             plt.close(fig)
 
 
+def test_scale_bar_fontsize_sets_label_and_bar_and_zero_hides_them():
+    """`scale_bar_fontsize_pt` sizes label and bar together; 0 removes both.
+
+    Strategy: render at 12 pt and 24 pt and check the label font size and that
+    the bar's line width doubles with it (it follows the font). 0 must draw
+    neither bar nor label (static function and widget trait), the GUI's empty
+    string means auto, and a negative size is rejected rather than ignored.
+    """
+    im = np.random.default_rng(5).integers(0, 255, (10, 60, 60)).astype(np.uint8)
+    widths = {}
+    for fs in (12, 24):
+        fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=fs)
+        try:
+            bar, label = _scale_bar_artists(fig)
+            assert label.get_fontsize() == fs
+            widths[fs] = bar.get_linewidth()[0]
+        finally:
+            plt.close(fig)
+    assert widths[24] == pytest.approx(2 * widths[12])
+
+    fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=0)
+    try:
+        assert _scale_bar_artists(fig) == (None, None)
+    finally:
+        plt.close(fig)
+
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=0)
+    fig = w._render()
+    try:
+        assert _scale_bar_artists(fig) == (None, None)
+    finally:
+        plt.close(fig)
+    w.copy_params_trigger += 1
+    assert "scale_bar_fontsize_pt=0.0," in w.copy_params_string
+    w.scale_bar_fontsize_pt = ""   # GUI box cleared -> auto size
+    fig = w._render()
+    try:
+        assert _scale_bar_artists(fig)[1] is not None
+    finally:
+        plt.close(fig)
+
+    with pytest.raises(ValueError):
+        show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=-1)
+
+
+def test_scale_bar_and_label_have_faint_black_outline():
+    """Bar and label carry a 30%-opacity black outline (visible over same-colour pixels).
+
+    Strategy: inspect the path effects of both artists; the bar's stroke must
+    be wider than the bar itself, otherwise it is hidden underneath.
+    """
+    from matplotlib import patheffects
+    im = np.random.default_rng(6).integers(0, 255, (10, 60, 60)).astype(np.uint8)
+    fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1))
+    try:
+        bar, label = _scale_bar_artists(fig)
+        for artist in (bar, label):
+            strokes = [pe for pe in artist.get_path_effects() if isinstance(pe, patheffects.Stroke)]
+            assert len(strokes) == 1
+            gc = strokes[0]._gc
+            assert gc['foreground'] == 'black' and gc['alpha'] == 0.3
+        bar_stroke = [pe for pe in bar.get_path_effects() if isinstance(pe, patheffects.Stroke)][0]
+        assert bar_stroke._gc['linewidth'] > bar.get_linewidth()[0]
+    finally:
+        plt.close(fig)
+
+
 def test_scale_bar_toggle_triggers_one_rerender():
     """Toggling the GUI checkbox re-renders the widget (the trait is part of the render state)."""
     im = np.random.default_rng(2).integers(0, 255, (10, 40, 40)).astype(np.uint8)

@@ -291,3 +291,25 @@ def test_frontend_scale_bar_checkbox_toggles_model(page, static_rangeslider_serv
 
     page.evaluate("window.mockModel.set('scale_bar_show', true)")
     assert cb.is_checked()
+
+
+def test_frontend_scale_bar_fontsize_box(page, static_rangeslider_server):
+    """The scale-bar size box writes `scale_bar_fontsize_pt`: a number, 0 (hidden) or null (auto).
+
+    Strategy: type 14, then 0, then clear the box, and read the trait back;
+    a negative entry is clamped to 0 and non-numeric text is rejected.
+    """
+    page.goto(static_rangeslider_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+    box = page.locator("input[placeholder='auto']")
+
+    def enter(text):
+        box.fill(text)
+        box.dispatch_event("change")
+        return page.evaluate("window.mockModel.get('scale_bar_fontsize_pt')")
+
+    assert enter("14") == 14
+    assert enter("0") == 0
+    assert enter("-3") == 0
+    assert enter("") is None
+    assert enter("abc") is None and box.input_value() == ""
