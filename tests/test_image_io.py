@@ -2,24 +2,28 @@ import numpy as np
 import pytest
 import xarray as xr
 from unittest.mock import patch, MagicMock
-from eigenp_utils.image_io import numpy_to_stczyx_xarray, get_tiff_voxel_size
+from eigenp_utils.image_io import (
+    array_to_stczyx_xarray,
+    numpy_to_stczyx_xarray,
+    get_tiff_voxel_size,
+)
 
-def test_numpy_to_stczyx_xarray_basic():
-    """Test basic conversion to STCZYX."""
+def test_array_to_stczyx_xarray_basic():
+    """A plain YX array becomes 6D STCZYX with singleton S, T, C, Z and integer coords."""
     arr = np.ones((10, 20))
-    da = numpy_to_stczyx_xarray(arr, 'YX')
+    da = array_to_stczyx_xarray(arr, 'YX')
 
     assert da.shape == (1, 1, 1, 1, 10, 20)
     assert list(da.dims) == ['S', 'T', 'C', 'Z', 'Y', 'X']
     assert da.attrs['axes'] == 'STCZYX'
 
-def test_numpy_to_stczyx_xarray_complex():
-    """Test complex conversion with channel names and attrs."""
+def test_array_to_stczyx_xarray_complex():
+    """ZCYX input is reordered to STCZYX; channel names and attrs are attached."""
     arr = np.ones((5, 3, 10, 20))
     channels = ['DAPI', 'GFP', 'RFP']
     attrs = {'experiment': 'test1'}
 
-    da = numpy_to_stczyx_xarray(arr, 'ZCYX', channel_names=channels, attrs=attrs)
+    da = array_to_stczyx_xarray(arr, 'ZCYX', channel_names=channels, attrs=attrs)
 
     assert da.shape == (1, 1, 3, 5, 10, 20)
     assert list(da.dims) == ['S', 'T', 'C', 'Z', 'Y', 'X']
@@ -27,17 +31,17 @@ def test_numpy_to_stczyx_xarray_complex():
     assert da.attrs['axes'] == 'STCZYX'
     assert da.attrs['experiment'] == 'test1'
 
-def test_numpy_to_stczyx_xarray_errors():
-    """Test error handling in numpy_to_stczyx_xarray."""
+def test_array_to_stczyx_xarray_errors():
+    """Mismatched ndim and wrong-length channel_names raise ValueError."""
     arr = np.ones((10, 20))
 
     # Shape mismatch
     with pytest.raises(ValueError, match="Shape mismatch"):
-        numpy_to_stczyx_xarray(arr, 'ZYX')
+        array_to_stczyx_xarray(arr, 'ZYX')
 
     # Channel names mismatch
     with pytest.raises(ValueError, match="Provided 2 channel names"):
-        numpy_to_stczyx_xarray(np.ones((3, 10, 20)), 'CYX', channel_names=['C1', 'C2'])
+        array_to_stczyx_xarray(np.ones((3, 10, 20)), 'CYX', channel_names=['C1', 'C2'])
 
 @patch('eigenp_utils.image_io.tifffile.TiffFile')
 def test_get_tiff_voxel_size_imagej(mock_tifffile):
@@ -106,9 +110,10 @@ def test_get_tiff_voxel_size_ome(mock_tifffile):
 # =========================================
 
 
-def test_numpy_to_stczyx_xarray_does_not_modify_attrs():
+def test_array_to_stczyx_xarray_does_not_modify_attrs():
+    """The caller's attrs dict is copied, not mutated, and 'axes' is overwritten to STCZYX."""
     meta = {'source': 'x.tif', 'axes': 'ZCYX'}
-    da = numpy_to_stczyx_xarray(np.zeros((2, 1, 3, 3)), 'ZCYX', attrs=meta)
+    da = array_to_stczyx_xarray(np.zeros((2, 1, 3, 3)), 'ZCYX', attrs=meta)
     assert meta == {'source': 'x.tif', 'axes': 'ZCYX'}
     assert da.attrs['axes'] == 'STCZYX' and da.attrs['source'] == 'x.tif'
 
@@ -162,3 +167,91 @@ def test_get_tiff_voxel_size_ome_z_with_xy_from_resolution_tags(mock_tifffile):
     assert res['unit'] == 'µm'
     assert res['X'] == pytest.approx(1.0) and res['Y'] == pytest.approx(1.0)
     assert res['Z'] == pytest.approx(2.0)
+
+
+def test_array_to_stczyx_xarray_from_dataarray_keeps_coords_and_attrs():
+    """A YX DataArray with physical coords (as from nd2.to_xarray) is expanded to STCZYX.
+
+    Y/X float coords, the name and existing attrs must survive; the new
+    singleton dims get integer coords; channel_names may be a single string.
+    """
+    y = np.arange(4) * 0.329
+    x = np.arange(5) * 0.329
+    src = xr.DataArray(
+        np.arange(20, dtype=np.uint16).reshape(4, 5),
+        dims=('Y', 'X'), coords={'Y': y, 'X': x},
+        name='img', attrs={'metadata': 'nd2-meta'},
+    )
+    da = array_to_stczyx_xarray(src, channel_names='BF', attrs={'experiment': 'e1'})
+
+    assert da.dims == tuple('STCZYX')
+    assert da.shape == (1, 1, 1, 1, 4, 5)
+    np.testing.assert_array_equal(da.coords['Y'].values, y)
+    np.testing.assert_array_equal(da.coords['X'].values, x)
+    assert da.coords['C'].values.tolist() == ['BF']
+    assert da.coords['S'].values.tolist() == [0]
+    assert da.name == 'img'
+    assert da.attrs == {'metadata': 'nd2-meta', 'experiment': 'e1', 'axes': 'STCZYX'}
+    np.testing.assert_array_equal(da.values[0, 0, 0, 0], src.values)
+    # The input DataArray is untouched
+    assert src.dims == ('Y', 'X') and src.attrs == {'metadata': 'nd2-meta'}
+
+
+def test_array_to_stczyx_xarray_dataarray_relabel_and_position_alias():
+    """nd2's 'P' (stage position) maps to 'S'; input_axes relabels DataArray dims positionally.
+
+    The data must follow its axis: element [p, c, y, x] of the input ends up at
+    [p, 0, c, 0, y, x]. Relabelling with a permutation of existing names
+    ('S' -> 'C', 'C' -> 'S') must not collide.
+    """
+    arr = np.random.default_rng(0).random((3, 2, 4, 5))
+    src = xr.DataArray(arr, dims=('P', 'C', 'Y', 'X'),
+                       coords={'C': ['DAPI', 'GFP']})
+    da = array_to_stczyx_xarray(src)
+    assert da.sizes['S'] == 3 and da.sizes['C'] == 2
+    assert da.coords['C'].values.tolist() == ['DAPI', 'GFP']
+    np.testing.assert_array_equal(da.values[:, 0, :, 0], arr)
+
+    swapped = xr.DataArray(arr, dims=('S', 'C', 'Y', 'X'))
+    da2 = array_to_stczyx_xarray(swapped, input_axes='CSYX')
+    assert da2.sizes['C'] == 3 and da2.sizes['S'] == 2
+    np.testing.assert_array_equal(da2.values[:, 0, :, 0], arr.transpose(1, 0, 2, 3))
+
+
+def test_array_to_stczyx_xarray_stays_lazy_with_dask():
+    """Dask input (nd2 / zarr readers) stays a dask array; values match the eager result."""
+    dask_array = pytest.importorskip('dask.array')
+    arr = np.arange(2 * 6 * 7).reshape(2, 6, 7)
+    lazy = dask_array.from_array(arr, chunks=(1, 6, 7))
+
+    da = array_to_stczyx_xarray(lazy, 'ZYX')
+    assert isinstance(da.data, dask_array.Array)
+    np.testing.assert_array_equal(da.values, array_to_stczyx_xarray(arr, 'ZYX').values)
+
+    da_x = array_to_stczyx_xarray(xr.DataArray(lazy, dims=('Z', 'Y', 'X')))
+    assert isinstance(da_x.data, dask_array.Array)
+
+
+def test_array_to_stczyx_xarray_rejects_bad_axes():
+    """Unknown letters, repeated letters, unmappable DataArray dims and missing axes raise."""
+    arr = np.ones((3, 4, 5))
+    with pytest.raises(ValueError, match="allowed letters"):
+        array_to_stczyx_xarray(arr, 'QYX')
+    with pytest.raises(ValueError, match="repeats"):
+        array_to_stczyx_xarray(arr, 'YYX')
+    with pytest.raises(ValueError, match="input_axes is required"):
+        array_to_stczyx_xarray(arr)
+    with pytest.raises(ValueError, match="Cannot map"):
+        array_to_stczyx_xarray(xr.DataArray(arr, dims=('time', 'Y', 'X')))
+    # ... but relabelling such a DataArray works
+    da = array_to_stczyx_xarray(xr.DataArray(arr, dims=('time', 'Y', 'X')), input_axes='TYX')
+    assert da.sizes['T'] == 3
+
+
+def test_numpy_to_stczyx_xarray_is_deprecated_alias():
+    """The old name warns with DeprecationWarning and returns the same result as the new one."""
+    arr = np.ones((3, 10, 20))
+    with pytest.warns(DeprecationWarning, match="array_to_stczyx_xarray"):
+        old = numpy_to_stczyx_xarray(arr, 'CYX', channel_names=['a', 'b', 'c'])
+    new = array_to_stczyx_xarray(arr, 'CYX', channel_names=['a', 'b', 'c'])
+    xr.testing.assert_identical(old, new)

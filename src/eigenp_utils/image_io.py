@@ -6,75 +6,154 @@ import tifffile
 import xml.etree.ElementTree as ET
 
 
+_STCZYX = 'STCZYX'
+
+
+def _relabel_dims(da: xr.DataArray, axes: str) -> xr.DataArray:
+    """Rename the dims of ``da`` positionally to the letters of ``axes``.
+
+    Goes through temporary names so that permutations of existing names
+    (e.g. nd2's ``('P', 'S')`` -> ``('S', 'C')``) do not collide.
+    """
+    if tuple(da.dims) == tuple(axes):
+        return da
+    tmp = {d: f'__stczyx_tmp_{i}' for i, d in enumerate(da.dims)}
+    da = da.rename(tmp)
+    return da.rename({tmp[d]: a for d, a in zip(tmp, axes)})
+
+
+def array_to_stczyx_xarray(
+    image,
+    input_axes: str = None,
+    channel_names=None,
+    attrs: dict = None,
+) -> xr.DataArray:
+    """
+    Converts an array into an xarray.DataArray with strict 'STCZYX' dimension order.
+    Missing dimensions are expanded with a size of 1.
+
+    Accepts NumPy arrays, lazy arrays (dask, zarr, ...) and existing
+    ``xr.DataArray`` objects (e.g. from ``nd2.ND2File.to_xarray()`` or
+    ``aicsimageio``). Lazy data stays lazy: nothing is loaded into memory.
+
+    Dimension letters: S = scene / series / stage position, T = time,
+    C = channel, Z, Y, X.
+
+    Parameters:
+    -----------
+    image : array-like or xr.DataArray
+        The input image (e.g. from ``tifffile.imread`` or ``nd2``).
+    input_axes : str, optional
+        The dimension order of the input (e.g. 'ZCYX', 'TCYX'). Required for
+        plain arrays. For a DataArray it defaults to its dims, and if given it
+        relabels them positionally (e.g. nd2's 'TPZCYX' -> 'TSZCYX'). A
+        DataArray dim named 'P' (nd2's stage position) is read as 'S' when no
+        'S' dim exists. Note that nd2 names the RGB-component axis 'S': pass
+        ``input_axes`` explicitly for RGB nd2 files.
+    channel_names : str or list of str, optional
+        Names for the channel dimension. Must match the size of 'C'. A single
+        string is accepted for a single channel. Overrides existing 'C' coords.
+    attrs : dict, optional
+        Metadata attributes to add. For a DataArray they are merged into (and
+        take precedence over) its existing attrs.
+
+    Returns:
+    --------
+    xr.DataArray
+        6D DataArray strictly ordered as STCZYX. Existing coordinates (e.g.
+        physical Y/X positions) and the name of a DataArray input are kept;
+        dims without coordinates get integer coordinates (0, 1, 2, ...).
+    """
+    # 1. Wrap into an initial DataArray with dims from input_axes
+    if isinstance(image, xr.DataArray):
+        da = image
+        if input_axes is None:
+            dims = [str(d).upper() for d in da.dims]
+            if 'P' in dims and 'S' not in dims:
+                dims[dims.index('P')] = 'S'
+            input_axes = ''.join(dims) if all(len(d) == 1 for d in dims) else None
+            if input_axes is None:
+                raise ValueError(
+                    f"Cannot map DataArray dims {tuple(da.dims)} to STCZYX; "
+                    "pass input_axes (e.g. 'TCYX') to relabel them."
+                )
+    else:
+        if input_axes is None:
+            raise ValueError("input_axes is required when the input is not an xarray.DataArray.")
+        if not hasattr(image, 'shape') or not hasattr(image, 'ndim'):
+            image = np.asarray(image)
+        da = None
+
+    input_axes = input_axes.upper()
+    ndim = image.ndim
+
+    # 2. Validate input dimensions
+    if ndim != len(input_axes):
+        raise ValueError(
+            f"Shape mismatch: Array has {ndim} dims {tuple(image.shape)}, "
+            f"but input_axes string '{input_axes}' defines {len(input_axes)} dims."
+        )
+    unknown = sorted(set(input_axes) - set(_STCZYX))
+    if unknown:
+        raise ValueError(
+            f"input_axes '{input_axes}' contains {unknown}; allowed letters are {_STCZYX}."
+        )
+    if len(set(input_axes)) != len(input_axes):
+        raise ValueError(f"input_axes '{input_axes}' repeats a dimension.")
+
+    if da is None:
+        da = xr.DataArray(image, dims=list(input_axes))
+    else:
+        da = _relabel_dims(da, input_axes)
+
+    # 3. Expand missing dimensions (size 1) and enforce STCZYX order
+    missing_dims = [dim for dim in _STCZYX if dim not in input_axes]
+    if missing_dims:
+        da = da.expand_dims({dim: 1 for dim in missing_dims})
+    da = da.transpose(*_STCZYX)
+
+    # 4. Populate coordinates (keep existing ones)
+    coords = {}
+    if channel_names is not None:
+        if isinstance(channel_names, str):
+            channel_names = [channel_names]
+        channel_names = list(channel_names)
+        if len(channel_names) != da.sizes['C']:
+            raise ValueError(
+                f"Provided {len(channel_names)} channel names, "
+                f"but C dimension has size {da.sizes['C']}."
+            )
+        coords['C'] = channel_names
+    for dim in _STCZYX:
+        if dim not in coords and dim not in da.coords:
+            # Default to standard integer coordinates (0, 1, 2...)
+            coords[dim] = np.arange(da.sizes[dim])
+    da = da.assign_coords(coords)
+
+    # 5. Append metadata attributes (copy: never modify the caller's dicts)
+    new_attrs = dict(da.attrs)
+    new_attrs.update(attrs or {})
+    new_attrs['axes'] = _STCZYX
+    da.attrs = new_attrs
+
+    return da
+
+
 def numpy_to_stczyx_xarray(
     image_array: np.ndarray,
     input_axes: str,
     channel_names: list = None,
     attrs: dict = None
 ) -> xr.DataArray:
-    """
-    Converts a NumPy array into an xarray.DataArray with strict 'STCZYX' dimension order.
-    Missing dimensions in `input_axes` are expanded with a size of 1.
-
-    Parameters:
-    -----------
-    image_array : np.ndarray
-        The input image array (e.g., from tifffile.imread).
-    input_axes : str
-        The dimension order of the input array (e.g., 'ZCYX', 'TCYX').
-    channel_names : list of str, optional
-        Names for the channel dimension. Must match the size of 'C'.
-    attrs : dict, optional
-        Dictionary of metadata attributes to add to the xarray.
-
-    Returns:
-    --------
-    xr.DataArray
-        6D DataArray strictly ordered as STCZYX.
-    """
-    input_axes = input_axes.upper()
-    target_axes = list('STCZYX')
-
-    # 1. Validate input dimensions
-    if len(image_array.shape) != len(input_axes):
-        raise ValueError(
-            f"Shape mismatch: Array has {len(image_array.shape)} dims {image_array.shape}, "
-            f"but input_axes string '{input_axes}' defines {len(input_axes)} dims."
-        )
-
-    # 2. Wrap into an initial DataArray
-    da = xr.DataArray(image_array, dims=list(input_axes))
-
-    # 3. Expand missing dimensions (set size to 1)
-    missing_dims = [dim for dim in target_axes if dim not in input_axes]
-    for dim in missing_dims:
-        da = da.expand_dims({dim: 1})
-
-    # 4. Transpose to strictly enforce STCZYX order
-    da = da.transpose(*target_axes)
-
-    # 5. Populate coordinates
-    coords = {}
-    for dim in target_axes:
-        if dim == 'C' and channel_names is not None:
-            if len(channel_names) != da.sizes['C']:
-                raise ValueError(
-                    f"Provided {len(channel_names)} channel names, "
-                    f"but C dimension has size {da.sizes['C']}."
-                )
-            coords[dim] = channel_names
-        else:
-            # Default to standard integer coordinates (0, 1, 2...)
-            coords[dim] = np.arange(da.sizes[dim])
-
-    da = da.assign_coords(coords)
-
-    # 6. Append metadata attributes (copy: never modify the caller's dict)
-    attrs = dict(attrs or {})
-    attrs['axes'] = 'STCZYX'
-    da.attrs.update(attrs)
-
-    return da
+    """Deprecated alias of :func:`array_to_stczyx_xarray`."""
+    warnings.warn(
+        "numpy_to_stczyx_xarray is deprecated. Use array_to_stczyx_xarray instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return array_to_stczyx_xarray(
+        image_array, input_axes, channel_names=channel_names, attrs=attrs
+    )
 
 
 # Length units in metres, keyed by the spellings ImageJ, OME and TIFF use
