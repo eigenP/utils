@@ -1897,19 +1897,20 @@ def test_infer_histogram_range_float_conventions():
 
 
 def test_slice_widget_default_vmax_is_robust_to_hot_pixels():
-    """Default vmax is the 99.9th percentile, so a few hot pixels do not set the range.
+    """Default vmax is the 99.99th percentile, so a few hot pixels do not set the range.
 
-    Strategy: a 12-bit-like channel whose values stay <= 1000 except 10 hot
-    pixels at 4095 (0.01% of the voxels). The plain maximum (4095) would map
-    the real signal to < 25% brightness; the default must instead land within
-    the bulk of the data (<= 1000) and be an integer for integer data. An
-    explicit vmax must still win, and a channel whose signal covers fewer
-    voxels than the 0.1% tail (here 5 bright voxels on a zero background,
-    where the percentile is 0) falls back to the maximum, so it is not blank.
+    Strategy: a 12-bit-like channel whose values stay <= 1000 except 5 hot
+    pixels at 4095 (0.005% of the voxels, below the 0.01% tail). The plain
+    maximum (4095) would map the real signal to < 25% brightness; the default
+    must instead land within the bulk of the data (<= 1000) and be an integer
+    for integer data. An explicit vmax must still win, and a channel whose
+    signal covers fewer voxels than the 0.01% tail (here 5 bright voxels on a
+    zero background, where the percentile is 0) falls back to the maximum, so
+    it is not blank.
     """
     rng = np.random.default_rng(3)
     ch = rng.integers(0, 1001, (10, 100, 100)).astype(np.uint16)
-    ch.flat[rng.choice(ch.size, 10, replace=False)] = 4095
+    ch.flat[rng.choice(ch.size, 5, replace=False)] = 4095
     sparse = np.zeros((10, 100, 100), dtype=np.uint16)
     sparse.flat[:5] = 3000
 
@@ -1922,11 +1923,30 @@ def test_slice_widget_default_vmax_is_robust_to_hot_pixels():
     assert w.vmax_list == [4095.0, 3000.0]
 
 
+def test_slice_widget_default_vmax_keeps_sparse_signal_unsaturated():
+    """A sparse channel (signal on ~0.2% of voxels) keeps its signal below the default vmax.
+
+    This is the case that motivated q = 99.99: at the 99.9th percentile the
+    default fell inside the signal and saturated ~40% of it. Strategy: 200
+    signal voxels ramping 300..2000 on a 100-count background (0.2% of 1e5
+    voxels). The default vmax must saturate at most 5% of the signal voxels;
+    as a control, the 99.9th percentile of the same data saturates far more.
+    """
+    rng = np.random.default_rng(7)
+    ch = rng.normal(100, 20, (10, 100, 100)).clip(0, 4095).astype(np.uint16)
+    signal = np.linspace(300, 2000, 200).astype(np.uint16)
+    ch.flat[rng.choice(ch.size, signal.size, replace=False)] = signal
+
+    w = show_zyx_max_slice_interactive(ch, pixel_sizes=(1, 1, 1))
+    assert (signal > w.vmax_list[0]).mean() <= 0.05
+    assert (signal > np.percentile(ch, 99.9)).mean() > 0.3
+
+
 def test_annotator_default_vmax_is_robust_and_annotations_stay_255():
     """The annotator uses the same robust default for image channels; annotations keep 255."""
     rng = np.random.default_rng(4)
     ch = rng.integers(0, 1001, (10, 100, 100)).astype(np.uint16)
-    ch.flat[:10] = 4095
+    ch.flat[:5] = 4095  # 0.005% hot pixels, below the 0.01% tail
     w = show_zyx_max_slice_interactive_point_annotator(ch, pixel_sizes=(1, 1, 1))
     assert w.vmax_list[0] <= 1000 and w.vmax_list[-1] == 255.0
 

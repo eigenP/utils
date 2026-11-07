@@ -1021,12 +1021,16 @@ def _finite_max(*arrays):
     return best
 
 
-def _robust_vmax(arr, q=99.9, max_samples=1_000_000):
+def _robust_vmax(arr, q=99.99, max_samples=1_000_000):
     """
     Default display maximum: the `q`-th percentile of the finite values.
 
     A few hot pixels, saturated debris or a single bright cell set the plain
-    maximum and leave the rest of the image dark. The percentile is estimated
+    maximum and leave the rest of the image dark. q = 99.99 tolerates hot
+    pixels up to 0.01% of the voxels (a camera's hot-pixel rate, since they
+    repeat in every Z slice) while saturating little of a sparse channel: with
+    q = 99.9, a channel whose blobs cover ~0.2% of the voxels had ~40% of its
+    signal saturated. The percentile is estimated
     on a fixed-seed random sample of at most `max_samples` values (a strided
     sample can alias with the image rows). When the signal is sparser than
     (100 - q)% of the voxels the percentile equals the background level; the
@@ -2281,7 +2285,7 @@ class TNIASliceWidget(TNIAWidgetBase):
                     res.append(self._auto_vmax[i])
             return res
 
-        # Robust default display maximum per channel (99.9th percentile), also
+        # Robust default display maximum per channel (99.99th percentile), also
         # used when a vmax box is cleared in the GUI.
         channels = im if isinstance(im, list) else [im]
         self._auto_vmax = [1.0 if m is None else m for m in (_robust_vmax(c) for c in channels)]
@@ -3487,8 +3491,8 @@ def show_zyx_max_slice_interactive(
 
     Notes:
         - When `vmax` is not explicitly provided (or its box is cleared in the GUI), it defaults to
-          the 99.9th percentile of each channel's finite values, so a few hot pixels do not set the
-          display range (the maximum when the signal covers less than 0.1% of the voxels; 1.0 for an
+          the 99.99th percentile of each channel's finite values, so a few hot pixels do not set the
+          display range (the maximum when the signal covers less than 0.01% of the voxels; 1.0 for an
           all-NaN channel); `vmin` defaults to 0.
         - Interactive widgets compute a 128-bin histogram per channel in the Python backend (excluding NaNs for floats)
           and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
