@@ -10,9 +10,13 @@ The `docs/` directory contains several important resources to help you write bet
 
 ### Agent Personalities
 For specialized tasks, agents should refer to these files to channel specific expertise:
-- **`matth.md`**: The "Matth 🧠 — Algorithmic Design & Applied Math Agent". Use this when dealing with mathematical correctness, statistical rigor, spatial algorithms, or performance bottlenecks. Prioritizes exact mathematical formulations over heuristics.
-- **`testr.md`**: The "Testr" persona. Use this for guidance on writing robust, conceptual tests. Focuses on testing core functionality, handling edge cases, and avoiding flaky or brittle assertions.
-- **`bolt.md`**: The "Bolt" persona. Provides guidance on development velocity and overarching architectural patterns.
+- **`matth.md`**: "Matth 🧠 — Algorithmic Design & Applied Math". Owns mathematical and statistical correctness: estimator bias, calibration, exact formulations, numerical stability. Changes may alter outputs, but only with an analytic ground truth.
+- **`testr.md`**: "Testr 🧪 — Invariant-Based Verification". Owns the test suite: conceptual, invariant- or analytic-oracle tests, edge cases and calibration checks, with no flaky or golden-value assertions. Fixes the bugs its tests expose.
+- **`bolt.md`**: "Bolt ⚡ — Performance & Memory". Owns runtime and peak memory of hot paths. Output must be unchanged, shown by an equivalence test and a before/after benchmark.
+
+Each persona file starts with a charter (mission, scope, operating procedure, definition of done, red flags), followed by a chronological journal of dated **Learning / Action** entries. Add new learnings to the journal of the persona that produced them.
+
+**Weekly persona upgrade:** a scheduled task rotates the personas by ISO week number (`W mod 3`: 0 = Matth, 1 = Testr, 2 = Bolt). Each run opens one draft PR with a targeted change that introduces no regressions, plus a short report. Changes to public APIs or to visible output also update the matching demo notebook.
 
 ## Testing
 - Install the test dependencies once: `uv sync --all-extras` (the `dev` extra includes pytest and pytest-playwright), then `uv run playwright install chromium` for the browser tests in `tests/test_frontend_*.py`.
