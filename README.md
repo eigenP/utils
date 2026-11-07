@@ -41,7 +41,8 @@
 
 ### Core Utilities
 * **Spline Utilities**: Fit cubic splines (`fit_cubic_spline`), resample them uniformly (`create_resampled_spline`), render them into ND image volumes (`create_nd_image_from_spline`), calculate tangent vectors, project points onto planes, and calculate real-world arc lengths (`calculate_spline_length`) (`spline_utils.py`).
-* **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `array_to_stczyx_xarray` (NumPy/dask arrays or existing `xarray.DataArray`s, e.g. from `nd2`; `numpy_to_stczyx_xarray` is a deprecated alias), with pixel sizes stored as physical coordinates and `attrs['pixel_sizes']` (read back with `get_stczyx_pixel_sizes`), and extract voxel sizes with `get_tiff_voxel_size`.
+* **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `array_to_stczyx_xarray` (NumPy/dask arrays or existing `xarray.DataArray`s, e.g. from `nd2`; `numpy_to_stczyx_xarray` is a deprecated alias), with pixel sizes stored as physical coordinates and `attrs['pixel_sizes']` (read back with `get_stczyx_pixel_sizes`) and tile stage positions as `stage_y`/`stage_x` coordinates, and extract voxel sizes with `get_tiff_voxel_size`.
+* **Tile Stitching**: `stitch_tiles` is a minimal translation-only 2D stitcher for STCZYX tiles (stage-position prior, phase correlation on Z max projections, global least squares, linear blending). For more control use [multiview-stitcher](https://github.com/multiview-stitcher/multiview-stitcher). Demo: `notebooks/pybasic_demo.py`.
 * **I/O Utilities**: Functions to streamline file and data reading, check files before saving (`check_file_before_save`), ensure directory existence (`ensure_directory`), and fast file downloading (`download_file`, `download_file_async`), and unzipping (`un_gzip`).
 
 ### Examples
@@ -106,6 +107,7 @@ Everything except single-cell analysis runs in [Pyodide](https://pyodide.org), t
 | `plotting_utils`, `tnia_plotting_anywidgets`, `stats`, `spline_utils`, `io` (file helpers) | core | yes |
 | `image_and_labels_utils`, `intensity_rescaling`, `extended_depth_of_focus`, `maxproj_registration`, `surface_extraction`, `clahe_equalize_adapthist` | `scikit-image` | yes |
 | `image_io` | `xarray`, `tifffile` | yes |
+| `stitching` | `xarray`, `scikit-image` | yes |
 | `stats.add_stat_annotations`, `plotting_utils.plotly_scatter_3d` | `[plotting]` | yes |
 | `single_cell` graph helpers (`smooth_expression_on_graph`, `find_correlated_features`, ...) | `anndata`, `scikit-learn` | yes (scanpy is imported lazily) |
 | `single_cell` functions that call scanpy / pacmap / leidenalg | `[single-cell]` (`numba` has no WASM build) | no |

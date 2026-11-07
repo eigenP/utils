@@ -59,6 +59,12 @@ except ImportError:
     pass
 
 try:
+    from .stitching import stitch_tiles
+    __all__.append("stitch_tiles")
+except ImportError:
+    pass
+
+try:
     from .image_and_labels_utils import (
         windowed_slice_projection,
         optimized_entire_labels_touching_mask,

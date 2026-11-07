@@ -7,6 +7,7 @@
 #     "matplotlib",
 #     "scikit-image",
 #     "tifffile",
+#     "xarray",
 #     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main ; sys_platform != 'emscripten'",
 # ]
 # ///
@@ -31,6 +32,8 @@ def _(mo):
 
     This notebook demonstrates the basic usage of `fit_basic_shading` and `apply_basic_shading`.
     We artificially degrade the `skimage.data.cells3d` dataset and then recover the true intensities.
+    The last section runs a full tiled-acquisition pipeline: standardising tiles to an STCZYX
+    `xarray` (`array_to_stczyx_xarray`), shading correction, and stitching (`stitch_tiles`).
     """)
     return
 
@@ -50,6 +53,7 @@ async def _():
             "https://raw.githubusercontent.com/eigenP/utils/wasm-wheel/eigenp_utils-0-py3-none-any.whl",
             "scikit-image",
             "tifffile",
+            "xarray",
         ])
     wasm_ready = True
     return IN_WASM, wasm_ready
@@ -134,7 +138,8 @@ def _(IN_WASM, cells3d, mo):
                 mo.md(
                     "**Browser (WebAssembly) version:** the 3D fits below are slow here, so they use a "
                     f"downsampled volume {cells3d_vol.shape} (every 2nd z, every 4th y/x) and run only "
-                    "when you click (expect a few minutes)."
+                    "when you click (expect a few minutes). The tiling and stitching section also "
+                    "waits for this button."
                 ),
                 run_3d,
             ]),
@@ -275,6 +280,117 @@ def _(apply_basic_shading, cells3d_vol, fit_basic_shading, mo, np, plt, run_3d):
 @app.cell
 def _(plot_tiles):
     plot_tiles
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## Tiled acquisition: standardise, correct shading, stitch
+
+    A tiled acquisition is simulated from the nuclei volume (every 3rd z-plane): a 3×3 grid of
+    overlapping tiles, each with the same vignetting, a darkfield offset and noise. As on a real
+    microscope, the stage *reports* the nominal grid positions while the tiles were actually taken a
+    few pixels off (stage error).
+
+    1. `array_to_stczyx_xarray` turns the `(S, Z, Y, X)` stack into the standard 6D `STCZYX` layout
+       (singleton T and C), with the channel name, the pixel sizes (physical coordinates and
+       `attrs['pixel_sizes']`) and the stage positions (`stage_y` / `stage_x` coordinates along S).
+       The same call standardises an existing `xarray.DataArray`, e.g. `nd2.ND2File(...).to_xarray()`.
+    2. `fit_basic_shading` estimates one flatfield and darkfield from all planes of all tiles.
+       BaSiC needs many images: fitted on the 9 max projections alone, it mistakes the sparse
+       nuclei for shading and the correction adds seams.
+    3. `stitch_tiles` registers overlapping neighbours on the max projection over Z, solves the
+       tile positions globally and fuses every plane with linear blending. It is deliberately minimal (translation only, 2D
+       registration on a max projection); for more control use
+       [multiview-stitcher](https://github.com/multiview-stitcher/multiview-stitcher).
+    """)
+    return
+
+
+@app.cell
+def _(apply_basic_shading, cells3d, fit_basic_shading, mo, np, run_3d):
+    mo.stop(run_3d is not None and not run_3d.value)
+    from eigenp_utils.image_io import array_to_stczyx_xarray
+    from eigenp_utils.stitching import stitch_tiles
+
+    _rng = np.random.default_rng(0)
+    tiled_volume = cells3d[::3].astype(np.float32)  # (20, 256, 256) nuclei
+    _tile = 110
+    _nominal = np.array([(_y, _x) for _y in (4, 72, 140) for _x in (4, 72, 140)])  # 42 px overlap
+    true_px = _nominal + _rng.integers(-4, 5, size=_nominal.shape)                # stage error
+
+    _g = np.linspace(-1, 1, _tile)
+    _vignetting = 1.0 - 0.5 * (_g[:, None] ** 2 + _g[None, :] ** 2) / 2  # 1.0 centre -> 0.5 corners
+    _clean = np.stack([tiled_volume[:, _y:_y + _tile, _x:_x + _tile] for _y, _x in true_px])
+    _raw = (_clean * _vignetting + 100.0 + _rng.normal(0, 20.0, _clean.shape)).astype(np.float32)
+
+    # 1. Standardise: (S, Z, Y, X) -> STCZYX with channel name, pixel sizes and stage positions
+    _px = 0.26  # cells3d XY pixel size (µm); z-step 0.29 µm, every 3rd plane kept
+    tile_stack = array_to_stczyx_xarray(
+        _raw, 'SZYX',
+        channel_names='DAPI',
+        pixel_sizes={'Z': 3 * 0.29, 'Y': _px, 'X': _px, 'unit': 'µm'},
+        stage_positions={'Y': _nominal[:, 0] * _px, 'X': _nominal[:, 1] * _px},
+    )
+
+    # 2. One shading model for all planes of all tiles
+    _planes = tile_stack.values.reshape(-1, _tile, _tile)
+    _shading = fit_basic_shading(_planes, is_3d=False, get_darkfield=True)
+    _corrected = apply_basic_shading(tile_stack.values, _shading['flatfield'], _shading['darkfield'])
+    _tiles_corrected = tile_stack.copy(data=_corrected)
+
+    # 3. Stitch: stage-only placement (registration disabled) vs registered
+    mosaic_stage = stitch_tiles(_tiles_corrected, min_ncc=1.1)
+    mosaic = stitch_tiles(_tiles_corrected)
+    mosaic_raw = stitch_tiles(tile_stack)  # without shading correction, for comparison
+    return mosaic, mosaic_raw, mosaic_stage, tile_stack, true_px, tiled_volume
+
+
+@app.cell
+def _(tile_stack):
+    tile_stack
+    return
+
+
+@app.cell
+def _(mo, mosaic, mosaic_stage, np, true_px):
+    _truth = true_px - true_px.min(axis=0)
+    _err_stage = np.abs(np.array(mosaic_stage.attrs['stitching']['positions_px']) - _truth).max()
+    _err_reg = np.abs(np.array(mosaic.attrs['stitching']['positions_px']) - _truth).max()
+    mo.md(f"""
+    Largest tile-position error: **{_err_stage} px** from the stage alone,
+    **{_err_reg} px** after registration ({mosaic.attrs['stitching']['n_pairs']} registered pairs used).
+    """)
+    return
+
+
+@app.cell
+def _(mo, mosaic, mosaic_raw, mosaic_stage, plt, true_px, tiled_volume):
+    _lo = true_px.min(axis=0)  # the mosaic starts at the top-left-most tile
+    _truth = tiled_volume.max(axis=0)[_lo[0]:_lo[0] + mosaic.sizes['Y'], _lo[1]:_lo[1] + mosaic.sizes['X']]
+
+    def _mip(da):
+        return da.isel(S=0, T=0, C=0).max(dim='Z').values
+
+    _panels = [
+        (_truth, 'Ground truth (max over Z)'),
+        (_mip(mosaic_raw), 'Registered, no shading correction'),
+        (_mip(mosaic_stage), 'Stage positions only (corrected tiles)'),
+        (_mip(mosaic), 'Registered (corrected tiles)'),
+    ]
+    fig_stitch, axes_stitch = plt.subplots(1, 4, figsize=(24, 6))
+    for _ax, (_img, _title) in zip(axes_stitch, _panels):
+        _ax.imshow(_img, cmap='gray')
+        _ax.set_title(_title)
+        _ax.axis('off')
+    plot_stitch = mo.as_html(fig_stitch)
+    return (plot_stitch,)
+
+
+@app.cell
+def _(plot_stitch):
+    plot_stitch
     return
 
 
