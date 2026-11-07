@@ -270,3 +270,46 @@ def test_frontend_histogram_vrange_slider_and_width(page, static_rangeslider_ser
     assert narrow >= 160 and narrow < wide
     # The drawing buffer follows the laid-out width (no blurry stretching).
     assert abs(page.evaluate("() => document.querySelector('canvas').width") - narrow) <= 2
+
+
+def test_frontend_scale_bar_checkbox_toggles_model(page, static_rangeslider_server):
+    """The "Scale Bar" checkbox writes `scale_bar_show` and follows model changes.
+
+    Strategy: the checkbox starts checked (default on), unchecking it must set
+    the trait to false and save, and a change pushed from Python must be
+    reflected back in the checkbox.
+    """
+    page.goto(static_rangeslider_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+
+    cb = page.get_by_label("Scale Bar")
+    assert cb.is_checked()
+    page.evaluate("window.saveTriggered = false")
+    cb.uncheck()
+    assert page.evaluate("window.mockModel.get('scale_bar_show')") is False
+    assert page.evaluate("window.saveTriggered") is True
+
+    page.evaluate("window.mockModel.set('scale_bar_show', true)")
+    assert cb.is_checked()
+
+
+def test_frontend_scale_bar_fontsize_box(page, static_rangeslider_server):
+    """The scale-bar size box writes `scale_bar_fontsize_pt`: a number, 0 (hidden) or null (auto).
+
+    Strategy: type 14, then 0, then clear the box, and read the trait back;
+    a negative entry is clamped to 0 and non-numeric text is rejected.
+    """
+    page.goto(static_rangeslider_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+    box = page.locator("input[placeholder='auto']")
+
+    def enter(text):
+        box.fill(text)
+        box.dispatch_event("change")
+        return page.evaluate("window.mockModel.get('scale_bar_fontsize_pt')")
+
+    assert enter("14") == 14
+    assert enter("0") == 0
+    assert enter("-3") == 0
+    assert enter("") is None
+    assert enter("abc") is None and box.input_value() == ""

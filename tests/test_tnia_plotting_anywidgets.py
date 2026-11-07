@@ -790,8 +790,7 @@ def test_show_zyx_max_slabs_scale_bar():
     fig3 = show_zyx_max_slabs(im, pixel_sizes={'Z': 1.5, 'Y': 0.5, 'X': 0.5})
 
     def get_text_from_fig(fig):
-        axBar = fig.axes[-1]
-        for t in axBar.texts:
+        for t in fig.axXY.texts:
             if "µm" in t.get_text() or "pixel_sizes" in t.get_text() or "sxy" in t.get_text():
                 return t.get_text()
         return None
@@ -799,6 +798,158 @@ def test_show_zyx_max_slabs_scale_bar():
     # Assert
     assert "µm" in get_text_from_fig(fig2)
     assert "µm" in get_text_from_fig(fig3)
+
+def _scale_bar_artists(fig):
+    """(bar LineCollection or None, label Text or None) drawn on the XY panel."""
+    from matplotlib.collections import LineCollection
+    bars = [c for c in fig.axXY.collections if isinstance(c, LineCollection)]
+    labels = [t for t in fig.axXY.texts if 'µm' in t.get_text() or 'pixel_sizes' in t.get_text()]
+    return (bars[-1] if bars else None), (labels[0] if labels else None)
+
+
+@pytest.mark.parametrize("figsize", [(4, 4), (10, 10)])
+def test_scale_bar_label_sits_centred_right_above_the_bar(figsize):
+    """The scale-bar label is centred on the bar and just above it, at any figure size.
+
+    It used to be centred in the empty bottom-right panel, away from the bar.
+    Strategy: render, then compare display coordinates of the label's bounding
+    box with the bar segment: horizontal centres agree within 1 px, the label's
+    bottom is above the line but within about one font height of it, and the
+    label is no wider than the canvas region left of the right edge.
+    """
+    im = np.random.default_rng(0).integers(0, 255, (10, 100, 100)).astype(np.uint8)
+    fig = show_zyx_max_slabs(im, pixel_sizes=(1.0, 0.5, 0.5), figsize=figsize)
+    try:
+        bar, label = _scale_bar_artists(fig)
+        assert bar is not None and label is not None
+        renderer = fig.canvas.get_renderer()
+        (x0, y0), (x1, y1) = fig.axXY.transAxes.transform(np.asarray(bar.get_segments()[0]))
+        bbox = label.get_window_extent(renderer)
+        assert abs((bbox.x0 + bbox.x1) / 2 - (x0 + x1) / 2) < 1.0
+        gap = bbox.y0 - y0
+        font_px = label.get_fontsize() * fig.dpi / 72
+        assert 0 < gap < font_px
+        assert label.get_color() == 'white'
+    finally:
+        plt.close(fig)
+
+
+def test_scale_bar_show_false_hides_bar_and_label():
+    """`scale_bar_show=False` removes both the bar and its label (static and widgets).
+
+    Strategy: the static function and both widget types are rendered with the
+    flag off (negative control: on), and the GUI trait can turn it back on.
+    The copied parameters keep the setting so a paste reproduces the view.
+    """
+    im = np.random.default_rng(1).integers(0, 255, (10, 60, 60)).astype(np.uint8)
+    for show in (True, False):
+        fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_show=show)
+        try:
+            bar, label = _scale_bar_artists(fig)
+            assert (bar is not None, label is not None) == (show, show)
+        finally:
+            plt.close(fig)
+
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1), scale_bar_show=False)
+    fig = w._render()
+    try:
+        assert _scale_bar_artists(fig) == (None, None)
+    finally:
+        plt.close(fig)
+    w.copy_params_trigger += 1
+    assert "scale_bar_show=False," in w.copy_params_string
+    w.scale_bar_show = True
+    fig = w._render()
+    try:
+        assert _scale_bar_artists(fig)[1] is not None
+    finally:
+        plt.close(fig)
+
+    pts = (np.array([0.0, 9.0]), np.array([0.0, 59.0]), np.array([0.0, 59.0]))
+    for render in ('points', 'density'):
+        ws = show_zyx_max_scatter_interactive(pts, pixel_sizes=(1, 1, 1), render=render, scale_bar_show=False)
+        fig = ws._render()
+        try:
+            assert _scale_bar_artists(fig)[1] is None
+        finally:
+            plt.close(fig)
+
+
+def test_scale_bar_fontsize_sets_label_and_bar_and_zero_hides_them():
+    """`scale_bar_fontsize_pt` sizes label and bar together; 0 removes both.
+
+    Strategy: render at 12 pt and 24 pt and check the label font size and that
+    the bar's line width doubles with it (it follows the font). 0 must draw
+    neither bar nor label (static function and widget trait), the GUI's empty
+    string means auto, and a negative size is rejected rather than ignored.
+    """
+    im = np.random.default_rng(5).integers(0, 255, (10, 60, 60)).astype(np.uint8)
+    widths = {}
+    for fs in (12, 24):
+        fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=fs)
+        try:
+            bar, label = _scale_bar_artists(fig)
+            assert label.get_fontsize() == fs
+            widths[fs] = bar.get_linewidth()[0]
+        finally:
+            plt.close(fig)
+    assert widths[24] == pytest.approx(2 * widths[12])
+
+    fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=0)
+    try:
+        assert _scale_bar_artists(fig) == (None, None)
+    finally:
+        plt.close(fig)
+
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=0)
+    fig = w._render()
+    try:
+        assert _scale_bar_artists(fig) == (None, None)
+    finally:
+        plt.close(fig)
+    w.copy_params_trigger += 1
+    assert "scale_bar_fontsize_pt=0.0," in w.copy_params_string
+    w.scale_bar_fontsize_pt = ""   # GUI box cleared -> auto size
+    fig = w._render()
+    try:
+        assert _scale_bar_artists(fig)[1] is not None
+    finally:
+        plt.close(fig)
+
+    with pytest.raises(ValueError):
+        show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=-1)
+
+
+def test_scale_bar_and_label_have_faint_black_outline():
+    """Bar and label carry a 30%-opacity black outline (visible over same-colour pixels).
+
+    Strategy: inspect the path effects of both artists; the bar's stroke must
+    be wider than the bar itself, otherwise it is hidden underneath.
+    """
+    from matplotlib import patheffects
+    im = np.random.default_rng(6).integers(0, 255, (10, 60, 60)).astype(np.uint8)
+    fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1))
+    try:
+        bar, label = _scale_bar_artists(fig)
+        for artist in (bar, label):
+            strokes = [pe for pe in artist.get_path_effects() if isinstance(pe, patheffects.Stroke)]
+            assert len(strokes) == 1
+            gc = strokes[0]._gc
+            assert gc['foreground'] == 'black' and gc['alpha'] == 0.3
+        bar_stroke = [pe for pe in bar.get_path_effects() if isinstance(pe, patheffects.Stroke)][0]
+        assert bar_stroke._gc['linewidth'] > bar.get_linewidth()[0]
+    finally:
+        plt.close(fig)
+
+
+def test_scale_bar_toggle_triggers_one_rerender():
+    """Toggling the GUI checkbox re-renders the widget (the trait is part of the render state)."""
+    im = np.random.default_rng(2).integers(0, 255, (10, 40, 40)).astype(np.uint8)
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1))
+    before = w.image_data
+    w.scale_bar_show = False
+    assert w.image_data != before
+
 
 def test_interactive_factory_passes_pixel_sizes():
     """Test that interactive factory passes pixel sizes works as expected."""
@@ -1746,19 +1897,20 @@ def test_infer_histogram_range_float_conventions():
 
 
 def test_slice_widget_default_vmax_is_robust_to_hot_pixels():
-    """Default vmax is the 99.9th percentile, so a few hot pixels do not set the range.
+    """Default vmax is the 99.99th percentile, so a few hot pixels do not set the range.
 
-    Strategy: a 12-bit-like channel whose values stay <= 1000 except 10 hot
-    pixels at 4095 (0.01% of the voxels). The plain maximum (4095) would map
-    the real signal to < 25% brightness; the default must instead land within
-    the bulk of the data (<= 1000) and be an integer for integer data. An
-    explicit vmax must still win, and a channel whose signal covers fewer
-    voxels than the 0.1% tail (here 5 bright voxels on a zero background,
-    where the percentile is 0) falls back to the maximum, so it is not blank.
+    Strategy: a 12-bit-like channel whose values stay <= 1000 except 5 hot
+    pixels at 4095 (0.005% of the voxels, below the 0.01% tail). The plain
+    maximum (4095) would map the real signal to < 25% brightness; the default
+    must instead land within the bulk of the data (<= 1000) and be an integer
+    for integer data. An explicit vmax must still win, and a channel whose
+    signal covers fewer voxels than the 0.01% tail (here 5 bright voxels on a
+    zero background, where the percentile is 0) falls back to the maximum, so
+    it is not blank.
     """
     rng = np.random.default_rng(3)
     ch = rng.integers(0, 1001, (10, 100, 100)).astype(np.uint16)
-    ch.flat[rng.choice(ch.size, 10, replace=False)] = 4095
+    ch.flat[rng.choice(ch.size, 5, replace=False)] = 4095
     sparse = np.zeros((10, 100, 100), dtype=np.uint16)
     sparse.flat[:5] = 3000
 
@@ -1771,11 +1923,30 @@ def test_slice_widget_default_vmax_is_robust_to_hot_pixels():
     assert w.vmax_list == [4095.0, 3000.0]
 
 
+def test_slice_widget_default_vmax_keeps_sparse_signal_unsaturated():
+    """A sparse channel (signal on ~0.2% of voxels) keeps its signal below the default vmax.
+
+    This is the case that motivated q = 99.99: at the 99.9th percentile the
+    default fell inside the signal and saturated ~40% of it. Strategy: 200
+    signal voxels ramping 300..2000 on a 100-count background (0.2% of 1e5
+    voxels). The default vmax must saturate at most 5% of the signal voxels;
+    as a control, the 99.9th percentile of the same data saturates far more.
+    """
+    rng = np.random.default_rng(7)
+    ch = rng.normal(100, 20, (10, 100, 100)).clip(0, 4095).astype(np.uint16)
+    signal = np.linspace(300, 2000, 200).astype(np.uint16)
+    ch.flat[rng.choice(ch.size, signal.size, replace=False)] = signal
+
+    w = show_zyx_max_slice_interactive(ch, pixel_sizes=(1, 1, 1))
+    assert (signal > w.vmax_list[0]).mean() <= 0.05
+    assert (signal > np.percentile(ch, 99.9)).mean() > 0.3
+
+
 def test_annotator_default_vmax_is_robust_and_annotations_stay_255():
     """The annotator uses the same robust default for image channels; annotations keep 255."""
     rng = np.random.default_rng(4)
     ch = rng.integers(0, 1001, (10, 100, 100)).astype(np.uint16)
-    ch.flat[:10] = 4095
+    ch.flat[:5] = 4095  # 0.005% hot pixels, below the 0.01% tail
     w = show_zyx_max_slice_interactive_point_annotator(ch, pixel_sizes=(1, 1, 1))
     assert w.vmax_list[0] <= 1000 and w.vmax_list[-1] == 255.0
 
@@ -2127,7 +2298,7 @@ def test_scatter_density_panels_scale_bar_and_hover_use_data_units():
         np.testing.assert_allclose(span(fig.axXZ), (1001, 21), rtol=1e-6)
         np.testing.assert_allclose(span(fig.axZY), (21, 1001), rtol=1e-6)
 
-        label = [t.get_text() for t in fig.axBar.texts][0]
+        label = [t.get_text() for t in fig.axXY.texts][0]
         bar = fig.axXY.collections[-1].get_segments()[0]
         bar_units = (bar[1][0] - bar[0][0]) * span(fig.axXY)[0]
         assert bar_units == pytest.approx(float(label.split()[0]), rel=1e-6)
@@ -2421,7 +2592,7 @@ def test_points_mode_scale_bar_matches_rotated_panel():
     w = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(1, 1, 1), rotate_view=(45, 0, 0))
     fig = w._render()
     try:
-        label = fig.axBar.texts[0].get_text()
+        label = _scale_bar_artists(fig)[1].get_text()
         seg = [c for c in fig.axXY.collections if hasattr(c, 'get_segments')][-1].get_segments()[0]
         bar_units = (seg[1][0] - seg[0][0]) * abs(np.diff(fig.axXY.get_xlim())[0])
         assert bar_units == pytest.approx(float(label.split()[0]), rel=1e-6)
