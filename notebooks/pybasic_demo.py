@@ -300,7 +300,7 @@ def _(mo):
     2. `fit_basic_shading` estimates one flatfield and darkfield from all planes of all tiles.
        BaSiC needs many images: fitted on the 9 max projections alone, it mistakes the sparse
        nuclei for shading and the correction adds seams.
-    3. `stitch_tiles` registers overlapping neighbours on the max projection over Z, solves the
+    3. `stitch_tiles` registers side-by-side neighbours on the max projection over Z, solves the
        tile positions globally and fuses every plane with linear blending. It is deliberately minimal (translation only, 2D
        registration on a max projection); for more control use
        [multiview-stitcher](https://github.com/multiview-stitcher/multiview-stitcher).
@@ -311,6 +311,7 @@ def _(mo):
 @app.cell
 def _(apply_basic_shading, cells3d, fit_basic_shading, mo, np, run_3d):
     mo.stop(run_3d is not None and not run_3d.value)
+    import warnings
     from eigenp_utils.image_io import array_to_stczyx_xarray
     from eigenp_utils.stitching import stitch_tiles
 
@@ -340,10 +341,13 @@ def _(apply_basic_shading, cells3d, fit_basic_shading, mo, np, run_3d):
     _corrected = apply_basic_shading(tile_stack.values, _shading['flatfield'], _shading['darkfield'])
     _tiles_corrected = tile_stack.copy(data=_corrected)
 
-    # 3. Stitch: stage-only placement (registration disabled) vs registered
-    mosaic_stage = stitch_tiles(_tiles_corrected, min_ncc=1.1)
-    mosaic = stitch_tiles(_tiles_corrected)
-    mosaic_raw = stitch_tiles(tile_stack)  # without shading correction, for comparison
+    # 3. Stitch: stage-only placement (registration disabled) vs registered.
+    # stitch_tiles always warns that it is minimal (see the note above)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="stitch_tiles is a minimal")
+        mosaic_stage = stitch_tiles(_tiles_corrected, min_ncc=1.1)
+        mosaic = stitch_tiles(_tiles_corrected)
+        mosaic_raw = stitch_tiles(tile_stack)  # without shading correction, for comparison
     return mosaic, mosaic_raw, mosaic_stage, tile_stack, true_px, tiled_volume
 
 

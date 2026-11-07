@@ -4,7 +4,6 @@ import warnings
 
 import numpy as np
 import xarray as xr
-from skimage.registration import phase_cross_correlation
 
 from .image_io import _STCZYX, array_to_stczyx_xarray, get_stczyx_pixel_sizes
 
@@ -15,43 +14,48 @@ def _overlap(a0, a1, b0, b1):
 
 
 def _register_pair(img_i, img_j, offset, min_overlap, max_shift):
-    """Refine the (dy, dx) offset of tile j relative to tile i from their predicted overlap.
+    """Refine the (dy, dx) offset of tile j relative to tile i by NCC template matching.
 
-    ``offset`` is the predicted top-left of j minus that of i, in pixels.
-    Returns (refined offset, NCC of the aligned overlap) or None when the tiles do
-    not overlap enough or the shift exceeds ``max_shift``.
+    ``offset`` is the predicted top-left of j minus that of i, in pixels. The
+    predicted overlap of j is matched inside tile i's overlap grown by the
+    search radius ``m = min(max_shift, narrower overlap // 2)`` (shrinking the
+    template where tile i ends), so every shift up to ``m`` is searched
+    exhaustively with no FFT wrap-around. Only side neighbours are registered:
+    a pair must overlap by at least half the tile along one axis (corner pairs
+    share little texture and give biased shifts).
+    Returns (refined offset, NCC at the best shift) or None.
     """
+    from skimage.feature import match_template
+
     h, w = img_i.shape
     (y0, y1), (x0, x1) = (_overlap(0, h, offset[0], offset[0] + h),
                           _overlap(0, w, offset[1], offset[1] + w))
-    if y1 - y0 < min_overlap or x1 - x0 < min_overlap:
+    oy, ox = y1 - y0, x1 - x0
+    if oy < min_overlap or ox < min_overlap or (oy < h / 2 and ox < w / 2):
         return None
-    crop_i = img_i[y0:y1, x0:x1]
-    crop_j = img_j[y0 - offset[0]:y1 - offset[0], x0 - offset[1]:x1 - offset[1]]
-    if np.ptp(crop_i) == 0 or np.ptp(crop_j) == 0:
-        return None  # featureless overlap: nothing to register
+    # One search radius for both axes (stage errors are isotropic), capped by
+    # half the narrow overlap so the template keeps at least half of it
+    my = mx = min(max_shift, min(oy, ox) // 2)
 
-    # Hann window against FFT edge effects; mean removal against background pedestals
-    window = np.outer(np.hanning(crop_i.shape[0]), np.hanning(crop_i.shape[1]))
-    shift, _, _ = phase_cross_correlation(
-        (crop_i - crop_i.mean()) * window, (crop_j - crop_j.mean()) * window
-    )
-    # crop_j(u) = crop_i(u + e) with e = (true - predicted) offset; skimage returns e
-    e = np.round(shift).astype(int)
-    if np.any(np.abs(e) > max_shift):
+    # Search region in tile i, and the template (j's predicted overlap) shrunk
+    # where the search region is clipped by the edge of tile i
+    sy0, sy1, sx0, sx1 = max(y0 - my, 0), min(y1 + my, h), max(x0 - mx, 0), min(x1 + mx, w)
+    ty0, ty1 = y0 + (my - (y0 - sy0)), y1 - (my - (sy1 - y1))
+    tx0, tx1 = x0 + (mx - (x0 - sx0)), x1 - (mx - (sx1 - x1))
+    if ty1 - ty0 < min_overlap // 2 or tx1 - tx0 < min_overlap // 2:
         return None
+    search = img_i[sy0:sy1, sx0:sx1]
+    template = img_j[ty0 - offset[0]:ty1 - offset[0], tx0 - offset[1]:tx1 - offset[1]]
+    if np.ptp(template) == 0 or np.ptp(search) == 0:
+        return None  # featureless: nothing to register
 
-    # NCC of the part of the overlap the two crops share after the shift
-    ey, ex = e
-    a = crop_i[max(ey, 0):crop_i.shape[0] + min(ey, 0), max(ex, 0):crop_i.shape[1] + min(ex, 0)]
-    b = crop_j[max(-ey, 0):crop_j.shape[0] + min(-ey, 0), max(-ex, 0):crop_j.shape[1] + min(-ex, 0)]
-    if a.size == 0:
-        return None
-    a = a - a.mean()
-    b = b - b.mean()
-    denom = np.sqrt(np.sum(a * a) * np.sum(b * b))
-    ncc = float(np.sum(a * b) / denom) if denom > 0 else 0.0
-    return np.asarray(offset) + e, ncc
+    # img_j(v) = img_i(v + offset + e): the template sits at (ty0, tx0) + e in tile i
+    score = match_template(search, template)
+    peak = np.unravel_index(np.argmax(score), score.shape)
+    e = np.array([sy0 + peak[0] - ty0, sx0 + peak[1] - tx0])
+    if np.any(np.abs(e) >= my):
+        return None  # best match on the search border: the true shift is likely outside it
+    return np.asarray(offset) + e, float(score[peak])
 
 
 def _solve_positions(prior, edges, prior_weight, max_residual):
@@ -88,7 +92,7 @@ def stitch_tiles(
     stage_to_image=None,
     min_overlap: int = 16,
     max_shift=None,
-    min_ncc: float = 0.3,
+    min_ncc: float = 0.6,
     max_residual: float = 2.0,
     prior_weight: float = 0.01,
     blending: str = 'linear',
@@ -97,8 +101,9 @@ def stitch_tiles(
     Stitch the S tiles of an STCZYX image into one 2D mosaic (S = 1).
 
     A minimal translation-only stitcher: stage positions give the initial
-    placement, overlapping neighbours are registered by phase correlation on
-    the max projection over Z and T of one channel, positions are solved
+    placement, side-by-side neighbours are registered by normalised
+    cross-correlation (template matching) on the max projection over Z and T
+    of one channel, positions are solved
     globally by weighted least squares (with outlier rejection), and tiles are
     fused with linear (feathered) blending. Shifts are whole pixels; there is
     no rotation, Z alignment or per-timepoint registration. For more control
@@ -125,13 +130,14 @@ def stitch_tiles(
         Default: identity. If the stage-only placement is scrambled, try flips.
     min_overlap : int
         Minimum predicted overlap in pixels (along both Y and X) for a pair of
-        tiles to be registered.
+        tiles to be registered. Corner (diagonal) pairs, overlapping by less
+        than half the tile along both axes, are never registered.
     max_shift : int, optional
         Largest accepted correction of a stage position, in pixels (the stage
-        error). Default: a quarter of the smaller tile side. Phase correlation
-        only resolves shifts up to half the overlap width, so the stage error
-        must be smaller than that.
-    min_ncc : float
+        error, relative between neighbours). The search radius is also capped
+        at half the overlap width, so the relative stage error must stay below
+        half the overlap. Default: no cap beyond that.
+    min_ncc : float (>= 0)
         Pairs whose aligned overlap has a normalised cross-correlation below
         this are discarded (e.g. empty background); such tiles keep the stage
         placement relative to their neighbours.
@@ -139,8 +145,9 @@ def stitch_tiles(
         Pairwise shifts disagreeing with the global solution by more than this
         many pixels are dropped one at a time (worst first) and the solve repeated.
     prior_weight : float
-        Weight of the stage positions in the global solve, relative to a pair
-        with NCC = 1. Small values anchor the mosaic without overriding registrations.
+        Weight (> 0) of the stage positions in the global solve, relative to a
+        pair with NCC = 1. Small values anchor the mosaic without overriding
+        registrations.
     blending : {'linear', 'overwrite'}
         'linear' weights each tile by its distance to the tile edge;
         'overwrite' pastes tiles in S order (later tiles on top).
@@ -180,7 +187,11 @@ def stitch_tiles(
     n_tiles = tiles.sizes['S']
     h, w = tiles.sizes['Y'], tiles.sizes['X']
     if max_shift is None:
-        max_shift = min(h, w) // 4
+        max_shift = max(h, w)
+    if not prior_weight > 0:
+        raise ValueError(f"prior_weight must be > 0 (it anchors unregistered tiles), got {prior_weight}.")
+    if not min_ncc >= 0:
+        raise ValueError(f"min_ncc must be >= 0, got {min_ncc}.")
 
     # 1. Stage positions -> prior top-left pixel positions
     stage = np.column_stack([tiles.coords['stage_y'].values, tiles.coords['stage_x'].values]).astype(float)
@@ -241,6 +252,7 @@ def stitch_tiles(
         pixel_sizes=sizes,
     )
     mosaic = mosaic.assign_coords(T=tiles.coords['T'], Z=tiles.coords['Z'])
+    mosaic.name = tiles.name
     mosaic.attrs['stitching'] = {
         'positions_px': positions.tolist(),
         'stage_positions_px': np.round(prior).astype(int).tolist(),

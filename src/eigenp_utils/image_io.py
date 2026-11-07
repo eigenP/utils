@@ -14,9 +14,15 @@ def _relabel_dims(da: xr.DataArray, axes: str) -> xr.DataArray:
 
     Goes through temporary names so that permutations of existing names
     (e.g. nd2's ``('P', 'S')`` -> ``('S', 'C')``) do not collide.
+    Coordinates of a dim relabelled to a different spatial letter (e.g. a
+    time axis in ms relabelled as Z) are dropped: they are not positions along
+    the new axis and would otherwise be read as a pixel size.
     """
     if tuple(da.dims) == tuple(axes):
         return da
+    stale = [d for d, a in zip(da.dims, axes)
+             if a in _SPATIAL and str(d).upper() != a and d in da.coords]
+    da = da.drop_vars(stale)
     tmp = {d: f'__stczyx_tmp_{i}' for i, d in enumerate(da.dims)}
     da = da.rename(tmp)
     return da.rename({tmp[d]: a for d, a in zip(tmp, axes)})
@@ -83,6 +89,9 @@ def get_stczyx_pixel_sizes(da: xr.DataArray) -> dict:
     snapshot taken at conversion and are dropped by many xarray operations.
     Per axis, the step of uniformly spaced float coordinates is used; axes
     without such coordinates fall back to ``da.attrs['pixel_sizes']``.
+    Any uniform float coordinate counts as calibrated, including ones that are
+    not physical (e.g. ``coarsen(...).mean()`` of an uncalibrated array turns
+    the integer index into 0.5, 2.5, ... and reads as a pixel size of 2).
     The result can be passed directly as ``pixel_sizes=`` to the plotting and
     image-processing functions of this package.
     """
@@ -139,9 +148,11 @@ def array_to_stczyx_xarray(
     Converts an array into an xarray.DataArray with strict 'STCZYX' dimension order.
     Missing dimensions are expanded with a size of 1.
 
-    Accepts NumPy arrays, lazy arrays (dask, zarr, ...) and existing
-    ``xr.DataArray`` objects (e.g. from ``nd2.ND2File.to_xarray()`` or
-    ``aicsimageio``). Lazy data stays lazy: nothing is loaded into memory.
+    Accepts NumPy arrays, dask arrays and existing ``xr.DataArray`` objects
+    (e.g. from ``nd2.ND2File.to_xarray()`` or ``aicsimageio``). Dask data
+    stays lazy: nothing is loaded into memory. Other array-likes (e.g. zarr
+    arrays) are loaded by xarray; wrap them with ``dask.array.from_zarr`` to
+    keep them lazy.
 
     Dimension letters: S = scene / series / stage position, T = time,
     C = channel, Z, Y, X.
@@ -263,6 +274,8 @@ def array_to_stczyx_xarray(
     sizes = {}
     for dim in _SPATIAL:
         step = _coord_spacing(da, dim)
+        if given[dim] is None and step is None and stored[dim] is not None:
+            given[dim] = stored[dim]  # build physical coords from the stored sizes
         if given[dim] is not None:
             sizes[dim] = given[dim]
             if step is not None and not np.isclose(step, given[dim], rtol=1e-3):
@@ -272,8 +285,15 @@ def array_to_stczyx_xarray(
                     UserWarning, stacklevel=2,
                 )
             if step is None or not np.isclose(step, given[dim], rtol=1e-3):
-                origin = float(da.coords[dim].values[0]) if step is not None else 0.0
-                coords[dim] = origin + np.arange(da.sizes[dim]) * given[dim]
+                # Keep the origin and direction of float (physical) coords;
+                # integer coords are indices and start the physical axis at 0
+                origin, sign = 0.0, 1.0
+                if dim in da.coords and np.issubdtype(da.coords[dim].dtype, np.floating):
+                    values = da.coords[dim].values
+                    origin = float(values[0])
+                    if values.size > 1 and values[-1] < values[0]:
+                        sign = -1.0
+                coords[dim] = origin + sign * np.arange(da.sizes[dim]) * given[dim]
         else:
             sizes[dim] = step if step is not None else stored[dim]
     unit = given['unit'] or _coord_unit(da) or stored['unit']

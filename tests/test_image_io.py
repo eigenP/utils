@@ -362,3 +362,34 @@ def test_array_to_stczyx_xarray_keeps_existing_stage_coords_through_relabel():
     da = array_to_stczyx_xarray(src)
     assert da.coords['stage_x'].dims == ('S',)
     np.testing.assert_array_equal(da.coords['stage_x'].values, [0.0, 1200.0])
+
+
+def test_array_to_stczyx_xarray_coordinate_edge_cases():
+    """Coordinate handling edge cases found in review.
+
+    - Rebuilding descending coords keeps their direction and origin.
+    - A size-1 float coord keeps its origin when a pixel size is given.
+    - A time coordinate relabelled as Z is dropped, not read as a Z pixel size.
+    - Integer coords with only stored attrs['pixel_sizes'] get physical coords,
+      so later downsampling is reflected by get_stczyx_pixel_sizes.
+    """
+    desc = xr.DataArray(np.zeros((4, 3)), dims=('Y', 'X'), coords={'Y': [1.5, 1.0, 0.5, 0.0]})
+    with pytest.warns(UserWarning, match="differs from the Y coordinate"):
+        da = array_to_stczyx_xarray(desc, pixel_sizes={'Y': 0.25})
+    np.testing.assert_allclose(da.coords['Y'].values, [1.5, 1.25, 1.0, 0.75])
+
+    one_z = xr.DataArray(np.zeros((1, 4, 3)), dims=('Z', 'Y', 'X'), coords={'Z': [3.5]})
+    assert array_to_stczyx_xarray(one_z, pixel_sizes={'Z': 2.0}).coords['Z'].values.tolist() == [3.5]
+
+    timed = xr.DataArray(np.zeros((3, 4, 5)), dims=('T', 'Y', 'X'), coords={'T': [0.0, 500.0, 1000.0]})
+    as_z = array_to_stczyx_xarray(timed, input_axes='ZYX')
+    assert 'pixel_sizes' not in as_z.attrs
+    np.testing.assert_array_equal(as_z.coords['Z'].values, [0, 1, 2])
+    # ... but a T axis that stays T keeps its coordinate
+    np.testing.assert_array_equal(array_to_stczyx_xarray(timed).coords['T'].values, [0.0, 500.0, 1000.0])
+
+    stored = xr.DataArray(np.zeros((4, 8, 8)), dims=('Z', 'Y', 'X'),
+                          attrs={'pixel_sizes': {'Z': 2.0, 'Y': 0.5, 'X': 0.5, 'unit': 'µm'}})
+    da_s = array_to_stczyx_xarray(stored)
+    np.testing.assert_allclose(da_s.coords['X'].values, np.arange(8) * 0.5)
+    assert get_stczyx_pixel_sizes(da_s[..., ::2, ::2])['X'] == pytest.approx(1.0)
