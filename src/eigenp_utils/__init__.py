@@ -49,8 +49,12 @@ __all__ = [
 
 # Robustly import heavy dependencies
 try:
-    from .image_io import array_to_stczyx_xarray, numpy_to_stczyx_xarray, get_tiff_voxel_size
-    __all__.extend(["array_to_stczyx_xarray", "numpy_to_stczyx_xarray", "get_tiff_voxel_size"])
+    from .image_io import (
+        array_to_stczyx_xarray, numpy_to_stczyx_xarray, get_stczyx_pixel_sizes, get_tiff_voxel_size,
+    )
+    __all__.extend([
+        "array_to_stczyx_xarray", "numpy_to_stczyx_xarray", "get_stczyx_pixel_sizes", "get_tiff_voxel_size",
+    ])
 except ImportError:
     pass
 

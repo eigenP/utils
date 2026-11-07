@@ -22,11 +22,85 @@ def _relabel_dims(da: xr.DataArray, axes: str) -> xr.DataArray:
     return da.rename({tmp[d]: a for d, a in zip(tmp, axes)})
 
 
+_SPATIAL = ('Z', 'Y', 'X')
+
+
+def _normalize_pixel_sizes(pixel_sizes):
+    """{'Z', 'Y', 'X', 'unit'} dict (None where unknown) from a dict or a (Z, Y, X) sequence."""
+    if pixel_sizes is None:
+        return {'Z': None, 'Y': None, 'X': None, 'unit': None}
+    if isinstance(pixel_sizes, dict):
+        keyed = {str(k).upper(): v for k, v in pixel_sizes.items()}
+        out = {ax: keyed.get(ax) for ax in _SPATIAL}
+        out['unit'] = pixel_sizes.get('unit')
+    else:
+        values = list(pixel_sizes)
+        if len(values) != 3:
+            raise ValueError(f"pixel_sizes must be a dict or a (Z, Y, X) sequence, got {pixel_sizes!r}.")
+        out = dict(zip(_SPATIAL, values))
+        out['unit'] = None
+    for ax in _SPATIAL:
+        if out[ax] is not None:
+            v = float(out[ax])
+            if not (np.isfinite(v) and v > 0):
+                raise ValueError(f"pixel_sizes['{ax}'] must be finite and positive, got {out[ax]!r}.")
+            out[ax] = v
+    return out
+
+
+def _coord_spacing(da: xr.DataArray, dim: str):
+    """Pixel size implied by a dim's coordinate: the step of uniformly spaced float coords, else None.
+
+    Integer coordinates are read as indices (uncalibrated), not as physical positions.
+    """
+    if dim not in da.coords or da.sizes[dim] < 2:
+        return None
+    values = np.asarray(da.coords[dim].values)
+    if not np.issubdtype(values.dtype, np.floating):
+        return None
+    steps = np.diff(values)
+    step = float(np.median(steps))
+    if not np.isfinite(step) or step == 0 or not np.allclose(steps, step, rtol=1e-3, atol=0):
+        return None
+    return abs(step)
+
+
+def _coord_unit(da: xr.DataArray):
+    for dim in _SPATIAL:
+        if dim in da.coords:
+            unit = da.coords[dim].attrs.get('units', da.coords[dim].attrs.get('unit'))
+            if unit is not None:
+                return unit
+    return None
+
+
+def get_stczyx_pixel_sizes(da: xr.DataArray) -> dict:
+    """
+    Pixel sizes ``{'Z', 'Y', 'X', 'unit'}`` of an xarray image (None where unknown).
+
+    The coordinates are the source of truth: they follow slicing and
+    downsampling (``da[..., ::2, ::2]``, ``coarsen``), while ``attrs`` are a
+    snapshot taken at conversion and are dropped by many xarray operations.
+    Per axis, the step of uniformly spaced float coordinates is used; axes
+    without such coordinates fall back to ``da.attrs['pixel_sizes']``.
+    The result can be passed directly as ``pixel_sizes=`` to the plotting and
+    image-processing functions of this package.
+    """
+    stored = _normalize_pixel_sizes(da.attrs.get('pixel_sizes'))
+    out = {}
+    for ax in _SPATIAL:
+        step = _coord_spacing(da, ax) if ax in da.dims else None
+        out[ax] = step if step is not None else stored[ax]
+    out['unit'] = _coord_unit(da) or stored['unit']
+    return out
+
+
 def array_to_stczyx_xarray(
     image,
     input_axes: str = None,
     channel_names=None,
     attrs: dict = None,
+    pixel_sizes=None,
 ) -> xr.DataArray:
     """
     Converts an array into an xarray.DataArray with strict 'STCZYX' dimension order.
@@ -56,6 +130,14 @@ def array_to_stczyx_xarray(
     attrs : dict, optional
         Metadata attributes to add. For a DataArray they are merged into (and
         take precedence over) its existing attrs.
+    pixel_sizes : dict or (Z, Y, X) sequence, optional
+        Physical pixel sizes, e.g. ``{'Z': 2.0, 'Y': 0.329, 'X': 0.329,
+        'unit': 'µm'}`` as returned by ``get_tiff_voxel_size``. None entries
+        mean unknown. Given sizes become physical coordinates
+        (``origin + i * size``; a DataArray's existing origin is kept). If a
+        DataArray already has calibrated coordinates with a different step, a
+        warning is issued and the given size wins. Axes not given are read
+        from calibrated (uniform float) coordinates, e.g. nd2's Y/X.
 
     Returns:
     --------
@@ -63,6 +145,11 @@ def array_to_stczyx_xarray(
         6D DataArray strictly ordered as STCZYX. Existing coordinates (e.g.
         physical Y/X positions) and the name of a DataArray input are kept;
         dims without coordinates get integer coordinates (0, 1, 2, ...).
+        When any pixel size is known, ``attrs['pixel_sizes']`` holds
+        ``{'Z', 'Y', 'X', 'unit'}`` (None where unknown) and calibrated
+        coordinates carry ``attrs['units']``. The coordinates stay the source
+        of truth after slicing or downsampling: read sizes back with
+        :func:`get_stczyx_pixel_sizes`, not from ``attrs``.
     """
     # 1. Wrap into an initial DataArray with dims from input_axes
     if isinstance(image, xr.DataArray):
@@ -124,6 +211,30 @@ def array_to_stczyx_xarray(
                 f"but C dimension has size {da.sizes['C']}."
             )
         coords['C'] = channel_names
+
+    # Physical pixel sizes: explicit argument > calibrated coords > stored attrs
+    given = _normalize_pixel_sizes(
+        pixel_sizes if pixel_sizes is not None else (attrs or {}).get('pixel_sizes')
+    )
+    stored = _normalize_pixel_sizes(da.attrs.get('pixel_sizes'))
+    sizes = {}
+    for dim in _SPATIAL:
+        step = _coord_spacing(da, dim)
+        if given[dim] is not None:
+            sizes[dim] = given[dim]
+            if step is not None and not np.isclose(step, given[dim], rtol=1e-3):
+                warnings.warn(
+                    f"pixel_sizes['{dim}'] = {given[dim]} differs from the {dim} coordinate "
+                    f"step {step}; rebuilding the {dim} coordinates from pixel_sizes.",
+                    UserWarning, stacklevel=2,
+                )
+            if step is None or not np.isclose(step, given[dim], rtol=1e-3):
+                origin = float(da.coords[dim].values[0]) if step is not None else 0.0
+                coords[dim] = origin + np.arange(da.sizes[dim]) * given[dim]
+        else:
+            sizes[dim] = step if step is not None else stored[dim]
+    unit = given['unit'] or _coord_unit(da) or stored['unit']
+
     for dim in _STCZYX:
         if dim not in coords and dim not in da.coords:
             # Default to standard integer coordinates (0, 1, 2...)
@@ -134,6 +245,15 @@ def array_to_stczyx_xarray(
     new_attrs = dict(da.attrs)
     new_attrs.update(attrs or {})
     new_attrs['axes'] = _STCZYX
+    new_attrs.pop('pixel_sizes', None)
+    if any(sizes[dim] is not None for dim in _SPATIAL):
+        new_attrs['pixel_sizes'] = {**sizes, 'unit': unit}
+        if unit is not None:
+            # New coordinate variables: never touch the attrs of the input's coords
+            da = da.assign_coords({
+                dim: (dim, da.coords[dim].values, {**da.coords[dim].attrs, 'units': unit})
+                for dim in _SPATIAL if _coord_spacing(da, dim) is not None
+            })
     da.attrs = new_attrs
 
     return da
