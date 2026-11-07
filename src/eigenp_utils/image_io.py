@@ -95,12 +95,45 @@ def get_stczyx_pixel_sizes(da: xr.DataArray) -> dict:
     return out
 
 
+def _normalize_stage_positions(stage_positions, n_series: int) -> dict:
+    """{'stage_z', 'stage_y', 'stage_x'} -> float arrays of length n_series from a dict or an (S, 2|3) array."""
+    if isinstance(stage_positions, dict):
+        keyed = {str(k).upper().removeprefix('STAGE_'): v for k, v in stage_positions.items()}
+        unknown = sorted(set(keyed) - set(_SPATIAL))
+        if unknown:
+            raise ValueError(f"stage_positions keys must be Z, Y, X, got {unknown}.")
+        columns = {ax: keyed[ax] for ax in _SPATIAL if ax in keyed}
+    else:
+        table = np.asarray(stage_positions, dtype=float)
+        if table.ndim == 1 and n_series == 1:
+            table = table[None, :]
+        if table.ndim != 2 or table.shape[1] not in (2, 3):
+            raise ValueError(
+                "stage_positions must be a dict {'Y': [...], 'X': [...]} (optionally 'Z') "
+                f"or an (S, 2) (Y, X) / (S, 3) (Z, Y, X) array, got shape {table.shape}."
+            )
+        columns = dict(zip(_SPATIAL[-table.shape[1]:], table.T))
+
+    out = {}
+    for ax, values in columns.items():
+        values = np.atleast_1d(np.asarray(values, dtype=float))
+        if values.shape != (n_series,):
+            raise ValueError(
+                f"stage_positions['{ax}'] has {values.size} entries, but S has size {n_series}."
+            )
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"stage_positions['{ax}'] contains non-finite values.")
+        out[f'stage_{ax.lower()}'] = values
+    return out
+
+
 def array_to_stczyx_xarray(
     image,
     input_axes: str = None,
     channel_names=None,
     attrs: dict = None,
     pixel_sizes=None,
+    stage_positions=None,
 ) -> xr.DataArray:
     """
     Converts an array into an xarray.DataArray with strict 'STCZYX' dimension order.
@@ -138,6 +171,16 @@ def array_to_stczyx_xarray(
         DataArray already has calibrated coordinates with a different step, a
         warning is issued and the given size wins. Axes not given are read
         from calibrated (uniform float) coordinates, e.g. nd2's Y/X.
+    stage_positions : dict or array, optional
+        Stage position of each S entry (tile / position), as reported by the
+        microscope, in the physical unit of ``pixel_sizes`` (usually µm):
+        ``{'Y': [...], 'X': [...]}`` (optionally ``'Z'``), or an ``(S, 2)``
+        (Y, X) / ``(S, 3)`` (Z, Y, X) array. Stored as non-dimension coordinates
+        ``stage_y``, ``stage_x`` (and ``stage_z``) along S, so they follow
+        selection along S (``da.isel(S=[0, 2])``). No orientation transform is
+        applied: the stage axes may be flipped or rotated relative to the
+        image axes, which a stitcher must calibrate. Existing ``stage_*``
+        coordinates of a DataArray are kept unless overridden here.
 
     Returns:
     --------
@@ -255,6 +298,12 @@ def array_to_stczyx_xarray(
                 for dim in _SPATIAL if _coord_spacing(da, dim) is not None
             })
     da.attrs = new_attrs
+
+    # 6. Stage positions: non-dimension coordinates along S
+    if stage_positions is not None:
+        stage = _normalize_stage_positions(stage_positions, da.sizes['S'])
+        coord_attrs = {'units': unit} if unit is not None else {}
+        da = da.assign_coords({name: ('S', values, coord_attrs) for name, values in stage.items()})
 
     return da
 

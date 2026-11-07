@@ -319,3 +319,46 @@ def test_get_stczyx_pixel_sizes_follows_downsampling():
 
     # A single Z slice has no step in its coords: Z comes from attrs
     assert get_stczyx_pixel_sizes(da.isel(Z=[0]))['Z'] == 2.0
+
+
+def test_array_to_stczyx_xarray_stage_positions_are_coords_along_s():
+    """Stage positions become stage_y/stage_x (/stage_z) coords on S that follow S selection.
+
+    Accepted as a dict or an (S, 2) (Y, X) / (S, 3) (Z, Y, X) array; units are
+    taken from pixel_sizes. Wrong lengths, shapes, keys and non-finite values raise.
+    """
+    tiles = np.zeros((3, 4, 5))
+    ys, xs = [0.0, 0.0, 900.0], [0.0, 1200.0, 0.0]
+    da = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes={'Y': 1.0, 'X': 1.0, 'unit': 'µm'},
+                                stage_positions={'Y': ys, 'X': xs})
+    assert da.coords['stage_y'].dims == ('S',)
+    np.testing.assert_array_equal(da.coords['stage_x'].values, xs)
+    np.testing.assert_array_equal(da.coords['stage_y'].values, ys)
+    assert da.coords['stage_x'].attrs['units'] == 'µm'
+    assert 'stage_z' not in da.coords
+    np.testing.assert_array_equal(da.isel(S=[2]).coords['stage_y'].values, [900.0])
+
+    zyx = np.column_stack([[5.0, 5.0, 6.0], ys, xs])
+    da3 = array_to_stczyx_xarray(tiles, 'SYX', stage_positions=zyx)
+    np.testing.assert_array_equal(da3.coords['stage_z'].values, [5.0, 5.0, 6.0])
+    np.testing.assert_array_equal(da3.coords['stage_x'].values, xs)
+    da2 = array_to_stczyx_xarray(tiles, 'SYX', stage_positions=zyx[:, 1:])
+    np.testing.assert_array_equal(da2.coords['stage_y'].values, ys)
+
+    with pytest.raises(ValueError, match="S has size 3"):
+        array_to_stczyx_xarray(tiles, 'SYX', stage_positions={'Y': [0, 1], 'X': [0, 1]})
+    with pytest.raises(ValueError, match="shape"):
+        array_to_stczyx_xarray(tiles, 'SYX', stage_positions=np.zeros((3, 4)))
+    with pytest.raises(ValueError, match="keys"):
+        array_to_stczyx_xarray(tiles, 'SYX', stage_positions={'Q': [0, 1, 2]})
+    with pytest.raises(ValueError, match="non-finite"):
+        array_to_stczyx_xarray(tiles, 'SYX', stage_positions={'Y': [0, np.nan, 1], 'X': xs})
+
+
+def test_array_to_stczyx_xarray_keeps_existing_stage_coords_through_relabel():
+    """Stage coords already on a DataArray's position dim 'P' move with it to 'S' and are kept."""
+    src = xr.DataArray(np.zeros((2, 4, 5)), dims=('P', 'Y', 'X'),
+                       coords={'stage_x': ('P', [0.0, 1200.0]), 'stage_y': ('P', [0.0, 0.0])})
+    da = array_to_stczyx_xarray(src)
+    assert da.coords['stage_x'].dims == ('S',)
+    np.testing.assert_array_equal(da.coords['stage_x'].values, [0.0, 1200.0])
