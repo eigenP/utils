@@ -294,7 +294,7 @@ def test_frontend_scale_bar_checkbox_toggles_model(page, static_rangeslider_serv
 
 
 def test_frontend_scale_bar_fontsize_box(page, static_rangeslider_server):
-    """The scale-bar size box writes `scale_bar_fontsize_pt`: a number, 0 (hidden) or null (auto).
+    """The scale-bar size box writes `scale_bar_fontsize_pt`: a number, 0 (label hidden) or null (auto).
 
     Strategy: type 14, then 0, then clear the box, and read the trait back;
     a negative entry is clamped to 0 and non-numeric text is rejected.

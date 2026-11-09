@@ -949,10 +949,10 @@ export default {
     scaleBarLabel.appendChild(document.createTextNode("Scale Bar"));
     uiTogglesContainer.appendChild(scaleBarLabel);
 
-    // Scale-bar font size in pt (empty = auto from the figure height, 0 hides it)
+    // Scale-bar font size in pt (empty = auto from the figure height, 0 hides the label, keeps the bar)
     const scaleBarSize = document.createElement("input");
     scaleBarSize.type = "text";
-    scaleBarSize.title = "Scale bar font size (pt); empty = auto, 0 = hidden";
+    scaleBarSize.title = "Scale bar label size (pt); empty = auto, 0 = no label (bar stays)";
     scaleBarSize.placeholder = "auto";
     scaleBarSize.style.width = "36px";
     scaleBarSize.style.fontSize = "11px";

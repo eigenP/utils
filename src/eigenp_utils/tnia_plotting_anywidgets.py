@@ -484,6 +484,39 @@ def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projec
     return show_zyx_projection_slabs(image_to_show, full, full, full, pixel_sizes=pixel_sizes, figsize=figsize, projector=projector, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
 # Copyright tnia 2021 - BSD License
+def _draw_channel_label_bar(axLabels, fontsize_pt, as_image=False):
+    """Grey bar under the channel labels, exactly as wide as the XY panel.
+
+    ``axLabels`` has the same x-position and width as the XY axes, so the bar
+    spans axes x in [0, 1]. (A plotted line overshoots both ends by half its
+    width because of matplotlib's default 'projecting' cap style.)
+
+    The bar must also go through the same pixel rounding as what fills the XY
+    panel: Agg places an image at ``x0 + ceil(width)`` but snaps a patch to the
+    nearest pixel edges. ``as_image=True`` draws the bar as a 1x1 image (for
+    panels filled by ``imshow``); otherwise it is a snapped rectangle (for
+    panels whose frame is the axes background patch, e.g. the scatter viewer).
+    """
+    thickness_in = max(1.0, fontsize_pt * 0.15) / 72.0
+    ax_h_in = axLabels.get_position().height * axLabels.figure.get_figheight()
+    h = thickness_in / ax_h_in  # thickness in axes fraction, centred on y = 0
+    grey = (0.85, 0.85, 0.85)
+    if as_image:
+        from matplotlib.image import AxesImage
+        im = AxesImage(axLabels, interpolation='nearest', extent=(0.0, 1.0, -h / 2.0, h / 2.0))
+        im.set_data(np.array([[grey]], dtype=float))
+        im.set_transform(axLabels.transAxes)
+        im.set_clip_on(False)
+        axLabels.add_artist(im)
+    else:
+        from matplotlib.patches import Rectangle
+        axLabels.add_patch(Rectangle(
+            (0.0, -h / 2.0), 1.0, h, transform=axLabels.transAxes,
+            facecolor=grey, edgecolor='none', linewidth=0,
+            clip_on=False, snap=True,
+        ))
+
+
 def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
@@ -517,8 +550,9 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         scale_bar_show (bool, optional): draw the scale bar on the XY panel
             (default True). Its label sits centred right above the bar.
         scale_bar_fontsize_pt (float, optional): label font size in points; the
-            bar's line width follows it. None sizes it from the figure height,
-            0 hides label and bar.
+            bar's line width follows it. None sizes it from the figure height;
+            0 hides the label but keeps the bar (at the auto width).
+            ``scale_bar_show`` toggles the bar.
     Returns:
         matplotlib Figure with named axes ``axXY``, ``axZY``, ``axXZ``, ``axBar``.
     """
@@ -695,8 +729,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         for spine in axLabels.spines.values():
             spine.set_visible(False)
 
-        bar_linewidth = max(1.0, channel_label_fontsize_pt * 0.15)
-        axLabels.plot([0, 1], [0, 0], transform=axLabels.transAxes, color=(0.85, 0.85, 0.85), linewidth=bar_linewidth, clip_on=False)
+        _draw_channel_label_bar(axLabels, channel_label_fontsize_pt, as_image=True)
 
         n_labels = len(channel_labels)
         if n_labels > 0:
@@ -786,16 +819,18 @@ def _scale_bar_fontsize(v):
         return None
     v = float(v)
     if not np.isfinite(v) or v < 0:
-        raise ValueError(f"scale_bar_fontsize_pt must be >= 0 (0 hides the scale bar), got {v}")
+        raise ValueError(f"scale_bar_fontsize_pt must be >= 0 (0 hides the label), got {v}")
     return v
 
 
 def _add_scale_bar(ax_line, ax_physical_width_um, pixel_sizes_given, figsize, unit=None, color='white', fontsize_pt=None):
-    # ``fontsize_pt`` None picks a size from the figure height; 0 draws nothing.
-    # The bar's line width follows the font size.
+    # ``fontsize_pt`` None picks a size from the figure height; 0 hides the
+    # label only (the bar keeps its auto-size width; ``scale_bar_show``
+    # toggles the bar). The bar's line width follows the font size.
     fontsize_pt = _scale_bar_fontsize(fontsize_pt)
-    if fontsize_pt == 0:
-        return
+    show_label = fontsize_pt != 0
+    if not show_label:
+        fontsize_pt = None
     # ``ax_physical_width_um`` is in the units of the pixel sizes: ``unit``
     # (a pixel-size dict's 'unit'; µm when None). Known length units are
     # converted so the bar is labelled in µm; an unknown unit is shown as is.
@@ -848,6 +883,9 @@ def _add_scale_bar(ax_line, ax_physical_width_um, pixel_sizes_given, figsize, un
 
     ax_line.hlines(y_line, x0, x1, transform=ax_line.transAxes, linewidth=linewidth, color=color, clip_on=False,
                    path_effects=_outline(linewidth))
+
+    if not show_label:
+        return
 
     if pixel_sizes_given:
         text_label = f"{int(bar_um)} {unit_label}" if bar_um >= 1 else f"{bar_um:.2g} {unit_label}"
@@ -1767,7 +1805,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     # UI Toggles
     show_crosshair = traitlets.Bool(True).tag(sync=True)
     scale_bar_show = traitlets.Bool(True).tag(sync=True)
-    scale_bar_fontsize_pt = traitlets.Any(None).tag(sync=True)  # None/'' auto, 0 hides
+    scale_bar_fontsize_pt = traitlets.Any(None).tag(sync=True)  # None/'' auto, 0 hides the label only
     sync_on_hover = traitlets.Bool(True).tag(sync=True)
 
     warning_msg = traitlets.Unicode("").tag(sync=True)
@@ -3346,8 +3384,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 for spine in axLabels.spines.values():
                     spine.set_visible(False)
 
-                bar_linewidth = max(1.0, channel_label_fontsize_pt * 0.15)
-                axLabels.plot([0, 1], [0, 0], transform=axLabels.transAxes, color=(0.85, 0.85, 0.85), linewidth=bar_linewidth, clip_on=False)
+                _draw_channel_label_bar(axLabels, channel_label_fontsize_pt)
 
                 n_labels = len(channel_labels)
                 if n_labels > 0:
@@ -3511,7 +3548,8 @@ def show_zyx_max_slice_interactive(
     scale_bar_fontsize_pt : float, optional
         Font size of the scale-bar label in points; the bar's line width
         follows it. None (default) sizes it from the figure height; 0 hides
-        label and bar. Also a GUI box (empty = auto).
+        the label but keeps the bar (``scale_bar_show`` toggles the bar).
+        Also a GUI box (empty = auto).
     rotate_view : float or tuple of floats, optional
         Rotates the 2D projected views purely for visualization.
         If a single float is provided, it rotates the XY projection (in degrees).
@@ -3652,7 +3690,8 @@ def show_zyx_max_slice_interactive_point_annotator(
     scale_bar_fontsize_pt : float, optional
         Font size of the scale-bar label in points; the bar's line width
         follows it. None (default) sizes it from the figure height; 0 hides
-        label and bar. Also a GUI box (empty = auto).
+        the label but keeps the bar (``scale_bar_show`` toggles the bar).
+        Also a GUI box (empty = auto).
     rotate_view : float or tuple of floats, optional
         Rotates the 2D projected views purely for visualization.
         If a single float is provided, it rotates the XY projection (in degrees).

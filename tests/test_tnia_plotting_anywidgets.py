@@ -875,12 +875,13 @@ def test_scale_bar_show_false_hides_bar_and_label():
             plt.close(fig)
 
 
-def test_scale_bar_fontsize_sets_label_and_bar_and_zero_hides_them():
-    """`scale_bar_fontsize_pt` sizes label and bar together; 0 removes both.
+def test_scale_bar_fontsize_sets_label_and_bar_and_zero_hides_label_only():
+    """`scale_bar_fontsize_pt` sizes label and bar together; 0 removes only the label.
 
     Strategy: render at 12 pt and 24 pt and check the label font size and that
-    the bar's line width doubles with it (it follows the font). 0 must draw
-    neither bar nor label (static function and widget trait), the GUI's empty
+    the bar's line width doubles with it (it follows the font). 0 must drop
+    the label but keep the bar at the auto-size width (static function and
+    widget trait); `scale_bar_show=False` removes both. The GUI's empty
     string means auto, and a negative size is rejected rather than ignored.
     """
     im = np.random.default_rng(5).integers(0, 255, (10, 60, 60)).astype(np.uint8)
@@ -895,16 +896,29 @@ def test_scale_bar_fontsize_sets_label_and_bar_and_zero_hides_them():
             plt.close(fig)
     assert widths[24] == pytest.approx(2 * widths[12])
 
+    fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1))
+    try:
+        auto_width = _scale_bar_artists(fig)[0].get_linewidth()[0]
+    finally:
+        plt.close(fig)
     fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=0)
+    try:
+        bar, label = _scale_bar_artists(fig)
+        assert label is None and bar is not None
+        assert bar.get_linewidth()[0] == pytest.approx(auto_width)
+    finally:
+        plt.close(fig)
+    fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=0, scale_bar_show=False)
     try:
         assert _scale_bar_artists(fig) == (None, None)
     finally:
         plt.close(fig)
 
-    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=0)
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1), scale_bar_fontsize_pt=0, show_crosshair=False)
     fig = w._render()
     try:
-        assert _scale_bar_artists(fig) == (None, None)
+        bar, label = _scale_bar_artists(fig)
+        assert label is None and bar is not None
     finally:
         plt.close(fig)
     w.copy_params_trigger += 1
@@ -3113,3 +3127,45 @@ def test_copy_png_trigger_returns_tight_figure_png(kind):
     w.copy_png_trigger += 1
     assert [s for s in seen if s] and len([s for s in seen if s]) == 2
     assert "" in seen
+
+
+def _first_run(mask):
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        return None
+    brk = np.flatnonzero(np.diff(idx) > 1)
+    return int(idx[0]), int(idx[brk[0]] if brk.size else idx[-1])
+
+
+@pytest.mark.parametrize("kind", ["slice", "scatter"])
+@pytest.mark.parametrize("dpi", [72, 100, 150, 200, 300])
+@pytest.mark.parametrize("tight", [False, True])
+def test_channel_label_bar_spans_exactly_the_xy_panel_pixels(kind, dpi, tight):
+    """The grey bar under the channel labels covers exactly the XY panel's pixel columns.
+
+    It used to be a plotted line whose 'projecting' caps overshot both ends
+    by half its width (a few px), and a snapped patch is still 1 px short of
+    an imshow panel at some dpi (Agg places images at x0 + ceil(width)).
+    Strategy: rasterise at several dpi, with and without the tight bbox. The
+    bar is the widest row of (0.85 grey) pixels with any alpha; its first and
+    last column must equal those of the XY panel's opaque content.
+    """
+    import io as _io
+    rng = np.random.default_rng(0)
+    if kind == "slice":
+        w = show_zyx_max_slice_interactive(rng.random((8, 32, 48)).astype(np.float32), channel_labels=["BF"])
+    else:
+        w = show_zyx_max_scatter_interactive(rng.random((50, 3)) * [8, 32, 48], channel_labels=["A"])
+    fig = w._render()
+    buf = _io.BytesIO()
+    try:
+        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight" if tight else None)
+    finally:
+        plt.close(fig)
+    a = plt.imread(_io.BytesIO(buf.getvalue()))
+    alpha = a[..., 3]
+    grey = (alpha > 0.01) & (np.abs(a[..., :3] - 0.85).max(axis=2) < 0.02)
+    runs = [(_first_run(grey[r]), r) for r in range(a.shape[0])]
+    bar, bar_row = max(((run, r) for run, r in runs if run), key=lambda t: t[0][1] - t[0][0])
+    img = _first_run(alpha[bar_row + int(0.2 * a.shape[0])] > 0.01)
+    assert bar == img
