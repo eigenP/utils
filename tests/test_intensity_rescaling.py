@@ -1,4 +1,6 @@
 from skimage.exposure import adjust_gamma
+import warnings
+
 import numpy as np
 import pytest
 
@@ -87,13 +89,15 @@ def test_basic_fit_synthetic_3d():
     assert flatfield.shape == sizes
 
 def test_apply_basic_shading_dtype():
-    """Test that apply basic shading dtype works as expected."""
+    """The input integer dtype is kept, values are rounded and clipped to its range,
+    and clipping a large fraction of pixels at the top is reported with a UserWarning."""
     np.random.seed(42)
     # Test uint8 input
     images_uint8 = np.random.randint(50, 200, size=(8, 128, 128), dtype=np.uint8)
     flatfield = np.ones((128, 128)) * 0.5  # brightens image (divides by 0.5 -> mult by 2)
 
-    corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
+    with pytest.warns(UserWarning, match="clips"):
+        corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
 
     # Check dtype is preserved
     assert corrected_uint8.dtype == np.uint8
@@ -104,17 +108,20 @@ def test_apply_basic_shading_dtype():
 
     # Verify exact math for a specific element that doesn't overflow
     images_uint8[0, 0, 0] = 100
-    corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
+    with pytest.warns(UserWarning, match="clips"):
+        corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
     assert corrected_uint8[0, 0, 0] == 200
 
     # Verify overflow clipping
     images_uint8[0, 0, 0] = 150
-    corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
+    with pytest.warns(UserWarning, match="clips"):
+        corrected_uint8 = apply_basic_shading(images_uint8, flatfield)
     assert corrected_uint8[0, 0, 0] == 255
 
     # Test uint16 input
     images_uint16 = np.random.randint(5000, 40000, size=(8, 128, 128), dtype=np.uint16)
-    corrected_uint16 = apply_basic_shading(images_uint16, flatfield)
+    with pytest.warns(UserWarning, match="clips"):
+        corrected_uint16 = apply_basic_shading(images_uint16, flatfield)
     assert corrected_uint16.dtype == np.uint16
     assert np.max(corrected_uint16) <= 65535
 
@@ -832,3 +839,60 @@ def test_contrast_stretching_float_with_negative_low_percentile_stays_in_unit_ra
     img = np.linspace(-1, 9, 1000, dtype=np.float32).reshape(10, 100)
     out = contrast_stretching(img)
     assert out.min() == 0.0 and out.max() == 1.0
+
+
+def test_apply_basic_shading_offset_casts_to_input_dtype_and_round_trips():
+    """Option B: a zero-centred (baseline-subtracted) uint16 result is shifted by the mean
+    baseline and cast back to uint16.
+
+    Invariants: the default dtype becomes the input dtype once an offset is given; nothing
+    is clipped (no warning); `return_offset` gives the float actually added, and subtracting
+    it recovers the float32 zero-centred result to within the 0.5 rounding step.
+    """
+    rng = np.random.default_rng(0)
+    flatfield = np.linspace(0.6, 1.2, 64).reshape(8, 8)
+    baseline = np.array([900.0, 1000.0, 1100.0])
+    # background b_i * F + noise: zero-centred after correction, about half negative
+    images = np.round(baseline[:, None, None] * flatfield + rng.normal(0, 30, (3, 8, 8)) + 100)
+    images = images.astype(np.uint16)
+    darkfield = np.full((8, 8), 100.0)
+
+    centred = apply_basic_shading(images, flatfield, darkfield, baseline=baseline)
+    assert centred.dtype == np.float32 and (centred < 0).mean() > 0.3
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no clipping warning
+        shifted, off = apply_basic_shading(images, flatfield, darkfield, baseline=baseline,
+                                           offset='baseline_mean', return_offset=True)
+    assert shifted.dtype == np.uint16
+    assert off == pytest.approx(1000.0)
+    np.testing.assert_allclose(shifted.astype(np.float64) - off, centred, atol=0.5 + 1e-3)
+
+    # A numeric offset is added as given; return_offset reports 0.0 without one
+    _, off_num = apply_basic_shading(images, flatfield, darkfield, baseline=baseline,
+                                     offset=250, return_offset=True)
+    assert off_num == 250.0
+    _, off_none = apply_basic_shading(images, flatfield, darkfield, return_offset=True)
+    assert off_none == 0.0
+
+
+def test_apply_basic_shading_warns_when_integer_cast_clips():
+    """Casting a zero-centred result to uint16 without an offset clips about half the
+    background at 0: a UserWarning must report it, and the clipped mean shows the
+    upward bias (~0.4 sigma) that motivates the offset."""
+    rng = np.random.default_rng(1)
+    flatfield = np.ones((16, 16))
+    baseline = np.array([500.0, 500.0])
+    images = (500 + rng.normal(0, 20, (2, 16, 16))).round().astype(np.uint16)
+    with pytest.warns(UserWarning, match=r"clips .*% of pixels at 0"):
+        clipped = apply_basic_shading(images, flatfield, baseline=baseline, output_dtype=np.uint16)
+    assert 0.3 * 20 < clipped.mean() < 0.5 * 20
+
+
+def test_apply_basic_shading_offset_errors():
+    """'baseline_mean' needs a baseline; unknown offset strings raise."""
+    images = np.ones((2, 4, 4), np.uint16)
+    with pytest.raises(ValueError, match="requires a baseline"):
+        apply_basic_shading(images, np.ones((4, 4)), offset='baseline_mean')
+    with pytest.raises(ValueError, match="offset must be"):
+        apply_basic_shading(images, np.ones((4, 4)), baseline=np.zeros(2), offset='median')
