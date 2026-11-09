@@ -333,6 +333,70 @@ export default {
       model.save_changes();
     });
 
+    // Copy PNG: Python renders the figure (panels, channel labels, scale bar;
+    // none of the GUI controls) at 300 dpi and sends it back as base64.
+    // ClipboardItem is given a Promise synchronously inside the click, so the
+    // write keeps the user activation while Python renders (Safari requires it).
+    const copyPngBtn = document.createElement("button");
+    copyPngBtn.textContent = "📋 PNG";
+    copyPngBtn.title = "Copy plot images to clipboard as PNG";
+    copyPngBtn.style.padding = "6px 12px";
+    copyPngBtn.style.backgroundColor = "#e0e0e0";
+    copyPngBtn.style.color = "#333";
+    copyPngBtn.style.border = "1px solid #999";
+    copyPngBtn.style.borderRadius = "4px";
+    copyPngBtn.style.cursor = "pointer";
+    copyPngBtn.style.fontWeight = "bold";
+    copyPngBtn.addEventListener("mouseover", () => { copyPngBtn.style.backgroundColor = "#ccc"; });
+    copyPngBtn.addEventListener("mouseout", () => { copyPngBtn.style.backgroundColor = "#e0e0e0"; });
+
+    let pendingPng = null;  // {resolve, reject, timer} while waiting on Python
+    function flashCopyPng(text) {
+      copyPngBtn.textContent = text;
+      setTimeout(() => { copyPngBtn.textContent = "📋 PNG"; }, 1500);
+    }
+    function base64ToPngBlob(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: "image/png" });
+    }
+
+    copyPngBtn.addEventListener("click", () => {
+      if (!navigator.clipboard || typeof ClipboardItem === "undefined") {
+        console.error("Copy PNG: the Clipboard API is unavailable (needs a secure context).");
+        flashCopyPng("❌");
+        return;
+      }
+      if (pendingPng) pendingPng.reject(new Error("superseded"));
+      const blobPromise = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingPng = null;
+          reject(new Error("timed out waiting for the PNG"));
+        }, 30000);
+        pendingPng = { resolve, reject, timer };
+      });
+      navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })])
+        .then(() => flashCopyPng("✅"))
+        .catch(err => {
+          if (err && err.message === "superseded") return;
+          console.error("Failed to copy PNG: ", err);
+          flashCopyPng("❌");
+        });
+      model.set("copy_png_trigger", (model.get("copy_png_trigger") || 0) + 1);
+      model.save_changes();
+    });
+
+    model.on("change:copy_png_data", () => {
+      const data = model.get("copy_png_data");
+      if (!data || !pendingPng) return;
+      const { resolve, reject, timer } = pendingPng;
+      pendingPng = null;
+      clearTimeout(timer);
+      if (data === "error") reject(new Error("Python failed to render the PNG"));
+      else resolve(base64ToPngBlob(data));
+    });
+
     const copyParamsBtn = document.createElement("button");
     copyParamsBtn.innerHTML = "📋";
     copyParamsBtn.title = "Copy parameters to clipboard";
@@ -365,6 +429,7 @@ export default {
     saveContainer.appendChild(saveLabel);
     saveContainer.appendChild(saveInput);
     saveContainer.appendChild(saveBtn);
+    saveContainer.appendChild(copyPngBtn);
     saveContainer.appendChild(copyParamsBtn);
 
     const hasAnnotation = model.get("annotation_mode") !== undefined;

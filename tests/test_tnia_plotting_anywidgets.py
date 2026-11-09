@@ -3080,3 +3080,36 @@ def test_interactive_wrapper_warns_once_for_a_missing_pixel_size_axis():
         show_zyx_max_slice_interactive(img, pixel_sizes={'Z': None, 'Y': 0.5, 'X': 0.5})
     msgs = [str(r.message) for r in rec if "No value for axis Z" in str(r.message)]
     assert len(msgs) == 1
+
+
+@pytest.mark.parametrize("kind", ["slice", "scatter"])
+def test_copy_png_trigger_returns_tight_figure_png(kind):
+    """Bumping `copy_png_trigger` puts a base64 PNG of the figure in `copy_png_data`.
+
+    Strategy: decode the payload and check (a) PNG magic bytes, (b) it is the
+    300-dpi tight-bbox render (larger than the 100-dpi on-screen image), and
+    (c) a second identical request still fires a change (the trait is cleared
+    first), which the JS listener relies on.
+    """
+    import base64
+    import io as _io
+    rng = np.random.default_rng(0)
+    if kind == "slice":
+        w = show_zyx_max_slice_interactive(rng.random((8, 32, 48)).astype(np.float32))
+    else:
+        pts = rng.random((50, 3)) * [8, 32, 48]
+        w = show_zyx_max_scatter_interactive(pts)
+
+    seen = []
+    w.observe(lambda c: seen.append(c["new"]), names="copy_png_data")
+    w.copy_png_trigger += 1
+    data = base64.b64decode(w.copy_png_data)
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+
+    shown = plt.imread(_io.BytesIO(base64.b64decode(w.image_data)))
+    copied = plt.imread(_io.BytesIO(data))
+    assert copied.shape[0] > shown.shape[0] and copied.shape[1] > shown.shape[1]
+
+    w.copy_png_trigger += 1
+    assert [s for s in seen if s] and len([s for s in seen if s]) == 2
+    assert "" in seen

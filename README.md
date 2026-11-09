@@ -69,6 +69,27 @@ Using `uv`:
 uv pip install "eigenp_utils @ git+https://github.com/eigenP/utils.git"
 ```
 
+Using [`pixi`](https://pixi.sh) (inside a pixi workspace, which needs a conda `python`; `pixi add python` if it has none):
+
+```bash
+pixi add --pypi "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
+```
+
+This writes the dependency to `[pypi-dependencies]` in `pixi.toml` (or `[tool.pixi.pypi-dependencies]` in `pyproject.toml`). The equivalent manifest entry, if you prefer to edit it by hand:
+
+```toml
+[pypi-dependencies]
+eigenp_utils = { git = "https://github.com/eigenP/utils.git", branch = "main", extras = ["all"] }
+```
+
+`pixi.lock` pins the exact commit, so new commits on `main` are not picked up until you update the lock file:
+
+```bash
+pixi update eigenp_utils
+```
+
+`pixi update` re-resolves only that package (to the latest commit of the branch) and rewrites `pixi.lock`; the environment is synced on the next `pixi run`/`pixi shell`, or immediately with `pixi install`. For the PyPI release instead of `git+`, use `pixi add --pypi "eigenp-utils[all]"`; `pixi update eigenp-utils` then moves to the newest version allowed by the manifest constraint, and `pixi upgrade eigenp-utils` also raises that constraint.
+
 ### Optional Dependencies
 
 You can choose to install optional dependencies if you need functionality such as single-cell analysis or image analysis:

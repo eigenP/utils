@@ -1780,6 +1780,11 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     save_filename = traitlets.Unicode("filepath_save.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
 
+    # Copy PNG UI: JS bumps the trigger, Python answers with a base64 PNG of
+    # the figure (panels + channel labels + scale bar, no GUI controls).
+    copy_png_trigger = traitlets.Int(0).tag(sync=True)
+    copy_png_data = traitlets.Unicode("").tag(sync=True)
+
     # Copy Params UI
     copy_params_trigger = traitlets.Int(0).tag(sync=True)
     copy_params_string = traitlets.Unicode("").tag(sync=True)
@@ -1819,6 +1824,9 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
         # Observe save trigger
         self.observe(self._save_svg, names='save_trigger')
+
+        # Observe copy-PNG trigger
+        self.observe(self._copy_png, names='copy_png_trigger')
 
         # Observe copy params trigger
         self.observe(self._copy_params, names='copy_params_trigger')
@@ -2109,6 +2117,28 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 print(f"Error saving file: {e}")
             finally:
                 plt.close(fig)
+
+    def _png_bytes(self, dpi=300):
+        """The figure as PNG bytes, cropped like the SVG export (bbox 'tight')."""
+        fig = self._render()
+        if not fig:
+            return None
+        try:
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
+            return buf.getvalue()
+        finally:
+            plt.close(fig)
+
+    def _copy_png(self, change):
+        # Clear first so an identical image still fires a change event in JS.
+        self.copy_png_data = ""
+        try:
+            data = self._png_bytes()
+        except Exception as e:
+            print(f"Error rendering PNG: {e}")
+            data = None
+        self.copy_png_data = base64.b64encode(data).decode('utf-8') if data else "error"
 
     def _copy_params(self, change):
         s = []
