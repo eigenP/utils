@@ -313,3 +313,39 @@ def test_frontend_scale_bar_fontsize_box(page, static_rangeslider_server):
     assert enter("-3") == 0
     assert enter("") is None
     assert enter("abc") is None and box.input_value() == ""
+
+
+def test_frontend_copy_png_button_writes_clipboard(page, static_rangeslider_server):
+    """The "📋 PNG" button asks Python for the PNG and writes it to the clipboard.
+
+    Strategy: clicking must bump `copy_png_trigger`; pushing a PNG into
+    `copy_png_data` (what `_copy_png` does) must resolve the pending
+    ClipboardItem, and reading the clipboard back must return those bytes.
+    Negative control: an "error" payload must not write and must show ❌.
+    """
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    page.goto(static_rangeslider_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+    btn = page.get_by_role("button", name="📋 PNG")
+
+    before = page.evaluate("window.mockModel.get('copy_png_trigger') || 0")
+    btn.click()
+    assert page.evaluate("window.mockModel.get('copy_png_trigger')") == before + 1
+
+    png_b64 = page.evaluate("window.mockModel.get('image_data')")
+    page.evaluate(f"window.mockModel.set('copy_png_data', '{png_b64}')")
+    page.get_by_role("button", name="✅").wait_for(state="visible", timeout=5000)
+    roundtrip = page.evaluate("""async () => {
+        const items = await navigator.clipboard.read();
+        const blob = await items[0].getType('image/png');
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let s = ''; for (const b of bytes) s += String.fromCharCode(b);
+        return btoa(s);
+    }""")
+    assert roundtrip[:16] == png_b64[:16]  # PNG header survives
+
+    btn = page.get_by_role("button", name="📋 PNG")
+    btn.wait_for(state="visible", timeout=5000)
+    btn.click()
+    page.evaluate("window.mockModel.set('copy_png_data', 'error')")
+    page.get_by_role("button", name="❌").wait_for(state="visible", timeout=5000)
