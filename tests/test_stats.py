@@ -356,3 +356,118 @@ def test_add_stat_annotations_follows_plot_order():
         assert spanned == ["ctrl", "drug"]
     finally:
         plt.close(fig)
+
+
+def _bootstrap_sample(seed=3, n=25):
+    """Right-skewed (lognormal) sample used by the bootstrap invariant tests."""
+    return np.random.default_rng(seed).lognormal(0.0, 1.0, n)
+
+
+@pytest.mark.parametrize("method", ["percentile", "bc", "bca"])
+@pytest.mark.parametrize("stat_func", [np.mean, np.median])
+def test_bootstrap_ci_affine_and_negation_equivariance(method, stat_func):
+    """Bootstrap intervals transform exactly with the data (same seed, same resamples).
+
+    Strategy: with a fixed ``random_state`` the resample indices are identical, so
+    for a location/scale-equivariant statistic theta the interval must satisfy
+      CI(x + c) = CI(x) + c,   CI(k x) = k CI(x) (k > 0),   CI(-x) = (-hi, -lo).
+    Negation flips the bias-correction z0 -> -z0 (ties counted half on each side)
+    and the jackknife acceleration a -> -a; the BCa percentiles then map
+    p -> 1 - p, so a sign error in z0, a, or the tie handling breaks the last
+    identity. The median exercises the tie path (many resampled medians equal
+    the sample median).
+    Expected: all three identities hold to floating-point precision.
+    """
+    x = _bootstrap_sample()
+    kw = dict(stat_func=stat_func, n_bootstraps=400, method=method, random_state=11)
+    lo, hi = bootstrap_ci(x, **kw)
+    assert lo < hi
+
+    lo_s, hi_s = bootstrap_ci(x + 5.0, **kw)
+    np.testing.assert_allclose([lo_s, hi_s], [lo + 5.0, hi + 5.0], rtol=0, atol=1e-9)
+
+    lo_k, hi_k = bootstrap_ci(4.0 * x, **kw)
+    np.testing.assert_allclose([lo_k, hi_k], [4.0 * lo, 4.0 * hi], rtol=1e-12)
+
+    lo_n, hi_n = bootstrap_ci(-x, **kw)
+    np.testing.assert_allclose([lo_n, hi_n], [-hi, -lo], rtol=1e-12)
+
+
+def test_bootstrap_bca_acceleration_sign_and_symmetric_null():
+    """BCa skews toward the long tail, and reduces to BC when the data are symmetric.
+
+    Positive control: for the mean of right-skewed (lognormal) data the jackknife
+    acceleration a is positive, so both BCa endpoints move right of the BC
+    endpoints (same resamples, same z0; only a differs).
+    Negative control: for an exactly mirror-symmetric sample {x, -x} the jackknife
+    cubic moment sum(d_i^3) cancels, so a = 0 and BCa must equal BC.
+    """
+    x = _bootstrap_sample(n=40)
+    kw = dict(stat_func=np.mean, n_bootstraps=2000, random_state=5)
+    bc = bootstrap_ci(x, method="bc", **kw)
+    bca = bootstrap_ci(x, method="bca", **kw)
+    assert bca[0] > bc[0] and bca[1] > bc[1]
+
+    sym = np.concatenate([x, -x])
+    np.testing.assert_allclose(
+        bootstrap_ci(sym, method="bca", **kw),
+        bootstrap_ci(sym, method="bc", **kw),
+        rtol=0, atol=1e-12,
+    )
+
+
+def test_bootstrap_bca_matches_scipy_reference():
+    """BCa endpoints agree with scipy.stats.bootstrap(method='BCa').
+
+    Strategy: both implement Efron's BCa (z0 from the bootstrap distribution, a from
+    the jackknife) but draw different resamples, so they agree only up to Monte
+    Carlo error. With 20k resamples that error is ~1% of the interval width.
+    Expected: each endpoint within 5% of the interval width of scipy's, for the
+    mean and the standard deviation of skewed data.
+    """
+    from scipy import stats as sps
+
+    x = _bootstrap_sample(seed=8, n=40)
+    for fn in (np.mean, np.std):
+        lo, hi = bootstrap_ci(x, fn, n_bootstraps=20000, method="bca", random_state=0)
+        ref = sps.bootstrap(
+            (x,), fn, n_resamples=20000, method="BCa", vectorized=False,
+            rng=np.random.default_rng(0),  # `rng` exists from SciPy 1.15 (locked >= 1.15.3)
+        ).confidence_interval
+        width = ref.high - ref.low
+        assert abs(lo - ref.low) < 0.05 * width
+        assert abs(hi - ref.high) < 0.05 * width
+
+
+@pytest.mark.parametrize("method", ["percentile", "bca"])
+def test_bootstrap_ci_coverage_is_calibrated(method):
+    """Nominal 95% intervals cover the true mean about 95% of the time.
+
+    Strategy: 200 independent N(1, 1) samples of size 30, one interval each. For
+    the mean of Gaussian data bootstrap intervals are close to the t-interval;
+    their coverage is ~0.93-0.94 at n = 30 (slight undercoverage of the
+    bootstrap). Binomial SD of the estimate is ~0.017.
+    Expected: coverage in [0.88, 0.99]. This is a coarse calibration guard (it
+    flags grossly mis-scaled or mis-centred intervals); the exact identities and
+    the SciPy comparison above are the sensitive checks.
+    """
+    rng = np.random.default_rng(2024)
+    hits = 0
+    n_rep = 200
+    for i in range(n_rep):
+        sample = rng.normal(1.0, 1.0, 30)
+        lo, hi = bootstrap_ci(sample, np.mean, n_bootstraps=500, method=method, random_state=i)
+        hits += lo <= 1.0 <= hi
+    coverage = hits / n_rep
+    assert 0.88 <= coverage <= 0.99, coverage
+
+
+def test_bootstrap_ci_constant_sample_is_degenerate():
+    """A constant sample gives a zero-width interval at that constant for every method.
+
+    Negative control: no resample can differ from the data, so z0 = 0 (all ties),
+    the jackknife spread is 0 (a stays 0), and the interval must be (c, c) with
+    no NaN from 0/0.
+    """
+    for method in ("percentile", "bc", "bca"):
+        assert bootstrap_ci(np.full(10, 2.5), method=method, random_state=0) == (2.5, 2.5)
