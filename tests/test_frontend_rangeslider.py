@@ -326,7 +326,9 @@ def test_frontend_copy_png_button_writes_clipboard(page, static_rangeslider_serv
     page.context.grant_permissions(["clipboard-read", "clipboard-write"])
     page.goto(static_rangeslider_server)
     page.get_by_text("X Range").wait_for(state="visible")
-    btn = page.get_by_role("button", name="📋 PNG")
+    btn = page.get_by_role("button", name="📋 PNG", exact=True)
+    # The kwargs copy button is labelled separately so the two are not confused.
+    page.get_by_role("button", name="📋 kwargs", exact=True).wait_for(state="visible")
 
     before = page.evaluate("window.mockModel.get('copy_png_trigger') || 0")
     btn.click()
