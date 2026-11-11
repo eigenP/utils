@@ -398,15 +398,15 @@ export default {
     });
 
     const copyParamsBtn = document.createElement("button");
-    copyParamsBtn.innerHTML = "📋";
-    copyParamsBtn.title = "Copy parameters to clipboard";
+    copyParamsBtn.textContent = "📋 kwargs";
+    copyParamsBtn.title = "Copy the current view settings to the clipboard as function kwargs";
     copyParamsBtn.style.padding = "6px 12px";
     copyParamsBtn.style.backgroundColor = "#e0e0e0";
     copyParamsBtn.style.color = "#333";
     copyParamsBtn.style.border = "1px solid #999";
     copyParamsBtn.style.borderRadius = "4px";
     copyParamsBtn.style.cursor = "pointer";
-    copyParamsBtn.style.fontSize = "16px";
+    copyParamsBtn.style.fontWeight = "bold";  // same look as the "💾 SVG" / "📋 PNG" buttons
     copyParamsBtn.addEventListener("mouseover", () => { copyParamsBtn.style.backgroundColor = "#ccc"; });
     copyParamsBtn.addEventListener("mouseout", () => { copyParamsBtn.style.backgroundColor = "#e0e0e0"; });
     copyParamsBtn.addEventListener("click", () => {
@@ -419,9 +419,8 @@ export default {
       const str = model.get("copy_params_string");
       if (str && navigator.clipboard) {
         navigator.clipboard.writeText(str).then(() => {
-          const originalHTML = copyParamsBtn.innerHTML;
-          copyParamsBtn.innerHTML = "✅";
-          setTimeout(() => { copyParamsBtn.innerHTML = originalHTML; }, 1500);
+          copyParamsBtn.textContent = "✅";
+          setTimeout(() => { copyParamsBtn.textContent = "📋 kwargs"; }, 1500);
         }).catch(err => console.error("Failed to copy text: ", err));
       }
     });
