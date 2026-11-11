@@ -2709,14 +2709,27 @@ def tl_pacmap(
         Random seed for reproducibility.
     init
         How to initialize the embedding. Options are:
-        - None: Let PaCMAP decide automatically based on feature count ('pca' or 'random').
+        - None (default): use 'pca' (PaCMAP's own default) and emit a warning that
+          names the choice and the alternatives. With `distance='precomputed'` in
+          `kwargs`, PaCMAP cannot do PCA, so 'random' is used instead. Pass `init`
+          explicitly to silence the warning.
+        - 'pca': the first `n_components` principal components of `use_rep`
+          (PaCMAP normalises the input and scales the PCA coordinates by 0.01).
+          Deterministic for a given `random_state`, and it starts the optimisation
+          from the coarse global layout of the data, whatever its dimensionality.
         - 'paga': positions from `scanpy.pl.paga` (computed here if `sc.tl.paga` was run
-          but PAGA was not plotted yet). If the PAGA graph has no edges between groups
-          (fully disconnected clusters), positions are undefined and the default
-          initialisation is used, with a warning.
-        - 'pca': PCA initialization.
-        - 'random': Random initialization.
-        - An `obsm` key (e.g., 'X_pca').
+          but PAGA was not plotted yet). Suits data with trajectories or many clusters,
+          where PAGA's coarse graph is a better global layout than the first PCs.
+          If the PAGA graph has no edges between groups (fully disconnected
+          clusters), positions are undefined and the default initialisation is
+          used, with a warning.
+        - 'random': isotropic Gaussian noise (scale 1e-4). The global layout then
+          comes from the optimisation alone; useful to check that the structure
+          does not depend on the initialisation.
+        - An `obsm` key (e.g., 'X_umap'), to start from (and stay close to) an
+          existing layout. Columns are truncated or padded to `n_components`, and
+          PaCMAP standardises each axis. If the key equals `use_rep`, 'pca' is used
+          instead (with a warning), which keeps the relative variance of the axes.
         - A numpy array of initial embedding positions.
     **kwargs
         Additional arguments passed to pacmap.PaCMAP.
@@ -2761,9 +2774,7 @@ def tl_pacmap(
         )
         X_in = adata.X
 
-    # Handle sparse input if necessary (PaCMAP usually expects dense or handles sparse internally?
-    # PaCMAP documentation says it accepts numpy arrays. It might handle sparse, but safer to densify if small enough,
-    # or let PaCMAP handle it if it supports it. Let's convert to array if sparse to be safe as PaCMAP is numba based)
+    # PaCMAP's numba kernels need a dense numpy array
     if sp.issparse(X_in):
         print("Input is sparse, converting to dense array for PaCMAP...")
         X_in = X_in.toarray()
@@ -2791,6 +2802,7 @@ def tl_pacmap(
         **pmap_kwargs,
     )
 
+    paga_unusable = False
     if isinstance(init, str) and init == "paga":
         if "paga" not in adata.uns:
             raise ValueError("init='paga' needs `sc.tl.paga(adata, ...)` to be run first.")
@@ -2804,6 +2816,7 @@ def tl_pacmap(
                 "Using the default initialisation instead."
             )
             init = None
+            paga_unusable = True
 
     # Determine initialization method
     init_method = None
@@ -2818,6 +2831,28 @@ def tl_pacmap(
                 plt.close(fig)
             init_coords = get_init_pos_from_paga(adata, random_state=random_state)
             init_method = init_coords
+        elif (
+            isinstance(init, str)
+            and init == use_rep
+            and use_rep in adata.obsm
+            and pmap_kwargs.get("distance") != "precomputed"
+        ):
+            # Initialising from the input itself: PaCMAP standardises an array
+            # init per axis, which would give PC2 the same spread as PC1. Its own
+            # 'pca' init keeps the relative variances, and on PC scores (e.g.
+            # X_pca) it returns the leading columns unchanged, so this is not a
+            # second PCA on top of the first.
+            warnings.warn(
+                f"tl_pacmap: init='{init}' is the same representation as use_rep, so "
+                "init='pca' is used instead: on PC scores it gives the same leading "
+                "axes, keeping their relative variance (an array init would be "
+                "standardised per axis by PaCMAP); on other representations it uses "
+                f"their leading principal components rather than the first "
+                f"{n_components} raw columns.",
+                UserWarning,
+                stacklevel=2,
+            )
+            init_method = "pca"
         elif isinstance(init, str) and init in adata.obsm:
             init_coords = adata.obsm[init]
             init_method = init_coords
@@ -2842,16 +2877,43 @@ def tl_pacmap(
             elif init_method.shape[1] > n_components:
                 init_method = init_method[:, :n_components]
     else:
-        # Check feature count to determine initialization method
-        n_features = X_in.shape[1]
-        init_method = "pca"
-
-        if n_features <= 100:
-            warnings.warn(
-                f"Input data has {n_features} features, which is <= 100. "
-                "Switching initialization from 'pca' to 'random' to avoid potential issues."
-            )
+        # Default: PaCMAP's own PCA initialisation, which is deterministic and
+        # starts from the data's coarse global layout. It works for any feature
+        # count (<= 100 features: a PCA fit on the normalised input; > 100: the
+        # leading components of PaCMAP's TruncatedSVD preprocessing). On PC scores
+        # such as X_pca, PaCMAP's global rescaling and PCA return the first
+        # n_components columns unchanged (up to sign), so there is no PCA on PCA.
+        if pmap_kwargs.get("distance") == "precomputed":
             init_method = "random"
+            reason = "distance='precomputed' has no feature space to run PCA on"
+        else:
+            init_method = "pca"
+            reason = (
+                "PaCMAP's own default: deterministic for a given random_state and it "
+                "starts from the coarse global layout of the data"
+            )
+        hints = [
+            "init='paga' when cells form trajectories or many clusters "
+            + (
+                "(PAGA results are already in adata.uns)"
+                if "paga" in adata.uns
+                else "(run sc.tl.paga first)"
+            ),
+            "init='<obsm key>' (e.g. 'X_umap') to stay close to an existing layout",
+            "init='random' to check that the structure does not depend on the initialisation",
+        ]
+        if init_method == "random":
+            hints = [h for h in hints if not h.startswith("init='random'")]
+        if paga_unusable:
+            hints = [h for h in hints if not h.startswith("init='paga'")]
+        warnings.warn(
+            f"tl_pacmap: init not given, using init='{init_method}' ({reason}). "
+            "Alternatives that may suit your data better: "
+            + "; ".join(hints)
+            + ". Pass init explicitly to silence this warning.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     if isinstance(init_method, np.ndarray):
         print(

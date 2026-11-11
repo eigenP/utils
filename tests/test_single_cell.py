@@ -719,85 +719,113 @@ try:
 except ImportError:
     PACMAP_INSTALLED = False
 
-@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
-def test_tl_pacmap_init_large_features():
-    """Test that tl pacmap init large features works as expected."""
-    # Case 1: > 100 features (should default to PCA)
-    n_obs = 50
-    n_vars = 101
-    X = np.random.rand(n_obs, n_vars)
-    adata = sc.AnnData(X=X)
+def _pacmap_adata(n_vars, n_obs=60, seed=0):
+    """Small random AnnData for tl_pacmap init tests."""
+    X = np.random.default_rng(seed).random((n_obs, n_vars)).astype(np.float32)
+    return sc.AnnData(X=X)
 
-    # Run pacmap
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always") # Cause all warnings to always be triggered.
-        tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X")
-
-        # Check that NO "Switching initialization" warning was issued
-        for warning in w:
-            assert "Switching initialization" not in str(warning.message)
-
-    assert "X_pacmap" in adata.obsm
 
 @pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
-def test_tl_pacmap_init_override():
-    """Test that tl pacmap init override works as expected."""
-    # Case 3: <= 100 features but user specifies init='pca'
-    # Should use 'pca' and NOT warn about switching
-    n_obs = 50
-    n_vars = 50 # <= 100
-    X = np.random.rand(n_obs, n_vars)
-    adata = sc.AnnData(X=X)
+@pytest.mark.parametrize("n_vars", [16, 50, 101, 300])
+def test_tl_pacmap_default_init_is_pca(n_vars):
+    """With init=None, tl_pacmap uses PaCMAP's PCA initialisation at any feature count.
 
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        # Pass init explicitly via kwargs
-        tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X", init="pca")
+    Strategy: run once with the default and once with init='pca' at the same seed,
+    for feature counts on both sides of PaCMAP's 100-feature preprocessing
+    threshold (the old wrapper switched to random init at <= 100 features).
+    Expected: the default warns that it chose 'pca' and names the alternatives,
+    and both embeddings are identical, so the default is reproducible.
+    """
+    a_default = _pacmap_adata(n_vars)
+    with pytest.warns(UserWarning, match=r"init not given, using init='pca'") as rec:
+        tl_pacmap(a_default, n_neighbors=5, use_rep="X")
+    msg = " ".join(str(w.message) for w in rec)
+    assert "init='paga'" in msg and "init='random'" in msg
+    assert not any("Switching initialization" in str(w.message) for w in rec)
 
-        # Check that NO "Switching initialization" warning was issued
-        for warning in w:
-            assert "Switching initialization" not in str(warning.message)
+    a_pca = _pacmap_adata(n_vars)
+    tl_pacmap(a_pca, n_neighbors=5, use_rep="X", init="pca")
+    np.testing.assert_array_equal(a_default.obsm["X_pacmap"], a_pca.obsm["X_pacmap"])
 
-    assert "X_pacmap" in adata.obsm
+
+@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
+def test_tl_pacmap_explicit_init_does_not_warn():
+    """An explicit init silences the default-initialisation warning.
+
+    Strategy: pass init='pca' and init='random' explicitly on 50-feature data.
+    Expected: no 'init not given' warning, and an embedding is stored.
+    """
+    for init in ("pca", "random"):
+        adata = _pacmap_adata(50)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            tl_pacmap(adata, n_neighbors=5, use_rep="X", init=init)
+        assert not any("init not given" in str(x.message) for x in w), init
+        assert adata.obsm["X_pacmap"].shape == (60, 2)
+
+
+@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
+def test_tl_pacmap_init_same_as_use_rep_uses_pca():
+    """init equal to use_rep is routed to PaCMAP's 'pca' init, not an array init.
+
+    PaCMAP standardises an array init per axis, which would give PC2 the same
+    spread as PC1; its 'pca' init on PC scores returns the leading PCs with their
+    relative variance kept. Strategy: compute X_pca, then run tl_pacmap with
+    use_rep='X_pca' and init='X_pca', and again with init='pca'.
+    Expected: a warning explaining the substitution, and identical embeddings.
+    """
+    base = _pacmap_adata(200)
+    sc.tl.pca(base, n_comps=20)
+
+    a_same = base.copy()
+    with pytest.warns(UserWarning, match="same representation as use_rep"):
+        tl_pacmap(a_same, n_neighbors=5, use_rep="X_pca", init="X_pca")
+
+    a_pca = base.copy()
+    tl_pacmap(a_pca, n_neighbors=5, use_rep="X_pca", init="pca")
+    np.testing.assert_array_equal(a_same.obsm["X_pacmap"], a_pca.obsm["X_pacmap"])
+
+
+@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
+def test_tl_pacmap_pca_init_on_pc_scores_is_identity():
+    """PaCMAP's PCA init on PC scores reproduces the leading PCs (no 'PCA on PCA').
+
+    Strategy: run PaCMAP's own preprocessing on X_pca and project with the PCA
+    it fits for initialisation. Expected: each init axis matches the
+    corresponding X_pca column up to sign and an overall scale (|corr| ~ 1),
+    with the PC1/PC2 spread ratio preserved.
+    """
+    from pacmap.pacmap import preprocess_X
+
+    adata = _pacmap_adata(200, n_obs=300)
+    sc.tl.pca(adata, n_comps=30)
+    P = adata.obsm["X_pca"].astype(np.float32)
+    Xp, _, tsvd, *_ = preprocess_X(P.copy(), "euclidean", True, False, 42, P.shape[1], 2)
+    Y = tsvd.transform(Xp)
+    for k in range(2):
+        assert abs(np.corrcoef(Y[:, k], P[:, k])[0, 1]) > 0.9999
+    assert np.isclose(Y[:, 0].std() / Y[:, 1].std(), P[:, 0].std() / P[:, 1].std(), rtol=1e-4)
+
 
 @pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
 def test_tl_pacmap_init_paga():
-    """Test that tl pacmap init paga works as expected."""
-    # Case 4: init='paga'
-    n_obs = 50
-    n_vars = 50
-    X = np.random.rand(n_obs, n_vars)
-    adata = sc.AnnData(X=X)
+    """init='paga' runs and does not fall back to the default initialisation.
 
-    # Need to compute neighbors and paga first
+    Strategy: compute neighbours, Leiden and PAGA on random data, then run
+    tl_pacmap with init='paga'. Expected: no 'init not given' warning (the PAGA
+    graph here has edges), and an embedding is stored.
+    """
+    adata = _pacmap_adata(50, n_obs=50)
     sc.pp.neighbors(adata, n_neighbors=5, use_rep="X")
     sc.tl.leiden(adata, resolution=1.0, flavor='igraph', n_iterations=2, directed=False)
     sc.tl.paga(adata, groups="leiden")
     sc.pl.paga(adata, show=False)
+    plt.close("all")
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X", init="paga")
-
-        for warning in w:
-            assert "Switching initialization" not in str(warning.message)
-
-    assert "X_pacmap" in adata.obsm
-
-@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
-def test_tl_pacmap_init_small_features():
-    """Test that tl pacmap init small features works as expected."""
-    # Case 2: <= 100 features (should switch to random and warn)
-    n_obs = 50
-    n_vars = 50 # <= 100
-    X = np.random.rand(n_obs, n_vars)
-    adata = sc.AnnData(X=X)
-
-    # Run pacmap
-    # Expect a warning about switching initialization
-    with pytest.warns(UserWarning, match="Switching initialization"):
-        tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X")
-
+    assert not any("init not given" in str(x.message) for x in w)
     assert "X_pacmap" in adata.obsm
 
 # =========================================
@@ -3969,7 +3997,10 @@ def test_tl_pacmap_paga_init_with_disconnected_groups():
     # what sc.tl.paga describes for groups with no edges between them
     Z = sp.csr_matrix((4, 4))
     a.uns["paga"] = {"connectivities": Z, "connectivities_tree": Z, "groups": "ct"}
-    with pytest.warns(UserWarning, match="no edges between groups"):
+    with pytest.warns(UserWarning, match="no edges between groups") as rec:
         tl_pacmap(a, init="paga")
+    # The fallback uses the default 'pca' init and does not re-suggest 'paga'
+    fallback = [str(w.message) for w in rec if "init not given" in str(w.message)]
+    assert fallback and "init='pca'" in fallback[0] and "init='paga'" not in fallback[0]
     assert a.obsm["X_pacmap"].shape == (a.n_obs, 2)
     assert np.isfinite(a.obsm["X_pacmap"]).all()
