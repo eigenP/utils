@@ -1,0 +1,567 @@
+// eigenp_utils LabelAnnotator front end (anywidget ESM).
+// Wire format (little-endian):
+//   image : uint32[4] (z, C, Y, X) + C*Y*X uint8
+//   labels: uint32[3] (z, Y, X)    + Y*X uint16
+// All compositing, painting and undo happen here; edited slice labels are sent
+// back to Python after every stroke.
+
+const UNDO_MAX = 30;
+
+function asBytes(v) {
+  if (!v) return null;
+  if (v instanceof DataView) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  if (v instanceof ArrayBuffer) return new Uint8Array(v);
+  if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  return null;
+}
+
+function decodeImage(v) {
+  const b = asBytes(v);
+  if (!b || b.byteLength < 16) return null;
+  const copy = b.slice(); // own, aligned buffer
+  const h = new Uint32Array(copy.buffer, 0, 4);
+  const [z, c, y, x] = h;
+  return { z, c, y, x, data: new Uint8Array(copy.buffer, 16, c * y * x) };
+}
+
+function decodeLabels(v) {
+  const b = asBytes(v);
+  if (!b || b.byteLength < 12) return null;
+  const copy = b.slice();
+  const h = new Uint32Array(copy.buffer, 0, 3);
+  const [z, y, x] = h;
+  // header is 12 bytes, uint16 body needs 2-byte alignment: 12 is fine
+  return { z, y, x, data: new Uint16Array(copy.buffer, 12, y * x) };
+}
+
+function encodeLabels(z, y, x, data) {
+  const buf = new ArrayBuffer(12 + 2 * y * x);
+  new Uint32Array(buf, 0, 3).set([z, y, x]);
+  new Uint16Array(buf, 12, y * x).set(data);
+  return new DataView(buf);
+}
+
+function hexToRgb(hex) {
+  const h = (hex || "#ffffff").replace("#", "");
+  const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function instanceColor(id) {
+  // golden-ratio hue walk, fixed S/V; deterministic per id
+  const hue = ((id * 0.618033988749895) % 1 + 1) % 1;
+  const s = 0.8, v = 1.0;
+  const i = Math.floor(hue * 6), f = hue * 6 - i;
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  const rgb = [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][i % 6];
+  return rgb.map((u) => Math.round(u * 255));
+}
+
+function el(tag, attrs = {}, children = []) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v;
+    else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const c of children) e.appendChild(c);
+  return e;
+}
+
+function render({ model, el: root }) {
+  const state = {
+    img: null, // {z,c,y,x,data}
+    lab: null, // {z,y,x,data}
+    undo: [],
+    zoom: 1, panX: 0, panY: 0,
+    painting: false, panning: false, spaceDown: false,
+    last: null, stroke: null, strokeStart: null,
+    cursor: null,
+  };
+
+  // ---------------------------------------------------------------- layout
+  root.classList.add("lbl-annot");
+  const toolbar = el("div", { class: "lbl-toolbar" });
+  const chanPanel = el("div", { class: "lbl-channels" });
+  const viewport = el("div", { class: "lbl-viewport", tabindex: "0" });
+  const stage = el("div", { class: "lbl-stage" });
+  const imgCanvas = el("canvas", { class: "lbl-img" });
+  const labCanvas = el("canvas", { class: "lbl-lab" });
+  const curCanvas = el("canvas", { class: "lbl-cur" });
+  stage.append(imgCanvas, labCanvas, curCanvas);
+  viewport.appendChild(stage);
+  // Geometry-critical styles inline, so painting coordinates stay correct even
+  // if the host does not inject the stylesheet.
+  Object.assign(viewport.style, { position: "relative", overflow: "hidden", touchAction: "none" });
+  Object.assign(stage.style, { position: "absolute", left: "0", top: "0", transformOrigin: "0 0" });
+  for (const c of [imgCanvas, labCanvas, curCanvas]) {
+    Object.assign(c.style, { position: "absolute", left: "0", top: "0", imageRendering: "pixelated" });
+  }
+  const zRow = el("div", { class: "lbl-zrow" });
+  const statusBar = el("div", { class: "lbl-status" });
+  root.append(toolbar, chanPanel, zRow, viewport, statusBar);
+
+  // toolbar controls
+  const tools = ["brush", "eraser", "fill", "picker"];
+  const toolBtns = {};
+  for (const t of tools) {
+    toolBtns[t] = el("button", { class: "lbl-btn", "data-tool": t, text: t, title: `${t} (${t[0]})`, onclick: () => { model.set("tool", t); model.save_changes(); } });
+    toolbar.appendChild(toolBtns[t]);
+  }
+  const labelInput = el("input", { type: "number", min: "0", class: "lbl-label", title: "active label" });
+  labelInput.addEventListener("change", () => { model.set("active_label", Math.max(0, parseInt(labelInput.value || "0"))); model.save_changes(); });
+  const classSelect = el("select", { class: "lbl-class" });
+  classSelect.addEventListener("change", () => { model.set("active_label", parseInt(classSelect.value)); model.save_changes(); });
+  const newBtn = el("button", { class: "lbl-btn", text: "new", title: "new label id (n)", onclick: () => { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); } });
+  const radius = el("input", { type: "range", min: "0", max: "50", class: "lbl-radius", title: "brush radius ([ / ])" });
+  radius.addEventListener("input", () => { model.set("brush_radius", parseInt(radius.value)); model.save_changes(); });
+  const opacity = el("input", { type: "range", min: "0", max: "100", class: "lbl-opacity", title: "label opacity" });
+  opacity.addEventListener("input", () => { model.set("opacity", parseInt(opacity.value) / 100); model.save_changes(); });
+  const mkToggle = (name, label, title) => {
+    const cb = el("input", { type: "checkbox", class: `lbl-${name}` });
+    cb.addEventListener("change", () => { model.set(name, cb.checked); model.save_changes(); });
+    return [cb, el("label", { class: "lbl-toggle", title }, [cb, document.createTextNode(label)])];
+  };
+  const [fillCb, fillLbl] = mkToggle("auto_fill", "fill stroke", "close and fill each stroke");
+  const [owCb, owLbl] = mkToggle("overwrite", "overwrite", "paint over other labels");
+  const [olCb, olLbl] = mkToggle("outline_only", "outlines", "show label outlines only");
+  const undoBtn = el("button", { class: "lbl-btn", text: "undo", title: "undo (ctrl+z)", onclick: () => undo() });
+  const clearBtn = el("button", { class: "lbl-btn", text: "clear slice", onclick: () => clearSlice() });
+  const fitBtn = el("button", { class: "lbl-btn", text: "fit", title: "reset zoom (0)", onclick: () => fit() });
+  toolbar.append(
+    el("span", { class: "lbl-sep" }), labelInput, classSelect, newBtn,
+    el("span", { class: "lbl-sep" }), el("span", { text: "r" }), radius, el("span", { text: "α" }), opacity,
+    fillLbl, owLbl, olLbl, undoBtn, clearBtn, fitBtn,
+  );
+
+  const zSlider = el("input", { type: "range", min: "0", max: "0", class: "lbl-z" });
+  const zLabel = el("span", { class: "lbl-zlabel" });
+  zSlider.addEventListener("input", () => { model.set("z", parseInt(zSlider.value)); model.save_changes(); });
+  zRow.append(el("span", { text: "z" }), zSlider, zLabel);
+
+  // ------------------------------------------------------------ channels UI
+  function buildChannels() {
+    chanPanel.innerHTML = "";
+    const names = model.get("channel_names") || [];
+    names.forEach((name, i) => {
+      const vis = el("input", { type: "checkbox" });
+      vis.checked = (model.get("channel_visible") || [])[i] !== false;
+      vis.addEventListener("change", () => setListItem("channel_visible", i, vis.checked));
+      const col = el("input", { type: "color", value: (model.get("channel_colors") || [])[i] || "#ffffff" });
+      col.addEventListener("input", () => setListItem("channel_colors", i, col.value));
+      const lo = el("input", { type: "range", min: "0", max: "255", value: String((model.get("vmin") || [])[i] ?? 0), title: "min" });
+      const hi = el("input", { type: "range", min: "0", max: "255", value: String((model.get("vmax") || [])[i] ?? 255), title: "max" });
+      const ga = el("input", { type: "range", min: "10", max: "300", value: String(Math.round(((model.get("gamma") || [])[i] ?? 1) * 100)), title: "gamma" });
+      lo.addEventListener("input", () => setListItem("vmin", i, parseInt(lo.value)));
+      hi.addEventListener("input", () => setListItem("vmax", i, parseInt(hi.value)));
+      ga.addEventListener("input", () => setListItem("gamma", i, parseInt(ga.value) / 100));
+      chanPanel.appendChild(el("div", { class: "lbl-chan" }, [vis, col, el("span", { class: "lbl-cname", text: name }), el("span", { text: "min" }), lo, el("span", { text: "max" }), hi, el("span", { text: "γ" }), ga]));
+    });
+  }
+  function setListItem(name, i, v) {
+    const arr = [...(model.get(name) || [])];
+    arr[i] = v;
+    model.set(name, arr);
+    model.save_changes();
+    if (name !== "channel_colors" && name !== "channel_visible") return;
+  }
+
+  // -------------------------------------------------------------- drawing
+  function compose() {
+    const im = state.img;
+    if (!im) return;
+    if (imgCanvas.width !== im.x || imgCanvas.height !== im.y) {
+      for (const c of [imgCanvas, labCanvas, curCanvas]) { c.width = im.x; c.height = im.y; }
+      fit();
+    }
+    const vis = model.get("channel_visible") || [];
+    const cols = model.get("channel_colors") || [];
+    const vmin = model.get("vmin") || [];
+    const vmax = model.get("vmax") || [];
+    const gam = model.get("gamma") || [];
+    const n = im.x * im.y;
+    const acc = new Float32Array(n * 3);
+    for (let c = 0; c < im.c; c++) {
+      if (vis[c] === false) continue;
+      const [r, g, b] = hexToRgb(cols[c]);
+      const lo = vmin[c] ?? 0, hi = Math.max((vmax[c] ?? 255), lo + 1), gm = gam[c] ?? 1;
+      const lut = new Float32Array(256);
+      for (let k = 0; k < 256; k++) lut[k] = Math.pow(Math.min(Math.max((k - lo) / (hi - lo), 0), 1), gm);
+      const off = c * n;
+      for (let p = 0; p < n; p++) {
+        const v = lut[im.data[off + p]];
+        if (v === 0) continue;
+        acc[3 * p] += v * r; acc[3 * p + 1] += v * g; acc[3 * p + 2] += v * b;
+      }
+    }
+    const ctx = imgCanvas.getContext("2d");
+    const out = ctx.createImageData(im.x, im.y);
+    for (let p = 0; p < n; p++) {
+      out.data[4 * p] = Math.min(255, acc[3 * p]);
+      out.data[4 * p + 1] = Math.min(255, acc[3 * p + 1]);
+      out.data[4 * p + 2] = Math.min(255, acc[3 * p + 2]);
+      out.data[4 * p + 3] = 255;
+    }
+    ctx.putImageData(out, 0, 0);
+  }
+
+  function labelRgb(id) {
+    if (model.get("mode") === "semantic") {
+      const cc = model.get("class_colors") || [];
+      return hexToRgb(cc[id - 1] || "#ffffff");
+    }
+    const pal = model.get("instance_palette") || [];
+    return pal.length ? hexToRgb(pal[(id - 1) % pal.length]) : instanceColor(id);
+  }
+
+  function drawLabels() {
+    const lb = state.lab;
+    if (!lb) return;
+    const ctx = labCanvas.getContext("2d");
+    const out = ctx.createImageData(lb.x, lb.y);
+    const a = Math.round(255 * (model.get("opacity") ?? 0.45));
+    const outline = !!model.get("outline_only");
+    const cache = new Map();
+    const d = lb.data, W = lb.x, H = lb.y;
+    for (let p = 0; p < d.length; p++) {
+      const id = d[p];
+      if (id === 0) continue;
+      if (outline) {
+        const x = p % W, y = (p - x) / W;
+        const edge = x === 0 || y === 0 || x === W - 1 || y === H - 1 ||
+          d[p - 1] !== id || d[p + 1] !== id || d[p - W] !== id || d[p + W] !== id;
+        if (!edge) continue;
+      }
+      let rgb = cache.get(id);
+      if (!rgb) { rgb = labelRgb(id); cache.set(id, rgb); }
+      out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
+      out.data[4 * p + 3] = outline ? 255 : a;
+    }
+    ctx.putImageData(out, 0, 0);
+  }
+
+  function drawCursor() {
+    const ctx = curCanvas.getContext("2d");
+    ctx.clearRect(0, 0, curCanvas.width, curCanvas.height);
+    if (!state.cursor) return;
+    const t = model.get("tool");
+    if (t !== "brush" && t !== "eraser") return;
+    const r = model.get("brush_radius") ?? 2;
+    ctx.strokeStyle = t === "eraser" ? "#ff4040" : "#ffffff";
+    ctx.lineWidth = Math.max(1 / state.zoom, 0.5);
+    ctx.beginPath();
+    ctx.arc(state.cursor[0] + 0.5, state.cursor[1] + 0.5, r + 0.5, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+
+  function applyTransform() {
+    stage.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+    drawCursor();
+  }
+
+  function fit() {
+    if (!state.img) return;
+    const w = viewport.clientWidth || 512;
+    state.zoom = Math.max(w / state.img.x, 0.05);
+    viewport.style.height = `${Math.round(state.img.y * state.zoom)}px`;
+    state.panX = 0; state.panY = 0;
+    applyTransform();
+  }
+
+  // ------------------------------------------------------------- painting
+  function toPixel(ev) {
+    const r = imgCanvas.getBoundingClientRect();
+    const x = Math.floor(((ev.clientX - r.left) / r.width) * imgCanvas.width);
+    const y = Math.floor(((ev.clientY - r.top) / r.height) * imgCanvas.height);
+    return [x, y];
+  }
+
+  function stamp(cx, cy) {
+    const lb = state.lab;
+    const r = model.get("brush_radius") ?? 2;
+    const eraser = model.get("tool") === "eraser";
+    const active = model.get("active_label") ?? 1;
+    const ow = !!model.get("overwrite");
+    const r2 = (r + 0.5) * (r + 0.5);
+    for (let dy = -r; dy <= r; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= lb.y) continue;
+      for (let dx = -r; dx <= r; dx++) {
+        const x = cx + dx;
+        if (x < 0 || x >= lb.x || dx * dx + dy * dy > r2) continue;
+        const p = y * lb.x + x;
+        state.stroke[p] = 1;
+        if (eraser) {
+          lb.data[p] = 0;
+        } else if (ow || lb.data[p] === 0) {
+          lb.data[p] = active;
+        }
+      }
+    }
+  }
+
+  function line(x0, y0, x1, y1) {
+    const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      stamp(x0, y0);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+
+  function fillEnclosed() {
+    // Fill pixels enclosed by this stroke: flood the stroke's padded bounding
+    // box from its border through non-stroke pixels; unreached pixels are inside.
+    const lb = state.lab, s = state.stroke, W = lb.x, H = lb.y;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (let p = 0; p < s.length; p++) if (s[p]) {
+      const x = p % W, y = (p - x) / W;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    if (x1 < 0) return;
+    x0 = Math.max(0, x0 - 1); y0 = Math.max(0, y0 - 1); x1 = Math.min(W - 1, x1 + 1); y1 = Math.min(H - 1, y1 + 1);
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+    const seen = new Uint8Array(bw * bh);
+    const stack = [];
+    const push = (x, y) => {
+      const q = (y - y0) * bw + (x - x0);
+      if (seen[q] || s[y * W + x]) return;
+      seen[q] = 1; stack.push(x, y);
+    };
+    for (let x = x0; x <= x1; x++) { push(x, y0); push(x, y1); }
+    for (let y = y0; y <= y1; y++) { push(x0, y); push(x1, y); }
+    while (stack.length) {
+      const y = stack.pop(), x = stack.pop();
+      if (x > x0) push(x - 1, y); if (x < x1) push(x + 1, y);
+      if (y > y0) push(x, y - 1); if (y < y1) push(x, y + 1);
+    }
+    const active = model.get("active_label") ?? 1;
+    const ow = !!model.get("overwrite");
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+      const q = (y - y0) * bw + (x - x0), p = y * W + x;
+      if (!seen[q] && !s[p] && (ow || lb.data[p] === 0)) lb.data[p] = active;
+    }
+  }
+
+  function floodFill(x, y) {
+    const lb = state.lab, W = lb.x, H = lb.y;
+    const target = lb.data[y * W + x], active = model.get("active_label") ?? 1;
+    if (target === active) return false;
+    const stack = [x, y];
+    lb.data[y * W + x] = active;
+    while (stack.length) {
+      const cy = stack.pop(), cx = stack.pop();
+      for (const [nx, ny] of [[cx - 1, cy], [cx + 1, cy], [cx, cy - 1], [cx, cy + 1]]) {
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const p = ny * W + nx;
+        if (lb.data[p] !== target) continue;
+        lb.data[p] = active;
+        stack.push(nx, ny);
+      }
+    }
+    return true;
+  }
+
+  function pushUndo() {
+    state.undo.push({ z: state.lab.z, data: state.lab.data.slice() });
+    if (state.undo.length > UNDO_MAX) state.undo.shift();
+  }
+
+  function send() {
+    const lb = state.lab;
+    model.set("labels_from_js", encodeLabels(lb.z, lb.y, lb.x, lb.data));
+    model.save_changes();
+  }
+
+  function undo() {
+    const lb = state.lab;
+    if (!lb) return;
+    for (let i = state.undo.length - 1; i >= 0; i--) {
+      if (state.undo[i].z === lb.z) {
+        lb.data.set(state.undo[i].data);
+        state.undo.splice(i, 1);
+        drawLabels(); send();
+        return;
+      }
+    }
+    setStatus("nothing to undo on this slice");
+  }
+
+  function clearSlice() {
+    if (!state.lab) return;
+    pushUndo();
+    state.lab.data.fill(0);
+    drawLabels(); send();
+  }
+
+  function setStatus(msg) { statusBar.textContent = msg; }
+
+  viewport.addEventListener("contextmenu", (e) => e.preventDefault());
+  viewport.addEventListener("pointerdown", (ev) => {
+    viewport.focus();
+    if (!state.lab) return;
+    if (ev.button === 1 || ev.button === 2 || state.spaceDown) {
+      state.panning = true; state.last = [ev.clientX, ev.clientY];
+      viewport.setPointerCapture?.(ev.pointerId);
+      return;
+    }
+    if (ev.button !== 0) return;
+    const [x, y] = toPixel(ev);
+    if (x < 0 || y < 0 || x >= state.lab.x || y >= state.lab.y) return;
+    const t = model.get("tool");
+    if (t === "picker") {
+      const id = state.lab.data[y * state.lab.x + x];
+      model.set("active_label", id); model.save_changes();
+      return;
+    }
+    if (t === "fill") {
+      pushUndo();
+      if (floodFill(x, y)) { drawLabels(); send(); } else state.undo.pop();
+      return;
+    }
+    pushUndo();
+    state.painting = true;
+    state.stroke = new Uint8Array(state.lab.x * state.lab.y);
+    state.last = [x, y];
+    stamp(x, y);
+    drawLabels();
+    viewport.setPointerCapture?.(ev.pointerId);
+  });
+  viewport.addEventListener("pointermove", (ev) => {
+    if (state.panning) {
+      state.panX += ev.clientX - state.last[0]; state.panY += ev.clientY - state.last[1];
+      state.last = [ev.clientX, ev.clientY];
+      applyTransform();
+      return;
+    }
+    if (!state.lab) return;
+    const [x, y] = toPixel(ev);
+    state.cursor = [x, y];
+    if (state.painting) {
+      line(state.last[0], state.last[1], x, y);
+      state.last = [x, y];
+      drawLabels();
+    }
+    drawCursor();
+    const inside = x >= 0 && y >= 0 && x < state.lab.x && y < state.lab.y;
+    if (inside) setStatus(`z=${state.lab.z} y=${y} x=${x} label=${state.lab.data[y * state.lab.x + x]}`);
+  });
+  const endStroke = () => {
+    if (state.panning) { state.panning = false; return; }
+    if (!state.painting) return;
+    state.painting = false;
+    if (model.get("tool") === "brush" && model.get("auto_fill")) fillEnclosed();
+    state.stroke = null;
+    drawLabels();
+    send();
+  };
+  viewport.addEventListener("pointerup", endStroke);
+  viewport.addEventListener("pointercancel", endStroke);
+  viewport.addEventListener("pointerleave", () => { state.cursor = null; drawCursor(); });
+  viewport.addEventListener("wheel", (ev) => {
+    if (!state.img) return;
+    ev.preventDefault();
+    const r = viewport.getBoundingClientRect();
+    const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+    const f = Math.exp(-ev.deltaY * 0.0015);
+    const nz = Math.min(Math.max(state.zoom * f, 0.05), 64);
+    state.panX = mx - (mx - state.panX) * (nz / state.zoom);
+    state.panY = my - (my - state.panY) * (nz / state.zoom);
+    state.zoom = nz;
+    applyTransform();
+  }, { passive: false });
+  viewport.addEventListener("keydown", (ev) => {
+    const k = ev.key;
+    if (k === " ") { state.spaceDown = true; ev.preventDefault(); return; }
+    if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "z") { undo(); ev.preventDefault(); return; }
+    const map = { b: "brush", e: "eraser", f: "fill", p: "picker" };
+    if (map[k]) { model.set("tool", map[k]); model.save_changes(); return; }
+    if (k === "[" || k === "]") {
+      const r = Math.max(0, (model.get("brush_radius") ?? 2) + (k === "]" ? 1 : -1));
+      model.set("brush_radius", r); model.save_changes(); return;
+    }
+    if (k === "n") { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); return; }
+    if (k === "0") { fit(); return; }
+    if (/^[1-9]$/.test(k) && model.get("mode") === "semantic") {
+      const id = parseInt(k);
+      if (id <= (model.get("class_names") || []).length) { model.set("active_label", id); model.save_changes(); }
+      return;
+    }
+    if (k === "ArrowUp" || k === "ArrowDown") {
+      const nz = (model.get("z") ?? 0) + (k === "ArrowUp" ? 1 : -1);
+      model.set("z", Math.min(Math.max(nz, 0), (model.get("shape_zyx") || [1])[0] - 1)); model.save_changes();
+      ev.preventDefault();
+    }
+  });
+  viewport.addEventListener("keyup", (ev) => { if (ev.key === " ") state.spaceDown = false; });
+
+  // ------------------------------------------------------------ model sync
+  function syncControls() {
+    const t = model.get("tool");
+    for (const [name, b] of Object.entries(toolBtns)) b.classList.toggle("lbl-active", name === t);
+    const sem = model.get("mode") === "semantic";
+    labelInput.style.display = sem ? "none" : "";
+    newBtn.style.display = sem ? "none" : "";
+    classSelect.style.display = sem ? "" : "none";
+    const names = model.get("class_names") || [];
+    if (classSelect.options.length !== names.length + 1) {
+      classSelect.innerHTML = "";
+      classSelect.appendChild(el("option", { value: "0", text: "0: unlabelled" }));
+      names.forEach((n, i) => classSelect.appendChild(el("option", { value: String(i + 1), text: `${i + 1}: ${n}` })));
+    }
+    const a = model.get("active_label") ?? 1;
+    labelInput.value = String(a);
+    classSelect.value = String(a);
+    radius.value = String(model.get("brush_radius") ?? 2);
+    opacity.value = String(Math.round(100 * (model.get("opacity") ?? 0.45)));
+    fillCb.checked = !!model.get("auto_fill");
+    owCb.checked = !!model.get("overwrite");
+    olCb.checked = !!model.get("outline_only");
+    const shp = model.get("shape_zyx") || [1, 1, 1];
+    zSlider.max = String(Math.max(0, shp[0] - 1));
+    zSlider.value = String(model.get("z") ?? 0);
+    zLabel.textContent = `${model.get("z") ?? 0} / ${Math.max(0, shp[0] - 1)}`;
+    zRow.style.display = shp[0] > 1 ? "" : "none";
+    const st = model.get("status");
+    if (st) setStatus(st);
+  }
+
+  function onImage() {
+    const im = decodeImage(model.get("image_to_js"));
+    if (!im) return;
+    state.img = im;
+    compose();
+  }
+  function onLabels() {
+    const lb = decodeLabels(model.get("labels_to_js"));
+    if (!lb) return;
+    if (!state.lab || state.lab.z !== lb.z) state.undo = state.undo.filter((u) => u.z === lb.z);
+    state.lab = lb;
+    drawLabels();
+  }
+
+  const handlers = [
+    ["change:image_to_js", onImage],
+    ["change:labels_to_js", onLabels],
+    ["change:channel_visible change:channel_colors change:vmin change:vmax change:gamma", compose],
+    ["change:opacity change:outline_only change:class_colors change:instance_palette change:mode", () => { drawLabels(); syncControls(); }],
+    ["change:tool change:active_label change:brush_radius change:auto_fill change:overwrite change:z change:shape_zyx change:class_names change:status", () => { syncControls(); drawCursor(); }],
+    ["change:channel_names", buildChannels],
+  ];
+  for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.on(e, fn);
+
+  buildChannels();
+  syncControls();
+  onImage();
+  onLabels();
+  requestAnimationFrame(fit);
+
+  return () => { for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.off?.(e, fn); };
+}
+
+export default { render };
