@@ -130,6 +130,7 @@ Everything except single-cell analysis runs in [Pyodide](https://pyodide.org), t
 | --- | --- | --- |
 | `plotting_utils`, `tnia_plotting_anywidgets`, `label_annotator`, `stats`, `spline_utils`, `io` (file helpers) | core | yes |
 | `image_and_labels_utils`, `intensity_rescaling`, `extended_depth_of_focus`, `maxproj_registration`, `surface_extraction`, `clahe_equalize_adapthist` | `scikit-image` | yes |
+| `clahe_equalize_adapthist.clahe_u8` fast backend (also used by `surface_extraction`) | optional `numba` (5-10x faster; falls back to NumPy without it) | yes (NumPy fallback) |
 | `image_io` | `xarray`, `tifffile` | yes |
 | `stitching` | `xarray`, `scikit-image` | yes |
 | `stats.add_stat_annotations`, `plotting_utils.plotly_scatter_3d` | `[plotting]` | yes |

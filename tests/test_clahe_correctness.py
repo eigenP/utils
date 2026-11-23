@@ -180,21 +180,73 @@ def _camera():
 def test_clahe_u8_numpy_matches_opencv():
     """The NumPy backend reproduces OpenCV's CLAHE to within rounding.
 
-    Both use origin-anchored tiles, a single clip/redistribute pass and
-    bilinear interpolation of per-tile LUTs; NumPy works in int16 fixed point.
-    Strategy: kernel sizes dividing the image (so OpenCV's tile size equals
-    ours), three clip regimes (identity-like, default, AHE). Expected: max
-    absolute difference <= 2 gray levels, mean < 0.5.
+    OpenCV is only a test oracle here (not a dependency). Both use
+    origin-anchored tiles, a single clip/redistribute pass and bilinear
+    interpolation of per-tile LUTs; clahe_u8 works in int16 fixed point and
+    its clip_limit c equals OpenCV's clipLimit = 256 * c. Strategy: kernel
+    sizes dividing the image (so OpenCV's tile size equals ours), three clip
+    regimes (identity-like, default, AHE). Expected: max absolute difference
+    <= 2 gray levels, mean < 0.5.
     """
     import pytest
-    pytest.importorskip("cv2")
+    cv2 = pytest.importorskip("cv2")
     image = _camera()
     for clip in (0.0, 0.01, None):
-        for ks in (64, (128, 32)):
+        for ks in ((64, 64), (128, 32)):
             a = clahe_u8(image, kernel_size=ks, clip_limit=clip, backend="numpy")
-            b = clahe_u8(image, kernel_size=ks, clip_limit=clip, backend="opencv")
+            cv_clip = 0.0 if clip is None else max(256 * clip, 1e-6)
+            tiles = (image.shape[1] // ks[1], image.shape[0] // ks[0])
+            b = cv2.createCLAHE(clipLimit=cv_clip, tileGridSize=tiles).apply(image)
             d = np.abs(a.astype(int) - b.astype(int))
             assert d.max() <= 2 and d.mean() < 0.5, (clip, ks, d.max(), d.mean())
+
+
+def test_clahe_u8_numba_bit_identical_to_numpy():
+    """The numba backend reproduces the NumPy backend exactly.
+
+    The kernels mirror the NumPy arithmetic (float32 leading-axis LUT blend,
+    half-even rounding to int16, 7-bit fixed-point lerps; histograms with
+    reflect-completed trailing tiles done by index reflection instead of
+    padding). Strategy: 1D, 2D, 3D, non-divisible shapes, anisotropic tiles,
+    three clip regimes; a thin stack also exercises the row-parallel kernel.
+    Expected: identical arrays.
+    """
+    import pytest
+    pytest.importorskip("numba")
+    from scipy import ndimage
+    rng = np.random.default_rng(4)
+    vol = ndimage.gaussian_filter(rng.random((21, 37, 45)), 2)
+    vol = (255 * (vol - vol.min()) / np.ptp(vol)).astype(np.uint8)
+    image = _camera()
+    cases = [
+        (vol, (5, 9, 12)),        # 3D, every axis non-divisible
+        (vol[:2], (2, 16, 16)),   # thin stack: row-parallel kernel
+        (image, (64, 64)),        # 2D
+        (image[:301, :257], 40),  # 2D, non-divisible
+        (image[100], 16),         # 1D
+    ]
+    for arr, ks in cases:
+        for clip in (0.0, 0.01, None):
+            a = clahe_u8(arr, kernel_size=ks, clip_limit=clip, backend="numba")
+            b = clahe_u8(arr, kernel_size=ks, clip_limit=clip, backend="numpy")
+            np.testing.assert_array_equal(a, b, err_msg=f"{arr.shape} {ks} {clip}")
+
+
+def test_clahe_u8_falls_back_to_numpy_without_numba(monkeypatch):
+    """backend='auto' works when numba is unavailable (e.g. Pyodide).
+
+    Strategy: make the numba loader report "not importable". Expected: 'auto'
+    returns the NumPy result; an explicit backend='numba' raises ImportError.
+    """
+    import pytest
+    import eigenp_utils.clahe_equalize_adapthist as mod
+    monkeypatch.setattr(mod, "_numba_kernels", lambda: None)
+    image = _camera()
+    np.testing.assert_array_equal(
+        clahe_u8(image, kernel_size=64), clahe_u8(image, kernel_size=64, backend="numpy")
+    )
+    with pytest.raises(ImportError, match="numba"):
+        clahe_u8(image, backend="numba")
 
 
 def test_clahe_u8_matches_skimage_reference():
@@ -322,12 +374,18 @@ def test_clahe_u8_identity_and_edge_cases():
 
 
 def test_clahe_u8_rejects_bad_arguments():
-    """Wrong kernel_size length, unknown backend and 3D opencv raise ValueError."""
+    """Wrong kernel_size length, unknown backend and >3D numba raise ValueError.
+
+    Also checks that 'auto' handles 4D input (NumPy path) instead of failing.
+    """
     import pytest
     image = np.zeros((16, 16), np.uint8)
     with pytest.raises(ValueError, match="kernel_size"):
         clahe_u8(image, kernel_size=(4, 4, 4))
     with pytest.raises(ValueError, match="backend"):
-        clahe_u8(image, backend="cuda")
-    with pytest.raises(ValueError, match="2D"):
-        clahe_u8(np.zeros((2, 16, 16), np.uint8), backend="opencv")
+        clahe_u8(image, backend="opencv")
+    vol4 = np.random.default_rng(5).integers(0, 255, (3, 4, 16, 16), dtype=np.uint8)
+    assert clahe_u8(vol4, kernel_size=(2, 2, 8, 8)).shape == vol4.shape
+    pytest.importorskip("numba")
+    with pytest.raises(ValueError, match="3 dimensions"):
+        clahe_u8(vol4, backend="numba")

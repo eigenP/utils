@@ -412,14 +412,19 @@ def _parse_kernel_size(kernel_size, shape):
     return tuple(int(min(max(int(k), 1), s)) for k, s in zip(kernel_size, shape))
 
 
-def _tile_luts_u8(img, ks, clip_limit):
-    """Clipped-histogram LUTs for each tile, edge-padded by one tile per axis.
+def _tile_grid(shape, ks):
+    """Number of origin-anchored tiles per axis (trailing partial tiles count)."""
+    return [-(-s // k) for s, k in zip(shape, ks)]
 
-    Tiles are anchored at the origin (as in OpenCV); trailing partial tiles are
-    completed by reflection. Returns float32 of shape (n_0 + 2, ..., n_d + 2, 256).
+
+def _tile_hist_u8_numpy(img, ks):
+    """(n_tiles, 256) int64 histograms of origin-anchored tiles, C order.
+
+    Trailing partial tiles are completed by reflection (numpy 'reflect', i.e.
+    OpenCV's BORDER_REFLECT_101).
     """
     ndim = img.ndim
-    nt = [-(-s // k) for s, k in zip(img.shape, ks)]
+    nt = _tile_grid(img.shape, ks)
     pad = [(0, n * k - s) for n, k, s in zip(nt, ks, img.shape)]
     if any(p for _, p in pad):
         img = np.pad(img, pad, mode='reflect')
@@ -444,7 +449,16 @@ def _tile_luts_u8(img, ks, clip_limit):
             hist[t0:t0 + b.shape[0]] = np.bincount(
                 idx.ravel(), minlength=b.shape[0] * _NBINS_U8
             ).reshape(-1, _NBINS_U8)
+    return hist
 
+
+def _hist_to_lut(hist, nt, n_px, clip_limit):
+    """Clip, redistribute and cumulate tile histograms into float32 LUTs.
+
+    Returns shape (n_0 + 2, ..., n_d + 2, 256): the tile grid edge-padded by
+    one tile per axis, so interpolation never needs bounds checks.
+    """
+    ndim = len(nt)
     if clip_limit is not None:
         # Normalised limit as in skimage/_my_clahe_: 0 -> identity, 1 -> AHE
         # (integer count, as OpenCV and skimage)
@@ -452,21 +466,26 @@ def _tile_luts_u8(img, ks, clip_limit):
         # OpenCV's single clip + redistribution pass, vectorised over tiles:
         # every bin gets excess // 256, then the remainder r adds 1 to bins
         # 0, s, 2s, ... (r of them) with s = max(256 // r, 1). Bins may end
-        # slightly above the limit (skimage iterates to remove that); matching
-        # OpenCV keeps the 2D (cv2) and N-D (NumPy) backends consistent.
+        # slightly above the limit (skimage iterates to remove that).
         excess = np.maximum(hist - clim, 0).sum(axis=1, keepdims=True)
-        np.minimum(hist, clim, out=hist)
+        hist = np.minimum(hist, clim)  # do not modify the caller's array
         batch, residual = np.divmod(excess, _NBINS_U8)
         hist += batch
         step = np.maximum(_NBINS_U8 // np.maximum(residual, 1), 1)
         bins = np.arange(_NBINS_U8)[None, :]
-        hist += ((bins % step == 0) & (bins // step < residual))
+        hist = hist + ((bins % step == 0) & (bins // step < residual))
 
     lut = np.cumsum(hist, axis=1).astype(np.float32)
     lut *= np.float32((_NBINS_U8 - 1) / n_px)
     np.clip(lut, 0, _NBINS_U8 - 1, out=lut)
     lut = lut.reshape(tuple(nt) + (_NBINS_U8,))
     return np.pad(lut, [(1, 1)] * ndim + [(0, 0)], mode='edge')
+
+
+def _tile_luts_u8(img, ks, clip_limit):
+    """Edge-padded float32 tile LUTs (NumPy histograms)."""
+    hist = _tile_hist_u8_numpy(img, ks)
+    return _hist_to_lut(hist, _tile_grid(img.shape, ks), int(np.prod(ks)), clip_limit)
 
 
 def _interp_coords(size, k):
@@ -543,33 +562,53 @@ def _clahe_u8_numpy(img, ks, clip_limit, chunk_px=1 << 16):
     return out
 
 
-def _clahe_u8_opencv(img, ks, clip_limit):
-    import cv2
-    H, W = img.shape
-    tiles = (-(-W // ks[1]), -(-H // ks[0]))  # (cols, rows)
-    if clip_limit is None:
-        cv_clip = 0.0  # OpenCV: <= 0 disables clipping (plain AHE)
-    else:
-        # OpenCV's limit is in units of the mean bin count (K / 256)
-        cv_clip = max(float(clip_limit) * _NBINS_U8, 1e-6)
-    return cv2.createCLAHE(clipLimit=cv_clip, tileGridSize=tiles).apply(
-        np.ascontiguousarray(img)
-    )
+def _numba_kernels():
+    """The compiled numba backend, or None when numba is not importable."""
+    try:
+        from . import _clahe_numba
+    except ImportError:
+        return None
+    return _clahe_numba
+
+
+def _clahe_u8_numba(img, ks, clip_limit, kernels):
+    """Fused, multithreaded equivalent of `_clahe_u8_numpy` for ndim <= 3."""
+    # Treat 1D/2D as (1, ..., N) volumes with unit kernels on the added axes
+    lead = 3 - img.ndim
+    vol = img.reshape((1,) * lead + img.shape)
+    ks3 = (1,) * lead + tuple(ks)
+    nt = _tile_grid(vol.shape, ks3)
+
+    hist = kernels.tile_hist(np.ascontiguousarray(vol), *ks3, *nt)
+    lut = _hist_to_lut(hist, nt, int(np.prod(ks3)), clip_limit)
+
+    (tz, wz), (ty, wy), (tx, wx) = (_interp_coords(s, k) for s, k in zip(vol.shape, ks3))
+    wy = np.round(wy * _W_ONE).astype(np.int32)
+    wx = np.round(wx * _W_ONE).astype(np.int32)
+    out = kernels.interp(vol, lut, tz, wz, ty, wy, tx, wx, _W_BITS)
+    return out.reshape(img.shape)
 
 
 def clahe_u8(image, kernel_size=None, clip_limit=0.01,
              percentiles=(0.1, 99.9), backend='auto'):
-    """Fast CLAHE on 8 bits, for segmentation preprocessing (uint8 in, uint8 out).
+    """Fast N-D CLAHE on 8 bits, for segmentation preprocessing (uint8 in and out).
 
     Same contextual-region algorithm as ``_my_clahe_`` / skimage, but it trades
     exactness for speed: 256 bins, OpenCV's tiling (anchored at the origin,
     trailing partial tiles completed by reflection) and its single-pass clip
-    redistribution, uint8 output. The NumPy and OpenCV backends agree to
-    about one gray level. For 2D input it uses
-    OpenCV when installed (``backend='auto'``); N-D input runs a vectorised
-    NumPy path that reduces the leading axes to a per-slice LUT and does a 2D
-    bilinear interpolation in int16 fixed point (4 gathers per pixel instead
-    of 2**ndim).
+    redistribution, int16 fixed-point interpolation, uint8 output. The leading
+    axes are folded into one LUT per 2D slice, so every pixel needs 4 lookups
+    whatever the dimensionality.
+
+    Two backends give bit-identical results:
+
+    * ``'numba'`` (used by ``'auto'`` when numba is importable and
+      ``image.ndim <= 3``): fused, multithreaded loops, ~1 ns/voxel on 4 cores.
+      The first call in a fresh environment compiles for a few seconds; the
+      compiled code is cached on disk. Threads follow numba's settings
+      (``NUMBA_NUM_THREADS`` / ``numba.set_num_threads``).
+    * ``'numpy'``: vectorised fallback (Pyodide, no numba, ndim > 3), ~5-10x
+      slower.
 
     Parameters
     ----------
@@ -580,34 +619,31 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
         Tile shape. Default 1/8 of each dimension.
     clip_limit : float or None
         Normalised clip limit as in ``_my_clahe_``: 0 ~ identity, 1 or None = AHE.
+        Equivalent to OpenCV's ``clipLimit = 256 * clip_limit``.
     percentiles : (float, float)
         Input range for non-uint8 images.
-    backend : {'auto', 'numpy', 'opencv'}
-        'auto' uses OpenCV for 2D images when ``cv2`` is importable.
+    backend : {'auto', 'numba', 'numpy'}
 
     Returns
     -------
     out : ndarray of uint8, same shape as ``image``.
     """
+    if backend not in ('auto', 'numba', 'numpy'):
+        raise ValueError(f'Unknown backend: {backend!r}')
     img = _to_uint8(image, percentiles)
     if img.ndim == 0:
         raise ValueError('`image` must have at least one dimension')
     ks = _parse_kernel_size(kernel_size, img.shape)
 
-    if backend == 'auto':
-        backend = 'numpy'
-        if img.ndim == 2:
-            try:
-                import cv2  # noqa: F401
-                backend = 'opencv'
-            except ImportError:
-                pass
-    if backend == 'opencv':
-        if img.ndim != 2:
-            raise ValueError("backend='opencv' supports 2D images only")
-        return _clahe_u8_opencv(img, ks, clip_limit)
     if backend != 'numpy':
-        raise ValueError(f'Unknown backend: {backend!r}')
+        kernels = _numba_kernels()
+        if backend == 'numba':
+            if kernels is None:
+                raise ImportError("backend='numba' requires numba")
+            if img.ndim > 3:
+                raise ValueError("backend='numba' supports up to 3 dimensions")
+        if kernels is not None and img.ndim <= 3:
+            return _clahe_u8_numba(img, ks, clip_limit, kernels)
 
     if img.ndim == 1:
         return _clahe_u8_numpy(img[None], (1,) + ks, clip_limit)[0]
