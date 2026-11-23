@@ -97,22 +97,42 @@ def _(mo):
     mo.md("""
     # CLAHE Demo
 
-    Demonstrating `_my_clahe_` from `eigenp_utils.clahe_equalize_adapthist`.
+    Demonstrating `clahe_u8` from `eigenp_utils.clahe_equalize_adapthist`:
+    fast N-D 8-bit CLAHE for segmentation preprocessing (uint8 output), on a
+    2D slice and on the whole 3D stack. It replaces the deprecated
+    `_my_clahe_` (same `clip_limit` scale; float output in [0, 1]), which is
+    shown only for the timing comparison below.
     """)
     return
 
 
 @app.cell
 def _():
+    import importlib.util
+    import time
+
     import matplotlib.pyplot as plt
     import numpy as np
     from skimage.io import imread
     from eigenp_utils.io import download_file_async
+    import warnings
     # marimo keeps names starting with "_" private to their cell: alias it
     from eigenp_utils.clahe_equalize_adapthist import _my_clahe_ as my_clahe
+    from eigenp_utils.clahe_equalize_adapthist import clahe_u8
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
-    return download_file_async, imread, my_clahe, plt, show_zyx_max_slice_interactive
+    return (
+        clahe_u8,
+        download_file_async,
+        imread,
+        importlib,
+        my_clahe,
+        np,
+        plt,
+        show_zyx_max_slice_interactive,
+        time,
+        warnings,
+    )
 
 
 @app.cell
@@ -137,27 +157,26 @@ def _(cells_path, imread):
 def _(cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
-    show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colormap=['lime', 'magenta'])
     return
 
 
 @app.cell
 def _(mo):
     clip_slider = mo.ui.slider(start=0.0, stop=0.1, step=0.005, value=0.01, label="Clip Limit")
-    nbins_slider = mo.ui.slider(start=64, stop=512, step=64, value=256, label="Bins")
     kernel_size_slider = mo.ui.slider(start=8, stop=128, step=8, value=32, label="Kernel Size")
 
-    mo.vstack([clip_slider, nbins_slider, kernel_size_slider])
-    return clip_slider, kernel_size_slider, nbins_slider
+    mo.vstack([clip_slider, kernel_size_slider])
+    return clip_slider, kernel_size_slider
 
 
 @app.cell
-def _(clip_slider, kernel_size_slider, membrane_slice, my_clahe, nbins_slider):
-    clahe_img = my_clahe(
+def _(clahe_u8, clip_slider, kernel_size_slider, membrane_slice):
+    # uint16 slice -> uint8 between the 0.1 / 99.9 percentiles, then CLAHE
+    clahe_img = clahe_u8(
         membrane_slice,
         clip_limit=clip_slider.value,
-        nbins=nbins_slider.value,
-        kernel_size=kernel_size_slider.value
+        kernel_size=kernel_size_slider.value,
     )
     return (clahe_img,)
 
@@ -174,6 +193,96 @@ def _(clahe_img, membrane_slice, plt):
     axes[1].axis('off')
     fig.tight_layout()
     fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Fast 3D CLAHE with `clahe_u8`
+
+    `clahe_u8` returns uint8 and is meant for segmentation preprocessing,
+    not quantitative intensities. Non-uint8 input (here the raw uint16 stack)
+    is mapped to 8 bits between the 0.1 and 99.9 percentiles, so a few hot or
+    dead pixels do not set the range (this is why it looks brighter than
+    `_my_clahe_`, which maps the stack's min/max). Contextual regions are 3D, so contrast
+    varies smoothly along Z too, without slice-to-slice banding (XZ views).
+    The sliders above set the clip limit and the Y/X tile size; the Z tile is
+    1/8 of the stack.
+
+    With `numba` installed it runs fused, multithreaded loops (the first call
+    in a fresh environment compiles for a few seconds); otherwise, e.g. in
+    the browser, it falls back to an identical NumPy implementation.
+    """)
+    return
+
+
+@app.cell
+def _(
+    cells,
+    clahe_u8,
+    clip_slider,
+    importlib,
+    kernel_size_slider,
+    my_clahe,
+    time,
+    warnings,
+):
+    membrane_stack = cells[:, 0, :, :]
+    kernel_3d = (max(membrane_stack.shape[0] // 8, 1),) + (kernel_size_slider.value,) * 2
+    clahe_backend = "numba" if importlib.util.find_spec("numba") else "numpy"
+    # warm-up: excludes numba's one-off compilation / cache load from the timing
+    clahe_u8(membrane_stack[:2, :16, :16])
+
+    # _my_clahe_ is deprecated: run here only as the timing reference
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "_my_clahe_ is deprecated", DeprecationWarning)
+        _t0 = time.perf_counter()
+        volume_ref = my_clahe(membrane_stack, clip_limit=clip_slider.value, kernel_size=kernel_3d)
+        t_ref = time.perf_counter() - _t0
+
+    _t0 = time.perf_counter()
+    volume_fast = clahe_u8(membrane_stack, clip_limit=clip_slider.value, kernel_size=kernel_3d)
+    t_fast = time.perf_counter() - _t0
+    return clahe_backend, kernel_3d, membrane_stack, t_fast, t_ref, volume_fast, volume_ref
+
+
+@app.cell
+def _(clahe_backend, kernel_3d, membrane_stack, mo, t_fast, t_ref):
+    mo.md(f"""
+    3D CLAHE of the {membrane_stack.shape} membrane stack, tiles {kernel_3d}:
+    `_my_clahe_` (deprecated) **{t_ref * 1e3:.0f} ms**, `clahe_u8` ({clahe_backend} backend)
+    **{t_fast * 1e3:.0f} ms** (**{t_ref / t_fast:.0f}x** faster).
+    """)
+    return
+
+
+@app.cell
+def _(clip_slider, membrane_stack, np, plt, volume_fast, volume_ref):
+    z_show = membrane_stack.shape[0] // 2
+    y_show = membrane_stack.shape[1] // 2
+    panels = [
+        ("Original", membrane_stack),
+        ("_my_clahe_ (deprecated)", volume_ref),
+        ("clahe_u8", volume_fast),
+    ]
+    fig_3d, axes_3d = plt.subplots(
+        2, 3, figsize=(12, 6),
+        height_ratios=[membrane_stack.shape[1], 2 * membrane_stack.shape[0]],
+    )
+    for col, (name, vol) in enumerate(panels):
+        axes_3d[0, col].imshow(vol[z_show], cmap="gray")
+        axes_3d[0, col].set_title(f"{name}: XY, z={z_show}")
+        # aspect=2: cells3d's Z step is about twice its XY pixel size
+        axes_3d[1, col].imshow(
+            np.asarray(vol[:, y_show, :], dtype=np.float32), cmap="gray", aspect=2
+        )
+        axes_3d[1, col].set_title(f"XZ, y={y_show}")
+    for ax in axes_3d.ravel():
+        ax.axis("off")
+    fig_3d.suptitle(f"3D CLAHE, clip_limit={clip_slider.value:.3f}")
+    fig_3d.tight_layout()
+    fig_3d
     return
 
 
