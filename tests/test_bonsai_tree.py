@@ -371,6 +371,9 @@ def test_find_mpiexec_next_to_python(tmp_path, monkeypatch):
     launcher.write_text("#!/bin/sh\n")
     launcher.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    # the running interpreter's bin/ is searched too; keep a real mpiexec there
+    # (e.g. from the [bonsai-mpi] extra) out of this test
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "nowhere" / "python"))
     assert _find_mpiexec("mpiexec", str(bindir / "python")) == str(launcher)
     assert _find_mpiexec(str(launcher), "/nonexistent/python") == str(launcher)
     with pytest.raises(FileNotFoundError, match="bonsai-mpi"):
@@ -401,9 +404,13 @@ def test_run_bonsai_mpi_command(fake_bonsai, tmp_path, monkeypatch):
     launcher.chmod(0o755)
     X = np.ones((4, 2)) + np.arange(4)[:, None]
 
-    with pytest.raises(ImportError, match="mpi4py"):
-        run_bonsai(X, results_folder=tmp_path / "r0", bonsai_dir=fake_bonsai,
-                   n_procs=3, mpiexec=str(launcher))
+    import eigenp_utils.bonsai_tree as bt
+
+    with monkeypatch.context() as m:  # independent of whether mpi4py is installed
+        m.setattr(bt, "_has_mpi4py", lambda python: False)
+        with pytest.raises(ImportError, match="mpi4py"):
+            run_bonsai(X, results_folder=tmp_path / "r0", bonsai_dir=fake_bonsai,
+                       n_procs=3, mpiexec=str(launcher))
 
     monkeypatch.syspath_prepend(str(fake_pkgs))
     importlib.invalidate_caches()
