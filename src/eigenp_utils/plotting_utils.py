@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as font_manager
 import matplotlib.colors as mcolors
+import matplotlib.ticker as mpl_ticker
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, PowerNorm
 from matplotlib import colormaps as mpl_colormaps
 from pathlib import Path
@@ -148,51 +149,250 @@ for name, cmap in I_SERIES_COLORMAPS.items():
             plt.register_cmap(name=reg_name, cmap=cmap)
 
 
-def _image_info_lines(image, shown=None) -> list:
-    """Text lines describing an array or an (STCZYX) xarray.DataArray."""
-    lines = []
+def _image_info(image, shown=None):
+    """Structured description of an array or an (STCZYX) xarray.DataArray.
+
+    Returns ``(rows, channels)``: ``rows`` is a list of ``(key, value)`` strings,
+    ``channels`` is ``None`` or ``(columns, cells)`` with one row of strings per
+    channel (index, label, then one entry per auxiliary ``C`` coordinate).
+    """
+    rows, channels = [], None
     if hasattr(image, "dims") and hasattr(image, "coords"):
         src = image.attrs.get("source") if hasattr(image, "attrs") else None
         if src:
-            lines.append(f"source: {src}")
-        lines.append("dims: " + " ".join(f"{d}={n}" for d, n in image.sizes.items()))
-        lines.append(f"dtype: {image.dtype}")
+            rows.append(("source", str(src)))
+        rows.append(("dims", " ".join(f"{d}={n}" for d, n in image.sizes.items())))
+        rows.append(("dtype", str(image.dtype)))
         try:
             from .image_io import get_stczyx_pixel_sizes
 
             ps = get_stczyx_pixel_sizes(image)
             if any(ps.get(a) is not None for a in ("Z", "Y", "X")):
-                lines.append(
-                    "pixel size: "
-                    + " ".join(f"{a}={ps[a]:.4g}" if ps.get(a) is not None else f"{a}=?" for a in ("Z", "Y", "X"))
-                    + (f" {ps['unit']}" if ps.get("unit") else "")
-                )
+                rows.append((
+                    "pixel size",
+                    " ".join(f"{a}={ps[a]:.4g}" if ps.get(a) is not None else f"{a}=?" for a in ("Z", "Y", "X"))
+                    + (f" {ps['unit']}" if ps.get("unit") else ""),
+                ))
         except ImportError:  # image_io needs xarray + tifffile
             pass
         if "C" in image.dims:
             labels = list(image.coords["C"].values) if "C" in image.coords else list(range(image.sizes["C"]))
             meta = [k for k, c in image.coords.items() if c.dims == ("C",) and k != "C"]
+            cells = []
             for i, lab in enumerate(labels):
-                extra = " ".join(f"{k}={image.coords[k].values[i]}" for k in meta)
-                lines.append(f"C[{i}] {lab}" + (f"  {extra}" if extra else ""))
+                vals = [image.coords[k].values[i] for k in meta]
+                cells.append([str(i), str(lab)] + ["" if (isinstance(v, float) and np.isnan(v)) else str(v) for v in vals])
+            channels = (["C", "name"] + [str(k) for k in meta], cells)
     else:
-        lines.append(f"shape: {tuple(np.shape(image))}")
-        lines.append(f"dtype: {np.asarray(image).dtype}")
+        rows.append(("shape", str(tuple(np.shape(image)))))
+        rows.append(("dtype", str(np.asarray(image).dtype)))
+    if shown:
+        rows.append(("shown", shown))
+    return rows, channels
+
+
+def _image_info_lines(image, shown=None) -> list:
+    """Text lines describing an array or an (STCZYX) xarray.DataArray."""
+    rows, channels = _image_info(image, shown)
+    lines = [f"{k}: {v}" for k, v in rows if k != "shown"]
+    if channels is not None:
+        columns, cells = channels
+        for row in cells:
+            extra = " ".join(f"{k}={v}" for k, v in zip(columns[2:], row[2:]))
+            lines.append(f"C[{row[0]}] {row[1]}" + (f"  {extra}" if extra else ""))
     if shown:
         lines.append(f"shown: {shown}")
     return lines
 
 
-def describe_image(image, bins=64, gamma = 1, return_image_only = False, info_width = 46, **imshow_kwargs):
+def _swatch_color(value):
+    """RGB of a channel colour entry (a colormap name gives its last colour), else None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:  # colormap names first: 'gray', 'pink', 'hot' are also CSS colours
+        return mpl_colormaps[value](1.0)[:3]
+    except (KeyError, ValueError):
+        pass
+    return mcolors.to_rgb(value) if mcolors.is_color_like(value) else None
+
+
+def _wrap_value(text, width):
+    """Greedy wrap that may also break after '/' or ',', so long paths wrap at directories."""
+    import re
+
+    width = max(int(width), 8)
+    tokens = [t for t in re.split(r"(?<=[/,])|(?= )", text) if t]
+    lines, cur = [], ""
+    for tok in tokens:
+        if len(cur) + len(tok) <= width:
+            cur += tok
+            continue
+        if cur.strip():
+            lines.append(cur.rstrip())
+        tok = tok.lstrip() if cur else tok
+        while len(tok) > width:  # a single token longer than the line
+            lines.append(tok[:width])
+            tok = tok[width:]
+        cur = "  " + tok if lines else tok  # hanging indent for continuation lines
+    if cur.strip() or not lines:
+        lines.append(cur.rstrip())
+    return lines
+
+
+def _draw_info_table(ax, rows, channels, width_pt, fontsize, shown_channel=None, max_chars=None):
+    """Draw a key/value table (and a channel table) on ``ax`` in point units.
+
+    The axes data coordinates are points with y pointing down; the caller sets
+    the axes position to ``width_pt`` x returned height. Values and cells are
+    monospace, so their widths are known without a renderer.
     """
-    Displays an image, its histogram and an info panel.
+    from matplotlib.patches import Rectangle
+
+    fs = fontsize
+    cw = 0.61 * fs  # monospace advance (DejaVu Sans Mono: 0.602 em), small safety margin
+    kw = 0.66 * fs  # conservative average advance of bold proportional text
+    pad = 0.5 * fs
+    ink, muted, rule, zebra, highlight = "#2B2B2B", "#6B6B6B", "#C8C8C8", "#F3F3F3", "#E1ECFA"
+
+    def row_height(n_lines, size):
+        return (1.2 * n_lines + 0.5) * size
+
+    def text(x, y, s, size, **kw_):
+        ax.text(x, y + 0.25 * size, s, fontsize=size, va="top", ha="left", linespacing=1.2,
+                clip_on=True, **kw_)
+
+    y = 0.0
+    key_w = max(len(k) for k, _ in rows) * kw + 2 * pad
+    val_chars = int((width_pt - key_w - pad) / cw)
+    if max_chars:
+        val_chars = min(val_chars, int(max_chars))
+    for i, (key, value) in enumerate(rows):
+        lines = _wrap_value(value, val_chars)
+        h = row_height(len(lines), fs)
+        if i % 2 == 0:
+            ax.add_patch(Rectangle((0, y), width_pt, h, fc=zebra, ec="none"))
+        text(pad, y, key, fs, color=muted, fontweight="bold")
+        text(key_w, y, "\n".join(lines), fs, color=ink, family="monospace")
+        y += h
+
+    if channels is not None:
+        columns, cells = channels
+        y += 0.8 * fs
+        color_col = columns.index("color") if "color" in columns else None
+
+        def widths(size):
+            out = []
+            for j, name in enumerate(columns):
+                w = max([len(name) * kw / fs * size] + [len(r[j]) * cw / fs * size for r in cells])
+                if j == color_col:
+                    w += 1.3 * size
+                out.append(w + 2 * pad / fs * size)
+            return out
+
+        cfs = fs
+        if sum(widths(fs)) > width_pt:  # shrink the channel table to the figure width
+            cfs = max(6.0, fs * width_pt / sum(widths(fs)))
+        col_w = widths(cfs)
+        xs = np.concatenate([[0.0], np.cumsum(col_w)[:-1]])
+        cpad = pad / fs * cfs
+
+        h = row_height(1, cfs)
+        for x, name in zip(xs, columns):
+            text(x + cpad, y, name, cfs, color=muted, fontweight="bold")
+        y += h
+        ax.plot([0, min(width_pt, sum(col_w))], [y, y], color=rule, lw=0.8, solid_capstyle="butt", clip_on=True)
+        for i, row in enumerate(cells):
+            is_shown = shown_channel is not None and i == shown_channel
+            if is_shown:
+                ax.add_patch(Rectangle((0, y), width_pt, h, fc=highlight, ec="none"))
+            for j, (x, cell) in enumerate(zip(xs, row)):
+                x0 = x + cpad
+                if j == color_col:
+                    rgb = _swatch_color(cell)
+                    if rgb is not None:
+                        s = 0.85 * cfs
+                        ax.add_patch(Rectangle((x0, y + (h - s) / 2), s, s, fc=rgb, ec=muted, lw=0.5))
+                    x0 += 1.3 * cfs
+                text(x0, y, cell, cfs, color=ink, family="monospace",
+                     fontweight="bold" if is_shown else "normal")
+            y += h
+        if shown_channel is not None:
+            text(sum(col_w) + cpad, y - (len(cells) - shown_channel) * h, "◀ shown", cfs, color=muted)
+
+    ax.set_xlim(0, width_pt)
+    ax.set_ylim(y, 0)
+    ax.axis("off")
+    return y
+
+
+class _HTML(str):
+    """A ``str`` of HTML that notebooks (Jupyter, marimo) render as HTML."""
+
+    def _repr_html_(self):
+        return str(self)
+
+
+def _info_html(rows, channels, shown_channel=None):
+    """The info table as self-contained HTML (inline styles, no dependency), in
+    the spirit of the dask / xarray notebook reprs. Backgrounds are translucent
+    so the table reads on light and dark notebook themes."""
+    from html import escape
+
+    cell = "padding:2px 10px 2px 6px;text-align:left;vertical-align:top;border:none;color:inherit;"
+    mono = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"
+    key = cell + "font-weight:600;opacity:0.7;white-space:nowrap;"
+    zebra = "background:rgba(128,128,128,0.10);"
+    out = ['<div style="font-size:12px;line-height:1.35;">',
+           '<table style="border-collapse:collapse;margin:0 0 8px 0;color:inherit;font-size:inherit;">']
+    for i, (k, v) in enumerate(rows):
+        bg = zebra if i % 2 == 0 else ""
+        out.append(f'<tr style="{bg}"><th style="{key}">{escape(k)}</th>'
+                   f'<td style="{cell}{mono}white-space:pre-wrap;overflow-wrap:anywhere;">{escape(v)}</td></tr>')
+    out.append("</table>")
+    if channels is not None:
+        columns, cells = channels
+        out.append('<table style="border-collapse:collapse;color:inherit;font-size:inherit;">')
+        out.append("<tr>" + "".join(
+            f'<th style="{key}border-bottom:1px solid rgba(128,128,128,0.5);">{escape(c)}</th>' for c in columns
+        ) + "</tr>")
+        for i, row in enumerate(cells):
+            shown = shown_channel is not None and i == shown_channel
+            bg = "background:rgba(66,133,244,0.18);font-weight:600;" if shown else ""
+            tds = []
+            for c, v in zip(columns, row):
+                sw = ""
+                rgb = _swatch_color(v) if c == "color" else None
+                if rgb is not None:
+                    sw = ('<span style="display:inline-block;width:0.85em;height:0.85em;margin-right:4px;'
+                          f'vertical-align:-0.1em;border:1px solid rgba(128,128,128,0.8);background:{mcolors.to_hex(rgb)};"></span>')
+                tds.append(f'<td style="{cell}{mono}white-space:pre;">{sw}{escape(v)}</td>')
+            mark = f'<td style="{cell}opacity:0.7;">&#9664; shown</td>' if shown else ""
+            out.append(f'<tr style="{bg}">' + "".join(tds) + mark + "</tr>")
+        out.append("</table>")
+    out.append("</div>")
+    return _HTML("".join(out))
+
+
+def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=None, image_size=4.0,
+                   **imshow_kwargs):
+    """
+    Displays an image, its histogram and an info table, stacked in one column.
+
+    Top to bottom: the image (longer side ``image_size`` inches); a short
+    histogram as wide as the image (fraction of pixels per bin, on a log scale
+    when it spans more than a decade), with the display range (``vmin`` /
+    ``vmax`` of the image's norm) marked by dashed lines and the clipped
+    intensities shaded when it differs from the data range; and a
+    full-width info table.
 
     For inputs with more than two dimensions the middle slice of every extra
-    dimension is shown. The info panel (monospace text, wrapped to
-    ``info_width`` characters so it is not clipped) lists the shape and dtype,
-    or for an ``xarray.DataArray`` (e.g. STCZYX from ``image_io``) the dims,
-    pixel sizes, channels with their metadata coordinates (``set_channel_info``)
-    and which slice is shown, plus min / max / mean of the shown slice.
+    dimension is shown. The info table lists the shape and dtype, or for an
+    ``xarray.DataArray`` (e.g. STCZYX from ``image_io``) the source, dims,
+    pixel sizes and which slice is shown, plus min / max / mean of the shown
+    slice and, when set (``vmin``/``vmax``/``gamma``), the display range with
+    the fraction of clipped pixels; channels and their metadata coordinates
+    (``set_channel_info``) get their own table, with a swatch for a ``color``
+    entry and the shown channel highlighted.
 
     Parameters
     ----------
@@ -203,31 +403,39 @@ def describe_image(image, bins=64, gamma = 1, return_image_only = False, info_wi
     gamma : float, optional
         Display gamma (``PowerNorm``); ``vmin``/``vmax`` passed in ``imshow_kwargs``
         are applied to that norm.
+    return_image_only : bool, optional
+        Return only the 2D slice that would be shown.
     info_width : int, optional
-        Wrap width (characters) of the info panel.
+        Maximum characters per value line in the info table (default: as many
+        as fit the figure width).
+    image_size : float, optional
+        Length in inches of the image's longer side.
+    **imshow_kwargs
+        Passed to ``imshow`` (``cmap``, ``vmin``, ``vmax``, ...).
 
     Returns
     -------
     dict
         ``"fig"`` (:class:`matplotlib.figure.Figure`), ``"axes"`` (mapping
-        ``"Image"``, ``"Histogram"``, ``"Info"`` to axes) and ``"info"`` (the
-        panel text). When ``return_image_only`` is ``True`` only the 2D slice is
-        returned.
+        ``"Image"``, ``"Histogram"``, ``"Info"`` to axes), ``"info"`` (plain
+        text) and ``"info_html"`` (the same table as HTML; a ``str`` that
+        notebooks render when it is a cell's output). When
+        ``return_image_only`` is ``True`` only the 2D slice is returned.
 
     Examples
     --------
-    >>> res = describe_image(np.random.rand(100, 100))
+    >>> res = describe_image(np.random.rand(100, 100), vmax=0.8)
     >>> print(res["info"])
+    >>> res["info_html"]  # last expression in a notebook cell: rendered table
 
     Formerly ``hist_imshow`` (deprecated alias).
     """
-    import textwrap
-
     ### SET DEFAULT KWARGS
     imshow_kwargs.setdefault('origin', 'lower')
     imshow_kwargs.setdefault('cmap', 'gray')
 
     shown = None
+    shown_channel = None
     if hasattr(image, "dims") and hasattr(image, "isel"):
         da = image
         extra = [d for d in da.dims[:-2]]
@@ -238,7 +446,8 @@ def describe_image(image, bins=64, gamma = 1, return_image_only = False, info_wi
                 lab = da.coords[d].values[i] if d in da.coords and d == "C" else i
                 parts.append(f"{d}={lab}")
             shown = ", ".join(parts)
-        info_lines = _image_info_lines(da, shown)
+        shown_channel = sel.get("C")
+        info_src = da
         image = np.asarray(da.isel(sel).values) if sel else np.asarray(da.values)
     else:
         image = np.asarray(image)
@@ -247,48 +456,131 @@ def describe_image(image, bins=64, gamma = 1, return_image_only = False, info_wi
             middle_indices = [s // 2 for s in im_shape[:-2]]
             shown = "middle slice " + str(tuple(middle_indices)) + " of the leading dims"
             image = image[tuple(middle_indices + [slice(None), slice(None)])]
-        info_lines = _image_info_lines(np.empty(im_shape, dtype=image.dtype) if len(im_shape) > 2 else image, shown)
+        info_src = np.empty(im_shape, dtype=image.dtype) if len(im_shape) > 2 else image
 
     if return_image_only:
         return image
+
+    info_lines = _image_info_lines(info_src, shown)
+    rows, channels = _image_info(info_src, shown)
 
     dtype = image.dtype
     if image.dtype == bool:
         # numpy cannot subtract booleans (needed by hist and by the stats below)
         image = image.astype(np.uint8)
 
-    stats = f"min {image.min():.4g}  max {image.max():.4g}  mean {image.mean():.4g}"
-    info_lines.append(stats)
-    wrapped = []
-    for line in info_lines:
-        wrapped.extend(textwrap.wrap(line, width=info_width, subsequent_indent="  ") or [""])
-    info = "\n".join(info_lines)
+    finite = image[np.isfinite(image)] if image.dtype.kind in "fc" else image.ravel()
+    if finite.size:
+        stats = f"min {finite.min():.4g}  max {finite.max():.4g}  mean {finite.mean():.4g}"
+    else:
+        stats = "no finite values"
 
-    n_lines = len(wrapped)
-    fig, axes = plt.subplot_mosaic(
-        [['Image', 'Histogram'], ['Image', 'Info']],
-        layout='constrained',
-        height_ratios=[1.0, max(0.5, 0.11 * n_lines)],
-    )
+    # --- figure: one column (image, histogram, info), axes placed in inches ---
+    H, W = image.shape[:2]
+    w_img = image_size * W / max(H, W)
+    h_img = image_size * H / max(H, W)
+    w_hist, h_hist = max(w_img, 3.0), 0.9
+    col_w = max(w_img, w_hist)
+
+    fig = plt.figure(figsize=(col_w + 2.0, h_img + h_hist + 4.0))
+    ax_img = fig.add_axes([0.1, 0.6, 0.4, 0.3])
+    ax_hist = fig.add_axes([0.1, 0.4, 0.4, 0.1])
+    ax_info = fig.add_axes([0.0, 0.0, 1.0, 0.3])
 
     norm = None
     if gamma != 1:
         # matplotlib refuses a norm together with vmin/vmax, so hand them to the norm
         norm = PowerNorm(gamma=gamma, vmin=imshow_kwargs.pop('vmin', None),
                          vmax=imshow_kwargs.pop('vmax', None))
+    im = ax_img.imshow(image, norm=norm, interpolation='nearest', **imshow_kwargs)
+    vmin, vmax = im.norm.vmin, im.norm.vmax
 
-    axes['Image'].imshow(image, norm = norm, interpolation = 'nearest', **imshow_kwargs)
+    frac = np.zeros(0)
+    if finite.size:
+        # fraction of pixels per bin: unit-free, unlike a density in 1/intensity
+        frac, _, _ = ax_hist.hist(finite.ravel(), bins=bins, histtype='stepfilled',
+                                  weights=np.full(finite.size, 1.0 / finite.size))
+    nonzero = frac[frac > 0]
+    if nonzero.size and nonzero.max() > 10 * nonzero.min():
+        # log fraction only pays off over more than a decade (else no major tick is labelled)
+        ax_hist.set_yscale('log')
+        ax_hist.yaxis.set_major_locator(mpl_ticker.LogLocator(numticks=3))
+        ax_hist.yaxis.set_minor_formatter(mpl_ticker.NullFormatter())
+    else:
+        ax_hist.yaxis.set_major_locator(mpl_ticker.MaxNLocator(2))
+    ax_hist.set_xlabel(f'Pixel intensity ({dtype})')
+    ax_hist.set_ylabel('Fraction')
 
-    axes['Histogram'].hist((image.ravel()), bins=bins, density = True, histtype='stepfilled')
-    axes['Histogram'].set_yscale('log')
-    axes['Histogram'].set_xlabel(f'Pixel intensity ({dtype})')
-    axes['Histogram'].set_ylabel('Log Frequency')
+    # display range: dashed lines at vmin / vmax, intensities the display clips shaded
+    display = None
+    if vmin is not None and vmax is not None and np.isfinite([vmin, vmax]).all():
+        lo = min(float(finite.min()), vmin) if finite.size else vmin
+        hi = max(float(finite.max()), vmax) if finite.size else vmax
+        if hi <= lo:
+            hi = lo + 1
+        ax_hist.set_xlim(lo, hi)
+        dmin, dmax = (float(finite.min()), float(finite.max())) if finite.size else (None, None)
+        for v in (vmin, vmax):
+            if v not in (dmin, dmax):  # autoscaled limits sit on the data range: nothing to mark
+                ax_hist.axvline(v, color="#6B6B6B", ls=(0, (3, 2)), lw=1)
+        if vmin > lo:
+            ax_hist.axvspan(lo, vmin, color="#808080", alpha=0.18, lw=0)
+        if vmax < hi:
+            ax_hist.axvspan(vmax, hi, color="#808080", alpha=0.18, lw=0)
+        if (vmin, vmax) != (dmin, dmax) or gamma != 1:  # else it repeats the intensity row
+            display = f"vmin {vmin:.4g}  vmax {vmax:.4g}" + (f"  gamma {gamma:g}" if gamma != 1 else "")
+            if finite.size:
+                clipped = np.mean((finite < vmin) | (finite > vmax))
+                if clipped > 0:
+                    display += f"  ({100 * clipped:.2g}% of pixels clipped)"
 
-    axes['Info'].axis('off')
-    axes['Info'].text(0.0, 1.0, "\n".join(wrapped), transform=axes['Info'].transAxes,
-                      va='top', ha='left', family='monospace', fontsize=7.5)
+    info_lines.append(stats)
+    rows.append(("intensity", stats))
+    if display:
+        info_lines.append(f"display: {display}")
+        rows.append(("display", display))
+    info = "\n".join(info_lines)
 
-    return {"fig": fig, "axes": axes, "info": info}
+    def overhang(ax):
+        """Inches by which ticks/labels stick out of the axes box: left, right, bottom, top."""
+        fig.draw_without_rendering()
+        tb, bb = ax.get_tightbbox(), ax.get_window_extent()
+        d = fig.dpi
+        return (max(bb.x0 - tb.x0, 0) / d, max(tb.x1 - bb.x1, 0) / d,
+                max(bb.y0 - tb.y0, 0) / d, max(tb.y1 - bb.y1, 0) / d)
+
+    pad, gap = 0.12, 0.15
+    fw, fh = fig.get_size_inches()
+    ax_img.set_position([0, 0, w_img / fw, h_img / fh])
+    ax_hist.set_position([0, 0, w_hist / fw, h_hist / fh])
+    oi, oh = overhang(ax_img), overhang(ax_hist)
+
+    dx_img, dx_hist = (col_w - w_img) / 2, (col_w - w_hist) / 2  # both centred in the column
+    left = pad + max(oi[0] - dx_img, oh[0] - dx_hist, 0)
+    right = pad + max(oi[1] - dx_img, oh[1] - dx_hist, 0)
+    fig_w = max(left + col_w + right, 4.5)
+    x0 = left + (fig_w - left - col_w - right) / 2
+
+    info_w_pt = (fig_w - 2 * pad) * 72
+    info_fs = float(np.clip(0.65 * plt.rcParams['font.size'], 7, 10))
+    info_h = _draw_info_table(ax_info, rows, channels, info_w_pt, info_fs,
+                              shown_channel=shown_channel, max_chars=info_width) / 72
+
+    top = pad + oi[3]
+    gap_ih = gap + oi[2] + oh[3]  # image tick labels above, histogram offset text below
+    below = oh[2]
+    fig_h = top + h_img + gap_ih + h_hist + below + gap + info_h + pad
+
+    fig.set_size_inches(fig_w, fig_h)
+    y_img = fig_h - top - h_img
+    y_hist = y_img - gap_ih - h_hist
+    ax_img.set_position([(x0 + dx_img) / fig_w, y_img / fig_h, w_img / fig_w, h_img / fig_h])
+    ax_hist.set_position([(x0 + dx_hist) / fig_w, y_hist / fig_h, w_hist / fig_w, h_hist / fig_h])
+    ax_info.set_position([pad / fig_w, pad / fig_h, info_w_pt / 72 / fig_w, info_h / fig_h])
+
+    axes = {"Image": ax_img, "Histogram": ax_hist, "Info": ax_info}
+    return {"fig": fig, "axes": axes, "info": info,
+            "info_html": _info_html(rows, channels, shown_channel)}
 
 
 def hist_imshow(*args, **kwargs):
