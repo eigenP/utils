@@ -120,7 +120,7 @@ def test_apply_drift_correction_invalid_dims():
 # Source: test_drift_bias_oscillation.py
 # =========================================
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "numpy",
 #     "scipy",
@@ -412,7 +412,7 @@ if __name__ == '__main__':
 # Source: test_drift_subpixel_precision.py
 # =========================================
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "numpy",
 #     "scipy",
@@ -792,7 +792,7 @@ def test_apply_drift_correction_edge():
 # Source: test_drift_integrity.py
 # =========================================
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "numpy",
 #     "pandas",
@@ -878,7 +878,7 @@ if __name__ == '__main__':
 # Source: test_drift_correction_accuracy.py
 # =========================================
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "numpy",
 #     "pandas",
