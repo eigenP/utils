@@ -333,3 +333,282 @@ def map_histogram(hist, min_val, max_val, n_pixels):
     np.clip(out, a_min=None, a_max=max_val, out=out)
 
     return out.astype(int)
+
+
+# ---------------------------------------------------------------------------
+# Fast 8-bit CLAHE (segmentation preprocessing)
+# ---------------------------------------------------------------------------
+
+_NBINS_U8 = 256
+
+
+def _to_uint8(image, percentiles):
+    """uint8 passes through; anything else is rescaled between two percentiles."""
+    image = np.asarray(image)
+    if image.dtype == np.uint8:
+        return image
+    if image.dtype == bool:
+        return image.astype(np.uint8) * 255
+    if image.dtype in (np.uint16, np.int16, np.int8):
+        return _small_int_to_uint8(image, percentiles)
+    flat = image.reshape(-1)
+    # Percentiles on a strided subsample (<= ~4M values): exact enough for
+    # display/segmentation bounds, and O(1) in the volume size beyond that.
+    step = max(1, flat.size >> 22)
+    sample = flat[::step]
+    if np.issubdtype(sample.dtype, np.floating):
+        sample = sample[np.isfinite(sample)]
+    if sample.size == 0:
+        return np.zeros(image.shape, np.uint8)
+    lo, hi = np.percentile(sample, percentiles)
+    lo, hi = float(lo), float(hi)
+    out = np.empty(image.shape, np.float32)
+    if hi > lo:
+        np.subtract(image, lo, out=out, casting="unsafe")
+        out *= np.float32(255.0 / (hi - lo))
+    else:
+        out.fill(0.0)
+    np.nan_to_num(out, copy=False, nan=0.0, posinf=255.0, neginf=0.0)
+    np.clip(out, 0.0, 255.0, out=out)
+    out += np.float32(0.5)
+    return out.astype(np.uint8)
+
+
+def _small_int_to_uint8(image, percentiles):
+    """<= 16-bit integers: percentiles from a histogram, then one LUT gather."""
+    info = np.iinfo(image.dtype)
+    offset = -int(info.min)
+    codes = image.reshape(-1)
+    if offset:
+        codes = codes.view(np.dtype(image.dtype.str.replace('i', 'u')))
+        # two's complement view: v + offset == (code ^ sign bit)
+        sign = np.array(1 << (8 * image.dtype.itemsize - 1), dtype=codes.dtype)
+        codes = codes ^ sign
+    # histogram of a strided subsample (<= ~4M values), as for floats
+    counts = np.bincount(codes[::max(1, codes.size >> 22)],
+                         minlength=info.max + offset + 1)
+    cdf = np.cumsum(counts)
+    # 'lower'-style percentiles on the exact histogram
+    ranks = np.asarray(percentiles, float) / 100 * (cdf[-1] - 1)
+    lo, hi = np.searchsorted(cdf, ranks, side='right')
+    levels = np.arange(counts.size, dtype=np.float32)
+    if hi > lo:
+        lut = (levels - lo) * np.float32(255.0 / (hi - lo))
+        np.clip(lut, 0, 255, out=lut)
+        lut = np.rint(lut).astype(np.uint8)
+    else:
+        lut = np.zeros(counts.size, np.uint8)
+    return np.take(lut, codes, mode='clip').reshape(image.shape)
+
+
+def _parse_kernel_size(kernel_size, shape):
+    ndim = len(shape)
+    if kernel_size is None:
+        kernel_size = tuple(max(s // 8, 1) for s in shape)
+    elif isinstance(kernel_size, numbers.Number):
+        kernel_size = (kernel_size,) * ndim
+    elif len(kernel_size) != ndim:
+        raise ValueError(f'Incorrect value of `kernel_size`: {kernel_size}')
+    return tuple(int(min(max(int(k), 1), s)) for k, s in zip(kernel_size, shape))
+
+
+def _tile_luts_u8(img, ks, clip_limit):
+    """Clipped-histogram LUTs for each tile, edge-padded by one tile per axis.
+
+    Tiles are anchored at the origin (as in OpenCV); trailing partial tiles are
+    completed by reflection. Returns float32 of shape (n_0 + 2, ..., n_d + 2, 256).
+    """
+    ndim = img.ndim
+    nt = [-(-s // k) for s, k in zip(img.shape, ks)]
+    pad = [(0, n * k - s) for n, k, s in zip(nt, ks, img.shape)]
+    if any(p for _, p in pad):
+        img = np.pad(img, pad, mode='reflect')
+
+    # (n0, k0, n1, k1, ...) -> (n0, n1, ..., k0, k1, ...) -> (T, K); uint8 copy
+    split = [d for n, k in zip(nt, ks) for d in (n, k)]
+    order = list(range(0, 2 * ndim, 2)) + list(range(1, 2 * ndim, 2))
+    blocks = img.reshape(split).transpose(order).reshape(int(np.prod(nt)), -1)
+    n_tiles, n_px = blocks.shape
+
+    hist = np.empty((n_tiles, _NBINS_U8), np.int64)
+    if n_px >= 1024:
+        # bincount on uint8 is ~3x faster than on a widened tile*256 + v index
+        for t in range(n_tiles):
+            hist[t] = np.bincount(blocks[t], minlength=_NBINS_U8)
+    else:
+        # Many small tiles: batch them (offset by tile * 256) to amortise calls
+        per_call = max(1, (1 << 20) // n_px)
+        for t0 in range(0, n_tiles, per_call):
+            b = blocks[t0:t0 + per_call]
+            idx = b + (np.arange(b.shape[0], dtype=np.int32) * _NBINS_U8)[:, None]
+            hist[t0:t0 + b.shape[0]] = np.bincount(
+                idx.ravel(), minlength=b.shape[0] * _NBINS_U8
+            ).reshape(-1, _NBINS_U8)
+
+    if clip_limit is not None:
+        # Normalised limit as in skimage/_my_clahe_: 0 -> identity, 1 -> AHE
+        # (integer count, as OpenCV and skimage)
+        clim = int(np.clip(int(clip_limit * n_px), 1, n_px))
+        # OpenCV's single clip + redistribution pass, vectorised over tiles:
+        # every bin gets excess // 256, then the remainder r adds 1 to bins
+        # 0, s, 2s, ... (r of them) with s = max(256 // r, 1). Bins may end
+        # slightly above the limit (skimage iterates to remove that); matching
+        # OpenCV keeps the 2D (cv2) and N-D (NumPy) backends consistent.
+        excess = np.maximum(hist - clim, 0).sum(axis=1, keepdims=True)
+        np.minimum(hist, clim, out=hist)
+        batch, residual = np.divmod(excess, _NBINS_U8)
+        hist += batch
+        step = np.maximum(_NBINS_U8 // np.maximum(residual, 1), 1)
+        bins = np.arange(_NBINS_U8)[None, :]
+        hist += ((bins % step == 0) & (bins // step < residual))
+
+    lut = np.cumsum(hist, axis=1).astype(np.float32)
+    lut *= np.float32((_NBINS_U8 - 1) / n_px)
+    np.clip(lut, 0, _NBINS_U8 - 1, out=lut)
+    lut = lut.reshape(tuple(nt) + (_NBINS_U8,))
+    return np.pad(lut, [(1, 1)] * ndim + [(0, 0)], mode='edge')
+
+
+def _interp_coords(size, k):
+    """Padded-grid lower tile index and weight for each coordinate (OpenCV convention)."""
+    f = np.arange(size, dtype=np.float64) / k - 0.5
+    t = np.floor(f)
+    w = (f - t).astype(np.float32)
+    return (t.astype(np.int64) + 1), w
+
+
+# Fixed-point interpolation weights: (b - a) * w must fit int16 for
+# |b - a| <= 255, so w has 7 fractional bits (255 * 128 = 32640).
+_W_BITS = 7
+_W_ONE = 1 << _W_BITS
+_W_HALF = 1 << (_W_BITS - 1)
+
+
+def _clahe_u8_numpy(img, ks, clip_limit, chunk_px=1 << 16):
+    """CLAHE mapping + interpolation in int16 fixed point.
+
+    The leading axes are folded into one (gy, gx, 256) LUT per 2D slice, then
+    each pixel needs 4 gathers and 3 lerps. int16 (vs float32) halves the
+    memory traffic of this bandwidth-bound loop (~2.5x faster); the cost is
+    uint8-rounded LUTs (as in OpenCV) and 7-bit weights, i.e. <= ~1 gray level.
+    """
+    lut = _tile_luts_u8(img, ks, clip_limit)
+    *lead_shape, H, W = img.shape
+    gx = lut.shape[-2]
+
+    ty, wy = _interp_coords(H, ks[-2])
+    tx, wx = _interp_coords(W, ks[-1])
+    # Flat index of the (ty, tx) corner in a (gy, gx, 256) slice LUT
+    base = ((ty * gx).astype(np.int32)[:, None] + tx.astype(np.int32)[None, :])
+    base *= _NBINS_U8
+    o_x, o_y = _NBINS_U8, gx * _NBINS_U8
+    wx = np.round(wx * _W_ONE).astype(np.int16)[None, :]
+    wy = np.round(wy * _W_ONE).astype(np.int16)[:, None]
+
+    lead_coords = [_interp_coords(s, k) for s, k in zip(lead_shape, ks[:-2])]
+    rows = max(1, chunk_px // W)  # keep temporaries cache-resident
+    out = np.empty(img.shape, np.uint8)
+
+    def lerp_(a, b, w):
+        # a += round((b - a) * w / 2**_W_BITS), in place; b is scratch
+        b -= a
+        b *= w
+        b += _W_HALF
+        b >>= _W_BITS
+        a += b
+
+    for lead in np.ndindex(*lead_shape):
+        # Multilinear interpolation of the LUT grid along the leading axes
+        # (tiny: gy * gx * 256 values) leaves a 2D bilinear problem per slice.
+        slab = lut
+        for d, i in enumerate(lead):
+            t, w = lead_coords[d][0][i], lead_coords[d][1][i]
+            lo, hi = slab[t], slab[t + 1]
+            slab = lo + w * (hi - lo) if w else lo
+        flat = np.rint(slab).astype(np.int16).reshape(-1)
+        f_00, f_01, f_10, f_11 = flat, flat[o_x:], flat[o_y:], flat[o_y + o_x:]
+        src, dst = img[lead], out[lead]
+
+        for r0 in range(0, H, rows):
+            r1 = min(r0 + rows, H)
+            idx = base[r0:r1] + src[r0:r1]
+            # indices are in range by construction; mode='clip' skips the
+            # bounds check (~25% faster than the default 'raise')
+            top = np.take(f_00, idx, mode='clip')
+            lerp_(top, np.take(f_01, idx, mode='clip'), wx)
+            bot = np.take(f_10, idx, mode='clip')
+            lerp_(bot, np.take(f_11, idx, mode='clip'), wx)
+            lerp_(top, bot, wy[r0:r1])
+            dst[r0:r1] = top
+    return out
+
+
+def _clahe_u8_opencv(img, ks, clip_limit):
+    import cv2
+    H, W = img.shape
+    tiles = (-(-W // ks[1]), -(-H // ks[0]))  # (cols, rows)
+    if clip_limit is None:
+        cv_clip = 0.0  # OpenCV: <= 0 disables clipping (plain AHE)
+    else:
+        # OpenCV's limit is in units of the mean bin count (K / 256)
+        cv_clip = max(float(clip_limit) * _NBINS_U8, 1e-6)
+    return cv2.createCLAHE(clipLimit=cv_clip, tileGridSize=tiles).apply(
+        np.ascontiguousarray(img)
+    )
+
+
+def clahe_u8(image, kernel_size=None, clip_limit=0.01,
+             percentiles=(0.1, 99.9), backend='auto'):
+    """Fast CLAHE on 8 bits, for segmentation preprocessing (uint8 in, uint8 out).
+
+    Same contextual-region algorithm as ``_my_clahe_`` / skimage, but it trades
+    exactness for speed: 256 bins, OpenCV's tiling (anchored at the origin,
+    trailing partial tiles completed by reflection) and its single-pass clip
+    redistribution, uint8 output. The NumPy and OpenCV backends agree to
+    about one gray level. For 2D input it uses
+    OpenCV when installed (``backend='auto'``); N-D input runs a vectorised
+    NumPy path that reduces the leading axes to a per-slice LUT and does a 2D
+    bilinear interpolation in int16 fixed point (4 gathers per pixel instead
+    of 2**ndim).
+
+    Parameters
+    ----------
+    image : (N1, ..., NN) ndarray
+        uint8 is used as is. Any other dtype is mapped to [0, 255] between the
+        ``percentiles`` (so isolated hot/dead pixels do not set the range).
+    kernel_size : int or sequence of int, optional
+        Tile shape. Default 1/8 of each dimension.
+    clip_limit : float or None
+        Normalised clip limit as in ``_my_clahe_``: 0 ~ identity, 1 or None = AHE.
+    percentiles : (float, float)
+        Input range for non-uint8 images.
+    backend : {'auto', 'numpy', 'opencv'}
+        'auto' uses OpenCV for 2D images when ``cv2`` is importable.
+
+    Returns
+    -------
+    out : ndarray of uint8, same shape as ``image``.
+    """
+    img = _to_uint8(image, percentiles)
+    if img.ndim == 0:
+        raise ValueError('`image` must have at least one dimension')
+    ks = _parse_kernel_size(kernel_size, img.shape)
+
+    if backend == 'auto':
+        backend = 'numpy'
+        if img.ndim == 2:
+            try:
+                import cv2  # noqa: F401
+                backend = 'opencv'
+            except ImportError:
+                pass
+    if backend == 'opencv':
+        if img.ndim != 2:
+            raise ValueError("backend='opencv' supports 2D images only")
+        return _clahe_u8_opencv(img, ks, clip_limit)
+    if backend != 'numpy':
+        raise ValueError(f'Unknown backend: {backend!r}')
+
+    if img.ndim == 1:
+        return _clahe_u8_numpy(img[None], (1,) + ks, clip_limit)[0]
+    return _clahe_u8_numpy(img, ks, clip_limit)

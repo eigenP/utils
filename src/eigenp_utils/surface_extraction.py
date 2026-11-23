@@ -17,7 +17,9 @@ import numpy as np
 from scipy import ndimage
 from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt
 from scipy.interpolate import RegularGridInterpolator
-from skimage import exposure, filters
+from skimage import filters
+
+from .clahe_equalize_adapthist import clahe_u8
 from typing import Union, Tuple
 
 def _parse_factors(downscale_factor):
@@ -86,8 +88,7 @@ def _reduced_surface(img_reduced, gaussian_sigma, clahe_clip, threshold):
 
         # --- 5. CLAHE ---
         if clahe_clip > 0.0:
-            img_proc = exposure.equalize_adapthist(img_u8, clip_limit=clahe_clip)
-            img_proc = (img_proc * 255).astype(np.uint8)
+            img_proc = clahe_u8(img_u8, clip_limit=clahe_clip)
         else:
             img_proc = img_u8
 

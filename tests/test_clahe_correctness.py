@@ -162,3 +162,172 @@ def test_clahe_rejects_kernel_size_of_wrong_length():
     image = np.random.default_rng(0).random((32, 32))
     with pytest.raises(ValueError, match="kernel_size"):
         _my_clahe_(image, kernel_size=(8, 8, 8))
+
+
+# ---------------------------------------------------------------------------
+# clahe_u8: fast 8-bit CLAHE
+# ---------------------------------------------------------------------------
+
+from eigenp_utils.clahe_equalize_adapthist import clahe_u8
+
+
+def _camera():
+    import pytest
+    skd = pytest.importorskip("skimage.data")
+    return skd.camera()  # 512 x 512 uint8
+
+
+def test_clahe_u8_numpy_matches_opencv():
+    """The NumPy backend reproduces OpenCV's CLAHE to within rounding.
+
+    Both use origin-anchored tiles, a single clip/redistribute pass and
+    bilinear interpolation of per-tile LUTs; NumPy works in int16 fixed point.
+    Strategy: kernel sizes dividing the image (so OpenCV's tile size equals
+    ours), three clip regimes (identity-like, default, AHE). Expected: max
+    absolute difference <= 2 gray levels, mean < 0.5.
+    """
+    import pytest
+    pytest.importorskip("cv2")
+    image = _camera()
+    for clip in (0.0, 0.01, None):
+        for ks in (64, (128, 32)):
+            a = clahe_u8(image, kernel_size=ks, clip_limit=clip, backend="numpy")
+            b = clahe_u8(image, kernel_size=ks, clip_limit=clip, backend="opencv")
+            d = np.abs(a.astype(int) - b.astype(int))
+            assert d.max() <= 2 and d.mean() < 0.5, (clip, ks, d.max(), d.mean())
+
+
+def test_clahe_u8_matches_skimage_reference():
+    """clahe_u8 agrees with skimage.exposure.equalize_adapthist on a natural image.
+
+    The differences (tile anchoring, single-pass redistribution, 8-bit LUTs)
+    are approximation choices, not a different algorithm. Expected: output
+    correlation > 0.99 and means within 3 gray levels.
+    """
+    from skimage.exposure import equalize_adapthist
+    image = _camera()
+    ours = clahe_u8(image, clip_limit=0.01, backend="numpy").astype(float)
+    ref = equalize_adapthist(image, clip_limit=0.01) * 255
+    assert np.corrcoef(ours.ravel(), ref.ravel())[0, 1] > 0.99
+    assert abs(ours.mean() - ref.mean()) < 3
+
+
+def test_clahe_u8_axis_permutation_equivariance():
+    """The N-D path treats every axis alike: permuting axes commutes with CLAHE.
+
+    The implementation folds leading axes into a per-slice LUT and interpolates
+    the last two axes per pixel, so a bug in either half breaks equivariance.
+    Strategy: a random smooth 3D volume with non-divisible shape and anisotropic
+    kernel; compare clahe(transpose(v)) with transpose(clahe(v)). Expected: equal
+    to within 2 gray levels (int16 rounding happens in a different order).
+    """
+    from scipy import ndimage
+    rng = np.random.default_rng(1)
+    vol = ndimage.gaussian_filter(rng.random((21, 37, 45)), 2)
+    vol = (255 * (vol - vol.min()) / np.ptp(vol)).astype(np.uint8)
+    ks = (5, 9, 12)
+    out = clahe_u8(vol, kernel_size=ks)
+    for perm in ((2, 0, 1), (1, 2, 0)):
+        out_p = clahe_u8(vol.transpose(perm), kernel_size=tuple(ks[p] for p in perm))
+        d = np.abs(out_p.astype(int) - out.transpose(perm).astype(int))
+        assert d.max() <= 2, (perm, d.max())
+
+
+def test_clahe_u8_z_constant_volume_equals_2d():
+    """A volume constant along Z with one Z tile equals 2D CLAHE of a slice.
+
+    With kernel_size[0] == Z there is a single contextual region along Z, whose
+    histogram is the slice histogram times Z, so the unclipped (AHE) LUT is the
+    2D one. This isolates the leading-axis LUT folding. (With clipping, the
+    integer clip count and redistribution remainder do not scale exactly with
+    Z, so only AHE is compared.) Expected: exact equality.
+    """
+    image = _camera()[::2, ::2]
+    vol = np.repeat(image[None], 6, axis=0)
+    out3 = clahe_u8(vol, kernel_size=(6, 32, 32), clip_limit=None, backend="numpy")
+    out2 = clahe_u8(image, kernel_size=(32, 32), clip_limit=None, backend="numpy")
+    for z in range(6):
+        np.testing.assert_array_equal(out3[z], out2)
+
+
+def test_clahe_u8_percentile_scaling_ignores_hot_pixel():
+    """Non-uint8 input is scaled between percentiles, so one hot pixel is harmless.
+
+    The extra sample only moves the 99.9th percentile by one order statistic.
+    Negative control: min/max scaling (percentiles=(0, 100)) lets the 1e6
+    pixel map everything else to gray level 0. Expected: 8-bit conversions
+    differ by <= 1 level away from the hot pixel; CLAHE (which amplifies
+    local contrast) changes the far corner by < 1.5 levels on average, versus
+    > 20 levels under min/max scaling.
+    """
+    from scipy import ndimage
+    from eigenp_utils.clahe_equalize_adapthist import _to_uint8
+    rng = np.random.default_rng(2)
+    image = ndimage.gaussian_filter(rng.random((256, 256)), 3).astype(np.float32)
+    hot = image.copy()
+    hot[250, 250] = 1e6
+    pct = (0.1, 99.9)
+    d8 = np.abs(_to_uint8(image, pct).astype(int) - _to_uint8(hot, pct).astype(int))
+    d8[250, 250] = 0
+    assert d8.max() <= 1
+
+    def corner_diff(percentiles):
+        a = clahe_u8(image, kernel_size=32, percentiles=percentiles, backend="numpy")
+        b = clahe_u8(hot, kernel_size=32, percentiles=percentiles, backend="numpy")
+        assert int(a.max()) - int(a.min()) > 200
+        return np.abs(a[:128, :128].astype(int) - b[:128, :128].astype(int)).mean()
+
+    assert corner_diff(pct) < 1.5
+    assert corner_diff((0, 100)) > 20
+
+
+def test_clahe_u8_small_int_conversion_matches_float_reference():
+    """16/8-bit integer input goes through a histogram + LUT path; check it.
+
+    Signed types are histogrammed through a two's-complement view, which is
+    easy to get wrong by the offset. Reference: percentiles (method='lower')
+    and linear scaling computed in float64. Expected: <= 1 gray level
+    difference (round-half-even ties) for uint16, int16 and int8.
+    """
+    from eigenp_utils.clahe_equalize_adapthist import _to_uint8
+    rng = np.random.default_rng(3)
+    for dt in (np.uint16, np.int16, np.int8):
+        info = np.iinfo(dt)
+        a = rng.integers(info.min, info.max, (300, 301)).astype(dt)
+        lo, hi = np.percentile(a.astype(float), (0.1, 99.9), method="lower")
+        ref = np.rint(np.clip((a.astype(float) - lo) * 255 / (hi - lo), 0, 255))
+        out = _to_uint8(a, (0.1, 99.9))
+        assert out.dtype == np.uint8
+        assert np.abs(out.astype(int) - ref.astype(int)).max() <= 1, dt
+
+
+def test_clahe_u8_identity_and_edge_cases():
+    """Low clip ~ identity; degenerate shapes and constant images do not fail.
+
+    Expected: clip_limit=0 output is highly correlated with the input
+    (r > 0.99); a constant image gives a constant image; 1D input, a kernel
+    larger than the image and single-pixel axes return the input shape.
+    """
+    image = _camera()
+    out0 = clahe_u8(image, clip_limit=0.0, backend="numpy")
+    assert np.corrcoef(out0.ravel().astype(float), image.ravel())[0, 1] > 0.99
+
+    const = np.full((40, 30), 77, np.uint8)
+    out = clahe_u8(const, kernel_size=8)
+    assert out.shape == const.shape and np.ptp(out) == 0
+
+    for arr, ks in ((image[100], 16), (image[:7, :5], 64), (image[None, :1, :50], None)):
+        res = clahe_u8(arr, kernel_size=ks)
+        assert res.shape == arr.shape and res.dtype == np.uint8
+
+
+def test_clahe_u8_rejects_bad_arguments():
+    """Wrong kernel_size length, unknown backend and 3D opencv raise ValueError."""
+    import pytest
+    image = np.zeros((16, 16), np.uint8)
+    with pytest.raises(ValueError, match="kernel_size"):
+        clahe_u8(image, kernel_size=(4, 4, 4))
+    with pytest.raises(ValueError, match="backend"):
+        clahe_u8(image, backend="cuda")
+    with pytest.raises(ValueError, match="2D"):
+        clahe_u8(np.zeros((2, 16, 16), np.uint8), backend="opencv")
