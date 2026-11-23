@@ -11,7 +11,7 @@ authors = [
   { name = "Panos Oikonomou" }
 ]
 license = { file = "LICENSE.md" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: Free for non-commercial use",
