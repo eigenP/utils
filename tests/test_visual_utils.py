@@ -122,7 +122,7 @@ def test_labels_cmap_low_ids_stay_opaque_with_many_labels():
 
 def test_describe_image_accepts_bool_lists_and_gamma_with_limits():
     res = describe_image(np.random.default_rng(0).random((16, 16)) > 0.5)
-    assert "bool" in res["axes"]["Histogram"].get_xlabel() and "dtype: bool" in res["info"]
+    assert "bool" in res["axes"]["Histogram"].get_ylabel() and "dtype: bool" in res["info"]
     describe_image([[1, 2], [3, 4]])
     res = describe_image(np.random.default_rng(0).random((8, 8)), gamma=0.5, vmin=0.2, vmax=0.8)
     norm = res["axes"]["Image"].images[0].norm
@@ -187,6 +187,85 @@ def test_describe_image_dataarray_info_panel_not_clipped():
     for txt in res["axes"]["Info"].texts:
         bb = txt.get_window_extent(renderer)
         assert bb.x0 >= fb.x0 - 1 and bb.x1 <= fb.x1 + 1 and bb.y0 >= fb.y0 - 1
+    plt.close("all")
+
+
+def test_describe_image_layout_image_dominant_histogram_right_info_below():
+    """Layout invariants of describe_image, for a square, a wide and a tall image.
+
+    The image must be the largest panel, the histogram a narrower strip to its
+    right sharing its vertical extent (intensity on its y axis, labelled on the
+    right), and the info table must sit below both and span their full width.
+    Every drawn artist (tick labels, axis labels, table text) must stay inside
+    the figure, since the axes are placed in inches without a layout engine.
+    """
+    rng = np.random.default_rng(0)
+    for shape in [(80, 80), (30, 200), (200, 30)]:
+        res = describe_image(rng.random(shape), image_size=4.0, hist_width=0.9)
+        fig, axes = res["fig"], res["axes"]
+        fig.draw_without_rendering()
+        img = axes["Image"].get_window_extent()
+        hist = axes["Histogram"].get_window_extent()
+        info = axes["Info"].get_window_extent()
+        if shape[0] <= shape[1]:
+            assert img.width > 2 * hist.width
+        assert hist.x0 > img.x1  # histogram to the right of the image
+        assert hist.y0 <= img.y0 + 1 and hist.y1 >= img.y1 - 1  # covers the image's height
+        assert axes["Histogram"].yaxis.get_label_position() == "right"
+        assert info.y1 < min(img.y0, hist.y0)  # table below both
+        assert info.x0 <= img.x0 and info.x1 >= hist.x1  # and full width
+        fb = fig.bbox
+        for ax in axes.values():
+            tb = ax.get_tightbbox()
+            assert tb.x0 >= fb.x0 - 1 and tb.x1 <= fb.x1 + 1 and tb.y0 >= fb.y0 - 1 and tb.y1 <= fb.y1 + 1
+        plt.close(fig)
+
+
+def test_describe_image_histogram_shows_pixel_fractions_log_only_over_a_decade():
+    """The histogram bars are fractions of the shown pixels (they sum to 1), on a
+    log axis for a skewed distribution and a linear one for a flat distribution
+    (where a log axis would show no labelled major tick)."""
+    rng = np.random.default_rng(0)
+    skewed = describe_image(rng.exponential(100, (64, 64)))["axes"]["Histogram"]
+    flat = describe_image(np.tile(np.arange(64.0), (64, 1)))["axes"]["Histogram"]
+    assert skewed.get_xscale() == "log" and flat.get_xscale() == "linear"
+    # 64 equally populated values in 64 bins: every bar is exactly 1/64 of the pixels
+    bar_x = flat.patches[0].get_path().vertices[:, 0]
+    assert bar_x.max() == pytest.approx(1 / 64)
+    assert np.all((bar_x == 0) | np.isclose(bar_x, 1 / 64))
+    plt.close("all")
+
+
+def test_describe_image_channel_table_swatches_and_shown_row():
+    """For a DataArray with channel metadata, the info table lists each channel
+    with its metadata, draws a swatch in the channel's colour, and highlights the
+    shown (middle) channel. Long source paths wrap at directory boundaries."""
+    pytest.importorskip("xarray")
+    from matplotlib.colors import to_rgb
+    from matplotlib.patches import Rectangle
+    from eigenp_utils.image_io import array_to_stczyx_xarray, set_channel_info
+    from eigenp_utils.plotting_utils import _wrap_value
+
+    arr = np.random.default_rng(2).random((3, 16, 20)).astype(np.float32)
+    da = array_to_stczyx_xarray(arr, input_axes="CYX", channel_names=["DAPI", "WGA", "TOMM20"])
+    da = set_channel_info(da, {"DAPI": {"color": "blue"}, "WGA": {"color": "green"}, "TOMM20": {"color": "red"}})
+    da.attrs["source"] = "/very/long/" + "directory_name/" * 12 + "file.ome.tif"
+    res = describe_image(da)
+    ax = res["axes"]["Info"]
+    texts = {t.get_text(): t for t in ax.texts}
+    assert {"DAPI", "WGA", "TOMM20"} <= set(texts)
+    assert texts["WGA"].get_fontweight() == "bold" and texts["DAPI"].get_fontweight() == "normal"
+    swatches = [tuple(p.get_facecolor()[:3]) for p in ax.patches
+                if isinstance(p, Rectangle) and p.get_linewidth() > 0]
+    for c in ("blue", "green", "red"):
+        assert any(np.allclose(sw, to_rgb(c)) for sw in swatches)
+    # the info string (plain text) keeps its line format
+    assert "C[1] WGA  color=green" in res["info"] and "shown: S=0, T=0, C=WGA, Z=0" in res["info"]
+
+    lines = _wrap_value("/a/" + "dir/" * 20 + "f.tif", 30)
+    assert all(len(line) <= 30 for line in lines)
+    assert all(line.endswith("/") for line in lines[:-1])
+    assert "".join(line.strip() for line in lines) == "/a/" + "dir/" * 20 + "f.tif"
     plt.close("all")
 
 
