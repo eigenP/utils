@@ -27,10 +27,8 @@ import warnings
 
 import numpy as np
 
-from skimage._shared.utils import _supported_float_type
-
-from skimage.exposure import rescale_intensity
-from skimage.util import img_as_uint
+# scikit-image is imported inside the legacy `_my_clahe_` only, so `clahe_u8`
+# (numba / NumPy) works in minimal environments without scikit-image.
 
 
 
@@ -105,6 +103,9 @@ def _my_clahe_(image, kernel_size=None,
         DeprecationWarning,
         stacklevel=2,
     )
+    from skimage.exposure import rescale_intensity
+    from skimage.util import img_as_uint
+
     float_dtype = output_float_dtype
     image = img_as_uint(image)
     image = np.round(
