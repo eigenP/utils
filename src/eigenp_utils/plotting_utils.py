@@ -148,74 +148,128 @@ for name, cmap in I_SERIES_COLORMAPS.items():
             plt.register_cmap(name=reg_name, cmap=cmap)
 
 
-def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_kwargs):
-    """
-    Displays an image and its histogram.
+def _image_info_lines(image, shown=None) -> list:
+    """Text lines describing an array or an (STCZYX) xarray.DataArray."""
+    lines = []
+    if hasattr(image, "dims") and hasattr(image, "coords"):
+        src = image.attrs.get("source") if hasattr(image, "attrs") else None
+        if src:
+            lines.append(f"source: {src}")
+        lines.append("dims: " + " ".join(f"{d}={n}" for d, n in image.sizes.items()))
+        lines.append(f"dtype: {image.dtype}")
+        try:
+            from .image_io import get_stczyx_pixel_sizes
 
-    This function processes a given image stack, ensuring it is in a 2D format suitable for display. If the
-    image stack has more than two dimensions, the function extracts the middle slice from each of the extra
-    dimensions and then displays this 2D slice. Alongside the image, the function plots a histogram of the
-    pixel intensities to provide a visual representation of the distribution of pixel values within the image.
+            ps = get_stczyx_pixel_sizes(image)
+            if any(ps.get(a) is not None for a in ("Z", "Y", "X")):
+                lines.append(
+                    "pixel size: "
+                    + " ".join(f"{a}={ps[a]:.4g}" if ps.get(a) is not None else f"{a}=?" for a in ("Z", "Y", "X"))
+                    + (f" {ps['unit']}" if ps.get("unit") else "")
+                )
+        except ImportError:  # image_io needs xarray + tifffile
+            pass
+        if "C" in image.dims:
+            labels = list(image.coords["C"].values) if "C" in image.coords else list(range(image.sizes["C"]))
+            meta = [k for k, c in image.coords.items() if c.dims == ("C",) and k != "C"]
+            for i, lab in enumerate(labels):
+                extra = " ".join(f"{k}={image.coords[k].values[i]}" for k in meta)
+                lines.append(f"C[{i}] {lab}" + (f"  {extra}" if extra else ""))
+    else:
+        lines.append(f"shape: {tuple(np.shape(image))}")
+        lines.append(f"dtype: {np.asarray(image).dtype}")
+    if shown:
+        lines.append(f"shown: {shown}")
+    return lines
+
+
+def describe_image(image, bins=64, gamma = 1, return_image_only = False, info_width = 46, **imshow_kwargs):
+    """
+    Displays an image, its histogram and an info panel.
+
+    For inputs with more than two dimensions the middle slice of every extra
+    dimension is shown. The info panel (monospace text, wrapped to
+    ``info_width`` characters so it is not clipped) lists the shape and dtype,
+    or for an ``xarray.DataArray`` (e.g. STCZYX from ``image_io``) the dims,
+    pixel sizes, channels with their metadata coordinates (``set_channel_info``)
+    and which slice is shown, plus min / max / mean of the shown slice.
 
     Parameters
     ----------
-    image : array-like
-        The input image. Can be multidimensional, but only a 2D slice (from the middle of any extra
-        dimensions) will be displayed.
+    image : array-like or xarray.DataArray
+        The input image.
     bins : int, optional
         The number of bins to use for the histogram. Default is 64.
     gamma : float, optional
         Display gamma (``PowerNorm``); ``vmin``/``vmax`` passed in ``imshow_kwargs``
         are applied to that norm.
+    info_width : int, optional
+        Wrap width (characters) of the info panel.
 
     Returns
     -------
     dict
-        A dictionary with two entries:
-        ``"fig"`` containing the created :class:`matplotlib.figure.Figure` and
-        ``"axes"`` containing a mapping of axis names to :class:`matplotlib.axes.Axes`
-        objects. When ``return_image_only`` is ``True`` this function returns only
-        the 2D image slice.
-
-    Notes
-    -----
-    Additional information about the original shape and data type of the image is displayed on the x-axis label
-    of the histogram.
+        ``"fig"`` (:class:`matplotlib.figure.Figure`), ``"axes"`` (mapping
+        ``"Image"``, ``"Histogram"``, ``"Info"`` to axes) and ``"info"`` (the
+        panel text). When ``return_image_only`` is ``True`` only the 2D slice is
+        returned.
 
     Examples
     --------
-    >>> img = np.random.rand(100, 100)  # Generate a random image
-    >>> res = hist_imshow(img)
-    >>> res["fig"].show()  # Display the figure with the image and its histogram
+    >>> res = describe_image(np.random.rand(100, 100))
+    >>> print(res["info"])
+
+    Formerly ``hist_imshow`` (deprecated alias).
     """
+    import textwrap
 
     ### SET DEFAULT KWARGS
-    # Ensure 'origin' is set to 'lower' if not specified
     imshow_kwargs.setdefault('origin', 'lower')
     imshow_kwargs.setdefault('cmap', 'gray')
 
-    image = np.asarray(image)
-
-    # Ensure image is 2D so that we can plot it
-    im_shape = image.shape
-    print(f'Image shape: {im_shape}')
-    if len(im_shape) > 2:
-        # Calculate the middle index for each dimension except the last two
-        middle_indices = [s // 2 for s in im_shape[:-2]]
-
-        # Add slice(None) for the last two dimensions
-        indexing = middle_indices + [slice(None), slice(None)]
-        slices = tuple(indexing)
-
-        print('Displaying only the last two dims (of the "middle" slices)')
-        # print(slices)
-        image = image[slices]
+    shown = None
+    if hasattr(image, "dims") and hasattr(image, "isel"):
+        da = image
+        extra = [d for d in da.dims[:-2]]
+        sel = {d: da.sizes[d] // 2 for d in extra}
+        if sel:
+            parts = []
+            for d, i in sel.items():
+                lab = da.coords[d].values[i] if d in da.coords and d == "C" else i
+                parts.append(f"{d}={lab}")
+            shown = ", ".join(parts)
+        info_lines = _image_info_lines(da, shown)
+        image = np.asarray(da.isel(sel).values) if sel else np.asarray(da.values)
+    else:
+        image = np.asarray(image)
+        im_shape = image.shape
+        if len(im_shape) > 2:
+            middle_indices = [s // 2 for s in im_shape[:-2]]
+            shown = "middle slice " + str(tuple(middle_indices)) + " of the leading dims"
+            image = image[tuple(middle_indices + [slice(None), slice(None)])]
+        info_lines = _image_info_lines(np.empty(im_shape, dtype=image.dtype) if len(im_shape) > 2 else image, shown)
 
     if return_image_only:
         return image
 
-    fig, axes = plt.subplot_mosaic([['Image', '.'], ['Image', 'Histogram'], ['Image', '.']],
-                                   layout = 'constrained')
+    dtype = image.dtype
+    if image.dtype == bool:
+        # numpy cannot subtract booleans (needed by hist and by the stats below)
+        image = image.astype(np.uint8)
+
+    stats = f"min {image.min():.4g}  max {image.max():.4g}  mean {image.mean():.4g}"
+    info_lines.append(stats)
+    wrapped = []
+    for line in info_lines:
+        wrapped.extend(textwrap.wrap(line, width=info_width, subsequent_indent="  ") or [""])
+    info = "\n".join(info_lines)
+
+    n_lines = len(wrapped)
+    fig, axes = plt.subplot_mosaic(
+        [['Image', 'Histogram'], ['Image', 'Info']],
+        layout='constrained',
+        height_ratios=[1.0, max(0.5, 0.11 * n_lines)],
+    )
 
     norm = None
     if gamma != 1:
@@ -223,32 +277,30 @@ def hist_imshow(image, bins=64, gamma = 1, return_image_only = False,  **imshow_
         norm = PowerNorm(gamma=gamma, vmin=imshow_kwargs.pop('vmin', None),
                          vmax=imshow_kwargs.pop('vmax', None))
 
-    dtype = image.dtype
-    if image.dtype == bool:
-        # numpy cannot subtract booleans (needed by hist and by the stats below)
-        image = image.astype(np.uint8)
-
     axes['Image'].imshow(image, norm = norm, interpolation = 'nearest', **imshow_kwargs)
 
-    # Display histogram
     axes['Histogram'].hist((image.ravel()), bins=bins, density = True, histtype='stepfilled')
     axes['Histogram'].set_yscale('log')
-    # axes['Histogram'].ticklabel_format(axis='y', style='scientific', scilimits=(0, 0))
-
-    min_val = image.min()
-    max_val = image.max()
-    mean_val = image.mean()
-    stats_msg = f"min:{min_val:.3g} max:{max_val:.3g} mean:{mean_val:.3g}"
-    axes['Histogram'].set_xlabel(
-        f' Pixel intensity ({stats_msg}) \n \n shape: {im_shape} \n dtype: {dtype}'
-    )
+    axes['Histogram'].set_xlabel(f'Pixel intensity ({dtype})')
     axes['Histogram'].set_ylabel('Log Frequency')
 
-    # axes['Histogram'].set_xlim(0, 1)
-    # axes['Histogram'].set_yticks([])
+    axes['Info'].axis('off')
+    axes['Info'].text(0.0, 1.0, "\n".join(wrapped), transform=axes['Info'].transAxes,
+                      va='top', ha='left', family='monospace', fontsize=7.5)
+
+    return {"fig": fig, "axes": axes, "info": info}
 
 
-    return {"fig": fig, "axes": axes}
+def hist_imshow(*args, **kwargs):
+    """Deprecated alias of :func:`describe_image` (same arguments and return value)."""
+    import warnings
+
+    warnings.warn(
+        "hist_imshow is deprecated; use eigenp_utils.describe_image (same arguments and return value)",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return describe_image(*args, **kwargs)
 
 
 def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:

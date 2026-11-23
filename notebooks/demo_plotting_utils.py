@@ -95,7 +95,7 @@ def _(mo):
     mo.md("""
     # Plotting Utils Demo
 
-    Demonstrates `hist_imshow` and `color_coded_projection`.
+    Demonstrates `describe_image` (formerly `hist_imshow`) and `color_coded_projection`.
     """)
     return
 
@@ -107,14 +107,14 @@ def _():
     from skimage.io import imread
     from eigenp_utils.io import download_file_async
     from eigenp_utils.plotting_utils import (
-        hist_imshow,
+        describe_image,
         color_coded_projection,
         set_plotting_style
     )
 
     # Try to set style (might fail if files missing in checkout, but good to call)
     set_plotting_style()
-    return color_coded_projection, download_file_async, hist_imshow, imread, plt
+    return color_coded_projection, describe_image, download_file_async, imread, plt
 
 
 @app.cell
@@ -166,15 +166,15 @@ def _(plt, proj_img):
 @app.cell
 def _(mo):
     mo.md("""
-    ## Histogram + Image (`hist_imshow`)
+    ## Image + histogram + info panel (`describe_image`)
     """)
     return
 
 
 @app.cell
-def _(hist_imshow, stack):
+def _(describe_image, stack):
     # Just pass the 3D stack, it should slice middle automatically
-    _res = hist_imshow(stack, bins=100)
+    _res = describe_image(stack, bins=100)
     _res['fig']
     return
 
