@@ -372,13 +372,16 @@ class LabelAnnotator(anywidget.AnyWidget):
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         zs = {"annotated": self.annotated_slices(), "all": list(range(self._labels.shape[0])), "current": [self.z]}[slices]
-        written = []
+        targets = []
         for z in zs:
             stem = name if self._labels.shape[0] == 1 else f"{name}_z{z:03d}"
-            pi, pm = out / f"{stem}_img.tif", out / f"{stem}_masks.tif"
-            for p in (pi, pm):
-                if p.exists() and not overwrite:
-                    raise FileExistsError(f"{p} exists (pass overwrite=True)")
+            targets.append((z, out / f"{stem}_img.tif", out / f"{stem}_masks.tif"))
+        if not overwrite:  # check everything first so a refused save writes nothing
+            clash = [str(p) for _, pi, pm in targets for p in (pi, pm) if p.exists()]
+            if clash:
+                raise FileExistsError(f"{clash} exist (pass overwrite=True)")
+        written = []
+        for z, pi, pm in targets:
             img = self._image[:, z]
             tifffile.imwrite(pi, img[0] if img.shape[0] == 1 else img, compression="zlib")
             tifffile.imwrite(pm, self._labels[z], compression="zlib")

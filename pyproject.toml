@@ -60,17 +60,11 @@ dev = [
     "pytest-playwright",
     "marimo",
     "pot",
-    "eigenp_utils[image-analysis,plotting,single-cell,nd2]"
+    "eigenp_utils[image-analysis,plotting,single-cell]"
 ]
 image-analysis = [
     "scikit-image",
     "xarray",
-]
-# image_io.load_image for Nikon .nd2 files (not WASM-tested)
-nd2 = [
-    "nd2",
-    "xarray",
-    "tifffile",
 ]
 all = [
     "eigenp_utils[image-analysis,plotting,single-cell,dev]"

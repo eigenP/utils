@@ -40,7 +40,8 @@ def test_hist_imshow_axes_dict_contents():
     """Test that hist imshow axes dict contents works as expected."""
     res = hist_imshow(np.random.rand(5, 5))
     axes = res["axes"]
-    assert list(axes.keys()) == ["Image", "Histogram"]
+    assert list(axes.keys()) == ["Image", "Histogram", "Info"]
+    assert "shape: (5, 5)" in res["info"] and "dtype: float64" in res["info"]
     assert all(isinstance(ax, Axes) for ax in axes.values())
 
 def test_labels_cmap():
@@ -121,7 +122,7 @@ def test_labels_cmap_low_ids_stay_opaque_with_many_labels():
 
 def test_hist_imshow_accepts_bool_lists_and_gamma_with_limits():
     res = hist_imshow(np.random.default_rng(0).random((16, 16)) > 0.5)
-    assert "bool" in res["axes"]["Histogram"].get_xlabel()
+    assert "bool" in res["axes"]["Histogram"].get_xlabel() and "dtype: bool" in res["info"]
     hist_imshow([[1, 2], [3, 4]])
     res = hist_imshow(np.random.default_rng(0).random((8, 8)), gamma=0.5, vmin=0.2, vmax=0.8)
     norm = res["axes"]["Image"].images[0].norm
@@ -163,3 +164,27 @@ def test_brightness_diagnostic_plotter_object_oriented():
     target_fig, target_ax = plt.subplots()
     assert brightness_diagnostic_plotter(diag, ax=target_ax) is target_fig
     assert len(target_ax.lines) == 2 and target_ax.get_title() == 'Z-axis Intensity Decay Fit'
+
+
+def test_hist_imshow_dataarray_info_panel_not_clipped():
+    xr = pytest.importorskip("xarray")
+    from eigenp_utils.image_io import array_to_stczyx_xarray, set_channel_info
+
+    arr = np.random.default_rng(1).random((3, 4, 32, 40)).astype(np.float32)
+    da = array_to_stczyx_xarray(arr, input_axes="CZYX", channel_names=["DAPI", "WGA", "TOMM20"],
+                                pixel_sizes={"Z": 2.0, "Y": 0.108, "X": 0.108, "unit": "µm"})
+    da = set_channel_info(da, {"DAPI": {"role": "dna"}, "WGA": {"role": "membrane"}, "TOMM20": {"role": "mito"}})
+    res = hist_imshow(da)
+    info = res["info"]
+    assert "pixel size: Z=2 Y=0.108 X=0.108 µm" in info
+    assert "C[2] TOMM20  role=mito" in info
+    assert "shown: S=0, T=0, C=WGA, Z=2" in info
+    # the rendered panel stays inside the figure (no clipping)
+    fig = res["fig"]
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    fb = fig.bbox
+    for txt in res["axes"]["Info"].texts:
+        bb = txt.get_window_extent(renderer)
+        assert bb.x0 >= fb.x0 - 1 and bb.x1 <= fb.x1 + 1 and bb.y0 >= fb.y0 - 1
+    plt.close("all")

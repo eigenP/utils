@@ -3615,7 +3615,6 @@ def show_zyx_max_slice_interactive(
           and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
           underneath the channel controls, overlaid with a curve reflecting the current `vmin`, `vmax`, and `gamma` settings.
     """
-    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
 
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
@@ -3628,6 +3627,9 @@ def show_zyx_max_slice_interactive(
             _sxy = sxy if sxy is not None else 1.0
             _sz = sz if sz is not None else 1.0
             pixel_sizes = (_sz, _sxy, _sxy)
+
+    # after resolving the deprecated colors/sxy/sz, so they still apply to DataArray input
+    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
 
     # The widget parses pixel_sizes again and warns about missing axes once
     pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0, warn=False)
@@ -3757,7 +3759,6 @@ def show_zyx_max_slice_interactive_point_annotator(
         Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
         For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
     """
-    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
 
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
@@ -3770,6 +3771,9 @@ def show_zyx_max_slice_interactive_point_annotator(
             _sxy = sxy if sxy is not None else 1.0
             _sz = sz if sz is not None else 1.0
             pixel_sizes = (_sz, _sxy, _sxy)
+
+    # after resolving the deprecated colors/sxy/sz, so they still apply to DataArray input
+    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
 
     # The widget parses pixel_sizes again and warns about missing axes once
     pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0, warn=False)

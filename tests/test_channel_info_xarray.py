@@ -105,3 +105,36 @@ def test_label_annotator_uses_channel_coords():
     assert w.channel_colors == ["#00ffff", "#ffffff"]  # 'gray' colormap -> its end colour
     w2 = LabelAnnotator(da, channel_colors=["#123456", "red"])
     assert w2.channel_colors == ["#123456", "#ff0000"]
+
+
+def test_sequence_valued_fields_and_array_criteria():
+    da = set_channel_info(_da(), {n: {"rgb": (i, 0, 0)} for i, n in enumerate(NAMES)})
+    assert da.coords["rgb"].values[2] == (2, 0, 0)
+    da2 = set_channel_info(_da(), INFO)
+    assert channels_where(da2, color=np.array(["cyan", "yellow"])) == ["SOX2", "TBXT"]
+
+
+def test_viewer_deprecated_args_still_apply_to_dataarray():
+    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+
+    da = set_channel_info(_da(), INFO).sel(C=["DAPI", "TBXT"])
+    with pytest.warns(DeprecationWarning):
+        w = show_zyx_max_slice_interactive(da, colors=["red", "blue"])
+    assert w.colors_resolved == ["red", "blue"]
+
+
+def test_label_annotator_refused_save_writes_nothing(tmp_path):
+    pytest.importorskip("anywidget")
+    pytest.importorskip("tifffile")
+    from eigenp_utils.label_annotator import LabelAnnotator, encode_label_slice
+
+    w = LabelAnnotator(np.random.default_rng(0).random((3, 6, 7)), axes="ZYX")
+    edit = np.zeros((6, 7), np.uint16)
+    edit[1, 1] = 1
+    w.labels_from_js = encode_label_slice(edit, 0)
+    w.save(tmp_path, "a")
+    w.labels_from_js = encode_label_slice(edit, 2)  # new slice annotated
+    with pytest.raises(FileExistsError):
+        w.save(tmp_path, "a")
+    assert not (tmp_path / "a_z002_img.tif").exists()  # nothing partially written
+    assert len(w.save(tmp_path, "a", overwrite=True)) == 4
