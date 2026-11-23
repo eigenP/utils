@@ -40,37 +40,6 @@ jobs:
         uv pip install --system pytest-playwright
         playwright install chromium --with-deps
 
-    # Datasets downloaded by tests (sc.datasets.pbmc3k -> data/pbmc3k_raw.h5ad in
-    # scanpy's default datasetdir). Cached so CI does not depend on the hosting
-    # server on every run. The cache is saved right after the download, not at the
-    # end of the job: actions/cache only saves when the whole job succeeds.
-    - name: Restore cached test datasets
-      id: datasets
-      uses: actions/cache/restore@v4
-      with:
-        path: data
-        key: test-datasets-pbmc3k-v1
-
-    - name: Download test datasets
-      if: steps.datasets.outputs.cache-hit != 'true'
-      run: |
-        for attempt in 1 2 3; do
-          python -c "import scanpy as sc; sc.datasets.pbmc3k()" && exit 0
-          echo "Download attempt $attempt failed; retrying in $((attempt * 20)) s"
-          rm -f data/pbmc3k_raw.h5ad
-          sleep $((attempt * 20))
-        done
-        exit 1
-
-    - name: Save test datasets to cache
-      if: steps.datasets.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
-      # the four matrix jobs race to save the same key; losing the race is harmless
-      continue-on-error: true
-      with:
-        path: data
-        key: test-datasets-pbmc3k-v1
-
     - name: Run tests with pytest
       run: pytest
 
