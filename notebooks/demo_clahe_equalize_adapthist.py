@@ -97,13 +97,11 @@ def _(mo):
     mo.md("""
     # CLAHE Demo
 
-    Demonstrating `_my_clahe_` and `clahe_u8` from
-    `eigenp_utils.clahe_equalize_adapthist`:
-
-    * **`_my_clahe_`**: N-D CLAHE with a float output, close to
-      `skimage.exposure.equalize_adapthist`.
-    * **`clahe_u8`**: fast N-D 8-bit CLAHE for segmentation preprocessing
-      (uint8 output), shown below on the whole 3D stack.
+    Demonstrating `clahe_u8` from `eigenp_utils.clahe_equalize_adapthist`:
+    fast N-D 8-bit CLAHE for segmentation preprocessing (uint8 output), on a
+    2D slice and on the whole 3D stack. It replaces the deprecated
+    `_my_clahe_` (same `clip_limit` scale; float output in [0, 1]), which is
+    shown only for the timing comparison below.
     """)
     return
 
@@ -117,6 +115,7 @@ def _():
     import numpy as np
     from skimage.io import imread
     from eigenp_utils.io import download_file_async
+    import warnings
     # marimo keeps names starting with "_" private to their cell: alias it
     from eigenp_utils.clahe_equalize_adapthist import _my_clahe_ as my_clahe
     from eigenp_utils.clahe_equalize_adapthist import clahe_u8
@@ -132,6 +131,7 @@ def _():
         plt,
         show_zyx_max_slice_interactive,
         time,
+        warnings,
     )
 
 
@@ -164,20 +164,19 @@ def _(cells, show_zyx_max_slice_interactive):
 @app.cell
 def _(mo):
     clip_slider = mo.ui.slider(start=0.0, stop=0.1, step=0.005, value=0.01, label="Clip Limit")
-    nbins_slider = mo.ui.slider(start=64, stop=512, step=64, value=256, label="Bins")
     kernel_size_slider = mo.ui.slider(start=8, stop=128, step=8, value=32, label="Kernel Size")
 
-    mo.vstack([clip_slider, nbins_slider, kernel_size_slider])
-    return clip_slider, kernel_size_slider, nbins_slider
+    mo.vstack([clip_slider, kernel_size_slider])
+    return clip_slider, kernel_size_slider
 
 
 @app.cell
-def _(clip_slider, kernel_size_slider, membrane_slice, my_clahe, nbins_slider):
-    clahe_img = my_clahe(
+def _(clahe_u8, clip_slider, kernel_size_slider, membrane_slice):
+    # uint16 slice -> uint8 between the 0.1 / 99.9 percentiles, then CLAHE
+    clahe_img = clahe_u8(
         membrane_slice,
         clip_limit=clip_slider.value,
-        nbins=nbins_slider.value,
-        kernel_size=kernel_size_slider.value
+        kernel_size=kernel_size_slider.value,
     )
     return (clahe_img,)
 
@@ -227,6 +226,7 @@ def _(
     kernel_size_slider,
     my_clahe,
     time,
+    warnings,
 ):
     membrane_stack = cells[:, 0, :, :]
     kernel_3d = (max(membrane_stack.shape[0] // 8, 1),) + (kernel_size_slider.value,) * 2
@@ -234,9 +234,12 @@ def _(
     # warm-up: excludes numba's one-off compilation / cache load from the timing
     clahe_u8(membrane_stack[:2, :16, :16])
 
-    _t0 = time.perf_counter()
-    volume_ref = my_clahe(membrane_stack, clip_limit=clip_slider.value, kernel_size=kernel_3d)
-    t_ref = time.perf_counter() - _t0
+    # _my_clahe_ is deprecated: run here only as the timing reference
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "_my_clahe_ is deprecated", DeprecationWarning)
+        _t0 = time.perf_counter()
+        volume_ref = my_clahe(membrane_stack, clip_limit=clip_slider.value, kernel_size=kernel_3d)
+        t_ref = time.perf_counter() - _t0
 
     _t0 = time.perf_counter()
     volume_fast = clahe_u8(membrane_stack, clip_limit=clip_slider.value, kernel_size=kernel_3d)
@@ -248,7 +251,7 @@ def _(
 def _(clahe_backend, kernel_3d, membrane_stack, mo, t_fast, t_ref):
     mo.md(f"""
     3D CLAHE of the {membrane_stack.shape} membrane stack, tiles {kernel_3d}:
-    `_my_clahe_` **{t_ref * 1e3:.0f} ms**, `clahe_u8` ({clahe_backend} backend)
+    `_my_clahe_` (deprecated) **{t_ref * 1e3:.0f} ms**, `clahe_u8` ({clahe_backend} backend)
     **{t_fast * 1e3:.0f} ms** (**{t_ref / t_fast:.0f}x** faster).
     """)
     return
@@ -260,7 +263,7 @@ def _(clip_slider, membrane_stack, np, plt, volume_fast, volume_ref):
     y_show = membrane_stack.shape[1] // 2
     panels = [
         ("Original", membrane_stack),
-        ("_my_clahe_", volume_ref),
+        ("_my_clahe_ (deprecated)", volume_ref),
         ("clahe_u8", volume_fast),
     ]
     fig_3d, axes_3d = plt.subplots(

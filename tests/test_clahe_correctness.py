@@ -1,8 +1,29 @@
 import unittest
 import numpy as np
+import pytest
 import warnings
 from eigenp_utils.clahe_equalize_adapthist import _my_clahe_
 
+# _my_clahe_ is deprecated (use clahe_u8); its tests stay until removal, and
+# only this expected warning is ignored for them
+_IGNORE_MY_CLAHE_DEPRECATION = pytest.mark.filterwarnings(
+    "ignore:_my_clahe_ is deprecated:DeprecationWarning"
+)
+
+
+def test_my_clahe_warns_deprecated():
+    """_my_clahe_ emits a DeprecationWarning pointing to clahe_u8.
+
+    Expected: one DeprecationWarning whose message names clahe_u8, attributed
+    to the caller (stacklevel=2), so users see their own line in the warning.
+    """
+    image = np.random.default_rng(0).random((32, 32))
+    with pytest.warns(DeprecationWarning, match="clahe_u8") as record:
+        _my_clahe_(image, kernel_size=8)
+    assert record[0].filename == __file__
+
+
+@_IGNORE_MY_CLAHE_DEPRECATION
 class TestCLAHECorrectness(unittest.TestCase):
     """
     Testr 🔎 Verification: CLAHE Correctness
@@ -130,6 +151,7 @@ if __name__ == '__main__':
     unittest.main()
 
 
+@_IGNORE_MY_CLAHE_DEPRECATION
 def test_clahe_matches_skimage_reference():
     """_my_clahe_ agrees with skimage.exposure.equalize_adapthist on natural images.
 
@@ -152,6 +174,7 @@ def test_clahe_matches_skimage_reference():
         assert abs(ours.mean() - ref.mean()) < 0.01, name
 
 
+@_IGNORE_MY_CLAHE_DEPRECATION
 def test_clahe_rejects_kernel_size_of_wrong_length():
     """A kernel_size whose length differs from image.ndim raises a clear ValueError.
 

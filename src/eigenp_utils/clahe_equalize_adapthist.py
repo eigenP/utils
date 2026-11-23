@@ -23,6 +23,7 @@ responsible.  Basically, don't be a jerk, and remember that anything free
 comes with no guarantee.
 """
 import numbers
+import warnings
 
 import numpy as np
 
@@ -38,6 +39,13 @@ from skimage.util import img_as_uint
 def _my_clahe_(image, kernel_size=None,
                        clip_limit=0.01, nbins=256, output_float_dtype = np.float16):
     """Contrast Limited Adaptive Histogram Equalization (CLAHE).
+
+    .. deprecated::
+        Use :func:`clahe_u8`: same algorithm and ``clip_limit`` scale, N-D,
+        5-150x faster, robust percentile input scaling. It returns uint8 in
+        [0, 255] rather than float in [0, 1] (divide by 255 if needed). For a
+        float result faithful to skimage, use
+        ``skimage.exposure.equalize_adapthist``.
 
     An algorithm for local contrast enhancement, that uses histograms computed
     over different tile regions of the image. Local details can therefore be
@@ -90,6 +98,13 @@ def _my_clahe_(image, kernel_size=None,
     .. [2] https://en.wikipedia.org/wiki/CLAHE#CLAHE
     """
 
+    warnings.warn(
+        "_my_clahe_ is deprecated and will be removed; use clahe_u8 (same "
+        "clip_limit scale, much faster, returns uint8 in [0, 255] instead of "
+        "float in [0, 1]).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     float_dtype = output_float_dtype
     image = img_as_uint(image)
     image = np.round(
