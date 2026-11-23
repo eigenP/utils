@@ -31,7 +31,7 @@ Representations
 ---------------
 * ``pca``          ``preprocess_subset`` (seurat_v3 HVGs, log1p, scale, PCA 32), Euclidean
                    (PaCMAP's input; reference)
-* ``pacmap``       ``tl_pacmap(use_rep='X_pca')`` 2-D, Euclidean
+* ``pacmap``       ``tl_pacmap(use_rep="X_pca", init="pca")`` 2-D, Euclidean
 * ``bonsai``       Bonsai on Poisson log-quotients with error bars, patristic distances
 * ``bonsai_pca``   Bonsai on the PCA scores without error bars (ablation: tree model
                    without the noise model)
@@ -209,7 +209,7 @@ def pca_and_pacmap(counts, seed, n_top_genes):
     t_pca = time.perf_counter() - t0
     t0 = time.perf_counter()
     with contextlib.redirect_stdout(io.StringIO()):
-        tl_pacmap(adata, use_rep="X_pca", random_state=seed)
+        tl_pacmap(adata, use_rep="X_pca", init="pca", random_state=seed)
     t_pacmap = time.perf_counter() - t0
     return adata.obsm["X_pca"], adata.obsm["X_pacmap"], t_pca, t_pacmap
 
