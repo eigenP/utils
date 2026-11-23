@@ -828,6 +828,108 @@ def test_tl_pacmap_init_paga():
     assert not any("init not given" in str(x.message) for x in w)
     assert "X_pacmap" in adata.obsm
 
+
+def _paga_adata_with_layout():
+    """Leiden + PAGA + PAGA positions on clustered data (shared by the PAGA-init tests)."""
+    adata = _pacmap_adata(50, n_obs=120)
+    sc.pp.neighbors(adata, n_neighbors=8, use_rep="X")
+    sc.tl.leiden(adata, resolution=1.0, flavor="igraph", n_iterations=2, directed=False, random_state=0)
+    sc.tl.paga(adata, groups="leiden")
+    sc.pl.paga(adata, show=False, random_state=0)
+    plt.close("all")
+    return adata
+
+
+def test_paga_init_positions_match_scanpy_reference():
+    """Negative control: the local PAGA init equals scanpy's helper (<= 1.12) bit for bit.
+
+    Strategy: on a real PAGA layout, compare ``_paga_init_positions`` with
+    ``scanpy.tools._utils.get_init_pos_from_paga`` for several seeds, when the
+    installed scanpy still has the pre-1.13 signature (``random_state``).
+    Expected: identical arrays (same RNG stream, same arithmetic).
+    """
+    import inspect
+    from scanpy.tools._utils import get_init_pos_from_paga
+    from eigenp_utils.single_cell import _paga_init_positions
+
+    if "random_state" not in inspect.signature(get_init_pos_from_paga).parameters:
+        pytest.skip("scanpy >= 1.13: reference helper has a different RNG contract")
+    adata = _paga_adata_with_layout()
+    for seed in (0, 1, 1234):
+        ref = get_init_pos_from_paga(adata, random_state=seed)
+        np.testing.assert_array_equal(_paga_init_positions(adata, random_state=seed), ref)
+
+
+def test_paga_init_positions_analytic_box_and_mean():
+    """Positive control: positions follow the closed form p_g - d/2 + U[0,1)^2 * d.
+
+    Strategy: hand-built PAGA on 3 groups with known positions; groups 0-1 are
+    linked (group 0's strongest neighbour is 1 and vice versa) and group 2 has no
+    edges. Expected: every cell of a linked group lies in the box centred on its
+    group position with half-widths |d|/2 per axis; the group mean converges to
+    p_g (E[u] = 1/2, n = 4000 so the SE is |d| / sqrt(12 n) < 0.5% of |d|); the
+    isolated group sits exactly at p_2; same seed -> same positions.
+    """
+    from eigenp_utils.single_cell import _paga_init_positions
+
+    n = 4000
+    adata = sc.AnnData(np.zeros((3 * n, 1)))
+    adata.obs["g"] = pd.Categorical(np.repeat(["a", "b", "c"], n))
+    pos = np.array([[0.0, 0.0], [4.0, -2.0], [10.0, 10.0]])
+    C = sp.csr_matrix(np.array([[0.0, 0.7, 0.0], [0.7, 0.0, 0.0], [0.0, 0.0, 0.0]]))
+    adata.uns["paga"] = {"pos": pos, "connectivities": C, "groups": "g"}
+
+    init = _paga_init_positions(adata, random_state=7)
+    for g, h in ((0, 1), (1, 0)):
+        x = init[g * n:(g + 1) * n]
+        d = pos[g] - pos[h]
+        lo = pos[g] - 0.5 * np.abs(d)
+        hi = pos[g] + 0.5 * np.abs(d)
+        assert np.all((x >= lo - 1e-12) & (x <= hi + 1e-12))
+        np.testing.assert_allclose(x.mean(axis=0), pos[g], atol=0.03 * np.abs(d).max())
+    np.testing.assert_array_equal(init[2 * n:], np.tile(pos[2], (n, 1)))
+    np.testing.assert_array_equal(init, _paga_init_positions(adata, random_state=7))
+
+
+def test_tl_pacmap_paga_init_leaves_global_rng_untouched():
+    """init='paga' must not reset the caller's global NumPy RNG.
+
+    scanpy's helper (<= 1.12) called ``np.random.seed(random_state)``, so after
+    tl_pacmap(init='paga') the global stream restarted from the seed: user code
+    drawing random numbers afterwards got the same values on every run. Expected:
+    the global RNG state is the same before and after the call.
+    """
+    adata = _paga_adata_with_layout()
+    np.random.seed(2024)
+    np.random.random(5)
+    before = np.random.get_state()
+    tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X", init="paga")
+    after = np.random.get_state()
+    assert before[0] == after[0]
+    np.testing.assert_array_equal(before[1], after[1])
+    assert before[2:] == after[2:]
+
+
+def test_tl_pacmap_paga_init_independent_of_scanpy_private_helper(monkeypatch):
+    """init='paga' keeps working when scanpy's private PAGA-init helper changes.
+
+    scanpy 1.13 made ``get_init_pos_from_paga(adata, *, rng, adjacency)``
+    keyword-only with a required ``adjacency``, so ``tl_pacmap(init='paga')``
+    raised TypeError. Strategy: replace the helper with a stub that raises like
+    the 1.13 signature does. Expected: tl_pacmap still embeds all cells.
+    """
+    import scanpy.tools._utils as sc_tool_utils
+
+    def _scanpy_113_signature(adata, *, rng, adjacency):
+        raise AssertionError("tl_pacmap must not depend on this private helper")
+
+    monkeypatch.setattr(sc_tool_utils, "get_init_pos_from_paga", _scanpy_113_signature)
+    adata = _paga_adata_with_layout()
+    tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X", init="paga")
+    assert adata.obsm["X_pacmap"].shape == (adata.n_obs, 2)
+    assert np.isfinite(adata.obsm["X_pacmap"]).all()
+
+
 # =========================================
 # Source: test_moran_memory.py
 # =========================================

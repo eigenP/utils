@@ -2675,6 +2675,49 @@ def load_pacmap_model(filepath: str) -> Any:
     return model
 
 
+def _paga_init_positions(adata: sc.AnnData, random_state=0) -> np.ndarray:
+    """Per-cell 2D start positions from the PAGA layout (``adata.uns['paga']['pos']``).
+
+    Same construction as scanpy's ``get_init_pos_from_paga`` up to 1.12: the cells
+    of group g with PAGA position p_g and most strongly connected neighbour group
+    h are placed at ``p_g - d/2 + u * d`` with ``d = p_g - p_h`` and ``u ~ U[0, 1)^2``
+    per cell, i.e. uniformly in the axis-aligned box centred on p_g with side
+    lengths |d| (half-way towards p_h on each side). A group without PAGA edges
+    sits exactly at p_g; cells in no group keep (1, 1).
+
+    Kept here instead of importing that private scanpy helper: scanpy 1.13 changed
+    its signature (keyword-only ``rng`` Generator and a required ``adjacency``),
+    and up to 1.12 it called ``np.random.seed``, resetting the caller's global
+    NumPy RNG. A local ``RandomState(random_state)`` draws the same stream as
+    ``np.random.seed(random_state)`` followed by ``np.random.random``, so the
+    positions are bit-identical to scanpy <= 1.12, without the side effect.
+    """
+    paga = adata.uns["paga"]
+    if "pos" not in paga:
+        raise ValueError("Plot PAGA first, so that `adata.uns['paga']['pos']` exists.")
+    rng = (
+        random_state
+        if isinstance(random_state, np.random.RandomState)
+        else np.random.RandomState(random_state)
+    )
+    groups = adata.obs[paga["groups"]]
+    pos = np.asarray(paga["pos"])
+    connectivities_coarse = paga["connectivities"]
+    init_pos = np.ones((adata.n_obs, 2))
+    for i, group_pos in enumerate(pos):
+        subset = (groups == groups.cat.categories[i]).values
+        neighbors = connectivities_coarse[i].nonzero()
+        if len(neighbors[1]) > 0:
+            connectivities = connectivities_coarse[i][neighbors]
+            nearest_neighbor = neighbors[1][np.argmax(connectivities)]
+            noise = rng.random_sample((int(subset.sum()), 2))
+            dist = group_pos - pos[nearest_neighbor]
+            init_pos[subset] = group_pos - 0.5 * dist + noise * dist
+        else:
+            init_pos[subset] = group_pos
+    return init_pos
+
+
 def tl_pacmap(
     adata: sc.AnnData,
     n_neighbors: Optional[int] = None,
@@ -2822,14 +2865,12 @@ def tl_pacmap(
     init_method = None
     if init is not None:
         if isinstance(init, str) and init == "paga":
-            from scanpy.tools._utils import get_init_pos_from_paga
-
             if "pos" not in adata.uns["paga"]:
                 # The node positions are only computed by plotting PAGA
                 fig, ax = plt.subplots()
                 sc.pl.paga(adata, ax=ax, show=False, random_state=random_state)
                 plt.close(fig)
-            init_coords = get_init_pos_from_paga(adata, random_state=random_state)
+            init_coords = _paga_init_positions(adata, random_state=random_state)
             init_method = init_coords
         elif (
             isinstance(init, str)
