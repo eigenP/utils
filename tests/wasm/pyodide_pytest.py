@@ -67,6 +67,7 @@ rc = pytest.main([
     "--ignore=/repo/tests/test_single_cell.py",
     "--ignore=/repo/tests/test_frontend_isolated.py",
     "--ignore=/repo/tests/test_frontend_rangeslider.py",
+    "--ignore=/repo/tests/test_frontend_label_annotator.py",
     "--ignore=/repo/tests/wasm",
 ])
 int(rc)
