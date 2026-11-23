@@ -475,41 +475,59 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     else:
         stats = "no finite values"
 
-    # --- figure: one column (image, histogram, info), axes placed in inches ---
+    # --- figure: one column (image, histogram, info) ---
+    # A named mosaic whose rows and columns are sized in inches: "." cells are
+    # margins and gaps, sized below from the measured tick/label overhangs.
+    mosaic = [
+        [".", "Image", "."],
+        [".", ".", "."],
+        [".", "Histogram", "."],
+        [".", ".", "."],
+        ["Info", "Info", "Info"],
+    ]
     H, W = image.shape[:2]
     w_img = image_size * W / max(H, W)
     h_img = image_size * H / max(H, W)
-    w_hist, h_hist = max(w_img, 3.0), 0.9
-    col_w = max(w_img, w_hist)
+    col_w, h_hist = max(w_img, 3.0), 0.9  # histogram (and column) at least 3 in wide
+    pad, gap = 0.12, 0.15
 
-    fig = plt.figure(figsize=(col_w + 2.0, h_img + h_hist + 4.0))
-    ax_img = fig.add_axes([0.1, 0.6, 0.4, 0.3])
-    ax_hist = fig.add_axes([0.1, 0.4, 0.4, 0.1])
-    ax_info = fig.add_axes([0.0, 0.0, 1.0, 0.3])
+    def size_grid(widths, heights, top):
+        """Set the figure size and the mosaic's row / column sizes, all in inches."""
+        fig_w, fig_h = sum(widths) + 2 * pad, top + sum(heights) + pad
+        fig.set_size_inches(fig_w, fig_h)
+        gs.set_width_ratios([max(w, 1e-3) for w in widths])
+        gs.set_height_ratios([max(h, 1e-3) for h in heights])
+        gs.update(left=pad / fig_w, right=1 - pad / fig_w, bottom=pad / fig_h, top=1 - top / fig_h,
+                  wspace=0, hspace=0)
+        return fig_w
+
+    fig, axes = plt.subplot_mosaic(mosaic, layout="none")
+    gs = axes["Image"].get_subplotspec().get_gridspec()
+    size_grid([1.0, col_w, 1.0], [h_img, 0.8, h_hist, 0.8, 1.0], pad)  # first guess, to measure
 
     norm = None
     if gamma != 1:
         # matplotlib refuses a norm together with vmin/vmax, so hand them to the norm
         norm = PowerNorm(gamma=gamma, vmin=imshow_kwargs.pop('vmin', None),
                          vmax=imshow_kwargs.pop('vmax', None))
-    im = ax_img.imshow(image, norm=norm, interpolation='nearest', **imshow_kwargs)
+    im = axes["Image"].imshow(image, norm=norm, interpolation='nearest', **imshow_kwargs)
     vmin, vmax = im.norm.vmin, im.norm.vmax
 
     frac = np.zeros(0)
     if finite.size:
         # fraction of pixels per bin: unit-free, unlike a density in 1/intensity
-        frac, _, _ = ax_hist.hist(finite.ravel(), bins=bins, histtype='stepfilled',
+        frac, _, _ = axes["Histogram"].hist(finite.ravel(), bins=bins, histtype='stepfilled',
                                   weights=np.full(finite.size, 1.0 / finite.size))
     nonzero = frac[frac > 0]
     if nonzero.size and nonzero.max() > 10 * nonzero.min():
         # log fraction only pays off over more than a decade (else no major tick is labelled)
-        ax_hist.set_yscale('log')
-        ax_hist.yaxis.set_major_locator(mpl_ticker.LogLocator(numticks=3))
-        ax_hist.yaxis.set_minor_formatter(mpl_ticker.NullFormatter())
+        axes["Histogram"].set_yscale('log')
+        axes["Histogram"].yaxis.set_major_locator(mpl_ticker.LogLocator(numticks=3))
+        axes["Histogram"].yaxis.set_minor_formatter(mpl_ticker.NullFormatter())
     else:
-        ax_hist.yaxis.set_major_locator(mpl_ticker.MaxNLocator(2))
-    ax_hist.set_xlabel(f'Pixel intensity ({dtype})')
-    ax_hist.set_ylabel('Fraction')
+        axes["Histogram"].yaxis.set_major_locator(mpl_ticker.MaxNLocator(2))
+    axes["Histogram"].set_xlabel(f'Pixel intensity ({dtype})')
+    axes["Histogram"].set_ylabel('Fraction')
 
     # display range: dashed lines at vmin / vmax, intensities the display clips shaded
     display = None
@@ -518,15 +536,15 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         hi = max(float(finite.max()), vmax) if finite.size else vmax
         if hi <= lo:
             hi = lo + 1
-        ax_hist.set_xlim(lo, hi)
+        axes["Histogram"].set_xlim(lo, hi)
         dmin, dmax = (float(finite.min()), float(finite.max())) if finite.size else (None, None)
         for v in (vmin, vmax):
             if v not in (dmin, dmax):  # autoscaled limits sit on the data range: nothing to mark
-                ax_hist.axvline(v, color="#6B6B6B", ls=(0, (3, 2)), lw=1)
+                axes["Histogram"].axvline(v, color="#6B6B6B", ls=(0, (3, 2)), lw=1)
         if vmin > lo:
-            ax_hist.axvspan(lo, vmin, color="#808080", alpha=0.18, lw=0)
+            axes["Histogram"].axvspan(lo, vmin, color="#808080", alpha=0.18, lw=0)
         if vmax < hi:
-            ax_hist.axvspan(vmax, hi, color="#808080", alpha=0.18, lw=0)
+            axes["Histogram"].axvspan(vmax, hi, color="#808080", alpha=0.18, lw=0)
         if (vmin, vmax) != (dmin, dmax) or gamma != 1:  # else it repeats the intensity row
             display = f"vmin {vmin:.4g}  vmax {vmax:.4g}" + (f"  gamma {gamma:g}" if gamma != 1 else "")
             if finite.size:
@@ -549,36 +567,22 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         return (max(bb.x0 - tb.x0, 0) / d, max(tb.x1 - bb.x1, 0) / d,
                 max(bb.y0 - tb.y0, 0) / d, max(tb.y1 - bb.y1, 0) / d)
 
-    pad, gap = 0.12, 0.15
-    fw, fh = fig.get_size_inches()
-    ax_img.set_position([0, 0, w_img / fw, h_img / fh])
-    ax_hist.set_position([0, 0, w_hist / fw, h_hist / fh])
-    oi, oh = overhang(ax_img), overhang(ax_hist)
+    # The image keeps its aspect, so in a column wider than it, it is centred.
+    oi, oh = overhang(axes["Image"]), overhang(axes["Histogram"])
+    dx_img = (col_w - w_img) / 2
+    left = max(oi[0] - dx_img, oh[0], 0)
+    right = max(oi[1] - dx_img, oh[1], 0)
+    spare = max(4.5 - 2 * pad - (left + col_w + right), 0)  # figure at least 4.5 in wide
+    widths = [left + spare / 2, col_w, right + spare / 2]
 
-    dx_img, dx_hist = (col_w - w_img) / 2, (col_w - w_hist) / 2  # both centred in the column
-    left = pad + max(oi[0] - dx_img, oh[0] - dx_hist, 0)
-    right = pad + max(oi[1] - dx_img, oh[1] - dx_hist, 0)
-    fig_w = max(left + col_w + right, 4.5)
-    x0 = left + (fig_w - left - col_w - right) / 2
-
-    info_w_pt = (fig_w - 2 * pad) * 72
+    info_w_pt = sum(widths) * 72
     info_fs = float(np.clip(0.65 * plt.rcParams['font.size'], 7, 10))
-    info_h = _draw_info_table(ax_info, rows, channels, info_w_pt, info_fs,
+    info_h = _draw_info_table(axes["Info"], rows, channels, info_w_pt, info_fs,
                               shown_channel=shown_channel, max_chars=info_width) / 72
 
-    top = pad + oi[3]
     gap_ih = gap + oi[2] + oh[3]  # image tick labels above, histogram offset text below
-    below = oh[2]
-    fig_h = top + h_img + gap_ih + h_hist + below + gap + info_h + pad
+    size_grid(widths, [h_img, gap_ih, h_hist, oh[2] + gap, info_h], pad + oi[3])
 
-    fig.set_size_inches(fig_w, fig_h)
-    y_img = fig_h - top - h_img
-    y_hist = y_img - gap_ih - h_hist
-    ax_img.set_position([(x0 + dx_img) / fig_w, y_img / fig_h, w_img / fig_w, h_img / fig_h])
-    ax_hist.set_position([(x0 + dx_hist) / fig_w, y_hist / fig_h, w_hist / fig_w, h_hist / fig_h])
-    ax_info.set_position([pad / fig_w, pad / fig_h, info_w_pt / 72 / fig_w, info_h / fig_h])
-
-    axes = {"Image": ax_img, "Histogram": ax_hist, "Info": ax_info}
     return {"fig": fig, "axes": axes, "info": info,
             "info_html": _info_html(rows, channels, shown_channel)}
 
