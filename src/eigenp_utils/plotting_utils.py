@@ -183,7 +183,7 @@ def _image_info_lines(image, shown=None) -> list:
     return lines
 
 
-def hist_imshow(image, bins=64, gamma = 1, return_image_only = False, info_width = 46, **imshow_kwargs):
+def describe_image(image, bins=64, gamma = 1, return_image_only = False, info_width = 46, **imshow_kwargs):
     """
     Displays an image, its histogram and an info panel.
 
@@ -216,8 +216,10 @@ def hist_imshow(image, bins=64, gamma = 1, return_image_only = False, info_width
 
     Examples
     --------
-    >>> res = hist_imshow(np.random.rand(100, 100))
+    >>> res = describe_image(np.random.rand(100, 100))
     >>> print(res["info"])
+
+    Formerly ``hist_imshow`` (deprecated alias).
     """
     import textwrap
 
@@ -287,6 +289,18 @@ def hist_imshow(image, bins=64, gamma = 1, return_image_only = False, info_width
                       va='top', ha='left', family='monospace', fontsize=7.5)
 
     return {"fig": fig, "axes": axes, "info": info}
+
+
+def hist_imshow(*args, **kwargs):
+    """Deprecated alias of :func:`describe_image` (same arguments and return value)."""
+    import warnings
+
+    warnings.warn(
+        "hist_imshow is deprecated; use eigenp_utils.describe_image (same arguments and return value)",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return describe_image(*args, **kwargs)
 
 
 def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:

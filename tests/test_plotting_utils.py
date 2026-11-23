@@ -718,11 +718,11 @@ def test_i_series_colormaps_properties():
 
 
 def test_i_series_colormaps_usage():
-    """Verifies that I Series registered colormaps work seamlessly in plotting functions like hist_imshow and color_coded_projection."""
-    from eigenp_utils import color_coded_projection, hist_imshow
+    """Verifies that I Series registered colormaps work seamlessly in plotting functions like describe_image and color_coded_projection."""
+    from eigenp_utils import color_coded_projection, describe_image
 
     img_2d = np.random.rand(16, 16)
-    res = hist_imshow(img_2d, cmap='I Blue')
+    res = describe_image(img_2d, cmap='I Blue')
     assert res["fig"] is not None
     plt.close(res["fig"])
 

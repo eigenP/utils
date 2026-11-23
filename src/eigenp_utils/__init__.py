@@ -2,6 +2,7 @@
 
 from .plotting_utils import (
     color_coded_projection,
+    describe_image,
     hist_imshow,
     labels_cmap,
     i_blue,
@@ -27,6 +28,7 @@ from .tnia_plotting_anywidgets import (
 
 __all__ = [
     "color_coded_projection",
+    "describe_image",
     "hist_imshow",
     "labels_cmap",
     "i_blue",

@@ -366,31 +366,6 @@ def load_image(
     return da
 
 
-def describe_image(da: xr.DataArray) -> str:
-    """Deprecated: use ``plotting_utils.hist_imshow(da)``, which renders the same information
-    (dims, pixel sizes, channels with metadata) in an info panel and returns it as ``["info"]``."""
-    warnings.warn(
-        "describe_image is deprecated; use eigenp_utils.hist_imshow(da) (info panel, also returned as ['info'])",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    ps = get_stczyx_pixel_sizes(da)
-    lines = [f"source: {da.attrs.get('source', '<in-memory>')}"]
-    lines.append("dims: " + ", ".join(f"{d}={n}" for d, n in da.sizes.items()) + f"  dtype={da.dtype}")
-    lines.append(
-        "pixel sizes: "
-        + ", ".join(f"{a}={ps[a]:.4g}" if ps.get(a) is not None else f"{a}=?" for a in ("Z", "Y", "X"))
-        + (f" {ps['unit']}" if ps.get("unit") else "")
-    )
-    if "C" in da.dims:
-        names = [str(c) for c in da.coords["C"].values] if "C" in da.coords else [str(i) for i in range(da.sizes["C"])]
-        meta = [k for k, c in da.coords.items() if c.dims == ("C",) and k != "C"]
-        for i, n in enumerate(names):
-            extra = {k: da.coords[k].values[i] for k in meta}
-            lines.append(f"  C[{i}] {n}" + (f"  {extra}" if extra else ""))
-    return "\n".join(lines)
-
-
 def _normalize_stage_positions(stage_positions, n_series: int) -> dict:
     """{'stage_z', 'stage_y', 'stage_x'} -> float arrays of length n_series from a dict or an (S, 2|3) array."""
     if isinstance(stage_positions, dict):

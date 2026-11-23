@@ -70,22 +70,15 @@ def test_tiff_imagej_roundtrip(tmp_path):
 def test_in_memory_array_and_describe():
     arr = np.zeros((2, 5, 6), dtype=np.float32)
     da = sio.load_image(arr, input_axes="CYX", channel_names=["DAPI", "WGA"], pixel_sizes={"Y": 0.1, "X": 0.1, "unit": "µm"})
-    from eigenp_utils import hist_imshow
+    from eigenp_utils import describe_image
 
-    text = hist_imshow(da)["info"]
+    text = describe_image(da)["info"]
     assert "DAPI" in text and "X=0.1" in text
 
 
 def test_unsupported_suffix_points_to_reader(tmp_path):
     with pytest.raises(ValueError, match="own reader"):
         sio.load_image(tmp_path / "x.czi")
-
-
-def test_describe_image_is_deprecated():
-    da = sio.load_image(np.zeros((2, 4, 5)), input_axes="CYX", channel_names=["a", "b"])
-    with pytest.warns(DeprecationWarning, match="hist_imshow"):
-        assert "a" in sio.describe_image(da)
-
 
 def test_channels_by_unique_false_and_scalar():
     _, src = _reader_dataarray()
