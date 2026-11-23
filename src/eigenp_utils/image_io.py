@@ -1,4 +1,5 @@
 import warnings
+from pathlib import Path
 
 import numpy as np
 import xarray as xr
@@ -193,6 +194,158 @@ def channels_where(da: xr.DataArray, **criteria) -> list:
                 ok = v == want
             keep[i] = keep[i] and ok
     return [n for n, k in zip(names, keep) if k]
+
+
+def channels_by(da: xr.DataArray, field: str, values, allow_missing: bool = False, unique: bool = True) -> list:
+    """Channel names whose ``field`` coordinate equals each of ``values``, **in the order requested**.
+
+    Use it when channel order matters (e.g. a model expecting
+    ``[membrane, nucleus]``): ``da.sel(C=channels_by(da, "role", ["membrane", "dna"]))``.
+
+    Parameters
+    ----------
+    field : str
+        Coordinate along ``C`` (see :func:`set_channel_info`), e.g. ``"role"``.
+    values : value or list of values
+        Requested values, in output order.
+    allow_missing : bool
+        Skip values no channel has instead of raising ``KeyError``.
+    unique : bool
+        Raise ``ValueError`` if a value matches more than one channel; with
+        ``unique=False`` all matches are returned (in ``C`` order per value).
+    """
+    if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
+        values = [values]
+    out = []
+    for v in values:
+        names = channels_where(da, **{field: v})
+        if len(names) > 1 and unique:
+            raise ValueError(f"{field}={v!r} matches several channels {names}; expected one")
+        if not names:
+            if allow_missing:
+                continue
+            present = sorted({str(x) for x in da.coords[field].values if isinstance(x, str) and x})
+            raise KeyError(f"no channel with {field}={v!r}; present: {present}")
+        out.extend(names)
+    return out
+
+
+def _read_nd2(path, lazy: bool):
+    try:
+        import nd2
+    except ImportError as err:
+        raise ImportError("reading .nd2 needs the 'nd2' package (pip install 'eigenp_utils[nd2]')") from err
+    f = nd2.ND2File(path)
+    try:
+        if getattr(f, "components_per_channel", 1) > 1:
+            raise NotImplementedError(f"{Path(path).name}: RGB nd2 files are not supported (components_per_channel > 1)")
+        da = f.to_xarray(delayed=lazy, squeeze=False)
+        vs = f.voxel_size()
+        pixel_sizes = {"Z": float(vs.z), "Y": float(vs.y), "X": float(vs.x), "unit": "µm"}
+    except Exception:
+        f.close()
+        raise
+    if not lazy:
+        f.close()
+    # lazy=True: the file stays open, the dask graph reads from it
+    return da, pixel_sizes
+
+
+def _read_tiff(path, input_axes):
+    with tifffile.TiffFile(path) as tif:
+        series = tif.series[0]
+        axes = (input_axes or series.axes).upper()
+        data = series.asarray()
+    if set(axes) - set(_STCZYX):
+        raise ValueError(
+            f"{Path(path).name}: TIFF axes {axes!r} contain letters outside STCZYX (tifffile uses e.g. 'Q', 'I' "
+            "for unknown and 'S' for RGB samples); pass input_axes="
+        )
+    return data, get_tiff_voxel_size(path), axes
+
+
+def load_image(
+    source,
+    *,
+    input_axes: str = None,
+    channel_names=None,
+    channel_info: dict = None,
+    pixel_sizes: dict = None,
+    lazy: bool = False,
+    strict: bool = True,
+) -> xr.DataArray:
+    """Load an image file (or array) as a strict STCZYX ``xarray.DataArray``.
+
+    Channel names stay as stored in the file (``nd2`` reads them from the
+    acquisition metadata into ``C``); ``channel_info`` attaches per-channel
+    metadata as coordinates along ``C`` (:func:`set_channel_info`).
+
+    Parameters
+    ----------
+    source : str, Path, array or xr.DataArray
+        ``.nd2`` (needs the ``nd2`` package; channel names and voxel size from
+        the file, read with ``squeeze=False`` so single-channel files keep their
+        ``C``), ``.tif`` / ``.tiff`` (axes from tifffile unless ``input_axes``;
+        voxel size via :func:`get_tiff_voxel_size`), or an in-memory array /
+        DataArray (as :func:`array_to_stczyx_xarray`).
+    input_axes : str, optional
+        Axis letters for arrays, or TIFFs whose axes tifffile cannot name.
+    channel_names : list of str, optional
+        Define / override channel names (needed for plain arrays and most TIFFs).
+    channel_info : dict, optional
+        ``{channel_name: {field: value}}`` keyed by the names in the file, e.g.
+        ``{"DAPI": {"role": "dna", "color": "gray"}}``; unknown names raise when
+        ``strict``.
+    pixel_sizes : dict, optional
+        ``{"Z", "Y", "X", "unit"}``; overrides the file's values.
+    lazy : bool
+        ``.nd2`` only: keep data on disk as dask (the file stays open).
+
+    Returns
+    -------
+    xr.DataArray
+        Dims ``S, T, C, Z, Y, X``; raw file values (no dtype change); physical
+        coordinates where pixel sizes are known; ``attrs["source"]`` for files.
+    """
+    attrs = {}
+    file_ps = None
+    data = source
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        attrs["source"] = str(path)
+        name = path.name.lower()
+        if name.endswith(".nd2"):
+            data, file_ps = _read_nd2(path, lazy)
+        elif name.endswith((".tif", ".tiff")):
+            data, file_ps, input_axes = _read_tiff(path, input_axes)
+        else:
+            raise ValueError(f"unsupported file type: {path.name} (supported: .nd2, .tif, .tiff)")
+    ps = pixel_sizes if pixel_sizes is not None else file_ps
+    if ps is not None and all(ps.get(a) is None for a in ("Z", "Y", "X")):
+        ps = None
+    da = array_to_stczyx_xarray(data, input_axes=input_axes, channel_names=channel_names, attrs=attrs or None, pixel_sizes=ps)
+    if channel_info:
+        da = set_channel_info(da, channel_info, strict=strict)
+    return da
+
+
+def describe_image(da: xr.DataArray) -> str:
+    """Short text summary: source, dims and dtype, pixel sizes, channels with their metadata."""
+    ps = get_stczyx_pixel_sizes(da)
+    lines = [f"source: {da.attrs.get('source', '<in-memory>')}"]
+    lines.append("dims: " + ", ".join(f"{d}={n}" for d, n in da.sizes.items()) + f"  dtype={da.dtype}")
+    lines.append(
+        "pixel sizes: "
+        + ", ".join(f"{a}={ps[a]:.4g}" if ps.get(a) is not None else f"{a}=?" for a in ("Z", "Y", "X"))
+        + (f" {ps['unit']}" if ps.get("unit") else "")
+    )
+    if "C" in da.dims:
+        names = [str(c) for c in da.coords["C"].values] if "C" in da.coords else [str(i) for i in range(da.sizes["C"])]
+        meta = [k for k, c in da.coords.items() if c.dims == ("C",) and k != "C"]
+        for i, n in enumerate(names):
+            extra = {k: da.coords[k].values[i] for k in meta}
+            lines.append(f"  C[{i}] {n}" + (f"  {extra}" if extra else ""))
+    return "\n".join(lines)
 
 
 def _normalize_stage_positions(stage_positions, n_series: int) -> dict:
