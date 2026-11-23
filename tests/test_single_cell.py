@@ -2063,6 +2063,173 @@ def test_kknn_classifier_with_mask():
     assert res[0] == "A"
     assert res[99] == "A"
 
+
+def _kknn_vote_reference(labels, pruned_distances, pruned_indices, is_categorical, mask):
+    """Per-cell loop of ``kknn_classifier`` before vectorisation (oracle, verbatim)."""
+    from eigenp_utils.single_cell import _kknn_distance_weights
+
+    smoothed = []
+    for i in range(len(pruned_indices)):
+        if mask is not None and not mask[i]:
+            smoothed.append(labels[i])
+            continue
+        idx = pruned_indices[i]
+        dist = pruned_distances[i]
+        neighbors_labels = labels[idx]
+        weights = _kknn_distance_weights(dist)
+        if is_categorical:
+            vote_tally = {}
+            for lbl, w in zip(neighbors_labels, weights):
+                if pd.isna(lbl):
+                    continue
+                vote_tally[lbl] = vote_tally.get(lbl, 0.0) + w
+            if vote_tally:
+                smoothed.append(max(vote_tally.items(), key=lambda x: x[1])[0])
+            else:
+                smoothed.append(np.nan)
+        else:
+            valid_mask = ~pd.isna(neighbors_labels)
+            if np.any(valid_mask):
+                valid_labels = neighbors_labels[valid_mask]
+                valid_weights = weights[valid_mask]
+                sum_weights = np.sum(valid_weights)
+                if sum_weights > 0:
+                    valid_weights /= sum_weights
+                    smoothed.append(np.sum(valid_labels * valid_weights))
+                else:
+                    smoothed.append(np.nan)
+            else:
+                smoothed.append(np.nan)
+    return smoothed
+
+
+def _random_kknn_neighbourhoods(rng, n, n_ref, sizes, dtype=np.float64, ties=False):
+    """Variable-size neighbourhoods like ``compute_kknn_neighbors`` returns.
+
+    With ``ties=True`` distances are drawn from {0, 1, 2} so many weights are
+    exactly equal and weighted votes tie exactly (exercising the tie-break).
+    """
+    dists, idxs = [], []
+    for _ in range(n):
+        k = int(rng.choice(sizes))
+        if ties:
+            d = rng.integers(0, 3, k).astype(dtype)
+        else:
+            d = rng.exponential(1.0, k).astype(dtype)
+            d[rng.random(k) < 0.05] = 0.0  # coincident cells
+        idxs.append(rng.integers(0, n_ref, k))
+        dists.append(np.sort(d))
+    return dists, idxs
+
+
+def _assert_same_smoothing(new, ref, is_categorical):
+    """Exact equality (NaN == NaN; categorical values compared as objects).
+
+    The old loop copied ``pd.NA`` for masked-out cells of a nullable Int64 column,
+    and its final ``np.array(smoothed, dtype=float)`` raised ``TypeError``; the
+    vectorised path returns NaN there, so the reference maps ``pd.NA`` to NaN.
+    """
+    if not is_categorical:
+        ref = [np.nan if v is pd.NA else v for v in ref]
+    new = np.asarray(new, dtype=object if is_categorical else float)
+    ref = np.asarray(ref, dtype=object if is_categorical else float)
+    assert new.shape == ref.shape
+    if is_categorical:
+        nan_new = pd.isna(new)
+        np.testing.assert_array_equal(nan_new, pd.isna(ref))
+        assert all(a == b for a, b in zip(new[~nan_new], ref[~nan_new]))
+    else:
+        np.testing.assert_array_equal(new, ref)  # bit-for-bit, NaNs in same places
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+@pytest.mark.parametrize("ties", [False, True])
+@pytest.mark.parametrize("kind", ["categorical", "object", "bool", "float", "float_nan", "float32", "int", "Int64"])
+def test_kknn_smooth_values_matches_per_cell_loop(kind, ties, dtype):
+    """Vectorised kkNN voting/averaging is bit-identical to the former per-cell loop.
+
+    Strategy (Bolt equivalence oracle): random variable-size neighbourhoods (sizes
+    1..12, coincident cells with distance 0, float32 and float64 distances), labels
+    of every kind ``kknn_classifier`` accepts (Categorical with NaN, object strings
+    with None, bool, float with/without NaN, float32, int, nullable Int64), half the
+    cells masked out. ``ties=True`` uses distances in {0, 1, 2}, so equal weights
+    make exact vote ties; the dict tally broke them by first appearance among the
+    neighbours, which the vectorised path must reproduce.
+    Expected: identical outputs element by element (floats compared exactly).
+    """
+    from eigenp_utils.single_cell import _kknn_smooth_values
+
+    rng = np.random.default_rng(abs(hash((kind, ties, np.dtype(dtype).name))) % 2**32)
+    n_ref = 300
+    cats = np.array(["T", "B", "NK", "Mono"], dtype=object)
+    raw = rng.integers(0, len(cats), n_ref)
+    if kind == "categorical":
+        labels = pd.Categorical(cats[raw], categories=["B", "Mono", "NK", "T"])
+        labels[rng.random(n_ref) < 0.1] = np.nan
+    elif kind == "object":
+        labels = cats[raw].copy()
+        labels[rng.random(n_ref) < 0.1] = None
+    elif kind == "bool":
+        labels = raw % 2 == 0
+    elif kind in ("float", "float_nan", "float32"):
+        labels = rng.normal(size=n_ref)
+        if kind == "float_nan":
+            labels[rng.random(n_ref) < 0.1] = np.nan
+        if kind == "float32":
+            labels = labels.astype(np.float32)
+    elif kind == "int":
+        labels = rng.integers(-50, 50, n_ref)
+    else:
+        labels = pd.array(rng.integers(0, 9, n_ref), dtype="Int64")
+        labels[rng.random(n_ref) < 0.1] = pd.NA
+    is_categorical = kind in ("categorical", "object", "bool")
+
+    dists, idxs = _random_kknn_neighbourhoods(
+        rng, n_ref, n_ref, sizes=[1, 2, 4, 7, 12], dtype=dtype, ties=ties
+    )
+    for mask in (None, rng.random(n_ref) < 0.5):
+        new = _kknn_smooth_values(labels, dists, idxs, is_categorical, mask)
+        ref = _kknn_vote_reference(labels, dists, idxs, is_categorical, mask)
+        _assert_same_smoothing(new, ref, is_categorical)
+
+
+def test_kknn_classifier_vectorised_end_to_end_matches_loop():
+    """``kknn_classifier`` output equals the per-cell loop on real kkNN neighbourhoods.
+
+    Positive control at the public API: 8 shifted Gaussian clusters with 10%
+    mislabelled cells, neighbourhoods from ``compute_kknn_neighbors`` (adaptive
+    sizes), categorical and continuous columns. Negative control: masked-out
+    cells must keep their original value.
+    Expected: identical categorical labels and bit-identical continuous values.
+    """
+    rng = np.random.default_rng(0)
+    n = 2000
+    centre = rng.integers(0, 8, n)
+    emb = rng.normal(size=(n, 2)) + np.c_[centre * 6.0, np.zeros(n)]
+    lab = np.array(list("ABCDEFGH"), dtype=object)[centre]
+    flip = rng.random(n) < 0.1
+    lab[flip] = rng.choice(list("ABCDEFGH"), flip.sum())
+    adata = sc.AnnData(np.zeros((n, 1)))
+    adata.obsm["X_pacmap"] = emb
+    adata.obs["ct"] = pd.Categorical(lab)
+    adata.obs["score"] = centre + rng.normal(scale=0.3, size=n)
+    mask = rng.random(n) < 0.7
+
+    kw = dict(use_rep="X_pacmap", n_neighbors=10, max_neighbors=20, min_neighbors=5)
+    dists, idxs = compute_kknn_neighbors(adata, adata, query_use_rep="X_pacmap", **kw)
+
+    for key, is_cat in (("ct", True), ("score", False)):
+        new = kknn_classifier(adata, key, inplace=False, mask=mask, **kw)
+        ref = _kknn_vote_reference(adata.obs[key].values, dists, idxs, is_cat, mask)
+        _assert_same_smoothing(new, ref, is_cat)
+        kept = np.asarray(new, dtype=object)[~mask]
+        assert all(a == b for a, b in zip(kept, adata.obs[key].values[~mask]))
+    # Smoothing corrects most of the flipped labels in the masked-in region
+    smoothed = np.asarray(kknn_classifier(adata, "ct", inplace=False, **kw), dtype=object)
+    truth = np.array(list("ABCDEFGH"), dtype=object)[centre]
+    assert np.mean(smoothed == truth) > np.mean(lab == truth)
+
+
 # =========================================
 # Source: test_moran_cancellation.py
 # =========================================

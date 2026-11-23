@@ -4641,6 +4641,111 @@ def _kknn_distance_weights(dist: np.ndarray) -> np.ndarray:
     return weights / np.sum(weights)
 
 
+def _kknn_weights_2d(dist: np.ndarray) -> np.ndarray:
+    """Row-wise :func:`_kknn_distance_weights` for equal-length neighbourhoods.
+
+    Bit-identical to calling ``_kknn_distance_weights`` on each row: the median of
+    the positive distances is taken from a sort (mean of the two middle values,
+    as ``np.median`` does), and each row is normalised by its own sum.
+    """
+    positive = dist > 0
+    n_pos = positive.sum(axis=1)
+    srt = np.sort(np.where(positive, dist, np.inf), axis=1)
+    rows = np.arange(dist.shape[0])
+    lo = srt[rows, np.maximum(n_pos - 1, 0) // 2]
+    hi = srt[rows, np.maximum(n_pos, 1) // 2]
+    # n_pos == 0 -> median 0.0; n_pos odd -> lo == hi, and (x + x) / 2 == x exactly
+    median_dist = np.where(n_pos > 0, (lo + hi) / 2, 0).astype(dist.dtype, copy=False)
+    weights = 1.0 / (dist + median_dist[:, None] + 1e-6)
+    return weights / np.sum(weights, axis=1, keepdims=True)
+
+
+def _kknn_weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
+    """Weighted mean of the non-NaN ``values`` (weights renormalised); NaN if none."""
+    valid_mask = ~pd.isna(values)
+    if not np.any(valid_mask):
+        return np.nan
+    valid_labels = values[valid_mask]
+    valid_weights = weights[valid_mask]
+    sum_weights = np.sum(valid_weights)
+    if not sum_weights > 0:
+        return np.nan
+    valid_weights /= sum_weights
+    return np.sum(valid_labels * valid_weights)
+
+
+def _kknn_smooth_values(labels, pruned_distances, pruned_indices, is_categorical, mask):
+    """Distance-weighted vote (categorical) or mean (numeric) over kkNN neighbourhoods.
+
+    Vectorised over cells: neighbourhoods take at most ``quantile_bins`` distinct
+    sizes, so rows are processed in groups of equal size. The result equals the
+    former per-cell loop exactly: votes are accumulated per (cell, label) in
+    neighbour order with ``np.add.at`` (the same sequential float sums as the
+    dict tally), and ties go to the label seen first among the neighbours (the
+    dict's insertion order). Cells outside ``mask`` keep their label. Returns an
+    object array (categorical) or a float array (numeric).
+    """
+    N = len(pruned_indices)
+    lengths = np.fromiter((len(ix) for ix in pruned_indices), dtype=np.intp, count=N)
+    todo = np.ones(N, dtype=bool) if mask is None else mask.copy()
+
+    if is_categorical:
+        codes, uniques = pd.factorize(labels)  # NaN -> -1
+        uniques = np.asarray(uniques, dtype=object)
+        n_cat = len(uniques)
+        out = np.asarray(labels, dtype=object).copy()
+    elif isinstance(labels, np.ndarray):
+        out = np.array(labels, dtype=float)
+    else:
+        # Extension arrays (e.g. nullable Int64): keep the scalar path's arithmetic
+        out = np.array(labels.to_numpy(dtype=float, na_value=np.nan))
+
+    for k in np.unique(lengths[todo]):
+        sel = np.flatnonzero(todo & (lengths == k))
+        if k == 0:
+            out[sel] = np.nan
+            continue
+        idx = np.stack([pruned_indices[i] for i in sel])
+        weights = _kknn_weights_2d(np.stack([pruned_distances[i] for i in sel]))
+
+        if is_categorical:
+            # Chunk so the (cells x labels) score table stays small
+            step = max(1, (1 << 22) // max(n_cat, 1))
+            for c0 in range(0, len(sel), step):
+                c1 = min(c0 + step, len(sel))
+                nb = codes[idx[c0:c1]]
+                w = weights[c0:c1]
+                r, pos = np.nonzero(nb >= 0)
+                c = nb[r, pos]
+                scores = np.zeros((c1 - c0, n_cat), dtype=w.dtype)
+                np.add.at(scores, (r, c), w[r, pos])
+                first = np.full((c1 - c0, n_cat), k, dtype=np.intp)
+                np.minimum.at(first, (r, c), pos)
+                seen = first < k
+                best = np.max(np.where(seen, scores, -np.inf), axis=1, keepdims=True)
+                tied = seen & (scores == best)
+                winner = np.argmin(np.where(tied, first, k), axis=1)
+                has_vote = seen.any(axis=1)
+                res = np.full(c1 - c0, np.nan, dtype=object)
+                res[has_vote] = uniques[winner[has_vote]]
+                out[sel[c0:c1]] = res
+        else:
+            if isinstance(labels, np.ndarray):
+                vals = labels[idx]
+                all_valid = ~pd.isna(vals).any(axis=1)
+                if all_valid.any():
+                    w = weights[all_valid]
+                    w = w / np.sum(w, axis=1, keepdims=True)
+                    out[sel[all_valid]] = np.sum(vals[all_valid] * w, axis=1)
+                rest = np.flatnonzero(~all_valid)
+            else:
+                rest = np.arange(len(sel))
+            for j in rest:
+                out[sel[j]] = _kknn_weighted_mean(labels[idx[j]], weights[j])
+
+    return out
+
+
 def kknn_classifier(
     adata: sc.AnnData,
     obs_key: str,
@@ -4710,57 +4815,12 @@ def kknn_classifier(
     is_bool = pd.api.types.is_bool_dtype(col)
     is_categorical = is_bool or not pd.api.types.is_numeric_dtype(col)
 
-    smoothed = []
-
-    for i in range(N):
-        if mask is not None and not mask[i]:
-            smoothed.append(labels[i])
-            continue
-
-        idx = pruned_indices[i]
-        dist = pruned_distances[i]
-
-        neighbors_labels = labels[idx]
-
-        # Distance weighting: smaller distance = larger weight
-        weights = _kknn_distance_weights(dist)
-
-        if is_categorical:
-            # Tally weighted votes
-            vote_tally = {}
-            for lbl, w in zip(neighbors_labels, weights):
-                # Ignore NaNs
-                if pd.isna(lbl):
-                    continue
-                vote_tally[lbl] = vote_tally.get(lbl, 0.0) + w
-
-            if vote_tally:
-                # Find the winner
-                winner = max(vote_tally.items(), key=lambda x: x[1])[0]
-                smoothed.append(winner)
-            else:
-                # Failsafe if all neighbors were NaN
-                smoothed.append(np.nan)
-
-        else:
-            # Continuous: Distance-weighted average
-            valid_mask = ~pd.isna(neighbors_labels)
-            if np.any(valid_mask):
-                valid_labels = neighbors_labels[valid_mask]
-                valid_weights = weights[valid_mask]
-                # Re-normalize valid weights
-                sum_weights = np.sum(valid_weights)
-                if sum_weights > 0:
-                    valid_weights /= sum_weights
-                    val = np.sum(valid_labels * valid_weights)
-                    smoothed.append(val)
-                else:
-                    smoothed.append(np.nan)
-            else:
-                smoothed.append(np.nan)
+    smoothed = _kknn_smooth_values(
+        labels, pruned_distances, pruned_indices, is_categorical, mask
+    )
 
     # Cast back to original categorical type if necessary
-    if is_bool and not any(pd.isna(v) for v in smoothed):
+    if is_bool and not pd.isna(smoothed).any():
         smoothed = np.array(smoothed, dtype=bool)
     elif is_categorical:
         if isinstance(adata.obs[obs_key].dtype, pd.CategoricalDtype):
