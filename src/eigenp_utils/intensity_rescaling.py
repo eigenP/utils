@@ -799,10 +799,14 @@ def apply_basic_shading(
     baseline=None,
     baseline_smooth_method=None,
     baseline_smooth_sigma=2.0,
-    output_dtype=None
+    output_dtype=None,
+    offset=None,
+    return_offset=False,
 ):
     """
     Applies the basic shading correction to images.
+
+    The result is ``(images - darkfield) / flatfield - baseline + offset``.
 
     Args:
         images: Input images.
@@ -812,12 +816,35 @@ def apply_basic_shading(
         baseline_smooth_method: Method to smooth baseline ('gaussian').
         baseline_smooth_sigma: Sigma for gaussian smoothing.
         output_dtype: dtype of the result. Defaults to the input dtype, except when
-            `baseline` is given: baseline-corrected images are centred on zero (as in
-            BaSiCPy), so the default is then float32 rather than clipping the negative
-            half of the background to 0. Integer outputs are rounded and clipped.
+            `baseline` is given without an `offset`: baseline-corrected images are
+            centred on zero (as in BaSiCPy), so the default is then float32 rather
+            than clipping the negative half of the background to 0. Integer outputs
+            are rounded and clipped to the dtype range; a UserWarning reports the
+            fraction of pixels clipped when it exceeds 0.1% at either end.
+        offset: Constant added after the correction, typically to bring a
+            zero-centred (baseline-subtracted) result back into the range of an
+            unsigned integer dtype:
+
+            - None (default): no offset.
+            - 'baseline_mean': the mean of the (smoothed) baseline that was
+              subtracted, so the background returns to its average level and
+              intensities stay in roughly the raw units, with only the
+              frame-to-frame background changes removed. Requires `baseline`.
+            - a number: added as is.
+
+            When an offset is given and `output_dtype` is None, the result has the
+            input dtype (e.g. uint16). Intensities are then shifted by the offset:
+            subtract it (see `return_offset`) to get back to the zero-centred
+            values, e.g. before measuring absolute background-subtracted signal.
+            Clipping at 0 is not neutral: for zero-mean background noise of std s
+            it raises the mean to about 0.4 s, so pick an offset that keeps the
+            low end in range (the clipping warning tells you when it does not).
+        return_offset: If True, return ``(corrected, offset_value)`` where
+            ``offset_value`` is the float actually added (0.0 when `offset` is None),
+            so it can be stored (e.g. in xarray attrs) and subtracted later.
 
     Returns:
-        Corrected images.
+        Corrected images, or ``(corrected, offset_value)`` if `return_offset`.
     """
     images = np.asarray(images)
 
@@ -849,10 +876,35 @@ def apply_basic_shading(
 
         corrected = corrected - b
 
+    if offset is None:
+        offset_value = 0.0
+    elif isinstance(offset, str):
+        if offset != 'baseline_mean':
+            raise ValueError(f"offset must be None, 'baseline_mean' or a number, got {offset!r}.")
+        if baseline is None:
+            raise ValueError("offset='baseline_mean' requires a baseline.")
+        offset_value = float(np.mean(baseline))
+    else:
+        offset_value = float(offset)
+    if offset_value != 0.0:
+        corrected = corrected + offset_value
+
     if output_dtype is None:
-        output_dtype = np.float32 if baseline is not None else images.dtype
+        output_dtype = np.float32 if (baseline is not None and offset is None) else images.dtype
 
     if np.issubdtype(output_dtype, np.integer):
-        return _float_to_int(corrected, output_dtype)
+        info = np.iinfo(output_dtype)
+        below = float(np.mean(corrected < info.min - 0.5))
+        above = float(np.mean(corrected > info.max + 0.5))
+        if below > 1e-3 or above > 1e-3:
+            warnings.warn(
+                f"Casting the shading-corrected images to {np.dtype(output_dtype).name} clips "
+                f"{below:.2%} of pixels at {info.min} and {above:.2%} at {info.max}. "
+                "Use a (larger) `offset`, or a float `output_dtype`, to keep them.",
+                UserWarning, stacklevel=2,
+            )
+        result = _float_to_int(corrected, output_dtype)
+    else:
+        result = corrected.astype(output_dtype)
 
-    return corrected.astype(output_dtype)
+    return (result, offset_value) if return_offset else result

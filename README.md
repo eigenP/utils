@@ -16,6 +16,7 @@
 
 ### Plotting & Visualization
 * **Interactive 3D Widgets**: Jupyter and Marimo-compatible, `anywidget`-based orthogonal slicers (`TNIASliceWidget`, `show_zyx` for dynamic multichannel viewers) with rotatable crosshairs, interactive point cloud visualization (`IsoScatterWidget`, `show_iso_scatter`), and 3D point annotation (`TNIAAnnotatorWidget`). Includes thick-slab projections (`show_zyx_max_slabs`, `show_zyx_projection_slabs`) and a one-click UI parameter copy feature for reproducibility.
+* **In-notebook Label Annotation**: `LabelAnnotator` (`eigenp_utils.label_annotator`) paints instance masks (e.g. Cellpose training masks; strokes are closed and filled, ids auto-increment) or semantic class scribbles (e.g. pixel-classifier labels) on 2D slices of multichannel images in Jupyter or marimo, without napari. Brush, eraser, flood fill, label picker, undo, zoom/pan, per-channel colour / contrast / gamma; compositing and painting run in the browser and only the edited slice's labels travel back to Python. `save(dir, name)` writes `*_img.tif` / `*_masks.tif` training pairs (unscaled data). Demo: `notebooks/demo_label_annotator.py`.
 * **Interactive 3D Scatter Plots**: Utilities for generating interactive 3D scatter plots with Plotly, including native support for AnnData embeddings (`plotly_scatter_3d`, `plotly_scatter_3d_from_adata_obsm`).
 * **Publication-Ready Plots**: Set global styles including editable SVG text (`set_plotting_style`). `raincloud_plot` supporting Seaborn-style arguments (grouped and colored with automatic position dodging), pre-KDE outlier filtering, and data subset highlighting. Custom Matplotlib colormap generation via `colormap_maker`, threshold-based scatter point rasterization to minimize SVG file sizes while preserving vector shapes via `savefig_svg`, and colormap truncation/modification (`adjust_colormap`). Includes `labels_cmap` for label images and `I Series` colormaps (`i_blue`, `i_bordeaux`, `i_forest`, `i_orange`, `i_purple`, `i_teal`, `i_rose`, `i_gold`, `i_slate`).
 * **Image Projections & Compositing**: Generate histograms over image plots (`hist_imshow`), produce depth color-coded projections (`color_coded_projection`), perform advanced multi-channel color blending (`create_multichannel_rgb`), and visualize intensity transformations (`brightness_diagnostic_plotter`).
@@ -42,7 +43,8 @@
 
 ### Core Utilities
 * **Spline Utilities**: Fit cubic splines (`fit_cubic_spline`), resample them uniformly (`create_resampled_spline`), render them into ND image volumes (`create_nd_image_from_spline`), calculate tangent vectors, project points onto planes, and calculate real-world arc lengths (`calculate_spline_length`) (`spline_utils.py`).
-* **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `numpy_to_stczyx_xarray`, and extract voxel sizes with `get_tiff_voxel_size`.
+* **Data Handling**: Standardize image dataset dimensions strictly to STCZYX via `array_to_stczyx_xarray` (NumPy/dask arrays or existing `xarray.DataArray`s, e.g. from `nd2`; `numpy_to_stczyx_xarray` is a deprecated alias), with pixel sizes stored as physical coordinates and `attrs['pixel_sizes']` (read back with `get_stczyx_pixel_sizes`) and tile stage positions as `stage_y`/`stage_x` coordinates, and extract voxel sizes with `get_tiff_voxel_size`.
+* **Tile Stitching**: `stitch_tiles` is a minimal translation-only 2D stitcher for STCZYX tiles (stage-position prior, phase correlation on Z max projections, global least squares, linear blending). For more control use [multiview-stitcher](https://github.com/multiview-stitcher/multiview-stitcher). Demo: `notebooks/pybasic_demo.py`.
 * **I/O Utilities**: Functions to streamline file and data reading, check files before saving (`check_file_before_save`), ensure directory existence (`ensure_directory`), and fast file downloading (`download_file`, `download_file_async`), and unzipping (`un_gzip`).
 
 ### Examples
@@ -68,6 +70,27 @@ Using `uv`:
 ```bash
 uv pip install "eigenp_utils @ git+https://github.com/eigenP/utils.git"
 ```
+
+Using [`pixi`](https://pixi.sh) (inside a pixi workspace, which needs a conda `python`; `pixi add python` if it has none):
+
+```bash
+pixi add --pypi "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
+```
+
+This writes the dependency to `[pypi-dependencies]` in `pixi.toml` (or `[tool.pixi.pypi-dependencies]` in `pyproject.toml`). The equivalent manifest entry, if you prefer to edit it by hand:
+
+```toml
+[pypi-dependencies]
+eigenp_utils = { git = "https://github.com/eigenP/utils.git", branch = "main", extras = ["all"] }
+```
+
+`pixi.lock` pins the exact commit, so new commits on `main` are not picked up until you update the lock file:
+
+```bash
+pixi update eigenp_utils
+```
+
+`pixi update` re-resolves only that package (to the latest commit of the branch) and rewrites `pixi.lock`; the environment is synced on the next `pixi run`/`pixi shell`, or immediately with `pixi install`. For the PyPI release instead of `git+`, use `pixi add --pypi "eigenp-utils[all]"`; `pixi update eigenp-utils` then moves to the newest version allowed by the manifest constraint, and `pixi upgrade eigenp-utils` also raises that constraint.
 
 ### Optional Dependencies
 
@@ -105,9 +128,10 @@ Everything except single-cell analysis runs in [Pyodide](https://pyodide.org), t
 
 | Module(s) | Needs | WASM |
 | --- | --- | --- |
-| `plotting_utils`, `tnia_plotting_anywidgets`, `stats`, `spline_utils`, `io` (file helpers) | core | yes |
+| `plotting_utils`, `tnia_plotting_anywidgets`, `label_annotator`, `stats`, `spline_utils`, `io` (file helpers) | core | yes |
 | `image_and_labels_utils`, `intensity_rescaling`, `extended_depth_of_focus`, `maxproj_registration`, `surface_extraction`, `clahe_equalize_adapthist` | `scikit-image` | yes |
 | `image_io` | `xarray`, `tifffile` | yes |
+| `stitching` | `xarray`, `scikit-image` | yes |
 | `stats.add_stat_annotations`, `plotting_utils.plotly_scatter_3d` | `[plotting]` | yes |
 | `single_cell` graph helpers (`smooth_expression_on_graph`, `find_correlated_features`, ...) | `anndata`, `scikit-learn` | yes (scanpy is imported lazily) |
 | `single_cell` functions that call scanpy / pacmap / leidenalg | `[single-cell]` (`numba` has no WASM build) | no |

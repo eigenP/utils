@@ -333,16 +333,80 @@ export default {
       model.save_changes();
     });
 
+    // Copy PNG: Python renders the figure (panels, channel labels, scale bar;
+    // none of the GUI controls) at 300 dpi and sends it back as base64.
+    // ClipboardItem is given a Promise synchronously inside the click, so the
+    // write keeps the user activation while Python renders (Safari requires it).
+    const copyPngBtn = document.createElement("button");
+    copyPngBtn.textContent = "📋 PNG";
+    copyPngBtn.title = "Copy plot images to clipboard as PNG";
+    copyPngBtn.style.padding = "6px 12px";
+    copyPngBtn.style.backgroundColor = "#e0e0e0";
+    copyPngBtn.style.color = "#333";
+    copyPngBtn.style.border = "1px solid #999";
+    copyPngBtn.style.borderRadius = "4px";
+    copyPngBtn.style.cursor = "pointer";
+    copyPngBtn.style.fontWeight = "bold";
+    copyPngBtn.addEventListener("mouseover", () => { copyPngBtn.style.backgroundColor = "#ccc"; });
+    copyPngBtn.addEventListener("mouseout", () => { copyPngBtn.style.backgroundColor = "#e0e0e0"; });
+
+    let pendingPng = null;  // {resolve, reject, timer} while waiting on Python
+    function flashCopyPng(text) {
+      copyPngBtn.textContent = text;
+      setTimeout(() => { copyPngBtn.textContent = "📋 PNG"; }, 1500);
+    }
+    function base64ToPngBlob(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: "image/png" });
+    }
+
+    copyPngBtn.addEventListener("click", () => {
+      if (!navigator.clipboard || typeof ClipboardItem === "undefined") {
+        console.error("Copy PNG: the Clipboard API is unavailable (needs a secure context).");
+        flashCopyPng("❌");
+        return;
+      }
+      if (pendingPng) pendingPng.reject(new Error("superseded"));
+      const blobPromise = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingPng = null;
+          reject(new Error("timed out waiting for the PNG"));
+        }, 30000);
+        pendingPng = { resolve, reject, timer };
+      });
+      navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })])
+        .then(() => flashCopyPng("✅"))
+        .catch(err => {
+          if (err && err.message === "superseded") return;
+          console.error("Failed to copy PNG: ", err);
+          flashCopyPng("❌");
+        });
+      model.set("copy_png_trigger", (model.get("copy_png_trigger") || 0) + 1);
+      model.save_changes();
+    });
+
+    model.on("change:copy_png_data", () => {
+      const data = model.get("copy_png_data");
+      if (!data || !pendingPng) return;
+      const { resolve, reject, timer } = pendingPng;
+      pendingPng = null;
+      clearTimeout(timer);
+      if (data === "error") reject(new Error("Python failed to render the PNG"));
+      else resolve(base64ToPngBlob(data));
+    });
+
     const copyParamsBtn = document.createElement("button");
-    copyParamsBtn.innerHTML = "📋";
-    copyParamsBtn.title = "Copy parameters to clipboard";
+    copyParamsBtn.textContent = "📋 kwargs";
+    copyParamsBtn.title = "Copy the current view settings to the clipboard as function kwargs";
     copyParamsBtn.style.padding = "6px 12px";
     copyParamsBtn.style.backgroundColor = "#e0e0e0";
     copyParamsBtn.style.color = "#333";
     copyParamsBtn.style.border = "1px solid #999";
     copyParamsBtn.style.borderRadius = "4px";
     copyParamsBtn.style.cursor = "pointer";
-    copyParamsBtn.style.fontSize = "16px";
+    copyParamsBtn.style.fontWeight = "bold";  // same look as the "💾 SVG" / "📋 PNG" buttons
     copyParamsBtn.addEventListener("mouseover", () => { copyParamsBtn.style.backgroundColor = "#ccc"; });
     copyParamsBtn.addEventListener("mouseout", () => { copyParamsBtn.style.backgroundColor = "#e0e0e0"; });
     copyParamsBtn.addEventListener("click", () => {
@@ -355,9 +419,8 @@ export default {
       const str = model.get("copy_params_string");
       if (str && navigator.clipboard) {
         navigator.clipboard.writeText(str).then(() => {
-          const originalHTML = copyParamsBtn.innerHTML;
-          copyParamsBtn.innerHTML = "✅";
-          setTimeout(() => { copyParamsBtn.innerHTML = originalHTML; }, 1500);
+          copyParamsBtn.textContent = "✅";
+          setTimeout(() => { copyParamsBtn.textContent = "📋 kwargs"; }, 1500);
         }).catch(err => console.error("Failed to copy text: ", err));
       }
     });
@@ -365,6 +428,7 @@ export default {
     saveContainer.appendChild(saveLabel);
     saveContainer.appendChild(saveInput);
     saveContainer.appendChild(saveBtn);
+    saveContainer.appendChild(copyPngBtn);
     saveContainer.appendChild(copyParamsBtn);
 
     const hasAnnotation = model.get("annotation_mode") !== undefined;
@@ -824,6 +888,7 @@ export default {
     uiTogglesContainer.style.gap = "10px";
     uiTogglesContainer.style.alignItems = "center";
     uiTogglesContainer.style.marginBottom = "10px";
+    uiTogglesContainer.style.flexWrap = "wrap";
 
     const warningSpan = document.createElement("span");
     warningSpan.style.color = "red";
@@ -859,6 +924,63 @@ export default {
     crosshairLabel.appendChild(crosshairCb);
     crosshairLabel.appendChild(document.createTextNode("Show Crosshair"));
     uiTogglesContainer.appendChild(crosshairLabel);
+
+    const scaleBarLabel = document.createElement("label");
+    scaleBarLabel.style.display = "flex";
+    scaleBarLabel.style.alignItems = "center";
+    scaleBarLabel.style.gap = "4px";
+    scaleBarLabel.style.fontSize = "14px";
+    scaleBarLabel.style.marginLeft = "10px";
+
+    const scaleBarCb = document.createElement("input");
+    scaleBarCb.type = "checkbox";
+    scaleBarCb.checked = model.get("scale_bar_show") !== false;
+    scaleBarCb.addEventListener("change", () => {
+      model.set("scale_bar_show", scaleBarCb.checked);
+      model.save_changes();
+    });
+
+    model.on("change:scale_bar_show", () => {
+      scaleBarCb.checked = model.get("scale_bar_show") !== false;
+    });
+
+    scaleBarLabel.appendChild(scaleBarCb);
+    scaleBarLabel.appendChild(document.createTextNode("Scale Bar"));
+    uiTogglesContainer.appendChild(scaleBarLabel);
+
+    // Scale-bar font size in pt (empty = auto from the figure height, 0 hides the label, keeps the bar)
+    const scaleBarSize = document.createElement("input");
+    scaleBarSize.type = "text";
+    scaleBarSize.title = "Scale bar label size (pt); empty = auto, 0 = no label (bar stays)";
+    scaleBarSize.placeholder = "auto";
+    scaleBarSize.style.width = "36px";
+    scaleBarSize.style.fontSize = "11px";
+    const refreshScaleBarSize = () => {
+      const v = model.get("scale_bar_fontsize_pt");
+      scaleBarSize.value = v === null || v === undefined ? "" : v;
+    };
+    refreshScaleBarSize();
+    scaleBarSize.addEventListener("change", () => {
+      const txt = scaleBarSize.value.trim();
+      let val = null;
+      if (txt !== "") {
+        val = parseFloat(txt);
+        if (isNaN(val)) { refreshScaleBarSize(); return; }
+        val = Math.max(0, val);
+      }
+      model.set("scale_bar_fontsize_pt", val);
+      model.save_changes();
+      refreshScaleBarSize();
+    });
+    model.on("change:scale_bar_fontsize_pt", refreshScaleBarSize);
+    const scaleBarSizeWrap = document.createElement("span");
+    scaleBarSizeWrap.style.display = "flex";
+    scaleBarSizeWrap.style.alignItems = "center";
+    scaleBarSizeWrap.style.gap = "2px";
+    scaleBarSizeWrap.style.fontSize = "11px";
+    scaleBarSizeWrap.appendChild(scaleBarSize);
+    scaleBarSizeWrap.appendChild(document.createTextNode("pt"));
+    uiTogglesContainer.appendChild(scaleBarSizeWrap);
 
     const syncLabel = document.createElement("label");
     syncLabel.style.display = "flex";

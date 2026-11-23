@@ -6,75 +6,343 @@ import tifffile
 import xml.etree.ElementTree as ET
 
 
+_STCZYX = 'STCZYX'
+
+
+def _relabel_dims(da: xr.DataArray, axes: str) -> xr.DataArray:
+    """Rename the dims of ``da`` positionally to the letters of ``axes``.
+
+    Goes through temporary names so that permutations of existing names
+    (e.g. nd2's ``('P', 'S')`` -> ``('S', 'C')``) do not collide.
+    Coordinates of a dim relabelled to a different spatial letter (e.g. a
+    time axis in ms relabelled as Z) are dropped: they are not positions along
+    the new axis and would otherwise be read as a pixel size.
+    """
+    if tuple(da.dims) == tuple(axes):
+        return da
+    stale = [d for d, a in zip(da.dims, axes)
+             if a in _SPATIAL and str(d).upper() != a and d in da.coords]
+    da = da.drop_vars(stale)
+    tmp = {d: f'__stczyx_tmp_{i}' for i, d in enumerate(da.dims)}
+    da = da.rename(tmp)
+    return da.rename({tmp[d]: a for d, a in zip(tmp, axes)})
+
+
+_SPATIAL = ('Z', 'Y', 'X')
+
+
+def _normalize_pixel_sizes(pixel_sizes):
+    """{'Z', 'Y', 'X', 'unit'} dict (None where unknown) from a dict or a (Z, Y, X) sequence."""
+    if pixel_sizes is None:
+        return {'Z': None, 'Y': None, 'X': None, 'unit': None}
+    if isinstance(pixel_sizes, dict):
+        keyed = {str(k).upper(): v for k, v in pixel_sizes.items()}
+        out = {ax: keyed.get(ax) for ax in _SPATIAL}
+        out['unit'] = pixel_sizes.get('unit')
+    else:
+        values = list(pixel_sizes)
+        if len(values) != 3:
+            raise ValueError(f"pixel_sizes must be a dict or a (Z, Y, X) sequence, got {pixel_sizes!r}.")
+        out = dict(zip(_SPATIAL, values))
+        out['unit'] = None
+    for ax in _SPATIAL:
+        if out[ax] is not None:
+            v = float(out[ax])
+            if not (np.isfinite(v) and v > 0):
+                raise ValueError(f"pixel_sizes['{ax}'] must be finite and positive, got {out[ax]!r}.")
+            out[ax] = v
+    return out
+
+
+def _coord_spacing(da: xr.DataArray, dim: str):
+    """Pixel size implied by a dim's coordinate: the step of uniformly spaced float coords, else None.
+
+    Integer coordinates are read as indices (uncalibrated), not as physical positions.
+    """
+    if dim not in da.coords or da.sizes[dim] < 2:
+        return None
+    values = np.asarray(da.coords[dim].values)
+    if not np.issubdtype(values.dtype, np.floating):
+        return None
+    steps = np.diff(values)
+    step = float(np.median(steps))
+    if not np.isfinite(step) or step == 0 or not np.allclose(steps, step, rtol=1e-3, atol=0):
+        return None
+    return abs(step)
+
+
+def _coord_unit(da: xr.DataArray):
+    for dim in _SPATIAL:
+        if dim in da.coords:
+            unit = da.coords[dim].attrs.get('units', da.coords[dim].attrs.get('unit'))
+            if unit is not None:
+                return unit
+    return None
+
+
+def get_stczyx_pixel_sizes(da: xr.DataArray) -> dict:
+    """
+    Pixel sizes ``{'Z', 'Y', 'X', 'unit'}`` of an xarray image (None where unknown).
+
+    The coordinates are the source of truth: they follow slicing and
+    downsampling (``da[..., ::2, ::2]``, ``coarsen``), while ``attrs`` are a
+    snapshot taken at conversion and are dropped by many xarray operations.
+    Per axis, the step of uniformly spaced float coordinates is used; axes
+    without such coordinates fall back to ``da.attrs['pixel_sizes']``.
+    Any uniform float coordinate counts as calibrated, including ones that are
+    not physical (e.g. ``coarsen(...).mean()`` of an uncalibrated array turns
+    the integer index into 0.5, 2.5, ... and reads as a pixel size of 2).
+    The result can be passed directly as ``pixel_sizes=`` to the plotting and
+    image-processing functions of this package.
+    """
+    stored = _normalize_pixel_sizes(da.attrs.get('pixel_sizes'))
+    out = {}
+    for ax in _SPATIAL:
+        step = _coord_spacing(da, ax) if ax in da.dims else None
+        out[ax] = step if step is not None else stored[ax]
+    out['unit'] = _coord_unit(da) or stored['unit']
+    return out
+
+
+def _normalize_stage_positions(stage_positions, n_series: int) -> dict:
+    """{'stage_z', 'stage_y', 'stage_x'} -> float arrays of length n_series from a dict or an (S, 2|3) array."""
+    if isinstance(stage_positions, dict):
+        keyed = {str(k).upper().removeprefix('STAGE_'): v for k, v in stage_positions.items()}
+        unknown = sorted(set(keyed) - set(_SPATIAL))
+        if unknown:
+            raise ValueError(f"stage_positions keys must be Z, Y, X, got {unknown}.")
+        columns = {ax: keyed[ax] for ax in _SPATIAL if ax in keyed}
+    else:
+        table = np.asarray(stage_positions, dtype=float)
+        if table.ndim == 1 and n_series == 1:
+            table = table[None, :]
+        if table.ndim != 2 or table.shape[1] not in (2, 3):
+            raise ValueError(
+                "stage_positions must be a dict {'Y': [...], 'X': [...]} (optionally 'Z') "
+                f"or an (S, 2) (Y, X) / (S, 3) (Z, Y, X) array, got shape {table.shape}."
+            )
+        columns = dict(zip(_SPATIAL[-table.shape[1]:], table.T))
+
+    out = {}
+    for ax, values in columns.items():
+        values = np.atleast_1d(np.asarray(values, dtype=float))
+        if values.shape != (n_series,):
+            raise ValueError(
+                f"stage_positions['{ax}'] has {values.size} entries, but S has size {n_series}."
+            )
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"stage_positions['{ax}'] contains non-finite values.")
+        out[f'stage_{ax.lower()}'] = values
+    return out
+
+
+def array_to_stczyx_xarray(
+    image,
+    input_axes: str = None,
+    channel_names=None,
+    attrs: dict = None,
+    pixel_sizes=None,
+    stage_positions=None,
+) -> xr.DataArray:
+    """
+    Converts an array into an xarray.DataArray with strict 'STCZYX' dimension order.
+    Missing dimensions are expanded with a size of 1.
+
+    Accepts NumPy arrays, dask arrays and existing ``xr.DataArray`` objects
+    (e.g. from ``nd2.ND2File.to_xarray()`` or ``aicsimageio``). Dask data
+    stays lazy: nothing is loaded into memory. Other array-likes (e.g. zarr
+    arrays) are loaded by xarray; wrap them with ``dask.array.from_zarr`` to
+    keep them lazy.
+
+    Dimension letters: S = scene / series / stage position, T = time,
+    C = channel, Z, Y, X.
+
+    Parameters:
+    -----------
+    image : array-like or xr.DataArray
+        The input image (e.g. from ``tifffile.imread`` or ``nd2``).
+    input_axes : str, optional
+        The dimension order of the input (e.g. 'ZCYX', 'TCYX'). Required for
+        plain arrays. For a DataArray it defaults to its dims, and if given it
+        relabels them positionally (e.g. nd2's 'TPZCYX' -> 'TSZCYX'). A
+        DataArray dim named 'P' (nd2's stage position) is read as 'S' when no
+        'S' dim exists. Note that nd2 names the RGB-component axis 'S': pass
+        ``input_axes`` explicitly for RGB nd2 files.
+    channel_names : str or list of str, optional
+        Names for the channel dimension. Must match the size of 'C'. A single
+        string is accepted for a single channel. Overrides existing 'C' coords.
+    attrs : dict, optional
+        Metadata attributes to add. For a DataArray they are merged into (and
+        take precedence over) its existing attrs.
+    pixel_sizes : dict or (Z, Y, X) sequence, optional
+        Physical pixel sizes, e.g. ``{'Z': 2.0, 'Y': 0.329, 'X': 0.329,
+        'unit': 'µm'}`` as returned by ``get_tiff_voxel_size``. None entries
+        mean unknown. Given sizes become physical coordinates
+        (``origin + i * size``; a DataArray's existing origin is kept). If a
+        DataArray already has calibrated coordinates with a different step, a
+        warning is issued and the given size wins. Axes not given are read
+        from calibrated (uniform float) coordinates, e.g. nd2's Y/X.
+    stage_positions : dict or array, optional
+        Stage position of each S entry (tile / position), as reported by the
+        microscope, in the physical unit of ``pixel_sizes`` (usually µm):
+        ``{'Y': [...], 'X': [...]}`` (optionally ``'Z'``), or an ``(S, 2)``
+        (Y, X) / ``(S, 3)`` (Z, Y, X) array. Stored as non-dimension coordinates
+        ``stage_y``, ``stage_x`` (and ``stage_z``) along S, so they follow
+        selection along S (``da.isel(S=[0, 2])``). No orientation transform is
+        applied: the stage axes may be flipped or rotated relative to the
+        image axes, which a stitcher must calibrate. Existing ``stage_*``
+        coordinates of a DataArray are kept unless overridden here.
+
+    Returns:
+    --------
+    xr.DataArray
+        6D DataArray strictly ordered as STCZYX. Existing coordinates (e.g.
+        physical Y/X positions) and the name of a DataArray input are kept;
+        dims without coordinates get integer coordinates (0, 1, 2, ...).
+        When any pixel size is known, ``attrs['pixel_sizes']`` holds
+        ``{'Z', 'Y', 'X', 'unit'}`` (None where unknown) and calibrated
+        coordinates carry ``attrs['units']``. The coordinates stay the source
+        of truth after slicing or downsampling: read sizes back with
+        :func:`get_stczyx_pixel_sizes`, not from ``attrs``.
+    """
+    # 1. Wrap into an initial DataArray with dims from input_axes
+    if isinstance(image, xr.DataArray):
+        da = image
+        if input_axes is None:
+            dims = [str(d).upper() for d in da.dims]
+            if 'P' in dims and 'S' not in dims:
+                dims[dims.index('P')] = 'S'
+            input_axes = ''.join(dims) if all(len(d) == 1 for d in dims) else None
+            if input_axes is None:
+                raise ValueError(
+                    f"Cannot map DataArray dims {tuple(da.dims)} to STCZYX; "
+                    "pass input_axes (e.g. 'TCYX') to relabel them."
+                )
+    else:
+        if input_axes is None:
+            raise ValueError("input_axes is required when the input is not an xarray.DataArray.")
+        if not hasattr(image, 'shape') or not hasattr(image, 'ndim'):
+            image = np.asarray(image)
+        da = None
+
+    input_axes = input_axes.upper()
+    ndim = image.ndim
+
+    # 2. Validate input dimensions
+    if ndim != len(input_axes):
+        raise ValueError(
+            f"Shape mismatch: Array has {ndim} dims {tuple(image.shape)}, "
+            f"but input_axes string '{input_axes}' defines {len(input_axes)} dims."
+        )
+    unknown = sorted(set(input_axes) - set(_STCZYX))
+    if unknown:
+        raise ValueError(
+            f"input_axes '{input_axes}' contains {unknown}; allowed letters are {_STCZYX}."
+        )
+    if len(set(input_axes)) != len(input_axes):
+        raise ValueError(f"input_axes '{input_axes}' repeats a dimension.")
+
+    if da is None:
+        da = xr.DataArray(image, dims=list(input_axes))
+    else:
+        da = _relabel_dims(da, input_axes)
+
+    # 3. Expand missing dimensions (size 1) and enforce STCZYX order
+    missing_dims = [dim for dim in _STCZYX if dim not in input_axes]
+    if missing_dims:
+        da = da.expand_dims({dim: 1 for dim in missing_dims})
+    da = da.transpose(*_STCZYX)
+
+    # 4. Populate coordinates (keep existing ones)
+    coords = {}
+    if channel_names is not None:
+        if isinstance(channel_names, str):
+            channel_names = [channel_names]
+        channel_names = list(channel_names)
+        if len(channel_names) != da.sizes['C']:
+            raise ValueError(
+                f"Provided {len(channel_names)} channel names, "
+                f"but C dimension has size {da.sizes['C']}."
+            )
+        coords['C'] = channel_names
+
+    # Physical pixel sizes: explicit argument > calibrated coords > stored attrs
+    given = _normalize_pixel_sizes(
+        pixel_sizes if pixel_sizes is not None else (attrs or {}).get('pixel_sizes')
+    )
+    stored = _normalize_pixel_sizes(da.attrs.get('pixel_sizes'))
+    sizes = {}
+    for dim in _SPATIAL:
+        step = _coord_spacing(da, dim)
+        if given[dim] is None and step is None and stored[dim] is not None:
+            given[dim] = stored[dim]  # build physical coords from the stored sizes
+        if given[dim] is not None:
+            sizes[dim] = given[dim]
+            if step is not None and not np.isclose(step, given[dim], rtol=1e-3):
+                warnings.warn(
+                    f"pixel_sizes['{dim}'] = {given[dim]} differs from the {dim} coordinate "
+                    f"step {step}; rebuilding the {dim} coordinates from pixel_sizes.",
+                    UserWarning, stacklevel=2,
+                )
+            if step is None or not np.isclose(step, given[dim], rtol=1e-3):
+                # Keep the origin and direction of float (physical) coords;
+                # integer coords are indices and start the physical axis at 0
+                origin, sign = 0.0, 1.0
+                if dim in da.coords and np.issubdtype(da.coords[dim].dtype, np.floating):
+                    values = da.coords[dim].values
+                    origin = float(values[0])
+                    if values.size > 1 and values[-1] < values[0]:
+                        sign = -1.0
+                coords[dim] = origin + sign * np.arange(da.sizes[dim]) * given[dim]
+        else:
+            sizes[dim] = step if step is not None else stored[dim]
+    unit = given['unit'] or _coord_unit(da) or stored['unit']
+
+    for dim in _STCZYX:
+        if dim not in coords and dim not in da.coords:
+            # Default to standard integer coordinates (0, 1, 2...)
+            coords[dim] = np.arange(da.sizes[dim])
+    da = da.assign_coords(coords)
+
+    # 5. Append metadata attributes (copy: never modify the caller's dicts)
+    new_attrs = dict(da.attrs)
+    new_attrs.update(attrs or {})
+    new_attrs['axes'] = _STCZYX
+    new_attrs.pop('pixel_sizes', None)
+    if any(sizes[dim] is not None for dim in _SPATIAL):
+        new_attrs['pixel_sizes'] = {**sizes, 'unit': unit}
+        if unit is not None:
+            # New coordinate variables: never touch the attrs of the input's coords
+            da = da.assign_coords({
+                dim: (dim, da.coords[dim].values, {**da.coords[dim].attrs, 'units': unit})
+                for dim in _SPATIAL if _coord_spacing(da, dim) is not None
+            })
+    da.attrs = new_attrs
+
+    # 6. Stage positions: non-dimension coordinates along S
+    if stage_positions is not None:
+        stage = _normalize_stage_positions(stage_positions, da.sizes['S'])
+        coord_attrs = {'units': unit} if unit is not None else {}
+        da = da.assign_coords({name: ('S', values, coord_attrs) for name, values in stage.items()})
+
+    return da
+
+
 def numpy_to_stczyx_xarray(
     image_array: np.ndarray,
     input_axes: str,
     channel_names: list = None,
     attrs: dict = None
 ) -> xr.DataArray:
-    """
-    Converts a NumPy array into an xarray.DataArray with strict 'STCZYX' dimension order.
-    Missing dimensions in `input_axes` are expanded with a size of 1.
-
-    Parameters:
-    -----------
-    image_array : np.ndarray
-        The input image array (e.g., from tifffile.imread).
-    input_axes : str
-        The dimension order of the input array (e.g., 'ZCYX', 'TCYX').
-    channel_names : list of str, optional
-        Names for the channel dimension. Must match the size of 'C'.
-    attrs : dict, optional
-        Dictionary of metadata attributes to add to the xarray.
-
-    Returns:
-    --------
-    xr.DataArray
-        6D DataArray strictly ordered as STCZYX.
-    """
-    input_axes = input_axes.upper()
-    target_axes = list('STCZYX')
-
-    # 1. Validate input dimensions
-    if len(image_array.shape) != len(input_axes):
-        raise ValueError(
-            f"Shape mismatch: Array has {len(image_array.shape)} dims {image_array.shape}, "
-            f"but input_axes string '{input_axes}' defines {len(input_axes)} dims."
-        )
-
-    # 2. Wrap into an initial DataArray
-    da = xr.DataArray(image_array, dims=list(input_axes))
-
-    # 3. Expand missing dimensions (set size to 1)
-    missing_dims = [dim for dim in target_axes if dim not in input_axes]
-    for dim in missing_dims:
-        da = da.expand_dims({dim: 1})
-
-    # 4. Transpose to strictly enforce STCZYX order
-    da = da.transpose(*target_axes)
-
-    # 5. Populate coordinates
-    coords = {}
-    for dim in target_axes:
-        if dim == 'C' and channel_names is not None:
-            if len(channel_names) != da.sizes['C']:
-                raise ValueError(
-                    f"Provided {len(channel_names)} channel names, "
-                    f"but C dimension has size {da.sizes['C']}."
-                )
-            coords[dim] = channel_names
-        else:
-            # Default to standard integer coordinates (0, 1, 2...)
-            coords[dim] = np.arange(da.sizes[dim])
-
-    da = da.assign_coords(coords)
-
-    # 6. Append metadata attributes (copy: never modify the caller's dict)
-    attrs = dict(attrs or {})
-    attrs['axes'] = 'STCZYX'
-    da.attrs.update(attrs)
-
-    return da
+    """Deprecated alias of :func:`array_to_stczyx_xarray`."""
+    warnings.warn(
+        "numpy_to_stczyx_xarray is deprecated. Use array_to_stczyx_xarray instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return array_to_stczyx_xarray(
+        image_array, input_axes, channel_names=channel_names, attrs=attrs
+    )
 
 
 # Length units in metres, keyed by the spellings ImageJ, OME and TIFF use

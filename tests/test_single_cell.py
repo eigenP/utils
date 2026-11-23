@@ -719,86 +719,216 @@ try:
 except ImportError:
     PACMAP_INSTALLED = False
 
-@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
-def test_tl_pacmap_init_large_features():
-    """Test that tl pacmap init large features works as expected."""
-    # Case 1: > 100 features (should default to PCA)
-    n_obs = 50
-    n_vars = 101
-    X = np.random.rand(n_obs, n_vars)
-    adata = sc.AnnData(X=X)
+def _pacmap_adata(n_vars, n_obs=60, seed=0):
+    """Small random AnnData for tl_pacmap init tests."""
+    X = np.random.default_rng(seed).random((n_obs, n_vars)).astype(np.float32)
+    return sc.AnnData(X=X)
 
-    # Run pacmap
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always") # Cause all warnings to always be triggered.
-        tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X")
-
-        # Check that NO "Switching initialization" warning was issued
-        for warning in w:
-            assert "Switching initialization" not in str(warning.message)
-
-    assert "X_pacmap" in adata.obsm
 
 @pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
-def test_tl_pacmap_init_override():
-    """Test that tl pacmap init override works as expected."""
-    # Case 3: <= 100 features but user specifies init='pca'
-    # Should use 'pca' and NOT warn about switching
-    n_obs = 50
-    n_vars = 50 # <= 100
-    X = np.random.rand(n_obs, n_vars)
-    adata = sc.AnnData(X=X)
+@pytest.mark.parametrize("n_vars", [16, 50, 101, 300])
+def test_tl_pacmap_default_init_is_pca(n_vars):
+    """With init=None, tl_pacmap uses PaCMAP's PCA initialisation at any feature count.
 
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        # Pass init explicitly via kwargs
-        tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X", init="pca")
+    Strategy: run once with the default and once with init='pca' at the same seed,
+    for feature counts on both sides of PaCMAP's 100-feature preprocessing
+    threshold (the old wrapper switched to random init at <= 100 features).
+    Expected: the default warns that it chose 'pca' and names the alternatives,
+    and both embeddings are identical, so the default is reproducible.
+    """
+    a_default = _pacmap_adata(n_vars)
+    with pytest.warns(UserWarning, match=r"init not given, using init='pca'") as rec:
+        tl_pacmap(a_default, n_neighbors=5, use_rep="X")
+    msg = " ".join(str(w.message) for w in rec)
+    assert "init='paga'" in msg and "init='random'" in msg
+    assert not any("Switching initialization" in str(w.message) for w in rec)
 
-        # Check that NO "Switching initialization" warning was issued
-        for warning in w:
-            assert "Switching initialization" not in str(warning.message)
+    a_pca = _pacmap_adata(n_vars)
+    tl_pacmap(a_pca, n_neighbors=5, use_rep="X", init="pca")
+    np.testing.assert_array_equal(a_default.obsm["X_pacmap"], a_pca.obsm["X_pacmap"])
 
-    assert "X_pacmap" in adata.obsm
+
+@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
+def test_tl_pacmap_explicit_init_does_not_warn():
+    """An explicit init silences the default-initialisation warning.
+
+    Strategy: pass init='pca' and init='random' explicitly on 50-feature data.
+    Expected: no 'init not given' warning, and an embedding is stored.
+    """
+    for init in ("pca", "random"):
+        adata = _pacmap_adata(50)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            tl_pacmap(adata, n_neighbors=5, use_rep="X", init=init)
+        assert not any("init not given" in str(x.message) for x in w), init
+        assert adata.obsm["X_pacmap"].shape == (60, 2)
+
+
+@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
+def test_tl_pacmap_init_same_as_use_rep_uses_pca():
+    """init equal to use_rep is routed to PaCMAP's 'pca' init, not an array init.
+
+    PaCMAP standardises an array init per axis, which would give PC2 the same
+    spread as PC1; its 'pca' init on PC scores returns the leading PCs with their
+    relative variance kept. Strategy: compute X_pca, then run tl_pacmap with
+    use_rep='X_pca' and init='X_pca', and again with init='pca'.
+    Expected: a warning explaining the substitution, and identical embeddings.
+    """
+    base = _pacmap_adata(200)
+    sc.tl.pca(base, n_comps=20)
+
+    a_same = base.copy()
+    with pytest.warns(UserWarning, match="same representation as use_rep"):
+        tl_pacmap(a_same, n_neighbors=5, use_rep="X_pca", init="X_pca")
+
+    a_pca = base.copy()
+    tl_pacmap(a_pca, n_neighbors=5, use_rep="X_pca", init="pca")
+    np.testing.assert_array_equal(a_same.obsm["X_pacmap"], a_pca.obsm["X_pacmap"])
+
+
+@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
+def test_tl_pacmap_pca_init_on_pc_scores_is_identity():
+    """PaCMAP's PCA init on PC scores reproduces the leading PCs (no 'PCA on PCA').
+
+    Strategy: run PaCMAP's own preprocessing on X_pca and project with the PCA
+    it fits for initialisation. Expected: each init axis matches the
+    corresponding X_pca column up to sign and an overall scale (|corr| ~ 1),
+    with the PC1/PC2 spread ratio preserved.
+    """
+    from pacmap.pacmap import preprocess_X
+
+    adata = _pacmap_adata(200, n_obs=300)
+    sc.tl.pca(adata, n_comps=30)
+    P = adata.obsm["X_pca"].astype(np.float32)
+    Xp, _, tsvd, *_ = preprocess_X(P.copy(), "euclidean", True, False, 42, P.shape[1], 2)
+    Y = tsvd.transform(Xp)
+    for k in range(2):
+        assert abs(np.corrcoef(Y[:, k], P[:, k])[0, 1]) > 0.9999
+    assert np.isclose(Y[:, 0].std() / Y[:, 1].std(), P[:, 0].std() / P[:, 1].std(), rtol=1e-4)
+
 
 @pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
 def test_tl_pacmap_init_paga():
-    """Test that tl pacmap init paga works as expected."""
-    # Case 4: init='paga'
-    n_obs = 50
-    n_vars = 50
-    X = np.random.rand(n_obs, n_vars)
-    adata = sc.AnnData(X=X)
+    """init='paga' runs and does not fall back to the default initialisation.
 
-    # Need to compute neighbors and paga first
+    Strategy: compute neighbours, Leiden and PAGA on random data, then run
+    tl_pacmap with init='paga'. Expected: no 'init not given' warning (the PAGA
+    graph here has edges), and an embedding is stored.
+    """
+    adata = _pacmap_adata(50, n_obs=50)
     sc.pp.neighbors(adata, n_neighbors=5, use_rep="X")
     sc.tl.leiden(adata, resolution=1.0, flavor='igraph', n_iterations=2, directed=False)
     sc.tl.paga(adata, groups="leiden")
     sc.pl.paga(adata, show=False)
+    plt.close("all")
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X", init="paga")
-
-        for warning in w:
-            assert "Switching initialization" not in str(warning.message)
-
+    assert not any("init not given" in str(x.message) for x in w)
     assert "X_pacmap" in adata.obsm
 
-@pytest.mark.skipif(not PACMAP_INSTALLED, reason="PaCMAP not installed")
-def test_tl_pacmap_init_small_features():
-    """Test that tl pacmap init small features works as expected."""
-    # Case 2: <= 100 features (should switch to random and warn)
-    n_obs = 50
-    n_vars = 50 # <= 100
-    X = np.random.rand(n_obs, n_vars)
-    adata = sc.AnnData(X=X)
 
-    # Run pacmap
-    # Expect a warning about switching initialization
-    with pytest.warns(UserWarning, match="Switching initialization"):
-        tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X")
+def _paga_adata_with_layout():
+    """Leiden + PAGA + PAGA positions on clustered data (shared by the PAGA-init tests)."""
+    adata = _pacmap_adata(50, n_obs=120)
+    sc.pp.neighbors(adata, n_neighbors=8, use_rep="X")
+    sc.tl.leiden(adata, resolution=1.0, flavor="igraph", n_iterations=2, directed=False, random_state=0)
+    sc.tl.paga(adata, groups="leiden")
+    sc.pl.paga(adata, show=False, random_state=0)
+    plt.close("all")
+    return adata
 
-    assert "X_pacmap" in adata.obsm
+
+def test_paga_init_positions_match_scanpy_reference():
+    """Negative control: the local PAGA init equals scanpy's helper (<= 1.12) bit for bit.
+
+    Strategy: on a real PAGA layout, compare ``_paga_init_positions`` with
+    ``scanpy.tools._utils.get_init_pos_from_paga`` for several seeds, when the
+    installed scanpy still has the pre-1.13 signature (``random_state``).
+    Expected: identical arrays (same RNG stream, same arithmetic).
+    """
+    import inspect
+    from scanpy.tools._utils import get_init_pos_from_paga
+    from eigenp_utils.single_cell import _paga_init_positions
+
+    if "random_state" not in inspect.signature(get_init_pos_from_paga).parameters:
+        pytest.skip("scanpy >= 1.13: reference helper has a different RNG contract")
+    adata = _paga_adata_with_layout()
+    for seed in (0, 1, 1234):
+        ref = get_init_pos_from_paga(adata, random_state=seed)
+        np.testing.assert_array_equal(_paga_init_positions(adata, random_state=seed), ref)
+
+
+def test_paga_init_positions_analytic_box_and_mean():
+    """Positive control: positions follow the closed form p_g - d/2 + U[0,1)^2 * d.
+
+    Strategy: hand-built PAGA on 3 groups with known positions; groups 0-1 are
+    linked (group 0's strongest neighbour is 1 and vice versa) and group 2 has no
+    edges. Expected: every cell of a linked group lies in the box centred on its
+    group position with half-widths |d|/2 per axis; the group mean converges to
+    p_g (E[u] = 1/2, n = 4000 so the SE is |d| / sqrt(12 n) < 0.5% of |d|); the
+    isolated group sits exactly at p_2; same seed -> same positions.
+    """
+    from eigenp_utils.single_cell import _paga_init_positions
+
+    n = 4000
+    adata = sc.AnnData(np.zeros((3 * n, 1)))
+    adata.obs["g"] = pd.Categorical(np.repeat(["a", "b", "c"], n))
+    pos = np.array([[0.0, 0.0], [4.0, -2.0], [10.0, 10.0]])
+    C = sp.csr_matrix(np.array([[0.0, 0.7, 0.0], [0.7, 0.0, 0.0], [0.0, 0.0, 0.0]]))
+    adata.uns["paga"] = {"pos": pos, "connectivities": C, "groups": "g"}
+
+    init = _paga_init_positions(adata, random_state=7)
+    for g, h in ((0, 1), (1, 0)):
+        x = init[g * n:(g + 1) * n]
+        d = pos[g] - pos[h]
+        lo = pos[g] - 0.5 * np.abs(d)
+        hi = pos[g] + 0.5 * np.abs(d)
+        assert np.all((x >= lo - 1e-12) & (x <= hi + 1e-12))
+        np.testing.assert_allclose(x.mean(axis=0), pos[g], atol=0.03 * np.abs(d).max())
+    np.testing.assert_array_equal(init[2 * n:], np.tile(pos[2], (n, 1)))
+    np.testing.assert_array_equal(init, _paga_init_positions(adata, random_state=7))
+
+
+def test_tl_pacmap_paga_init_leaves_global_rng_untouched():
+    """init='paga' must not reset the caller's global NumPy RNG.
+
+    scanpy's helper (<= 1.12) called ``np.random.seed(random_state)``, so after
+    tl_pacmap(init='paga') the global stream restarted from the seed: user code
+    drawing random numbers afterwards got the same values on every run. Expected:
+    the global RNG state is the same before and after the call.
+    """
+    adata = _paga_adata_with_layout()
+    np.random.seed(2024)
+    np.random.random(5)
+    before = np.random.get_state()
+    tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X", init="paga")
+    after = np.random.get_state()
+    assert before[0] == after[0]
+    np.testing.assert_array_equal(before[1], after[1])
+    assert before[2:] == after[2:]
+
+
+def test_tl_pacmap_paga_init_independent_of_scanpy_private_helper(monkeypatch):
+    """init='paga' keeps working when scanpy's private PAGA-init helper changes.
+
+    scanpy 1.13 made ``get_init_pos_from_paga(adata, *, rng, adjacency)``
+    keyword-only with a required ``adjacency``, so ``tl_pacmap(init='paga')``
+    raised TypeError. Strategy: replace the helper with a stub that raises like
+    the 1.13 signature does. Expected: tl_pacmap still embeds all cells.
+    """
+    import scanpy.tools._utils as sc_tool_utils
+
+    def _scanpy_113_signature(adata, *, rng, adjacency):
+        raise AssertionError("tl_pacmap must not depend on this private helper")
+
+    monkeypatch.setattr(sc_tool_utils, "get_init_pos_from_paga", _scanpy_113_signature)
+    adata = _paga_adata_with_layout()
+    tl_pacmap(adata, n_neighbors=5, n_components=2, use_rep="X", init="paga")
+    assert adata.obsm["X_pacmap"].shape == (adata.n_obs, 2)
+    assert np.isfinite(adata.obsm["X_pacmap"]).all()
+
 
 # =========================================
 # Source: test_moran_memory.py
@@ -1932,6 +2062,173 @@ def test_kknn_classifier_with_mask():
 
     assert res[0] == "A"
     assert res[99] == "A"
+
+
+def _kknn_vote_reference(labels, pruned_distances, pruned_indices, is_categorical, mask):
+    """Per-cell loop of ``kknn_classifier`` before vectorisation (oracle, verbatim)."""
+    from eigenp_utils.single_cell import _kknn_distance_weights
+
+    smoothed = []
+    for i in range(len(pruned_indices)):
+        if mask is not None and not mask[i]:
+            smoothed.append(labels[i])
+            continue
+        idx = pruned_indices[i]
+        dist = pruned_distances[i]
+        neighbors_labels = labels[idx]
+        weights = _kknn_distance_weights(dist)
+        if is_categorical:
+            vote_tally = {}
+            for lbl, w in zip(neighbors_labels, weights):
+                if pd.isna(lbl):
+                    continue
+                vote_tally[lbl] = vote_tally.get(lbl, 0.0) + w
+            if vote_tally:
+                smoothed.append(max(vote_tally.items(), key=lambda x: x[1])[0])
+            else:
+                smoothed.append(np.nan)
+        else:
+            valid_mask = ~pd.isna(neighbors_labels)
+            if np.any(valid_mask):
+                valid_labels = neighbors_labels[valid_mask]
+                valid_weights = weights[valid_mask]
+                sum_weights = np.sum(valid_weights)
+                if sum_weights > 0:
+                    valid_weights /= sum_weights
+                    smoothed.append(np.sum(valid_labels * valid_weights))
+                else:
+                    smoothed.append(np.nan)
+            else:
+                smoothed.append(np.nan)
+    return smoothed
+
+
+def _random_kknn_neighbourhoods(rng, n, n_ref, sizes, dtype=np.float64, ties=False):
+    """Variable-size neighbourhoods like ``compute_kknn_neighbors`` returns.
+
+    With ``ties=True`` distances are drawn from {0, 1, 2} so many weights are
+    exactly equal and weighted votes tie exactly (exercising the tie-break).
+    """
+    dists, idxs = [], []
+    for _ in range(n):
+        k = int(rng.choice(sizes))
+        if ties:
+            d = rng.integers(0, 3, k).astype(dtype)
+        else:
+            d = rng.exponential(1.0, k).astype(dtype)
+            d[rng.random(k) < 0.05] = 0.0  # coincident cells
+        idxs.append(rng.integers(0, n_ref, k))
+        dists.append(np.sort(d))
+    return dists, idxs
+
+
+def _assert_same_smoothing(new, ref, is_categorical):
+    """Exact equality (NaN == NaN; categorical values compared as objects).
+
+    The old loop copied ``pd.NA`` for masked-out cells of a nullable Int64 column,
+    and its final ``np.array(smoothed, dtype=float)`` raised ``TypeError``; the
+    vectorised path returns NaN there, so the reference maps ``pd.NA`` to NaN.
+    """
+    if not is_categorical:
+        ref = [np.nan if v is pd.NA else v for v in ref]
+    new = np.asarray(new, dtype=object if is_categorical else float)
+    ref = np.asarray(ref, dtype=object if is_categorical else float)
+    assert new.shape == ref.shape
+    if is_categorical:
+        nan_new = pd.isna(new)
+        np.testing.assert_array_equal(nan_new, pd.isna(ref))
+        assert all(a == b for a, b in zip(new[~nan_new], ref[~nan_new]))
+    else:
+        np.testing.assert_array_equal(new, ref)  # bit-for-bit, NaNs in same places
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+@pytest.mark.parametrize("ties", [False, True])
+@pytest.mark.parametrize("kind", ["categorical", "object", "bool", "float", "float_nan", "float32", "int", "Int64"])
+def test_kknn_smooth_values_matches_per_cell_loop(kind, ties, dtype):
+    """Vectorised kkNN voting/averaging is bit-identical to the former per-cell loop.
+
+    Strategy (Bolt equivalence oracle): random variable-size neighbourhoods (sizes
+    1..12, coincident cells with distance 0, float32 and float64 distances), labels
+    of every kind ``kknn_classifier`` accepts (Categorical with NaN, object strings
+    with None, bool, float with/without NaN, float32, int, nullable Int64), half the
+    cells masked out. ``ties=True`` uses distances in {0, 1, 2}, so equal weights
+    make exact vote ties; the dict tally broke them by first appearance among the
+    neighbours, which the vectorised path must reproduce.
+    Expected: identical outputs element by element (floats compared exactly).
+    """
+    from eigenp_utils.single_cell import _kknn_smooth_values
+
+    rng = np.random.default_rng(abs(hash((kind, ties, np.dtype(dtype).name))) % 2**32)
+    n_ref = 300
+    cats = np.array(["T", "B", "NK", "Mono"], dtype=object)
+    raw = rng.integers(0, len(cats), n_ref)
+    if kind == "categorical":
+        labels = pd.Categorical(cats[raw], categories=["B", "Mono", "NK", "T"])
+        labels[rng.random(n_ref) < 0.1] = np.nan
+    elif kind == "object":
+        labels = cats[raw].copy()
+        labels[rng.random(n_ref) < 0.1] = None
+    elif kind == "bool":
+        labels = raw % 2 == 0
+    elif kind in ("float", "float_nan", "float32"):
+        labels = rng.normal(size=n_ref)
+        if kind == "float_nan":
+            labels[rng.random(n_ref) < 0.1] = np.nan
+        if kind == "float32":
+            labels = labels.astype(np.float32)
+    elif kind == "int":
+        labels = rng.integers(-50, 50, n_ref)
+    else:
+        labels = pd.array(rng.integers(0, 9, n_ref), dtype="Int64")
+        labels[rng.random(n_ref) < 0.1] = pd.NA
+    is_categorical = kind in ("categorical", "object", "bool")
+
+    dists, idxs = _random_kknn_neighbourhoods(
+        rng, n_ref, n_ref, sizes=[1, 2, 4, 7, 12], dtype=dtype, ties=ties
+    )
+    for mask in (None, rng.random(n_ref) < 0.5):
+        new = _kknn_smooth_values(labels, dists, idxs, is_categorical, mask)
+        ref = _kknn_vote_reference(labels, dists, idxs, is_categorical, mask)
+        _assert_same_smoothing(new, ref, is_categorical)
+
+
+def test_kknn_classifier_vectorised_end_to_end_matches_loop():
+    """``kknn_classifier`` output equals the per-cell loop on real kkNN neighbourhoods.
+
+    Positive control at the public API: 8 shifted Gaussian clusters with 10%
+    mislabelled cells, neighbourhoods from ``compute_kknn_neighbors`` (adaptive
+    sizes), categorical and continuous columns. Negative control: masked-out
+    cells must keep their original value.
+    Expected: identical categorical labels and bit-identical continuous values.
+    """
+    rng = np.random.default_rng(0)
+    n = 2000
+    centre = rng.integers(0, 8, n)
+    emb = rng.normal(size=(n, 2)) + np.c_[centre * 6.0, np.zeros(n)]
+    lab = np.array(list("ABCDEFGH"), dtype=object)[centre]
+    flip = rng.random(n) < 0.1
+    lab[flip] = rng.choice(list("ABCDEFGH"), flip.sum())
+    adata = sc.AnnData(np.zeros((n, 1)))
+    adata.obsm["X_pacmap"] = emb
+    adata.obs["ct"] = pd.Categorical(lab)
+    adata.obs["score"] = centre + rng.normal(scale=0.3, size=n)
+    mask = rng.random(n) < 0.7
+
+    kw = dict(use_rep="X_pacmap", n_neighbors=10, max_neighbors=20, min_neighbors=5)
+    dists, idxs = compute_kknn_neighbors(adata, adata, query_use_rep="X_pacmap", **kw)
+
+    for key, is_cat in (("ct", True), ("score", False)):
+        new = kknn_classifier(adata, key, inplace=False, mask=mask, **kw)
+        ref = _kknn_vote_reference(adata.obs[key].values, dists, idxs, is_cat, mask)
+        _assert_same_smoothing(new, ref, is_cat)
+        kept = np.asarray(new, dtype=object)[~mask]
+        assert all(a == b for a, b in zip(kept, adata.obs[key].values[~mask]))
+    # Smoothing corrects most of the flipped labels in the masked-in region
+    smoothed = np.asarray(kknn_classifier(adata, "ct", inplace=False, **kw), dtype=object)
+    truth = np.array(list("ABCDEFGH"), dtype=object)[centre]
+    assert np.mean(smoothed == truth) > np.mean(lab == truth)
+
 
 # =========================================
 # Source: test_moran_cancellation.py
@@ -3969,7 +4266,10 @@ def test_tl_pacmap_paga_init_with_disconnected_groups():
     # what sc.tl.paga describes for groups with no edges between them
     Z = sp.csr_matrix((4, 4))
     a.uns["paga"] = {"connectivities": Z, "connectivities_tree": Z, "groups": "ct"}
-    with pytest.warns(UserWarning, match="no edges between groups"):
+    with pytest.warns(UserWarning, match="no edges between groups") as rec:
         tl_pacmap(a, init="paga")
+    # The fallback uses the default 'pca' init and does not re-suggest 'paga'
+    fallback = [str(w.message) for w in rec if "init not given" in str(w.message)]
+    assert fallback and "init='pca'" in fallback[0] and "init='paga'" not in fallback[0]
     assert a.obsm["X_pacmap"].shape == (a.n_obs, 2)
     assert np.isfinite(a.obsm["X_pacmap"]).all()

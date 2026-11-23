@@ -2675,6 +2675,49 @@ def load_pacmap_model(filepath: str) -> Any:
     return model
 
 
+def _paga_init_positions(adata: sc.AnnData, random_state=0) -> np.ndarray:
+    """Per-cell 2D start positions from the PAGA layout (``adata.uns['paga']['pos']``).
+
+    Same construction as scanpy's ``get_init_pos_from_paga`` up to 1.12: the cells
+    of group g with PAGA position p_g and most strongly connected neighbour group
+    h are placed at ``p_g - d/2 + u * d`` with ``d = p_g - p_h`` and ``u ~ U[0, 1)^2``
+    per cell, i.e. uniformly in the axis-aligned box centred on p_g with side
+    lengths |d| (half-way towards p_h on each side). A group without PAGA edges
+    sits exactly at p_g; cells in no group keep (1, 1).
+
+    Kept here instead of importing that private scanpy helper: scanpy 1.13 changed
+    its signature (keyword-only ``rng`` Generator and a required ``adjacency``),
+    and up to 1.12 it called ``np.random.seed``, resetting the caller's global
+    NumPy RNG. A local ``RandomState(random_state)`` draws the same stream as
+    ``np.random.seed(random_state)`` followed by ``np.random.random``, so the
+    positions are bit-identical to scanpy <= 1.12, without the side effect.
+    """
+    paga = adata.uns["paga"]
+    if "pos" not in paga:
+        raise ValueError("Plot PAGA first, so that `adata.uns['paga']['pos']` exists.")
+    rng = (
+        random_state
+        if isinstance(random_state, np.random.RandomState)
+        else np.random.RandomState(random_state)
+    )
+    groups = adata.obs[paga["groups"]]
+    pos = np.asarray(paga["pos"])
+    connectivities_coarse = paga["connectivities"]
+    init_pos = np.ones((adata.n_obs, 2))
+    for i, group_pos in enumerate(pos):
+        subset = (groups == groups.cat.categories[i]).values
+        neighbors = connectivities_coarse[i].nonzero()
+        if len(neighbors[1]) > 0:
+            connectivities = connectivities_coarse[i][neighbors]
+            nearest_neighbor = neighbors[1][np.argmax(connectivities)]
+            noise = rng.random_sample((int(subset.sum()), 2))
+            dist = group_pos - pos[nearest_neighbor]
+            init_pos[subset] = group_pos - 0.5 * dist + noise * dist
+        else:
+            init_pos[subset] = group_pos
+    return init_pos
+
+
 def tl_pacmap(
     adata: sc.AnnData,
     n_neighbors: Optional[int] = None,
@@ -2709,14 +2752,27 @@ def tl_pacmap(
         Random seed for reproducibility.
     init
         How to initialize the embedding. Options are:
-        - None: Let PaCMAP decide automatically based on feature count ('pca' or 'random').
+        - None (default): use 'pca' (PaCMAP's own default) and emit a warning that
+          names the choice and the alternatives. With `distance='precomputed'` in
+          `kwargs`, PaCMAP cannot do PCA, so 'random' is used instead. Pass `init`
+          explicitly to silence the warning.
+        - 'pca': the first `n_components` principal components of `use_rep`
+          (PaCMAP normalises the input and scales the PCA coordinates by 0.01).
+          Deterministic for a given `random_state`, and it starts the optimisation
+          from the coarse global layout of the data, whatever its dimensionality.
         - 'paga': positions from `scanpy.pl.paga` (computed here if `sc.tl.paga` was run
-          but PAGA was not plotted yet). If the PAGA graph has no edges between groups
-          (fully disconnected clusters), positions are undefined and the default
-          initialisation is used, with a warning.
-        - 'pca': PCA initialization.
-        - 'random': Random initialization.
-        - An `obsm` key (e.g., 'X_pca').
+          but PAGA was not plotted yet). Suits data with trajectories or many clusters,
+          where PAGA's coarse graph is a better global layout than the first PCs.
+          If the PAGA graph has no edges between groups (fully disconnected
+          clusters), positions are undefined and the default initialisation is
+          used, with a warning.
+        - 'random': isotropic Gaussian noise (scale 1e-4). The global layout then
+          comes from the optimisation alone; useful to check that the structure
+          does not depend on the initialisation.
+        - An `obsm` key (e.g., 'X_umap'), to start from (and stay close to) an
+          existing layout. Columns are truncated or padded to `n_components`, and
+          PaCMAP standardises each axis. If the key equals `use_rep`, 'pca' is used
+          instead (with a warning), which keeps the relative variance of the axes.
         - A numpy array of initial embedding positions.
     **kwargs
         Additional arguments passed to pacmap.PaCMAP.
@@ -2761,9 +2817,7 @@ def tl_pacmap(
         )
         X_in = adata.X
 
-    # Handle sparse input if necessary (PaCMAP usually expects dense or handles sparse internally?
-    # PaCMAP documentation says it accepts numpy arrays. It might handle sparse, but safer to densify if small enough,
-    # or let PaCMAP handle it if it supports it. Let's convert to array if sparse to be safe as PaCMAP is numba based)
+    # PaCMAP's numba kernels need a dense numpy array
     if sp.issparse(X_in):
         print("Input is sparse, converting to dense array for PaCMAP...")
         X_in = X_in.toarray()
@@ -2791,6 +2845,7 @@ def tl_pacmap(
         **pmap_kwargs,
     )
 
+    paga_unusable = False
     if isinstance(init, str) and init == "paga":
         if "paga" not in adata.uns:
             raise ValueError("init='paga' needs `sc.tl.paga(adata, ...)` to be run first.")
@@ -2804,20 +2859,41 @@ def tl_pacmap(
                 "Using the default initialisation instead."
             )
             init = None
+            paga_unusable = True
 
     # Determine initialization method
     init_method = None
     if init is not None:
         if isinstance(init, str) and init == "paga":
-            from scanpy.tools._utils import get_init_pos_from_paga
-
             if "pos" not in adata.uns["paga"]:
                 # The node positions are only computed by plotting PAGA
                 fig, ax = plt.subplots()
                 sc.pl.paga(adata, ax=ax, show=False, random_state=random_state)
                 plt.close(fig)
-            init_coords = get_init_pos_from_paga(adata, random_state=random_state)
+            init_coords = _paga_init_positions(adata, random_state=random_state)
             init_method = init_coords
+        elif (
+            isinstance(init, str)
+            and init == use_rep
+            and use_rep in adata.obsm
+            and pmap_kwargs.get("distance") != "precomputed"
+        ):
+            # Initialising from the input itself: PaCMAP standardises an array
+            # init per axis, which would give PC2 the same spread as PC1. Its own
+            # 'pca' init keeps the relative variances, and on PC scores (e.g.
+            # X_pca) it returns the leading columns unchanged, so this is not a
+            # second PCA on top of the first.
+            warnings.warn(
+                f"tl_pacmap: init='{init}' is the same representation as use_rep, so "
+                "init='pca' is used instead: on PC scores it gives the same leading "
+                "axes, keeping their relative variance (an array init would be "
+                "standardised per axis by PaCMAP); on other representations it uses "
+                f"their leading principal components rather than the first "
+                f"{n_components} raw columns.",
+                UserWarning,
+                stacklevel=2,
+            )
+            init_method = "pca"
         elif isinstance(init, str) and init in adata.obsm:
             init_coords = adata.obsm[init]
             init_method = init_coords
@@ -2842,16 +2918,43 @@ def tl_pacmap(
             elif init_method.shape[1] > n_components:
                 init_method = init_method[:, :n_components]
     else:
-        # Check feature count to determine initialization method
-        n_features = X_in.shape[1]
-        init_method = "pca"
-
-        if n_features <= 100:
-            warnings.warn(
-                f"Input data has {n_features} features, which is <= 100. "
-                "Switching initialization from 'pca' to 'random' to avoid potential issues."
-            )
+        # Default: PaCMAP's own PCA initialisation, which is deterministic and
+        # starts from the data's coarse global layout. It works for any feature
+        # count (<= 100 features: a PCA fit on the normalised input; > 100: the
+        # leading components of PaCMAP's TruncatedSVD preprocessing). On PC scores
+        # such as X_pca, PaCMAP's global rescaling and PCA return the first
+        # n_components columns unchanged (up to sign), so there is no PCA on PCA.
+        if pmap_kwargs.get("distance") == "precomputed":
             init_method = "random"
+            reason = "distance='precomputed' has no feature space to run PCA on"
+        else:
+            init_method = "pca"
+            reason = (
+                "PaCMAP's own default: deterministic for a given random_state and it "
+                "starts from the coarse global layout of the data"
+            )
+        hints = [
+            "init='paga' when cells form trajectories or many clusters "
+            + (
+                "(PAGA results are already in adata.uns)"
+                if "paga" in adata.uns
+                else "(run sc.tl.paga first)"
+            ),
+            "init='<obsm key>' (e.g. 'X_umap') to stay close to an existing layout",
+            "init='random' to check that the structure does not depend on the initialisation",
+        ]
+        if init_method == "random":
+            hints = [h for h in hints if not h.startswith("init='random'")]
+        if paga_unusable:
+            hints = [h for h in hints if not h.startswith("init='paga'")]
+        warnings.warn(
+            f"tl_pacmap: init not given, using init='{init_method}' ({reason}). "
+            "Alternatives that may suit your data better: "
+            + "; ".join(hints)
+            + ". Pass init explicitly to silence this warning.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     if isinstance(init_method, np.ndarray):
         print(
@@ -4538,6 +4641,111 @@ def _kknn_distance_weights(dist: np.ndarray) -> np.ndarray:
     return weights / np.sum(weights)
 
 
+def _kknn_weights_2d(dist: np.ndarray) -> np.ndarray:
+    """Row-wise :func:`_kknn_distance_weights` for equal-length neighbourhoods.
+
+    Bit-identical to calling ``_kknn_distance_weights`` on each row: the median of
+    the positive distances is taken from a sort (mean of the two middle values,
+    as ``np.median`` does), and each row is normalised by its own sum.
+    """
+    positive = dist > 0
+    n_pos = positive.sum(axis=1)
+    srt = np.sort(np.where(positive, dist, np.inf), axis=1)
+    rows = np.arange(dist.shape[0])
+    lo = srt[rows, np.maximum(n_pos - 1, 0) // 2]
+    hi = srt[rows, np.maximum(n_pos, 1) // 2]
+    # n_pos == 0 -> median 0.0; n_pos odd -> lo == hi, and (x + x) / 2 == x exactly
+    median_dist = np.where(n_pos > 0, (lo + hi) / 2, 0).astype(dist.dtype, copy=False)
+    weights = 1.0 / (dist + median_dist[:, None] + 1e-6)
+    return weights / np.sum(weights, axis=1, keepdims=True)
+
+
+def _kknn_weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
+    """Weighted mean of the non-NaN ``values`` (weights renormalised); NaN if none."""
+    valid_mask = ~pd.isna(values)
+    if not np.any(valid_mask):
+        return np.nan
+    valid_labels = values[valid_mask]
+    valid_weights = weights[valid_mask]
+    sum_weights = np.sum(valid_weights)
+    if not sum_weights > 0:
+        return np.nan
+    valid_weights /= sum_weights
+    return np.sum(valid_labels * valid_weights)
+
+
+def _kknn_smooth_values(labels, pruned_distances, pruned_indices, is_categorical, mask):
+    """Distance-weighted vote (categorical) or mean (numeric) over kkNN neighbourhoods.
+
+    Vectorised over cells: neighbourhoods take at most ``quantile_bins`` distinct
+    sizes, so rows are processed in groups of equal size. The result equals the
+    former per-cell loop exactly: votes are accumulated per (cell, label) in
+    neighbour order with ``np.add.at`` (the same sequential float sums as the
+    dict tally), and ties go to the label seen first among the neighbours (the
+    dict's insertion order). Cells outside ``mask`` keep their label. Returns an
+    object array (categorical) or a float array (numeric).
+    """
+    N = len(pruned_indices)
+    lengths = np.fromiter((len(ix) for ix in pruned_indices), dtype=np.intp, count=N)
+    todo = np.ones(N, dtype=bool) if mask is None else mask.copy()
+
+    if is_categorical:
+        codes, uniques = pd.factorize(labels)  # NaN -> -1
+        uniques = np.asarray(uniques, dtype=object)
+        n_cat = len(uniques)
+        out = np.asarray(labels, dtype=object).copy()
+    elif isinstance(labels, np.ndarray):
+        out = np.array(labels, dtype=float)
+    else:
+        # Extension arrays (e.g. nullable Int64): keep the scalar path's arithmetic
+        out = np.array(labels.to_numpy(dtype=float, na_value=np.nan))
+
+    for k in np.unique(lengths[todo]):
+        sel = np.flatnonzero(todo & (lengths == k))
+        if k == 0:
+            out[sel] = np.nan
+            continue
+        idx = np.stack([pruned_indices[i] for i in sel])
+        weights = _kknn_weights_2d(np.stack([pruned_distances[i] for i in sel]))
+
+        if is_categorical:
+            # Chunk so the (cells x labels) score table stays small
+            step = max(1, (1 << 22) // max(n_cat, 1))
+            for c0 in range(0, len(sel), step):
+                c1 = min(c0 + step, len(sel))
+                nb = codes[idx[c0:c1]]
+                w = weights[c0:c1]
+                r, pos = np.nonzero(nb >= 0)
+                c = nb[r, pos]
+                scores = np.zeros((c1 - c0, n_cat), dtype=w.dtype)
+                np.add.at(scores, (r, c), w[r, pos])
+                first = np.full((c1 - c0, n_cat), k, dtype=np.intp)
+                np.minimum.at(first, (r, c), pos)
+                seen = first < k
+                best = np.max(np.where(seen, scores, -np.inf), axis=1, keepdims=True)
+                tied = seen & (scores == best)
+                winner = np.argmin(np.where(tied, first, k), axis=1)
+                has_vote = seen.any(axis=1)
+                res = np.full(c1 - c0, np.nan, dtype=object)
+                res[has_vote] = uniques[winner[has_vote]]
+                out[sel[c0:c1]] = res
+        else:
+            if isinstance(labels, np.ndarray):
+                vals = labels[idx]
+                all_valid = ~pd.isna(vals).any(axis=1)
+                if all_valid.any():
+                    w = weights[all_valid]
+                    w = w / np.sum(w, axis=1, keepdims=True)
+                    out[sel[all_valid]] = np.sum(vals[all_valid] * w, axis=1)
+                rest = np.flatnonzero(~all_valid)
+            else:
+                rest = np.arange(len(sel))
+            for j in rest:
+                out[sel[j]] = _kknn_weighted_mean(labels[idx[j]], weights[j])
+
+    return out
+
+
 def kknn_classifier(
     adata: sc.AnnData,
     obs_key: str,
@@ -4607,57 +4815,12 @@ def kknn_classifier(
     is_bool = pd.api.types.is_bool_dtype(col)
     is_categorical = is_bool or not pd.api.types.is_numeric_dtype(col)
 
-    smoothed = []
-
-    for i in range(N):
-        if mask is not None and not mask[i]:
-            smoothed.append(labels[i])
-            continue
-
-        idx = pruned_indices[i]
-        dist = pruned_distances[i]
-
-        neighbors_labels = labels[idx]
-
-        # Distance weighting: smaller distance = larger weight
-        weights = _kknn_distance_weights(dist)
-
-        if is_categorical:
-            # Tally weighted votes
-            vote_tally = {}
-            for lbl, w in zip(neighbors_labels, weights):
-                # Ignore NaNs
-                if pd.isna(lbl):
-                    continue
-                vote_tally[lbl] = vote_tally.get(lbl, 0.0) + w
-
-            if vote_tally:
-                # Find the winner
-                winner = max(vote_tally.items(), key=lambda x: x[1])[0]
-                smoothed.append(winner)
-            else:
-                # Failsafe if all neighbors were NaN
-                smoothed.append(np.nan)
-
-        else:
-            # Continuous: Distance-weighted average
-            valid_mask = ~pd.isna(neighbors_labels)
-            if np.any(valid_mask):
-                valid_labels = neighbors_labels[valid_mask]
-                valid_weights = weights[valid_mask]
-                # Re-normalize valid weights
-                sum_weights = np.sum(valid_weights)
-                if sum_weights > 0:
-                    valid_weights /= sum_weights
-                    val = np.sum(valid_labels * valid_weights)
-                    smoothed.append(val)
-                else:
-                    smoothed.append(np.nan)
-            else:
-                smoothed.append(np.nan)
+    smoothed = _kknn_smooth_values(
+        labels, pruned_distances, pruned_indices, is_categorical, mask
+    )
 
     # Cast back to original categorical type if necessary
-    if is_bool and not any(pd.isna(v) for v in smoothed):
+    if is_bool and not pd.isna(smoothed).any():
         smoothed = np.array(smoothed, dtype=bool)
     elif is_categorical:
         if isinstance(adata.obs[obs_key].dtype, pd.CategoricalDtype):
