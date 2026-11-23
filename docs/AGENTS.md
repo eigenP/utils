@@ -45,7 +45,7 @@ Each persona file starts with a charter (mission, scope, operating procedure, de
 
 ## Python Versions
 - The project requires Python 3.11 or later (3.10 reached end-of-life in October 2026). The stdlib `tomllib` can be used without a `tomli` fallback.
-- GitHub Actions tests the code on Python 3.11, 3.12, 3.13 and 3.14 with the newest dependencies, plus an `oldest-deps` job on 3.11 with older dependency lines (`pandas<3`, `numpy<2.3`, `scipy<1.16`, `scikit-image<0.26`).
+- GitHub Actions tests the code on Python 3.11, 3.12 and 3.13 with the newest dependencies, plus an `oldest-deps` job on 3.11 with older dependency lines (`pandas<3`, `numpy<2.3`, `scipy<1.16`, `scikit-image<0.26`).
 - Keep the code compatible with these versions.
 
 ## Contributions
