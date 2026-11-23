@@ -832,8 +832,8 @@ def tl_bonsai(
     2. ``use_rep`` (``'X'``, an ``obsm`` key, a layer name, or an array) with optional
        ``stds`` (same lookup), passed to Bonsai as is. Bonsai expects per-feature
        estimates with error bars; PCA scores or log1p values have no error bars
-       (``stds=None`` makes Bonsai treat them as negligible), which in our benchmark
-       (``benchmarks/bonsai_vs_pacmap.py``) loses most of Bonsai's advantage.
+       (``stds=None`` makes Bonsai treat them as negligible), which in our simulations
+       lost most of Bonsai's advantage over PCA / PaCMAP.
     3. Neither: ``layers['counts']`` if present, else ``X`` if it holds integer counts.
 
     Parameters
