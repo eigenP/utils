@@ -172,10 +172,7 @@ def test_download_file_rejects_truncated_body(tmp_path):
 
 def test_dev_extra_includes_pytest_playwright():
     """The documented dev install must be able to run the browser tests."""
-    try:
-        import tomllib
-    except ImportError:  # Python 3.10
-        tomllib = pytest.importorskip("tomli")
+    import tomllib
 
     pyproject = Path(__file__).parents[1] / "pyproject.toml"
     if not pyproject.exists():

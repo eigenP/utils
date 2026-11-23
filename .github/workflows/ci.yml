@@ -18,7 +18,7 @@ jobs:
 
     strategy:
       matrix:
-        python-version: ['3.10', 3.11, 3.12, 3.13]
+        python-version: ['3.11', '3.12', '3.13']
 
     steps:
     - name: Check out repository
@@ -73,6 +73,32 @@ jobs:
 
     - name: Run tests with pytest
       run: pytest
+
+  oldest-deps:
+    # The matrix above resolves the newest releases its Python allows (on
+    # 3.12+: pandas 3, numpy >= 2.5; on 3.11 the anndata line still pulls
+    # pandas 2.x, but that is incidental). Pinned environments (Colab,
+    # institutional conda envs) still ship older lines, so test them on
+    # purpose on the oldest supported Python. Raise these caps deliberately.
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install package with older dependency lines
+      run: |
+        pip install uv
+        printf '%s\n' 'pandas<3' 'numpy<2.3' 'scipy<1.16' 'scikit-image<0.26' > "$RUNNER_TEMP/oldest.txt"
+        uv pip install --system --constraint "$RUNNER_TEMP/oldest.txt" ".[single-cell,dev]"
+        python -c "import numpy, pandas, scipy, skimage; print('numpy', numpy.__version__, 'pandas', pandas.__version__, 'scipy', scipy.__version__, 'skimage', skimage.__version__)"
+
+    - name: Run tests with pytest (browser tests run in the matrix job)
+      run: pytest --ignore-glob='tests/test_frontend_*'
 
   pyodide:
     # Runs the suite inside Pyodide, the WebAssembly runtime marimo uses for

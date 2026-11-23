@@ -1,4 +1,5 @@
 import warnings
+from pathlib import Path
 
 import numpy as np
 import xarray as xr
@@ -102,6 +103,267 @@ def get_stczyx_pixel_sizes(da: xr.DataArray) -> dict:
         out[ax] = step if step is not None else stored[ax]
     out['unit'] = _coord_unit(da) or stored['unit']
     return out
+
+
+def set_channel_info(da: xr.DataArray, info: dict, strict: bool = True) -> xr.DataArray:
+    """Attach per-channel metadata (colour, role, ...) as coordinates along ``C``.
+
+    Channel names stay the ``C`` coordinate (e.g. read from the file by
+    the source reader); everything else about a channel becomes an *auxiliary
+    coordinate* on the ``C`` dimension, so it follows selection, reordering and
+    slicing automatically (``da.sel(C=["DAPI", "SOX2"]).color``) instead of
+    living in parallel lists or dicts that can fall out of sync.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Image with a ``C`` dimension whose coordinate holds channel names.
+    info : dict
+        ``{channel_name: {field: value, ...}}``, e.g.
+        ``{"DAPI": {"color": "gray", "role": "dna"}}``. Fields missing for a
+        channel are ``""`` when the field's given values are all strings,
+        else ``NaN``.
+    strict : bool
+        Raise if ``info`` names a channel that is not in ``da.C`` (catches typos
+        and channel-order assumptions); channels without an entry only warn.
+
+    Returns
+    -------
+    xr.DataArray
+        A new DataArray with one coordinate per field along ``C``.
+
+    Examples
+    --------
+    >>> da = set_channel_info(da, {"DAPI": {"color": "gray", "role": "dna"},
+    ...                            "TBXT": {"color": "yellow", "role": "marker"}})
+    >>> channels_where(da, role="dna")
+    ['DAPI']
+    """
+    if "C" not in da.dims:
+        raise ValueError("DataArray has no 'C' dimension")
+    if "C" not in da.coords:
+        da = da.assign_coords(C=np.arange(da.sizes["C"]))
+    labels = list(da.coords["C"].values)
+    names = [str(c) for c in labels]
+    # match keys by value first (int channel labels), then by their string form
+    key_of = {}
+    for k in info:
+        if k in labels:
+            key_of[names[labels.index(k)]] = k
+        elif str(k) in names:
+            key_of[str(k)] = k
+    unknown = [k for k in info if k not in key_of.values()]
+    if unknown and strict:
+        raise KeyError(f"channels {unknown} are not in the image; available: {names}")
+    missing = [n for n in names if n not in key_of]
+    if missing:
+        warnings.warn(f"no channel info for {missing}", stacklevel=2)
+    fields = []
+    for v in info.values():
+        for f in v:
+            if f not in fields:
+                fields.append(f)
+    for f in fields:
+        if f in da.dims or f in ("C", "S", "T", "Z", "Y", "X"):
+            raise ValueError(f"field name {f!r} clashes with a dimension name")
+    by_name = {n: info[k] for n, k in key_of.items()}
+    coords = {}
+    for f in fields:
+        given = [v[f] for v in by_name.values() if f in v]
+        # xarray turns None into NaN in object coordinates; use "" for string fields
+        fill = "" if given and all(isinstance(g, str) for g in given) else np.nan
+        arr = np.empty(len(names), dtype=object)  # 1-D even for tuple values (RGB colours)
+        for i, n in enumerate(names):
+            arr[i] = by_name.get(n, {}).get(f, fill)
+        coords[f] = ("C", arr)
+    return da.assign_coords(coords)
+
+
+def channels_where(da: xr.DataArray, **criteria) -> list:
+    """Channel labels (in ``C`` order, as stored in ``C``) whose auxiliary coordinates match ``criteria``.
+
+    Each criterion is ``field=value`` (equality), ``field=[v1, v2]`` (any of)
+    or ``field=callable`` (predicate on the value). Use the result with
+    ``da.sel(C=...)``.
+
+    >>> channels_where(da, role=["mito", "perox"])
+    ['TOMM20', 'PMP70']
+    """
+    if "C" not in da.dims:
+        raise ValueError("DataArray has no 'C' dimension")
+    labels = list(da.coords["C"].values) if "C" in da.coords else list(range(da.sizes["C"]))
+    keep = [True] * len(labels)
+    for field, want in criteria.items():
+        if field not in da.coords or da.coords[field].dims != ("C",):
+            raise KeyError(f"no channel coordinate {field!r}; set it with set_channel_info")
+        vals = list(da.coords[field].values)
+        for i, v in enumerate(vals):
+            if callable(want):
+                ok = bool(want(v))
+            elif not isinstance(want, (str, bytes)) and hasattr(want, "__iter__"):
+                ok = v in list(want)  # any of (list, tuple, set, ndarray)
+            else:
+                ok = v == want
+            keep[i] = keep[i] and ok
+    return [lab for lab, k in zip(labels, keep) if k]  # native labels: usable in da.sel(C=...)
+
+
+def channels_by(da: xr.DataArray, field: str, values, allow_missing: bool = False, unique: bool = True) -> list:
+    """Channel names whose ``field`` coordinate equals each of ``values``, **in the order requested**.
+
+    Use it when channel order matters (e.g. a model expecting
+    ``[membrane, nucleus]``): ``da.sel(C=channels_by(da, "role", ["membrane", "dna"]))``.
+
+    Parameters
+    ----------
+    field : str
+        Coordinate along ``C`` (see :func:`set_channel_info`), e.g. ``"role"``.
+    values : value or list of values
+        Requested values, in output order.
+    allow_missing : bool
+        Skip values no channel has instead of raising ``KeyError``.
+    unique : bool
+        Raise ``ValueError`` if a value matches more than one channel; with
+        ``unique=False`` all matches are returned (in ``C`` order per value).
+    """
+    if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
+        values = [values]
+    out = []
+    for v in values:
+        names = channels_where(da, **{field: v})
+        if len(names) > 1 and unique:
+            raise ValueError(f"{field}={v!r} matches several channels {names}; expected one")
+        if not names:
+            if allow_missing:
+                continue
+            present = sorted({str(x) for x in da.coords[field].values if isinstance(x, str) and x})
+            raise KeyError(f"no channel with {field}={v!r}; present: {present}")
+        out.extend(names)
+    return out
+
+
+def _read_tiff(path, input_axes, series=None):
+    with tifffile.TiffFile(path) as tif:
+        all_series = list(tif.series)
+        if series is not None:
+            chosen = [all_series[series]]
+        elif len(all_series) > 1 and len({(s.shape, s.axes, str(s.dtype)) for s in all_series}) == 1:
+            chosen = all_series  # e.g. multi-position OME-TIFF: stack along S
+        else:
+            chosen = all_series[:1]
+            if len(all_series) > 1:
+                warnings.warn(
+                    f"{Path(path).name}: {len(all_series)} series of different shapes; read series 0 "
+                    "(pass series= to choose)",
+                    stacklevel=3,
+                )
+        file_axes = chosen[0].axes.upper()
+        data = chosen[0].asarray() if len(chosen) == 1 else np.stack([s.asarray() for s in chosen])
+    if input_axes is not None:
+        axes = input_axes.upper()
+    else:
+        # tifffile's 'S' is samples per pixel (RGB / planar components), not scenes
+        if "S" in file_axes:
+            if "C" in file_axes:
+                raise ValueError(
+                    f"{Path(path).name}: TIFF axes {file_axes!r} have both samples ('S') and channels ('C'); "
+                    "pass input_axes="
+                )
+            file_axes = file_axes.replace("S", "C")
+        axes = ("S" + file_axes) if len(chosen) > 1 else file_axes
+    if set(axes) - set(_STCZYX):
+        raise ValueError(
+            f"{Path(path).name}: TIFF axes {axes!r} contain letters outside STCZYX (tifffile uses e.g. 'Q', 'I' "
+            "for unknown axes); pass input_axes="
+        )
+    return data, get_tiff_voxel_size(path), axes
+
+
+def load_image(
+    source,
+    *,
+    input_axes: str = None,
+    channel_names=None,
+    channel_info: dict = None,
+    pixel_sizes=None,
+    strict: bool = True,
+    series: int = None,
+) -> xr.DataArray:
+    """Convert an image (TIFF file, array, or DataArray from any reader) to a strict STCZYX ``xarray.DataArray``.
+
+    Format-agnostic: files other than TIFF are read with their own reader
+    (anything returning an array or an ``xarray.DataArray`` with single-letter
+    dims, e.g. a vendor reader's ``to_xarray()``), and the result is passed
+    here. Channel names stay as provided by the source (the ``C`` coordinate
+    of a DataArray); ``channel_info`` attaches per-channel metadata as
+    coordinates along ``C`` (:func:`set_channel_info`).
+
+    Parameters
+    ----------
+    source : str, Path, array or xr.DataArray
+        ``.tif`` / ``.tiff`` path (axes from tifffile unless ``input_axes``;
+        voxel size via :func:`get_tiff_voxel_size`), or an in-memory array /
+        DataArray (as :func:`array_to_stczyx_xarray`; calibrated coordinates
+        give the pixel sizes). A reader's dim named ``P`` (position) maps to
+        ``S``.
+    input_axes : str, optional
+        Axis letters for arrays, or TIFFs whose axes tifffile cannot name.
+    channel_names : list of str, optional
+        Define / override channel names (needed for plain arrays and most TIFFs).
+    channel_info : dict, optional
+        ``{channel_name: {field: value}}`` keyed by the **final** channel names
+        (the file's names, or ``channel_names`` if given), e.g.
+        ``{"DAPI": {"role": "dna", "color": "gray"}}``; unknown names raise when
+        ``strict``.
+    pixel_sizes : dict or (Z, Y, X) sequence, optional
+        Overrides the source's values **per axis** (``{"Z": 0.5}`` keeps the
+        file's X/Y).
+    series : int, optional
+        TIFF only: read this series. By default series of identical shape
+        (multi-position OME-TIFF) are stacked along ``S``; otherwise series 0
+        is read with a warning. tifffile's samples axis (RGB / planar 'S') is
+        read as ``C``.
+
+    Returns
+    -------
+    xr.DataArray
+        Dims ``S, T, C, Z, Y, X``; raw file values (no dtype change); physical
+        coordinates where pixel sizes are known; ``attrs["source"]`` for files.
+    """
+    attrs = {}
+    file_ps = None
+    data = source
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        attrs["source"] = str(path)
+        name = path.name.lower()
+        if name.endswith((".tif", ".tiff")):
+            data, file_ps, input_axes = _read_tiff(path, input_axes, series)
+            if file_ps and file_ps.get("unit") is None and file_ps.get("X") == 1.0 and file_ps.get("Y") == 1.0:
+                file_ps = {**file_ps, "X": None, "Y": None}  # resolution tags absent: 1.0 means "unknown"
+        else:
+            raise ValueError(
+                f"unsupported file type: {path.name}; load_image reads .tif/.tiff. For other formats read "
+                "the file with its own reader (to an array or xarray.DataArray with named dims) and pass that"
+            )
+    given = _normalize_pixel_sizes(pixel_sizes)
+    base = _normalize_pixel_sizes(file_ps)
+    ps = {a: given[a] if given[a] is not None else base[a] for a in ("Z", "Y", "X")}
+    ps["unit"] = given["unit"] or base["unit"]
+    if all(ps[a] is None for a in ("Z", "Y", "X")):
+        ps = None
+    original = None
+    if channel_names is not None and hasattr(data, "coords") and "C" in getattr(data, "coords", {}):
+        original = [str(c) for c in data.coords["C"].values]
+    da = array_to_stczyx_xarray(data, input_axes=input_axes, channel_names=channel_names, attrs=attrs or None, pixel_sizes=ps)
+    if channel_info:
+        if original and strict and any(str(k) in original and str(k) not in map(str, da.coords["C"].values) for k in channel_info):
+            raise KeyError(
+                f"channel_info uses the original channel names {original}, but channel_names renamed them to "
+                f"{[str(c) for c in da.coords['C'].values]}; key channel_info by the new names"
+            )
+        da = set_channel_info(da, channel_info, strict=strict)
+    return da
 
 
 def _normalize_stage_positions(stage_positions, n_series: int) -> dict:
