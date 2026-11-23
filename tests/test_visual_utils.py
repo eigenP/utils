@@ -122,7 +122,7 @@ def test_labels_cmap_low_ids_stay_opaque_with_many_labels():
 
 def test_describe_image_accepts_bool_lists_and_gamma_with_limits():
     res = describe_image(np.random.default_rng(0).random((16, 16)) > 0.5)
-    assert "bool" in res["axes"]["Histogram"].get_ylabel() and "dtype: bool" in res["info"]
+    assert "bool" in res["axes"]["Histogram"].get_xlabel() and "dtype: bool" in res["info"]
     describe_image([[1, 2], [3, 4]])
     res = describe_image(np.random.default_rng(0).random((8, 8)), gamma=0.5, vmin=0.2, vmax=0.8)
     norm = res["axes"]["Image"].images[0].norm
@@ -190,30 +190,26 @@ def test_describe_image_dataarray_info_panel_not_clipped():
     plt.close("all")
 
 
-def test_describe_image_layout_image_dominant_histogram_right_info_below():
+def test_describe_image_layout_one_column_image_histogram_info():
     """Layout invariants of describe_image, for a square, a wide and a tall image.
 
-    The image must be the largest panel, the histogram a narrower strip to its
-    right sharing its vertical extent (intensity on its y axis, labelled on the
-    right), and the info table must sit below both and span their full width.
+    One column, top to bottom: the image (largest panel), a short histogram at
+    least as wide as the image, and the info table spanning the full width.
     Every drawn artist (tick labels, axis labels, table text) must stay inside
     the figure, since the axes are placed in inches without a layout engine.
     """
     rng = np.random.default_rng(0)
     for shape in [(80, 80), (30, 200), (200, 30)]:
-        res = describe_image(rng.random(shape), image_size=4.0, hist_width=0.9)
+        res = describe_image(rng.random(shape), image_size=4.0)
         fig, axes = res["fig"], res["axes"]
         fig.draw_without_rendering()
         img = axes["Image"].get_window_extent()
         hist = axes["Histogram"].get_window_extent()
         info = axes["Info"].get_window_extent()
-        if shape[0] <= shape[1]:
-            assert img.width > 2 * hist.width
-        assert hist.x0 > img.x1  # histogram to the right of the image
-        assert hist.y0 <= img.y0 + 1 and hist.y1 >= img.y1 - 1  # covers the image's height
-        assert axes["Histogram"].yaxis.get_label_position() == "right"
-        assert info.y1 < min(img.y0, hist.y0)  # table below both
-        assert info.x0 <= img.x0 and info.x1 >= hist.x1  # and full width
+        assert hist.y1 < img.y0 and info.y1 < hist.y0  # stacked top to bottom
+        assert hist.x0 <= img.x0 + 1 and hist.x1 >= img.x1 - 1  # as wide as the image
+        assert hist.height < img.height or shape[0] < shape[1]
+        assert info.x0 <= min(img.x0, hist.x0) and info.x1 >= max(img.x1, hist.x1)
         fb = fig.bbox
         for ax in axes.values():
             tb = ax.get_tightbbox()
@@ -222,17 +218,38 @@ def test_describe_image_layout_image_dominant_histogram_right_info_below():
 
 
 def test_describe_image_histogram_shows_pixel_fractions_log_only_over_a_decade():
-    """The histogram bars are fractions of the shown pixels (they sum to 1), on a
-    log axis for a skewed distribution and a linear one for a flat distribution
-    (where a log axis would show no labelled major tick)."""
+    """The histogram bars are fractions of the shown pixels, on a log axis for a
+    skewed distribution and a linear one for a flat distribution (where a log
+    axis would show no labelled major tick)."""
     rng = np.random.default_rng(0)
     skewed = describe_image(rng.exponential(100, (64, 64)))["axes"]["Histogram"]
     flat = describe_image(np.tile(np.arange(64.0), (64, 1)))["axes"]["Histogram"]
-    assert skewed.get_xscale() == "log" and flat.get_xscale() == "linear"
+    assert skewed.get_yscale() == "log" and flat.get_yscale() == "linear"
     # 64 equally populated values in 64 bins: every bar is exactly 1/64 of the pixels
-    bar_x = flat.patches[0].get_path().vertices[:, 0]
-    assert bar_x.max() == pytest.approx(1 / 64)
-    assert np.all((bar_x == 0) | np.isclose(bar_x, 1 / 64))
+    bar_y = flat.patches[0].get_path().vertices[:, 1]
+    assert bar_y.max() == pytest.approx(1 / 64)
+    assert np.all((bar_y == 0) | np.isclose(bar_y, 1 / 64))
+    plt.close("all")
+
+
+def test_describe_image_marks_display_range_only_when_it_differs_from_data():
+    """With autoscaled limits the histogram has no vmin/vmax marks and the info
+    has no display row (it would repeat min/max). With vmax inside the data, a
+    line marks it, the clipped intensities are shaded, and the info reports the
+    exact fraction of clipped pixels; a vmax beyond the data widens the axis so
+    the unused part of the display range is visible."""
+    img = np.tile(np.arange(100.0), (10, 1))  # 0..99, each value 1 % of pixels
+    auto = describe_image(img)
+    assert not auto["axes"]["Histogram"].lines and "display" not in auto["info"]
+
+    res = describe_image(img, vmax=79.5)
+    ax = res["axes"]["Histogram"]
+    assert [ln.get_xdata()[0] for ln in ax.lines] == [79.5]
+    assert len([p for p in ax.patches if p.get_alpha() is not None and p.get_alpha() < 1]) == 1
+    assert "display: vmin 0  vmax 79.5  (20% of pixels clipped)" in res["info"]
+
+    wide = describe_image(img, vmax=200)["axes"]["Histogram"]
+    assert wide.get_xlim()[1] == pytest.approx(200)
     plt.close("all")
 
 
@@ -262,6 +279,13 @@ def test_describe_image_channel_table_swatches_and_shown_row():
     # the info string (plain text) keeps its line format
     assert "C[1] WGA  color=green" in res["info"] and "shown: S=0, T=0, C=WGA, Z=0" in res["info"]
 
+    html = res["info_html"]
+    assert isinstance(html, str) and html._repr_html_() == html
+    assert "TOMM20" in html and "background:#008000" in html and "&#9664; shown" in html
+    # metadata is escaped, not interpreted as markup
+    da.attrs["source"] = "/data/<b>x</b>.tif"
+    assert "/data/&lt;b&gt;x&lt;/b&gt;.tif" in describe_image(da)["info_html"]
+
     lines = _wrap_value("/a/" + "dir/" * 20 + "f.tif", 30)
     assert all(len(line) <= 30 for line in lines)
     assert all(line.endswith("/") for line in lines[:-1])
@@ -274,7 +298,8 @@ def test_hist_imshow_is_a_deprecated_alias_of_describe_image():
     with pytest.warns(DeprecationWarning, match="describe_image"):
         res = hist_imshow(img, bins=16)
     ref = describe_image(img, bins=16)
-    assert res["info"] == ref["info"] and list(res["axes"]) == list(ref["axes"])
+    assert res["info"] == ref["info"] and res["info_html"] == ref["info_html"]
+    assert list(res["axes"]) == list(ref["axes"])
     with pytest.warns(DeprecationWarning):
         np.testing.assert_array_equal(hist_imshow(img, return_image_only=True), img)
     plt.close("all")

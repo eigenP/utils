@@ -325,22 +325,74 @@ def _draw_info_table(ax, rows, channels, width_pt, fontsize, shown_channel=None,
     return y
 
 
-def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=None,
-                   image_size=4.0, hist_width=0.9, info_fontsize=None, **imshow_kwargs):
-    """
-    Displays an image, its histogram and an info table.
+class _HTML(str):
+    """A ``str`` of HTML that notebooks (Jupyter, marimo) render as HTML."""
 
-    The image takes most of the figure; the histogram is a narrow strip to its
-    right (intensity on the vertical axis, like a colorbar; fraction of pixels
-    per bin, on a log scale when it spans more than a decade) and the info table spans the full width below both.
+    def _repr_html_(self):
+        return str(self)
+
+
+def _info_html(rows, channels, shown_channel=None):
+    """The info table as self-contained HTML (inline styles, no dependency), in
+    the spirit of the dask / xarray notebook reprs. Backgrounds are translucent
+    so the table reads on light and dark notebook themes."""
+    from html import escape
+
+    cell = "padding:2px 10px 2px 6px;text-align:left;vertical-align:top;border:none;color:inherit;"
+    mono = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"
+    key = cell + "font-weight:600;opacity:0.7;white-space:nowrap;"
+    zebra = "background:rgba(128,128,128,0.10);"
+    out = ['<div style="font-size:12px;line-height:1.35;">',
+           '<table style="border-collapse:collapse;margin:0 0 8px 0;color:inherit;font-size:inherit;">']
+    for i, (k, v) in enumerate(rows):
+        bg = zebra if i % 2 == 0 else ""
+        out.append(f'<tr style="{bg}"><th style="{key}">{escape(k)}</th>'
+                   f'<td style="{cell}{mono}white-space:pre-wrap;overflow-wrap:anywhere;">{escape(v)}</td></tr>')
+    out.append("</table>")
+    if channels is not None:
+        columns, cells = channels
+        out.append('<table style="border-collapse:collapse;color:inherit;font-size:inherit;">')
+        out.append("<tr>" + "".join(
+            f'<th style="{key}border-bottom:1px solid rgba(128,128,128,0.5);">{escape(c)}</th>' for c in columns
+        ) + "</tr>")
+        for i, row in enumerate(cells):
+            shown = shown_channel is not None and i == shown_channel
+            bg = "background:rgba(66,133,244,0.18);font-weight:600;" if shown else ""
+            tds = []
+            for c, v in zip(columns, row):
+                sw = ""
+                rgb = _swatch_color(v) if c == "color" else None
+                if rgb is not None:
+                    sw = ('<span style="display:inline-block;width:0.85em;height:0.85em;margin-right:4px;'
+                          f'vertical-align:-0.1em;border:1px solid rgba(128,128,128,0.8);background:{mcolors.to_hex(rgb)};"></span>')
+                tds.append(f'<td style="{cell}{mono}white-space:pre;">{sw}{escape(v)}</td>')
+            mark = f'<td style="{cell}opacity:0.7;">&#9664; shown</td>' if shown else ""
+            out.append(f'<tr style="{bg}">' + "".join(tds) + mark + "</tr>")
+        out.append("</table>")
+    out.append("</div>")
+    return _HTML("".join(out))
+
+
+def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=None, image_size=4.0,
+                   **imshow_kwargs):
+    """
+    Displays an image, its histogram and an info table, stacked in one column.
+
+    Top to bottom: the image (longer side ``image_size`` inches); a short
+    histogram as wide as the image (fraction of pixels per bin, on a log scale
+    when it spans more than a decade), with the display range (``vmin`` /
+    ``vmax`` of the image's norm) marked by dashed lines and the clipped
+    intensities shaded when it differs from the data range; and a
+    full-width info table.
 
     For inputs with more than two dimensions the middle slice of every extra
     dimension is shown. The info table lists the shape and dtype, or for an
     ``xarray.DataArray`` (e.g. STCZYX from ``image_io``) the source, dims,
     pixel sizes and which slice is shown, plus min / max / mean of the shown
-    slice; channels and their metadata coordinates (``set_channel_info``) get
-    their own table, with a swatch for a ``color`` entry and the shown channel
-    highlighted.
+    slice and, when set (``vmin``/``vmax``/``gamma``), the display range with
+    the fraction of clipped pixels; channels and their metadata coordinates
+    (``set_channel_info``) get their own table, with a swatch for a ``color``
+    entry and the shown channel highlighted.
 
     Parameters
     ----------
@@ -351,29 +403,30 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     gamma : float, optional
         Display gamma (``PowerNorm``); ``vmin``/``vmax`` passed in ``imshow_kwargs``
         are applied to that norm.
+    return_image_only : bool, optional
+        Return only the 2D slice that would be shown.
     info_width : int, optional
         Maximum characters per value line in the info table (default: as many
         as fit the figure width).
     image_size : float, optional
         Length in inches of the image's longer side.
-    hist_width : float, optional
-        Width in inches of the histogram strip.
-    info_fontsize : float, optional
-        Font size of the info table (default: 0.65 x ``rcParams['font.size']``,
-        between 7 and 10 pt).
+    **imshow_kwargs
+        Passed to ``imshow`` (``cmap``, ``vmin``, ``vmax``, ...).
 
     Returns
     -------
     dict
         ``"fig"`` (:class:`matplotlib.figure.Figure`), ``"axes"`` (mapping
-        ``"Image"``, ``"Histogram"``, ``"Info"`` to axes) and ``"info"`` (the
-        panel text). When ``return_image_only`` is ``True`` only the 2D slice is
-        returned.
+        ``"Image"``, ``"Histogram"``, ``"Info"`` to axes), ``"info"`` (plain
+        text) and ``"info_html"`` (the same table as HTML; a ``str`` that
+        notebooks render when it is a cell's output). When
+        ``return_image_only`` is ``True`` only the 2D slice is returned.
 
     Examples
     --------
-    >>> res = describe_image(np.random.rand(100, 100))
+    >>> res = describe_image(np.random.rand(100, 100), vmax=0.8)
     >>> print(res["info"])
+    >>> res["info_html"]  # last expression in a notebook cell: rendered table
 
     Formerly ``hist_imshow`` (deprecated alias).
     """
@@ -421,19 +474,17 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         stats = f"min {finite.min():.4g}  max {finite.max():.4g}  mean {finite.mean():.4g}"
     else:
         stats = "no finite values"
-    info_lines.append(stats)
-    rows.append(("intensity", stats))
-    info = "\n".join(info_lines)
 
-    # --- figure: sizes in inches, axes placed explicitly (no layout engine) ---
+    # --- figure: one column (image, histogram, info), axes placed in inches ---
     H, W = image.shape[:2]
     w_img = image_size * W / max(H, W)
     h_img = image_size * H / max(H, W)
-    h_hist = max(h_img, 1.5)
+    w_hist, h_hist = max(w_img, 3.0), 0.9
+    col_w = max(w_img, w_hist)
 
-    fig = plt.figure(figsize=(w_img + hist_width + 2.0, h_hist + 3.0))
-    ax_img = fig.add_axes([0.1, 0.5, 0.4, 0.4])
-    ax_hist = fig.add_axes([0.6, 0.5, 0.2, 0.4])
+    fig = plt.figure(figsize=(col_w + 2.0, h_img + h_hist + 4.0))
+    ax_img = fig.add_axes([0.1, 0.6, 0.4, 0.3])
+    ax_hist = fig.add_axes([0.1, 0.4, 0.4, 0.1])
     ax_info = fig.add_axes([0.0, 0.0, 1.0, 0.3])
 
     norm = None
@@ -441,30 +492,54 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         # matplotlib refuses a norm together with vmin/vmax, so hand them to the norm
         norm = PowerNorm(gamma=gamma, vmin=imshow_kwargs.pop('vmin', None),
                          vmax=imshow_kwargs.pop('vmax', None))
-    ax_img.imshow(image, norm=norm, interpolation='nearest', **imshow_kwargs)
+    im = ax_img.imshow(image, norm=norm, interpolation='nearest', **imshow_kwargs)
+    vmin, vmax = im.norm.vmin, im.norm.vmax
 
-    density = np.zeros(0)
+    frac = np.zeros(0)
     if finite.size:
         # fraction of pixels per bin: unit-free, unlike a density in 1/intensity
-        density, _, _ = ax_hist.hist(finite.ravel(), bins=bins, histtype='stepfilled', orientation='horizontal',
-                                     weights=np.full(finite.size, 1.0 / finite.size))
-        ax_hist.set_ylim(float(finite.min()), float(finite.max()) if finite.max() > finite.min()
-                         else float(finite.min()) + 1)
-    nonzero = density[density > 0]
+        frac, _, _ = ax_hist.hist(finite.ravel(), bins=bins, histtype='stepfilled',
+                                  weights=np.full(finite.size, 1.0 / finite.size))
+    nonzero = frac[frac > 0]
     if nonzero.size and nonzero.max() > 10 * nonzero.min():
-        # log frequency only pays off over more than a decade (else no major tick is labelled)
-        ax_hist.set_xscale('log')
-        ax_hist.xaxis.set_major_locator(mpl_ticker.LogLocator(numticks=3))
-        ax_hist.xaxis.set_minor_formatter(mpl_ticker.NullFormatter())
+        # log fraction only pays off over more than a decade (else no major tick is labelled)
+        ax_hist.set_yscale('log')
+        ax_hist.yaxis.set_major_locator(mpl_ticker.LogLocator(numticks=3))
+        ax_hist.yaxis.set_minor_formatter(mpl_ticker.NullFormatter())
     else:
-        ax_hist.xaxis.set_major_locator(mpl_ticker.MaxNLocator(2))
-    ax_hist.set_xlabel('Pixel fraction')
-    ax_hist.set_ylabel(f'Pixel intensity ({dtype})')
-    ax_hist.yaxis.set_label_position('right')
-    ax_hist.yaxis.tick_right()
-    ax_hist.spines['left'].set_visible(False)
-    ax_hist.spines['top'].set_visible(False)
-    ax_hist.spines['right'].set_visible(True)
+        ax_hist.yaxis.set_major_locator(mpl_ticker.MaxNLocator(2))
+    ax_hist.set_xlabel(f'Pixel intensity ({dtype})')
+    ax_hist.set_ylabel('Fraction')
+
+    # display range: dashed lines at vmin / vmax, intensities the display clips shaded
+    display = None
+    if vmin is not None and vmax is not None and np.isfinite([vmin, vmax]).all():
+        lo = min(float(finite.min()), vmin) if finite.size else vmin
+        hi = max(float(finite.max()), vmax) if finite.size else vmax
+        if hi <= lo:
+            hi = lo + 1
+        ax_hist.set_xlim(lo, hi)
+        dmin, dmax = (float(finite.min()), float(finite.max())) if finite.size else (None, None)
+        for v in (vmin, vmax):
+            if v not in (dmin, dmax):  # autoscaled limits sit on the data range: nothing to mark
+                ax_hist.axvline(v, color="#6B6B6B", ls=(0, (3, 2)), lw=1)
+        if vmin > lo:
+            ax_hist.axvspan(lo, vmin, color="#808080", alpha=0.18, lw=0)
+        if vmax < hi:
+            ax_hist.axvspan(vmax, hi, color="#808080", alpha=0.18, lw=0)
+        if (vmin, vmax) != (dmin, dmax) or gamma != 1:  # else it repeats the intensity row
+            display = f"vmin {vmin:.4g}  vmax {vmax:.4g}" + (f"  gamma {gamma:g}" if gamma != 1 else "")
+            if finite.size:
+                clipped = np.mean((finite < vmin) | (finite > vmax))
+                if clipped > 0:
+                    display += f"  ({100 * clipped:.2g}% of pixels clipped)"
+
+    info_lines.append(stats)
+    rows.append(("intensity", stats))
+    if display:
+        info_lines.append(f"display: {display}")
+        rows.append(("display", display))
+    info = "\n".join(info_lines)
 
     def overhang(ax):
         """Inches by which ticks/labels stick out of the axes box: left, right, bottom, top."""
@@ -475,37 +550,37 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
                 max(bb.y0 - tb.y0, 0) / d, max(tb.y1 - bb.y1, 0) / d)
 
     pad, gap = 0.12, 0.15
-    img_dy = (h_hist - h_img) / 2  # image centred vertically on the histogram strip
-    ax_img.set_position([0, 0, w_img / fig.get_figwidth(), h_img / fig.get_figheight()])
-    ax_hist.set_position([0, 0, hist_width / fig.get_figwidth(), h_hist / fig.get_figheight()])
+    fw, fh = fig.get_size_inches()
+    ax_img.set_position([0, 0, w_img / fw, h_img / fh])
+    ax_hist.set_position([0, 0, w_hist / fw, h_hist / fh])
     oi, oh = overhang(ax_img), overhang(ax_hist)
 
-    left = pad + max(oi[0], 0)
-    mid = gap + oi[1] + oh[0]
-    right = oh[1] + pad
-    top = pad + max(oh[3], oi[3] - img_dy)
-    below = max(oh[2], oi[2] - img_dy)
-    top_w = left + w_img + mid + hist_width + right
-    fig_w = max(top_w, 4.5)
-    x_off = (fig_w - top_w) / 2  # centre a narrow image + histogram block
+    dx_img, dx_hist = (col_w - w_img) / 2, (col_w - w_hist) / 2  # both centred in the column
+    left = pad + max(oi[0] - dx_img, oh[0] - dx_hist, 0)
+    right = pad + max(oi[1] - dx_img, oh[1] - dx_hist, 0)
+    fig_w = max(left + col_w + right, 4.5)
+    x0 = left + (fig_w - left - col_w - right) / 2
 
-    if info_fontsize is None:
-        info_fontsize = float(np.clip(0.65 * plt.rcParams['font.size'], 7, 10))
     info_w_pt = (fig_w - 2 * pad) * 72
-    info_h_pt = _draw_info_table(ax_info, rows, channels, info_w_pt, info_fontsize,
-                                 shown_channel=shown_channel, max_chars=info_width)
-    info_h = info_h_pt / 72
-    fig_h = top + h_hist + below + gap + info_h + pad
+    info_fs = float(np.clip(0.65 * plt.rcParams['font.size'], 7, 10))
+    info_h = _draw_info_table(ax_info, rows, channels, info_w_pt, info_fs,
+                              shown_channel=shown_channel, max_chars=info_width) / 72
+
+    top = pad + oi[3]
+    gap_ih = gap + oi[2] + oh[3]  # image tick labels above, histogram offset text below
+    below = oh[2]
+    fig_h = top + h_img + gap_ih + h_hist + below + gap + info_h + pad
 
     fig.set_size_inches(fig_w, fig_h)
-    y_hist = fig_h - top - h_hist
-    ax_hist.set_position([(x_off + left + w_img + mid) / fig_w, y_hist / fig_h,
-                          hist_width / fig_w, h_hist / fig_h])
-    ax_img.set_position([(x_off + left) / fig_w, (y_hist + img_dy) / fig_h, w_img / fig_w, h_img / fig_h])
+    y_img = fig_h - top - h_img
+    y_hist = y_img - gap_ih - h_hist
+    ax_img.set_position([(x0 + dx_img) / fig_w, y_img / fig_h, w_img / fig_w, h_img / fig_h])
+    ax_hist.set_position([(x0 + dx_hist) / fig_w, y_hist / fig_h, w_hist / fig_w, h_hist / fig_h])
     ax_info.set_position([pad / fig_w, pad / fig_h, info_w_pt / 72 / fig_w, info_h / fig_h])
 
     axes = {"Image": ax_img, "Histogram": ax_hist, "Info": ax_info}
-    return {"fig": fig, "axes": axes, "info": info}
+    return {"fig": fig, "axes": axes, "info": info,
+            "info_html": _info_html(rows, channels, shown_channel)}
 
 
 def hist_imshow(*args, **kwargs):
