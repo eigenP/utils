@@ -4,6 +4,7 @@
 #     "anywidget",
 #     "traitlets",
 #     "numpy",
+#     "matplotlib",  # colour names -> hex
 #     "tifffile",  # only for LabelAnnotator.save
 # ]
 # ///
@@ -57,6 +58,19 @@ def _class_palette(n: int) -> list[str]:
         r, g, b = colorsys.hsv_to_rgb((0.11 + i * 0.618034) % 1.0, 0.75, 1.0)
         out.append("#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255)))
     return out
+
+
+def _color_hex(c) -> str:
+    """Hex colour for the browser from a colour or colormap name ('gray' -> its end colour, white)."""
+    import matplotlib
+    import matplotlib.colors as mcolors
+
+    if isinstance(c, str):
+        try:
+            return mcolors.to_hex(matplotlib.colormaps[c](1.0)[:3])
+        except (KeyError, ValueError):
+            pass
+    return mcolors.to_hex(c)
 
 
 def _rgb_hex(rgb) -> str:
@@ -143,7 +157,9 @@ class LabelAnnotator(anywidget.AnyWidget):
     ----------
     image : array-like or xarray.DataArray
         2D/3D/4D image. Axes given by ``axes`` (subset of ``"CZYX"`` in any
-        order) or by DataArray dims (other dims must have size 1).
+        order) or by DataArray dims (other dims must have size 1). For a
+        DataArray, channel names default to the ``C`` coordinate and colours to
+        a ``color`` coordinate along ``C`` (``image_io.set_channel_info``).
     axes : str, optional
         Axis letters of ``image`` (e.g. ``"CYX"``, ``"ZYX"``, ``"CZYX"``);
         required for ndarrays with ndim > 2.
@@ -157,6 +173,8 @@ class LabelAnnotator(anywidget.AnyWidget):
     classes : list of str, optional
         Class names for semantic mode.
     channel_names, channel_colors : list of str, optional
+        Colours may be any matplotlib colour or colormap name (a colormap such
+        as ``"gray"`` maps to its end colour).
     percentiles : (float, float)
         Display scaling to 8 bit, per channel over the whole volume.
 
@@ -217,6 +235,14 @@ class LabelAnnotator(anywidget.AnyWidget):
     ):
         if mode not in ("instance", "semantic"):
             raise ValueError("mode must be 'instance' or 'semantic'")
+        if getattr(image, "dims", None) is not None and "C" in image.dims:
+            # channel names / colours from the DataArray (image_io.set_channel_info)
+            if channel_names is None and "C" in image.coords:
+                channel_names = [str(v) for v in image.coords["C"].values]
+            if channel_colors is None and "color" in image.coords and image.coords["color"].dims == ("C",):
+                cols = list(image.coords["color"].values)
+                if all(isinstance(v, str) and v for v in cols):
+                    channel_colors = cols
         czyx, input_axes = _to_czyx(image, axes)
         self._image = czyx
         self._spatial_axes = "".join(a for a in input_axes if a in "ZYX")
@@ -235,7 +261,7 @@ class LabelAnnotator(anywidget.AnyWidget):
             self._labels = lab.astype(np.uint32, copy=True)
 
         names = list(channel_names) if channel_names else [f"ch{i}" for i in range(c)]
-        colors = list(channel_colors) if channel_colors else (["#ffffff"] if c == 1 else _DEFAULT_CHANNEL_COLORS[:c])
+        colors = [_color_hex(v) for v in channel_colors] if channel_colors else (["#ffffff"] if c == 1 else _DEFAULT_CHANNEL_COLORS[:c])
         if len(names) != c or len(colors) != c:
             raise ValueError(f"need {c} channel names/colors")
         classes = list(classes) if classes else (["foreground"] if mode == "semantic" else [])

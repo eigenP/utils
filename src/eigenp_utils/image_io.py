@@ -104,6 +104,97 @@ def get_stczyx_pixel_sizes(da: xr.DataArray) -> dict:
     return out
 
 
+def set_channel_info(da: xr.DataArray, info: dict, strict: bool = True) -> xr.DataArray:
+    """Attach per-channel metadata (colour, role, ...) as coordinates along ``C``.
+
+    Channel names stay the ``C`` coordinate (e.g. read from the file by
+    ``nd2``); everything else about a channel becomes an *auxiliary
+    coordinate* on the ``C`` dimension, so it follows selection, reordering and
+    slicing automatically (``da.sel(C=["DAPI", "SOX2"]).color``) instead of
+    living in parallel lists or dicts that can fall out of sync.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Image with a ``C`` dimension whose coordinate holds channel names.
+    info : dict
+        ``{channel_name: {field: value, ...}}``, e.g.
+        ``{"DAPI": {"color": "gray", "role": "dna"}}``. Fields missing for a
+        channel are ``""`` when the field's given values are all strings,
+        else ``NaN``.
+    strict : bool
+        Raise if ``info`` names a channel that is not in ``da.C`` (catches typos
+        and channel-order assumptions); channels without an entry only warn.
+
+    Returns
+    -------
+    xr.DataArray
+        A new DataArray with one coordinate per field along ``C``.
+
+    Examples
+    --------
+    >>> da = set_channel_info(da, {"DAPI": {"color": "gray", "role": "dna"},
+    ...                            "TBXT": {"color": "yellow", "role": "marker"}})
+    >>> channels_where(da, role="dna")
+    ['DAPI']
+    """
+    if "C" not in da.dims:
+        raise ValueError("DataArray has no 'C' dimension")
+    names = [str(c) for c in da.coords["C"].values] if "C" in da.coords else [str(i) for i in range(da.sizes["C"])]
+    unknown = [k for k in info if str(k) not in names]
+    if unknown and strict:
+        raise KeyError(f"channels {unknown} are not in the image; available: {names}")
+    missing = [n for n in names if n not in {str(k) for k in info}]
+    if missing:
+        warnings.warn(f"no channel info for {missing}", stacklevel=2)
+    fields = []
+    for v in info.values():
+        for f in v:
+            if f not in fields:
+                fields.append(f)
+    for f in fields:
+        if f in da.dims or f in ("C", "S", "T", "Z", "Y", "X"):
+            raise ValueError(f"field name {f!r} clashes with a dimension name")
+    by_name = {str(k): v for k, v in info.items()}
+    coords = {}
+    for f in fields:
+        given = [v[f] for v in by_name.values() if f in v]
+        # xarray turns None into NaN in object coordinates; use "" for string fields
+        fill = "" if given and all(isinstance(g, str) for g in given) else np.nan
+        vals = [by_name.get(n, {}).get(f, fill) for n in names]
+        coords[f] = ("C", np.array(vals, dtype=object))
+    return da.assign_coords(coords)
+
+
+def channels_where(da: xr.DataArray, **criteria) -> list:
+    """Channel names (in ``C`` order) whose auxiliary coordinates match ``criteria``.
+
+    Each criterion is ``field=value`` (equality), ``field=[v1, v2]`` (any of)
+    or ``field=callable`` (predicate on the value). Use the result with
+    ``da.sel(C=...)``.
+
+    >>> channels_where(da, role=["mito", "perox"])
+    ['TOMM20', 'PMP70']
+    """
+    if "C" not in da.dims:
+        raise ValueError("DataArray has no 'C' dimension")
+    names = [str(c) for c in da.coords["C"].values] if "C" in da.coords else [str(i) for i in range(da.sizes["C"])]
+    keep = [True] * len(names)
+    for field, want in criteria.items():
+        if field not in da.coords or da.coords[field].dims != ("C",):
+            raise KeyError(f"no channel coordinate {field!r}; set it with set_channel_info")
+        vals = list(da.coords[field].values)
+        for i, v in enumerate(vals):
+            if callable(want):
+                ok = bool(want(v))
+            elif isinstance(want, (list, tuple, set, frozenset)):
+                ok = v in want
+            else:
+                ok = v == want
+            keep[i] = keep[i] and ok
+    return [n for n, k in zip(names, keep) if k]
+
+
 def _normalize_stage_positions(stage_positions, n_series: int) -> dict:
     """{'stage_z', 'stage_y', 'stage_x'} -> float arrays of length n_series from a dict or an (S, 2|3) array."""
     if isinstance(stage_positions, dict):

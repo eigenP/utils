@@ -3508,6 +3508,48 @@ class TNIAScatterWidget(TNIAWidgetBase):
             return fig
 
 
+def _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes):
+    """Unpack an xarray.DataArray (e.g. STCZYX from ``image_io``) for the ortho viewers.
+
+    Dims other than C, Z, Y, X must have size 1 (select first, e.g.
+    ``da.isel(S=0, T=0)``). Channel labels default to the ``C`` coordinate,
+    colours to a ``color`` coordinate along ``C`` (``image_io.set_channel_info``),
+    and pixel sizes to the calibrated coordinates (``get_stczyx_pixel_sizes``).
+    Explicit arguments always win. Non-xarray inputs are returned unchanged.
+    """
+    if not (hasattr(im, "dims") and hasattr(im, "isel") and hasattr(im, "coords")):
+        return im, colormap, channel_labels, pixel_sizes
+    da = im
+    for d in list(da.dims):
+        if d not in ("C", "Z", "Y", "X"):
+            if da.sizes[d] != 1:
+                raise ValueError(
+                    f"dimension {d!r} has size {da.sizes[d]}; select one index first, e.g. da.isel({d}=0)"
+                )
+            da = da.isel({d: 0})
+    if not {"Y", "X"} <= set(da.dims):
+        raise ValueError(f"DataArray needs Y and X dimensions, got {tuple(da.dims)}")
+    if pixel_sizes is None:
+        from .image_io import get_stczyx_pixel_sizes
+        ps = get_stczyx_pixel_sizes(da)
+        if any(ps.get(a) is not None for a in ("Z", "Y", "X")):
+            pixel_sizes = {a: ps[a] for a in ("Z", "Y", "X") if ps.get(a) is not None}
+            if ps.get("unit"):
+                pixel_sizes["unit"] = ps["unit"]
+    spatial = [d for d in ("Z", "Y", "X") if d in da.dims]
+    if "C" not in da.dims:
+        return np.asarray(da.transpose(*spatial).values), colormap, channel_labels, pixel_sizes
+    da = da.transpose("C", *spatial)
+    if channel_labels is None and "C" in da.coords:
+        channel_labels = [str(c) for c in da.coords["C"].values]
+    if colormap is None and "color" in da.coords and da.coords["color"].dims == ("C",):
+        cols = list(da.coords["color"].values)
+        if all(isinstance(c, str) and c for c in cols):
+            colormap = cols
+    channels = [np.asarray(da.isel(C=i).values) for i in range(da.sizes["C"])]
+    return channels, colormap, channel_labels, pixel_sizes
+
+
 def show_zyx_max_slice_interactive(
     im,
     pixel_sizes=None, sxy=None, sz=None,
@@ -3528,6 +3570,13 @@ def show_zyx_max_slice_interactive(
 
     Parameters
     ----------
+    im : ndarray, list of ndarrays, or xarray.DataArray
+        ZYX (or YX) array, a list of them (one per channel), or a DataArray
+        with C/Z/Y/X dims (e.g. STCZYX from ``image_io``; other dims must have
+        size 1). For a DataArray, ``channel_labels`` default to the ``C``
+        coordinate, ``colormap`` to a ``color`` coordinate along ``C`` (see
+        ``image_io.set_channel_info``) and ``pixel_sizes`` to the calibrated
+        coordinates; explicit arguments win.
     blending : str, optional
         Channel compositing: 'additive', 'maximum', 'screen' or 'minimum'
         (white background with white->colour or inverted colormaps). None
@@ -3566,6 +3615,8 @@ def show_zyx_max_slice_interactive(
           and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
           underneath the channel controls, overlaid with a curve reflecting the current `vmin`, `vmax`, and `gamma` settings.
     """
+    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
+
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
@@ -3670,6 +3721,13 @@ def show_zyx_max_slice_interactive_point_annotator(
 
     Parameters
     ----------
+    im : ndarray, list of ndarrays, or xarray.DataArray
+        ZYX (or YX) array, a list of them (one per channel), or a DataArray
+        with C/Z/Y/X dims (e.g. STCZYX from ``image_io``; other dims must have
+        size 1). For a DataArray, ``channel_labels`` default to the ``C``
+        coordinate, ``colormap`` to a ``color`` coordinate along ``C`` (see
+        ``image_io.set_channel_info``) and ``pixel_sizes`` to the calibrated
+        coordinates; explicit arguments win.
     blending : str, optional
         Channel compositing: 'additive', 'maximum', 'screen' or 'minimum'
         (white background with white->colour or inverted colormaps). None
@@ -3699,6 +3757,8 @@ def show_zyx_max_slice_interactive_point_annotator(
         Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
         For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
     """
+    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
+
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
         if colormap is None:
