@@ -54,8 +54,7 @@ def _bits(a):
 # Networks
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("k", [3, 5])
-def test_networks_sort_columns_and_select_median(k):
+def test_networks_sort_columns_and_select_median():
     """The column and window comparator networks are correct (0-1 principle).
 
     A comparator network commutes with monotone maps, so it sorts (selects)
@@ -64,7 +63,9 @@ def test_networks_sort_columns_and_select_median(k):
     0-1 inputs whose k columns are each sorted ((k + 1) ** k cases).
     Expected: the column network sorts all 2 ** k binary vectors; the window
     network leaves the median (k * k // 2-th smallest) on its output wire.
+    Only the 3 x 3 networks (the default) are tested.
     """
+    k = 3
     colsort, window, out_wire = mf._NETWORKS[k]
 
     vecs = np.array(list(itertools.product([False, True], repeat=k)))
@@ -95,18 +96,17 @@ def test_matches_scipy_reflect(backend, dtype):
     Strategy: odd shapes, 1-pixel-wide rows/columns, images smaller than the
     window (reflection past the far edge), 3D and 4D stacks (scipy size 1 on
     leading axes), each with full-range values and with 4 levels (ties), for
-    k = 3, 5 (networks) and 7 (selection fallback), plus k = 1 (identity).
+    the default 3 x 3 window.
     Expected: identical arrays, input dtype kept.
     """
     rng = np.random.default_rng(0)
     for shape in SHAPES:
         for levels in (None, 4):
             a = _random(shape, dtype, rng, levels)
-            for k in (1, 3, 5, 7):
-                out = median_filter_fast(a, k, backend=backend)
-                assert out.dtype == a.dtype and out.shape == a.shape
-                np.testing.assert_array_equal(
-                    out, _scipy(a, k), err_msg=f"{shape} k={k} levels={levels}")
+            out = median_filter_fast(a, backend=backend)
+            assert out.dtype == a.dtype and out.shape == a.shape
+            np.testing.assert_array_equal(
+                out, _scipy(a, 3), err_msg=f"{shape} levels={levels}")
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -120,16 +120,14 @@ def test_constant_and_extreme_values(backend):
         info = np.iinfo(dtype) if np.dtype(dtype).kind in "ui" else np.finfo(dtype)
         for v in (info.min, info.max, 0):
             a = np.full((5, 6), v, dtype)
-            for k in (3, 5):
-                np.testing.assert_array_equal(median_filter_fast(a, k, backend=backend), a)
+            np.testing.assert_array_equal(median_filter_fast(a, backend=backend), a)
     rng = np.random.default_rng(1)
     for dtype in (np.float32, np.float64):
         fi = np.finfo(dtype)
         a = rng.choice(np.array([-np.inf, np.inf, fi.min, fi.max, 0, 1, -1], dtype),
                        (23, 19))
-        for k in (3, 5, 7):
-            np.testing.assert_array_equal(median_filter_fast(a, k, backend=backend),
-                                          _scipy(a, k))
+        np.testing.assert_array_equal(median_filter_fast(a, backend=backend),
+                                      _scipy(a, 3))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -139,7 +137,7 @@ def test_slices_are_independent_and_axes_select_the_plane(backend):
     Strategy: a CZYX stack where one slice is replaced by a spike image; the
     result must equal per-slice 2D calls (so nothing leaks across Z or C).
     Filtering axes (0, 2) of a ZYX volume must equal moving those axes last,
-    filtering and moving back, and equal scipy with size (k, 1, k).
+    filtering and moving back, and equal scipy with size (3, 1, 3).
     Non-contiguous and big-endian inputs give the same result.
     """
     rng = np.random.default_rng(2)
@@ -152,9 +150,9 @@ def test_slices_are_independent_and_axes_select_the_plane(backend):
     assert out[1, 2].max() == 0  # an isolated spike is removed
 
     vol = _random((9, 6, 11), np.uint16, rng)
-    a = median_filter_fast(vol, 5, axes=(0, 2), backend=backend)
-    np.testing.assert_array_equal(a, _scipy(vol, 5, axes=(0, 2)))
-    np.testing.assert_array_equal(a, median_filter_fast(vol, 5, axes=(2, 0), backend=backend))
+    a = median_filter_fast(vol, axes=(0, 2), backend=backend)
+    np.testing.assert_array_equal(a, _scipy(vol, 3, axes=(0, 2)))
+    np.testing.assert_array_equal(a, median_filter_fast(vol, axes=(2, 0), backend=backend))
 
     strided = vol[:, ::2, ::-1]
     np.testing.assert_array_equal(median_filter_fast(strided, 3, backend=backend),
@@ -183,30 +181,27 @@ def _nan_oracle(a, k):
 def test_nan_propagates_to_every_window_containing_it(backend, dtype):
     """NaN policy: any NaN in the (reflected) k x k window gives NaN.
 
-    Strategy: (1) an interior NaN in a finite image must turn exactly the
-    k x k block around it into NaN and leave every other pixel equal to the
+    Strategy (3 x 3): (1) an interior NaN in a finite image must turn exactly
+    the 3 x 3 block around it into NaN and leave every other pixel equal to the
     NaN-free filter; (2) random NaNs (incl. on borders) in a stack match
     np.median over the same reflected windows (np.median propagates NaN).
     """
     rng = np.random.default_rng(3)
     a = _random((15, 16), dtype, rng)
-    for k in (3, 5, 7):
-        p = k // 2
-        b = a.copy()
-        b[7, 6] = np.nan
-        out = median_filter_fast(b, k, backend=backend)
-        expected_nan = np.zeros(a.shape, bool)
-        expected_nan[7 - p:7 + p + 1, 6 - p:6 + p + 1] = True
-        np.testing.assert_array_equal(np.isnan(out), expected_nan)
-        clean = median_filter_fast(a, k, backend=backend)
-        np.testing.assert_array_equal(out[~expected_nan], clean[~expected_nan])
+    b = a.copy()
+    b[7, 6] = np.nan
+    out = median_filter_fast(b, backend=backend)
+    expected_nan = np.zeros(a.shape, bool)
+    expected_nan[6:9, 5:8] = True
+    np.testing.assert_array_equal(np.isnan(out), expected_nan)
+    clean = median_filter_fast(a, backend=backend)
+    np.testing.assert_array_equal(out[~expected_nan], clean[~expected_nan])
 
     stack = _random((2, 12, 13), dtype, rng)
     stack[rng.random(stack.shape) < 0.03] = np.nan
     stack[0, 0, 0] = stack[1, -1, 5] = np.nan  # corner / border
-    for k in (3, 5, 7):
-        np.testing.assert_array_equal(median_filter_fast(stack, k, backend=backend),
-                                      _nan_oracle(stack, k))
+    np.testing.assert_array_equal(median_filter_fast(stack, backend=backend),
+                                  _nan_oracle(stack, 3))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -221,9 +216,7 @@ def test_zero_median_is_positive_zero(backend):
         mixed = neg.copy()
         mixed[::2] = 0.0
         for a in (neg, mixed):
-            for k in (3, 5, 7):
-                out = median_filter_fast(a, k, backend=backend)
-                assert not np.signbit(out).any()
+            assert not np.signbit(median_filter_fast(a, backend=backend)).any()
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +227,7 @@ def test_numba_bit_identical_to_numpy():
     """The numba and NumPy backends return bit-identical arrays.
 
     Both compute exact order statistics with the same NaN and signed-zero
-    rules. Strategy: all supported dtypes, k = 3, 5, 7, data with ties, and
+    rules. Strategy: all supported dtypes, 3 x 3, data with ties, and
     for floats NaN, +-inf and +-0.0; compare raw bits. Expected: identical.
     """
     pytest.importorskip("numba")
@@ -245,10 +238,9 @@ def test_numba_bit_identical_to_numpy():
             special = np.array([np.nan, np.inf, -np.inf, 0.0, -0.0], dtype)
             mask = rng.random(a.shape) < 0.1
             a[mask] = rng.choice(special, mask.sum())
-        for k in (3, 5, 7):
-            x = median_filter_fast(a, k, backend="numba")
-            y = median_filter_fast(a, k, backend="numpy")
-            np.testing.assert_array_equal(_bits(x), _bits(y), err_msg=f"{dtype} k={k}")
+        x = median_filter_fast(a, backend="numba")
+        y = median_filter_fast(a, backend="numpy")
+        np.testing.assert_array_equal(_bits(x), _bits(y), err_msg=str(dtype))
 
 
 def test_auto_falls_back_to_numpy_without_numba(monkeypatch):
@@ -301,22 +293,20 @@ def test_imports_and_runs_without_skimage_or_numba():
 
 
 # ---------------------------------------------------------------------------
-# OpenCV border convention (documentation check; OpenCV is not a dependency)
+# OpenCV agreement (documentation check; OpenCV is not a dependency)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("dtype", [np.uint8, np.uint16, np.float32])
-def test_opencv_agrees_for_3x3_and_in_the_interior_for_5x5(dtype):
-    """cv2.medianBlur uses BORDER_REPLICATE; scipy 'reflect' is half-sample symmetric.
+def test_opencv_agrees_for_3x3(dtype):
+    """cv2.medianBlur (BORDER_REPLICATE) equals scipy 'reflect' for 3 x 3.
 
-    For k = 3 the one-pixel extension is the same (a | a b c), so the outputs
-    are identical. For k = 5 they agree away from the borders; only the
-    outer k // 2 rows/columns may differ. Expected exactly that.
+    Half-sample symmetric reflection extends by one pixel exactly as
+    replication does (a | a b c), so the 3 x 3 outputs are identical,
+    borders included. (For k >= 5 the outer rows/columns can differ.)
     """
     cv2 = pytest.importorskip("cv2")
     a = _random((40, 37), dtype, np.random.default_rng(6))
-    np.testing.assert_array_equal(median_filter_fast(a, 3), cv2.medianBlur(a, 3))
-    ours, theirs = median_filter_fast(a, 5), cv2.medianBlur(a, 5)
-    np.testing.assert_array_equal(ours[2:-2, 2:-2], theirs[2:-2, 2:-2])
+    np.testing.assert_array_equal(median_filter_fast(a), cv2.medianBlur(a, 3))
 
 
 # ---------------------------------------------------------------------------
