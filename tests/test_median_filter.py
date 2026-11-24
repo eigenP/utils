@@ -5,10 +5,9 @@ exact median, for finite data; for NaN, np.median over the same reflected
 windows (np.median propagates NaN). The comparator networks are checked
 exhaustively with the 0-1 principle.
 """
+import importlib
 import itertools
-import subprocess
 import sys
-import textwrap
 
 import numpy as np
 import pytest
@@ -256,40 +255,50 @@ def test_auto_falls_back_to_numpy_without_numba(monkeypatch):
         median_filter_fast(a, backend="numba")
 
 
-def test_imports_and_runs_without_skimage_or_numba():
-    """The module needs only numpy (scipy not needed at run time either).
+def _import_fresh_with_blocked(monkeypatch, module, blocked, forget=()):
+    """Re-import `module` while every import of the `blocked` packages fails.
 
-    Strategy: in a subprocess, block scikit-image and numba (any import of
-    them raises ImportError), import the module, filter with 'auto'.
-    Expected: runs on the NumPy backend, gives the expected 3 x 3 median of
-    a hand-checkable image, and never imports skimage.
+    Done in-process (Pyodide cannot start subprocesses): blocked packages and
+    their already-imported submodules map to None in sys.modules, so any
+    `import` of them raises ImportError. `module` and the `forget` modules
+    (lazily imported helpers) are dropped from sys.modules and their parent
+    package so they are imported again. monkeypatch restores everything.
     """
-    code = textwrap.dedent(
-        """
-        import sys
-        sys.modules["skimage"] = None
-        sys.modules["numba"] = None
-        import numpy as np
-        from eigenp_utils.median_filter import median_filter_fast
+    for name in list(sys.modules):
+        if name.split(".")[0] in blocked:
+            monkeypatch.setitem(sys.modules, name, None)
+    for name in blocked:
+        monkeypatch.setitem(sys.modules, name, None)
+    for name in (module, *forget):
+        parent, _, child = name.rpartition(".")
+        monkeypatch.delitem(sys.modules, name, raising=False)
+        monkeypatch.delattr(sys.modules[parent], child, raising=False)
+    return importlib.import_module(module)
 
-        img = np.zeros((6, 6), np.uint16)
-        img[4, 4] = 1000           # isolated spike -> removed
-        img[0:3, 0:3] = 7          # 3 x 3 corner block: 9/9 sevens at (0, 0) and
-        out = median_filter_fast(img)  # (1, 1), only 4/9 at its corner (2, 2)
-        assert out.dtype == np.uint16 and out[4, 4] == 0
-        assert out[0, 0] == 7 and out[1, 1] == 7 and out[2, 2] == 0
-        try:
-            median_filter_fast(img, backend="numba")
-            raise SystemExit("numba backend should be unavailable")
-        except ImportError:
-            pass
-        assert "skimage" not in [m.split(".")[0] for m in sys.modules if sys.modules[m]]
-        print("ok")
-        """
-    )
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.strip().splitlines()[-1] == "ok"
+
+def test_imports_and_runs_without_skimage_or_numba(monkeypatch):
+    """The module needs only numpy (no scikit-image, no numba).
+
+    Strategy: block scikit-image and numba (any import of them raises
+    ImportError), import the module afresh, filter with 'auto'. Runs in
+    Pyodide too, where numba genuinely does not exist.
+    Expected: the import succeeds, 'auto' runs on the NumPy backend and gives
+    the 3 x 3 median of a hand-checkable image, backend='numba' raises
+    ImportError.
+    """
+    fresh = _import_fresh_with_blocked(
+        monkeypatch, "eigenp_utils.median_filter", ("skimage", "numba"),
+        forget=("eigenp_utils._median_numba",))
+    assert fresh._numba_kernels() is None
+
+    img = np.zeros((6, 6), np.uint16)
+    img[4, 4] = 1000           # isolated spike -> removed
+    img[0:3, 0:3] = 7          # 3 x 3 corner block: 9/9 sevens at (0, 0) and
+    out = fresh.median_filter_fast(img)  # (1, 1), only 4/9 at its corner (2, 2)
+    assert out.dtype == np.uint16 and out[4, 4] == 0
+    assert out[0, 0] == 7 and out[1, 1] == 7 and out[2, 2] == 0
+    with pytest.raises(ImportError, match="numba"):
+        fresh.median_filter_fast(img, backend="numba")
 
 
 # ---------------------------------------------------------------------------
