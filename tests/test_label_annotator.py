@@ -689,3 +689,80 @@ def test_frontend_maps_alt_arrows_and_track_tools():
     assert 'stepZ(k === "ArrowRight" ? 1 : -1)' in js and "ev.preventDefault()" in js
     for name in ('"merge"', '"split"', '"show_adjacent"', '"auto_increment", !keepCb.checked', '"track_request"'):
         assert name in js
+
+
+def test_track_undo_keeps_voxels_edited_since_the_operation():
+    """Undo of a merge restores only voxels that still hold the merged id.
+
+    Strategy: merge 5 -> 3, then (as the browser would after a z change has
+    dropped its slice undo history) erase part of the merged mask on z=4 and
+    paint another part with a new id 9; then undo the merge.
+    Expected outcome: untouched former id-5 voxels are 5 again, the erased
+    voxels stay 0 and the repainted voxels stay 9 (the later edits are not
+    silently reverted); ``status`` reports the skipped voxels.
+    """
+    w, lab = _two_tracks()
+    assert w.merge_ids(5, 3)
+    edit = w.labels[4].astype(np.uint16)
+    ys, xs = np.nonzero(lab[4] == 5)
+    edit[ys[0], xs[0]] = 0
+    edit[ys[1], xs[1]] = 9
+    w.labels_from_js = encode_label_slice(edit, 4)
+    assert w.undo_track_op()
+    out = w.labels
+    assert out[4, ys[0], xs[0]] == 0 and out[4, ys[1], xs[1]] == 9
+    expected = lab.copy()
+    expected[4, ys[0], xs[0]] = 0
+    expected[4, ys[1], xs[1]] = 9
+    np.testing.assert_array_equal(out, expected)
+    assert "2 voxels edited since" in w.status
+
+
+def test_labels_rev_forces_reload_when_bytes_repeat():
+    """Volume edits bump ``labels_rev`` even when ``labels_to_js`` bytes do not change.
+
+    Strategy: the browser relabels mask 3 on z=1 as 6 with the fill tool
+    (``labels_from_js``; Python does not echo it, so ``labels_to_js`` still
+    holds the pre-fill slice), then ``merge_ids(6, 3)`` restores exactly that
+    slice.
+    Expected outcome: ``labels_to_js`` is byte-identical to before (hosts would
+    not deliver it), but ``labels_rev`` increments, which makes the browser
+    reload the slice instead of keeping (and later sending back) its stale ids.
+    ``set_labels`` bumps it too.
+    """
+    w, lab = _two_tracks()
+    w.z = 1
+    before = bytes(w.labels_to_js)
+    rev = w.labels_rev
+    edit = lab[1].astype(np.uint16)
+    edit[edit == 3] = 6
+    w.labels_from_js = encode_label_slice(edit, 1)
+    assert w.labels_rev == rev, "browser edits are not echoed"
+    assert w.merge_ids(6, 3)
+    assert bytes(w.labels_to_js) == before
+    assert w.labels_rev == rev + 1
+    w.set_labels(w.labels)
+    assert w.labels_rev == rev + 2
+
+
+def test_active_label_respects_wire_limit():
+    """Ids above 65535 cannot become active (uint16 painting would wrap 65536 -> 0, 65537 -> 1).
+
+    Strategy: set ``active_label`` to 65536; fill a volume up to id 65535 and
+    ask for a new id.
+    Expected outcome: 65536 raises ``TraitError`` and the active id is
+    unchanged; with id 65535 present, the next free id is the smallest unused
+    one instead of 65536.
+    """
+    import traitlets
+
+    lab = np.zeros((1, 4, 4), np.uint32)
+    lab[0, 0, 0] = 1
+    lab[0, 0, 1] = 65535
+    w = LabelAnnotator(np.zeros((4, 4), np.float32), labels=lab[0])
+    assert w.active_label == 2  # max + 1 would be 65536
+    with pytest.raises(traitlets.TraitError):
+        w.active_label = 65536
+    assert w.active_label == 2
+    w.new_label_trigger += 1
+    assert w.active_label == 2

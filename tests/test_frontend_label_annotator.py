@@ -318,3 +318,87 @@ def test_adjacent_outlines_drawn_only_on_mask_edges(page, serve):
     assert (a[edge] > 0).sum() >= edge.sum() // 2 - 1, "dotted outline covers about half the edge pixels"
     page.locator("input.lbl-show_adjacent").uncheck()
     assert _get(page, "show_adjacent") is False
+
+
+def test_modified_letter_keys_do_not_switch_tools(page, serve):
+    """ctrl+s / ctrl+f / ctrl+p (host shortcuts) must not arm split / fill / picker; plain keys still do."""
+    w, _ = _widget3d()
+    _open(page, serve(w))
+    page.locator(".lbl-viewport").focus()
+    for key in ("Control+s", "Control+f", "Control+p", "Meta+m", "Control+n"):
+        page.keyboard.press(key)
+        assert _get(page, "tool") == "brush", key
+    assert _get(page, "new_label_trigger") == 0
+    page.keyboard.press("s")
+    assert _get(page, "tool") == "split"
+
+
+def test_evicted_track_marker_is_not_readded_above_later_strokes(page, serve):
+    """A track-op marker pushed off the bounded undo stack must not come back on top.
+
+    Strategy: Python reports track op 1; then more single-pixel strokes than
+    the undo stack holds evict its marker; then Python reports op 2. Press
+    ctrl+z twice.
+    Expected outcome: the first undo asks Python to undo op 2; the second undoes
+    the newest stroke (a slice undo), not op 1 (which predates every stroke).
+    """
+    w, _ = _widget3d()
+    w.auto_fill = False
+    w.auto_increment = False
+    _open(page, serve(w))
+    page.evaluate("window.mockModel.set('track_undo_ids', [1])")
+    for i in range(32):  # UNDO_MAX = 30
+        _stroke(page, [(i + 2, 2), (i + 2, 2)])
+    page.evaluate("window.mockModel.set('track_undo_ids', [1, 2])")
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("Control+z")
+    req = _get(page, "track_request")
+    assert req["op"] == "undo" and req["serial"] == 2
+    page.evaluate("window.mockModel.set('track_undo_ids', [1])")  # Python undid op 2
+    page.keyboard.press("Control+z")
+    assert _get(page, "track_request")["n"] == req["n"], "second undo must not go to Python"
+    _, lab = _last_labels(page)
+    assert lab[2, 33] == 0 and lab[2, 32] != 0, "the newest stroke was undone"
+
+
+def test_track_request_counter_continues_from_model(page, serve):
+    """A (re-)rendered view numbers requests after the model's last one, so identical requests still change the trait."""
+    w, _ = _widget3d()
+    w.z = 0
+    w.active_label = 6
+    w.track_request = {"op": "noop", "n": 7}  # unknown op: ignored by Python
+    _open(page, serve(w))
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("m")
+    page.mouse.click(*_client_xy(page, 10, 10))
+    assert _get(page, "track_request")["n"] == 8
+
+
+def test_labels_rev_reloads_slice_with_unchanged_bytes(page, serve):
+    """A ``labels_rev`` change reloads ``labels_to_js`` even if its bytes did not change.
+
+    Strategy: paint a stroke (local only), then bump ``labels_rev`` without
+    changing ``labels_to_js`` (Python rewrote the slice to exactly what it last
+    sent), then paint a second stroke elsewhere.
+    Expected outcome: the second message holds the second stroke but not the
+    first (the browser reloaded Python's slice instead of keeping stale pixels).
+    """
+    w, _ = _widget3d()
+    w.auto_fill = False
+    _open(page, serve(w))
+    _stroke(page, [(2, 2), (8, 2)])
+    _, lab = _last_labels(page)
+    assert lab[2, 2:9].all()
+    page.evaluate("window.mockModel.set('labels_rev', 1)")
+    _stroke(page, [(2, 38), (8, 38)])
+    _, lab = _last_labels(page)
+    assert lab[38, 2:9].all() and not lab[2, 2:9].any()
+
+
+def test_label_input_is_clamped_to_uint16(page, serve):
+    """Typing an id above 65535 sets 65535 (uint16 painting would wrap larger ids)."""
+    w, _ = _widget3d()
+    _open(page, serve(w))
+    page.locator("input.lbl-label").fill("70000")
+    page.locator("input.lbl-label").dispatch_event("change")
+    assert _get(page, "active_label") == 65535

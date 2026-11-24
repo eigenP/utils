@@ -229,6 +229,10 @@ class LabelAnnotator(anywidget.AnyWidget):
     # labels of slices z-1 / z+1 for the onion-skin outlines (b"" = none)
     labels_prev_to_js = traitlets.Bytes(b"").tag(sync=True)
     labels_next_to_js = traitlets.Bytes(b"").tag(sync=True)
+    # bumped whenever Python rewrites labels the browser may have edited since
+    # the last labels_to_js (track ops, set_labels): the browser then reloads
+    # labels_to_js even if its bytes did not change (hosts drop equal values)
+    labels_rev = traitlets.Int(0).tag(sync=True)
     # edits (JS -> Python); Any because buffers may arrive as memoryview
     labels_from_js = traitlets.Any(None, allow_none=True).tag(sync=True)
 
@@ -313,7 +317,8 @@ class LabelAnnotator(anywidget.AnyWidget):
             raise ValueError(f"need {c} channel names/colors")
         classes = list(classes) if classes else (["foreground"] if mode == "semantic" else [])
         self._slice_ids: list[np.ndarray | None] = [None] * nz  # cached ids per slice (extent readout)
-        self._track_undo: list[tuple[int, np.ndarray, np.ndarray, str]] = []  # (serial, flat idx, old values, what)
+        # (serial, flat idx, old values, value written, what)
+        self._track_undo: list[tuple[int, np.ndarray, np.ndarray, int, str]] = []
         self._track_serial = 0
 
         super().__init__(**kwargs)
@@ -355,10 +360,18 @@ class LabelAnnotator(anywidget.AnyWidget):
             self._send_adjacent()
 
     def _send_labels(self):
-        """Re-send the current slice's labels and its neighbours (after a volume edit)."""
+        """Re-send the current slice's labels and its neighbours (after a volume edit).
+
+        ``labels_rev`` is bumped so the browser reloads the slice even when the
+        encoded bytes equal the previous ``labels_to_js`` (e.g. a merge that
+        restores what Python last sent, after browser strokes Python has
+        received but never echoed); otherwise the browser would keep showing,
+        and later send back, its stale slice.
+        """
         with self.hold_sync():
             self.labels_to_js = encode_label_slice(self._labels[self.z], self.z)
             self._send_adjacent()
+            self.labels_rev += 1
 
     def _send_adjacent(self):
         nz = self._labels.shape[0]
@@ -404,7 +417,22 @@ class LabelAnnotator(anywidget.AnyWidget):
         self.active_label = self._next_label()
 
     def _next_label(self) -> int:
-        return int(self._labels.max()) + 1 if self._labels.size else 1
+        """``max + 1``; once that exceeds the wire limit (65535), the smallest unused id."""
+        nxt = int(self._labels.max()) + 1 if self._labels.size else 1
+        if nxt <= _MAX_WIRE_LABEL:
+            return nxt
+        free = np.flatnonzero(np.bincount(self._labels.ravel(), minlength=_MAX_WIRE_LABEL + 1)[1:] == 0)
+        if free.size == 0:
+            raise ValueError(f"all ids 1..{_MAX_WIRE_LABEL} are in use")
+        return int(free[0]) + 1
+
+    @traitlets.validate("active_label")
+    def _valid_active_label(self, proposal):
+        v = int(proposal["value"])
+        if not 0 <= v <= _MAX_WIRE_LABEL:
+            # the browser paints uint16: a larger id would wrap (65536 -> 0, 65537 -> 1)
+            raise traitlets.TraitError(f"active_label must be in [0, {_MAX_WIRE_LABEL}], got {v}")
+        return v
 
     @traitlets.observe("active_label")
     def _on_active_label(self, change):
@@ -458,11 +486,11 @@ class LabelAnnotator(anywidget.AnyWidget):
                 self.status = "track undo out of sync; nothing undone"
                 self.track_undo_ids = [u[0] for u in self._track_undo]
 
-    def _apply_track_op(self, idx: np.ndarray, new_values, what: str) -> None:
-        """Write ``new_values`` at flat indices ``idx``, record the old values for undo, refresh."""
+    def _apply_track_op(self, idx: np.ndarray, new_values: int, what: str) -> None:
+        """Write the id ``new_values`` at flat indices ``idx``, record the old values for undo, refresh."""
         flat = self._labels.reshape(-1)
         self._track_serial += 1
-        self._track_undo.append((self._track_serial, idx, flat[idx].copy(), what))
+        self._track_undo.append((self._track_serial, idx, flat[idx].copy(), int(new_values), what))
         del self._track_undo[:-_TRACK_UNDO_MAX]
         flat[idx] = new_values
         self._after_volume_edit(idx)
@@ -561,16 +589,22 @@ class LabelAnnotator(anywidget.AnyWidget):
     def undo_track_op(self) -> bool:
         """Undo the most recent :meth:`merge_ids` / :meth:`split_id` (last few kept).
 
-        Restores the voxels the operation changed; returns False if there is
-        nothing to undo.
+        Restores the voxels the operation changed that still hold the id it
+        wrote; voxels edited since (e.g. erased or painted with another id on
+        a slice whose browser undo history was dropped on a z change) are left
+        alone and counted in ``status``. Returns False if there is nothing to
+        undo.
         """
         if not self._track_undo:
             self.status = "no track operation to undo"
             return False
-        _, idx, old, what = self._track_undo.pop()
-        self._labels.reshape(-1)[idx] = old
+        _, idx, old, written, what = self._track_undo.pop()
+        flat = self._labels.reshape(-1)
+        keep = flat[idx] == written
+        flat[idx[keep]] = old[keep]
         self._after_volume_edit(idx)
-        self.status = f"undone: {what}"
+        skipped = int(keep.size - keep.sum())
+        self.status = f"undone: {what}" + (f" ({skipped} voxels edited since were left as they are)" if skipped else "")
         return True
 
     # ------------------------------------------------------------------ API
@@ -591,7 +625,9 @@ class LabelAnnotator(anywidget.AnyWidget):
         self._slice_ids = [None] * self._labels.shape[0]
         self._track_undo.clear()
         self.track_undo_ids = []
-        self._send_slice()
+        with self.hold_sync():
+            self._send_slice()
+            self.labels_rev += 1  # reload even if the bytes equal the last labels_to_js
         if self.mode == "instance":
             self.active_label = self._next_label()
         self._update_extent()

@@ -9,6 +9,7 @@
 // to Python when the last operation was a track operation.
 
 const UNDO_MAX = 30;
+const MAX_LABEL = 65535; // labels travel as uint16: larger ids would wrap (65536 -> 0)
 const KEY_HELP = "keys: b/e/f/p brush/eraser/fill/picker, m/s merge/split track, n new id, [ ] radius, " +
   "ArrowUp/Down or Alt+ArrowRight/Left z+1/z-1, 0 fit, ctrl+z undo, space/right drag pan, wheel zoom, 1-9 class (semantic)";
 
@@ -80,6 +81,7 @@ function render({ model, el: root }) {
     lab: null, // {z,y,x,data}
     prev: null, next: null, // labels of slices z-1 / z+1 (onion skin) or null
     undo: [],
+    trackSeen: 0, // highest track-op serial already mirrored into undo
     zoom: 1, panX: 0, panY: 0,
     painting: false, panning: false, spaceDown: false,
     last: null, stroke: null, strokeStart: null,
@@ -120,8 +122,12 @@ function render({ model, el: root }) {
     toolBtns[t] = el("button", { class: "lbl-btn", "data-tool": t, text: t, title: toolTitles[t] || `${t} (${t[0]})`, onclick: () => { model.set("tool", t); model.save_changes(); } });
     toolbar.appendChild(toolBtns[t]);
   }
-  const labelInput = el("input", { type: "number", min: "0", class: "lbl-label", title: "active label" });
-  labelInput.addEventListener("change", () => { model.set("active_label", Math.max(0, parseInt(labelInput.value || "0"))); model.save_changes(); });
+  const labelInput = el("input", { type: "number", min: "0", max: String(MAX_LABEL), class: "lbl-label", title: "active label" });
+  labelInput.addEventListener("change", () => {
+    const v = Math.min(MAX_LABEL, Math.max(0, parseInt(labelInput.value || "0") || 0));
+    labelInput.value = String(v);
+    model.set("active_label", v); model.save_changes();
+  });
   const classSelect = el("select", { class: "lbl-class" });
   classSelect.addEventListener("change", () => { model.set("active_label", parseInt(classSelect.value)); model.save_changes(); });
   const newBtn = el("button", { class: "lbl-btn", text: "new", title: "new label id (n)", onclick: () => { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); } });
@@ -422,17 +428,26 @@ function render({ model, el: root }) {
   }
 
   function trackRequest(req) {
-    model.set("track_request", { ...req, n: (state.trackN = (state.trackN || 0) + 1) });
+    // n continues from the model's last request so a re-rendered view cannot
+    // repeat an identical dict (which the host would not deliver as a change)
+    const n = Math.max(state.trackN || 0, (model.get("track_request") || {}).n || 0) + 1;
+    state.trackN = n;
+    model.set("track_request", { ...req, n });
     model.save_changes();
   }
 
   function syncTrackUndo() {
-    // mirror Python's track-operation undo stack as markers in state.undo
+    // mirror Python's track-operation undo stack as markers in state.undo;
+    // only serials newer than any seen are appended (in order), so a marker
+    // that fell off the bounded undo stack is not re-added on top of later
+    // strokes (which would undo that old op before them)
     const ids = model.get("track_undo_ids") || [];
     const live = new Set(ids);
     state.undo = state.undo.filter((u) => u.track === undefined || live.has(u.track));
-    const have = new Set(state.undo.filter((u) => u.track !== undefined).map((u) => u.track));
-    for (const s of ids) if (!have.has(s)) state.undo.push({ track: s });
+    for (const s of ids) {
+      if (s > state.trackSeen) { state.undo.push({ track: s }); state.trackSeen = s; }
+    }
+    while (state.undo.length > UNDO_MAX) state.undo.shift();
   }
 
   function undo() {
@@ -558,14 +573,17 @@ function render({ model, el: root }) {
       stepZ(k === "ArrowRight" ? 1 : -1);
       return;
     }
+    // letter keys only without modifiers: ctrl+s / ctrl+f / ctrl+p belong to the
+    // host (saving the notebook must not silently arm the split tool)
+    const mod = ev.ctrlKey || ev.metaKey || ev.altKey;
     const map = { b: "brush", e: "eraser", f: "fill", p: "picker" };
     if (model.get("mode") !== "semantic") Object.assign(map, { m: "merge", s: "split" });
-    if (map[k]) { model.set("tool", map[k]); model.save_changes(); return; }
+    if (map[k]) { if (!mod) { model.set("tool", map[k]); model.save_changes(); } return; }
     if (k === "[" || k === "]") {
       const r = Math.max(0, (model.get("brush_radius") ?? 2) + (k === "]" ? 1 : -1));
       model.set("brush_radius", r); model.save_changes(); return;
     }
-    if (k === "n") { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); return; }
+    if (k === "n" && !mod) { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); return; }
     if (k === "0") { fit(); return; }
     if (/^[1-9]$/.test(k) && model.get("mode") === "semantic") {
       const id = parseInt(k);
@@ -639,7 +657,7 @@ function render({ model, el: root }) {
 
   const handlers = [
     ["change:image_to_js", onImage],
-    ["change:labels_to_js", onLabels],
+    ["change:labels_to_js change:labels_rev", onLabels],
     ["change:channel_visible change:channel_colors change:vmin change:vmax change:gamma", compose],
     ["change:labels_prev_to_js change:labels_next_to_js", onAdjacent],
     ["change:opacity change:outline_only change:class_colors change:instance_palette change:mode", () => { drawLabels(); drawAdjacent(); syncControls(); }],
