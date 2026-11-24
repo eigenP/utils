@@ -1058,3 +1058,13 @@ def test_frontend_has_background_and_delete_tools():
         "ev.shiftKey ? null : state.lab.z", '"counts_text"', 'model.get("tool") === "brush" && model.get("auto_fill")',
     ):
         assert needle in js, needle
+
+
+def test_display_defaults_and_outline_traits():
+    w = LabelAnnotator(np.zeros((8, 8), np.float32))
+    assert w.display == "filled" and w.outline_px == 2 and w.outline_border_px == 1
+    assert w.outline_only is False  # legacy trait unchanged
+    w.display = "outlined"
+    with pytest.raises(Exception):
+        w.display = "dotted"
+    assert LabelAnnotator(np.zeros((8, 8), np.float32), display="outlined", outline_px=3).outline_px == 3
