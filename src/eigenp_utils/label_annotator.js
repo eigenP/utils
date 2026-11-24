@@ -89,11 +89,12 @@ function render({ model, el: root }) {
     zoom: 1, panX: 0, panY: 0,
     painting: false, panning: false, spaceDown: false,
     last: null, stroke: null, strokeStart: null,
-    cursor: null,
+    cursor: null, userView: false,
   };
 
   // ---------------------------------------------------------------- layout
   root.classList.add("lbl-annot");
+  root.style.position = "relative";
   const toolbar = el("div", { class: "lbl-toolbar" });
   const chanPanel = el("div", { class: "lbl-channels" });
   const viewport = el("div", { class: "lbl-viewport", tabindex: "0" });
@@ -164,17 +165,32 @@ function render({ model, el: root }) {
   const undoBtn = el("button", { class: "lbl-btn", text: "undo", title: "undo (ctrl+z)", onclick: () => undo() });
   const clearBtn = el("button", { class: "lbl-btn", text: "clear slice", onclick: () => clearSlice() });
   const fitBtn = el("button", { class: "lbl-btn", text: "fit", title: "reset zoom (0)", onclick: () => fit() });
+  const chanBtn = el("button", { class: "lbl-btn lbl-active", text: "channels", title: "show / hide the channel controls", onclick: () => {
+    const hide = chanPanel.style.display !== "none";
+    chanPanel.style.display = hide ? "none" : "";
+    chanBtn.classList.toggle("lbl-active", !hide);
+    refit();
+  } });
   toolbar.append(
     el("span", { class: "lbl-sep" }), labelInput, classSelect, newBtn, keepLbl, extentSpan,
     el("span", { class: "lbl-sep" }), el("span", { text: "r" }), radius, el("span", { text: "α" }), opacity,
-    fillLbl, owLbl, olLbl, adjLbl, undoBtn, clearBtn, fitBtn,
+    fillLbl, owLbl, olLbl, adjLbl, undoBtn, clearBtn, fitBtn, chanBtn,
     el("span", { class: "lbl-help", text: "?", title: KEY_HELP }),
   );
 
   const zSlider = el("input", { type: "range", min: "0", max: "0", class: "lbl-z" });
   const zLabel = el("span", { class: "lbl-zlabel" });
   zSlider.addEventListener("input", () => { model.set("z", parseInt(zSlider.value)); model.save_changes(); });
-  zRow.append(el("span", { text: "z" }), zSlider, zLabel);
+  const zPrev = el("button", { class: "lbl-btn lbl-step", text: "‹", title: "previous slice (ArrowDown)", onclick: () => stepZ(-1) });
+  const zNext = el("button", { class: "lbl-btn lbl-step", text: "›", title: "next slice (ArrowUp)", onclick: () => stepZ(1) });
+  const zGroup = el("span", { class: "lbl-group" }, [el("span", { text: "z" }), zPrev, zSlider, zNext, zLabel]);
+  // stack selector (several 3D stacks, e.g. one per cage / field of view)
+  const stackSel = el("select", { class: "lbl-stack", title: "stack (PageUp / PageDown)" });
+  stackSel.addEventListener("change", () => { model.set("stack", parseInt(stackSel.value)); model.save_changes(); });
+  const sPrev = el("button", { class: "lbl-btn lbl-step", text: "‹", title: "previous stack (PageUp)", onclick: () => stepStack(-1) });
+  const sNext = el("button", { class: "lbl-btn lbl-step", text: "›", title: "next stack (PageDown)", onclick: () => stepStack(1) });
+  const stackGroup = el("span", { class: "lbl-group" }, [el("span", { text: "stack" }), sPrev, stackSel, sNext]);
+  zRow.append(stackGroup, zGroup);
 
   // ------------------------------------------------------------ channels UI
   function buildChannels() {
@@ -371,11 +387,19 @@ function render({ model, el: root }) {
   function fit() {
     if (!state.img) return;
     const w = viewport.clientWidth || 512;
-    state.zoom = Math.max(w / state.img.x, 0.05);
+    // available height: the window minus what sits above the viewport (toolbar,
+    // channels, z row; offsetTop is scroll independent) and the status lines below
+    const maxH = Math.max(320, Math.min(window.innerHeight * 0.96 - viewport.offsetTop - 44, 4000));
+    state.zoom = Math.max(Math.min(w / state.img.x, maxH / state.img.y), 0.05);
     viewport.style.height = `${Math.round(state.img.y * state.zoom)}px`;
-    state.panX = 0; state.panY = 0;
+    state.panX = (w - state.img.x * state.zoom) / 2; state.panY = 0;
+    state.userView = false;
     applyTransform();
   }
+  const refit = () => { if (!state.userView) fit(); };
+  window.addEventListener("resize", refit);
+  const ro = typeof ResizeObserver === "function" ? new ResizeObserver(refit) : null;
+  ro?.observe(viewport.parentElement || root);
 
   // ------------------------------------------------------------- painting
   function toPixel(ev) {
@@ -593,7 +617,7 @@ function render({ model, el: root }) {
   });
   viewport.addEventListener("pointermove", (ev) => {
     if (state.panning) {
-      state.panX += ev.clientX - state.last[0]; state.panY += ev.clientY - state.last[1];
+      state.userView = true; state.panX += ev.clientX - state.last[0]; state.panY += ev.clientY - state.last[1];
       state.last = [ev.clientX, ev.clientY];
       applyTransform();
       return;
@@ -632,7 +656,7 @@ function render({ model, el: root }) {
     const nz = Math.min(Math.max(state.zoom * f, 0.05), 64);
     state.panX = mx - (mx - state.panX) * (nz / state.zoom);
     state.panY = my - (my - state.panY) * (nz / state.zoom);
-    state.zoom = nz;
+    state.zoom = nz; state.userView = true;
     applyTransform();
   }, { passive: false });
   viewport.addEventListener("keydown", (ev) => {
@@ -664,11 +688,17 @@ function render({ model, el: root }) {
       if (id <= (model.get("class_names") || []).length) { model.set("active_label", id); model.save_changes(); }
       return;
     }
+    if (k === "PageUp" || k === "PageDown") { stepStack(k === "PageDown" ? 1 : -1); ev.preventDefault(); return; }
     if (k === "ArrowUp" || k === "ArrowDown") {
       stepZ(k === "ArrowUp" ? 1 : -1);
       ev.preventDefault();
     }
   });
+  function stepStack(d) {
+    const n = (model.get("stack_names") || []).length;
+    if (n < 2) return;
+    model.set("stack", (((model.get("stack") ?? 0) + d) % n + n) % n); model.save_changes();
+  }
   function stepZ(dz) {
     const nz = (model.get("z") ?? 0) + dz;
     model.set("z", Math.min(Math.max(nz, 0), (model.get("shape_zyx") || [1])[0] - 1)); model.save_changes();
@@ -706,7 +736,15 @@ function render({ model, el: root }) {
     zSlider.max = String(Math.max(0, shp[0] - 1));
     zSlider.value = String(model.get("z") ?? 0);
     zLabel.textContent = `${model.get("z") ?? 0} / ${Math.max(0, shp[0] - 1)}`;
-    zRow.style.display = shp[0] > 1 ? "" : "none";
+    zGroup.style.display = shp[0] > 1 ? "" : "none";
+    const sn = model.get("stack_names") || [];
+    stackGroup.style.display = sn.length > 1 ? "" : "none";
+    zRow.style.display = shp[0] > 1 || sn.length > 1 ? "" : "none";
+    if (stackSel.options.length !== sn.length) {
+      stackSel.innerHTML = "";
+      sn.forEach((n, i) => stackSel.appendChild(el("option", { value: String(i), text: `${i + 1}/${sn.length} ${n}` })));
+    }
+    stackSel.value = String(model.get("stack") ?? 0);
     adjLbl.style.display = shp[0] > 1 ? "" : "none";
     const st = model.get("status");
     if (st) setStatus(st);
@@ -740,7 +778,7 @@ function render({ model, el: root }) {
     ["change:opacity change:outline_only change:display change:outline_px change:outline_border_px change:class_colors change:instance_palette change:mode change:background", () => { drawLabels(); drawAdjacent(); syncControls(); }],
     ["change:show_adjacent", () => { drawAdjacent(); syncControls(); }],
     ["change:track_undo_ids", syncTrackUndo],
-    ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:shape_zyx change:class_names change:status change:active_label_extent change:counts_text", () => { syncControls(); drawCursor(); }],
+    ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:stack change:stack_names change:shape_zyx change:class_names change:status change:active_label_extent change:counts_text", () => { syncControls(); drawCursor(); }],
     ["change:channel_names", buildChannels],
   ];
   for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.on(e, fn);

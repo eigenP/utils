@@ -1,6 +1,12 @@
 .lbl-annot { font: 12px/1.4 system-ui, sans-serif; color: #ddd; background: #1e1e1e; padding: 6px; border-radius: 6px; max-width: 100%; }
 .lbl-annot input, .lbl-annot select, .lbl-annot button { font: inherit; }
-.lbl-toolbar, .lbl-zrow, .lbl-chan { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
+.lbl-toolbar, .lbl-zrow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
+.lbl-channels { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-bottom: 4px; }
+.lbl-chan { display: flex; align-items: center; gap: 3px; }
+.lbl-group { display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; }
+.lbl-step { padding: 0 8px; font-size: 14px; line-height: 18px; }
+.lbl-zlabel { min-width: 52px; font-family: ui-monospace, monospace; color: #9cf; }
+.lbl-stack { max-width: 240px; background: #333; color: #ddd; border: 1px solid #555; border-radius: 4px; }
 .lbl-btn { background: #333; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 2px 8px; cursor: pointer; }
 .lbl-btn:hover { background: #444; }
 .lbl-btn.lbl-active { background: #2d6cdf; border-color: #2d6cdf; color: #fff; }
@@ -8,10 +14,10 @@
 .lbl-label { width: 64px; }
 .lbl-radius, .lbl-opacity { width: 80px; }
 .lbl-toggle { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
-.lbl-chan input[type="range"] { width: 90px; }
+.lbl-chan input[type="range"] { width: 70px; }
 .lbl-chan input[type="color"] { width: 26px; height: 20px; padding: 0; border: none; background: none; }
-.lbl-cname { min-width: 60px; }
-.lbl-z { flex: 1; min-width: 120px; }
+.lbl-cname { min-width: 64px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lbl-z { width: min(40vw, 420px); min-width: 120px; }
 .lbl-viewport { position: relative; overflow: hidden; width: 100%; min-height: 128px; background: #000; outline: none; cursor: crosshair; touch-action: none; user-select: none; }
 .lbl-viewport:focus { box-shadow: 0 0 0 1px #2d6cdf inset; }
 .lbl-stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
