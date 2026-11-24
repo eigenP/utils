@@ -107,6 +107,14 @@ def _(mo):
     `[` / `]`, undo `Ctrl+Z`, new id `n`, class `1`-`9`, slice `↑`/`↓`, zoom with the
     wheel, pan with right-drag or space+drag, `0` to fit. Click the image first so it
     receives key presses.
+
+    **z-linking** (instance mode; one id across z = one 3D object): `Alt+←`/`Alt+→`
+    also step z; *keep label* keeps the active id after each stroke so one object can
+    be painted slice after slice; *z±1* outlines the masks of the neighbouring slices
+    (z-1 dotted, z+1 faint) in their ids' colours; the **merge** tool (`m`) replaces the
+    clicked mask's id by the active id in all slices, **split** (`s`) gives the clicked
+    mask's voxels on this and later slices a new id (both undoable with `Ctrl+Z`; also
+    `merge_ids` / `split_id` from code). The toolbar shows the active id's z extent.
     """)
     return
 

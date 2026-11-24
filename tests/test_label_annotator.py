@@ -509,3 +509,260 @@ def test_save_refusal_writes_no_partial_files(tmp_path):
         w.save(tmp_path, "a")
     assert not (tmp_path / "a_z002_img.tif").exists()
     assert len(w.save(tmp_path, "a", overwrite=True)) == 4
+
+
+# ---------------------------------------------------------------- z-linking
+def _two_tracks():
+    """6-slice volume: id 3 on z 0-3 (left), id 5 on z 2-5 (right), id 7 on z 4-5 (bottom left)."""
+    lab = np.zeros((6, 10, 12), dtype=np.uint32)
+    lab[0:4, 1:4, 1:4] = 3
+    lab[2:6, 1:4, 7:10] = 5
+    lab[4:6, 6:9, 1:4] = 7
+    img = np.random.default_rng(7).random(lab.shape).astype(np.float32)
+    return LabelAnnotator(img, axes="ZYX", labels=lab), lab
+
+
+def _decode_or_none(buf):
+    return decode_label_slice(buf) if len(bytes(buf)) else None
+
+
+def test_merge_ids_relabels_every_slice_and_undo_restores():
+    """Merging relabels the source id in all slices only; undo restores the exact volume.
+
+    Strategy: merge id 5 into id 3 (``merge_ids(src=5, dst=3)``), then undo.
+    Expected outcome: no voxel keeps id 5, every former id-5 voxel is 3, other
+    voxels are unchanged, the extent of 3 becomes z 0-5, ``track_undo_ids`` has
+    one entry, and ``undo_track_op`` restores the input bit-exactly.
+    """
+    w, lab = _two_tracks()
+    assert w.merge_ids(5, 3)
+    out = w.labels
+    assert not (out == 5).any()
+    np.testing.assert_array_equal(out[lab == 5], 3)
+    np.testing.assert_array_equal(out[lab != 5], lab[lab != 5])
+    assert w.label_extent(3) == [0, 1, 2, 3, 4, 5]
+    assert "both on z 2, 3" in w.status  # 3 and 5 share slices 2-3: flagged
+    assert len(w.track_undo_ids) == 1
+    assert w.undo_track_op()
+    np.testing.assert_array_equal(w.labels, lab)
+    assert w.track_undo_ids == [] and not w.undo_track_op()
+
+
+def test_merge_ids_refusals_leave_volume_unchanged():
+    """Merges with background, identical ids or absent ids are refused without side effects."""
+    w, lab = _two_tracks()
+    for src, dst in [(5, 0), (0, 5), (5, 5), (42, 3)]:
+        assert not w.merge_ids(src, dst)
+        assert "refused" in w.status
+    np.testing.assert_array_equal(w.labels, lab)
+    assert w.track_undo_ids == []
+
+
+def test_split_id_gives_new_id_from_z_and_undo():
+    """Splitting id 3 at z=2 moves its voxels at z >= 2 to a fresh id ``max + 1``.
+
+    Strategy: ``split_id(3, 2)`` on the two-track phantom, then undo.
+    Expected outcome: returns 8 (max 7 + 1); id 3 keeps z 0-1, id 8 covers
+    z 2-3 with exactly the former id-3 voxels there; other ids untouched;
+    splitting at the first slice (pure rename) is refused; undo restores the input.
+    """
+    w, lab = _two_tracks()
+    assert w.split_id(3, 0) is None and "refused" in w.status  # nothing below z=0
+    assert w.split_id(3, 4) is None  # nothing at/after z=4
+    new = w.split_id(3, 2)
+    assert new == 8
+    out = w.labels
+    assert w.label_extent(3) == [0, 1] and w.label_extent(8) == [2, 3]
+    np.testing.assert_array_equal(out[2:][lab[2:] == 3], 8)
+    np.testing.assert_array_equal(out[:2], lab[:2])
+    np.testing.assert_array_equal(out[lab != 3], lab[lab != 3])
+    assert w.active_label != new, "the active id must not silently join the new track"
+    assert w.undo_track_op()
+    np.testing.assert_array_equal(w.labels, lab)
+
+
+def test_track_ops_from_frontend_requests_and_undo_routing():
+    """``track_request`` messages from JS run the same operations; undo needs the matching serial."""
+    w, lab = _two_tracks()
+    w.z = 3
+    w.track_request = {"op": "merge", "src": 5, "dst": 3, "n": 1}
+    assert not (w.labels == 5).any()
+    # the current slice and its neighbours are re-sent after a volume edit
+    z, cur = decode_label_slice(w.labels_to_js)
+    assert z == 3 and (cur[lab[3] == 5] == 3).all()
+    w.track_request = {"op": "split", "id": 3, "z": 4, "n": 2}
+    assert w.label_extent(3) == [0, 1, 2, 3]
+    assert len(w.track_undo_ids) == 2
+    stale = w.track_undo_ids[0]
+    w.track_request = {"op": "undo", "serial": stale, "n": 3}  # not the last op: refused
+    assert "out of sync" in w.status and len(w.track_undo_ids) == 2
+    w.track_request = {"op": "undo", "serial": w.track_undo_ids[-1], "n": 4}
+    w.track_request = {"op": "undo", "serial": w.track_undo_ids[-1], "n": 5}
+    np.testing.assert_array_equal(w.labels, lab)
+
+
+def test_track_undo_stack_is_bounded():
+    """Only the last ``_TRACK_UNDO_MAX`` track operations stay undoable."""
+    from eigenp_utils.label_annotator import _TRACK_UNDO_MAX
+
+    w, _ = _two_tracks()
+    for _ in range(_TRACK_UNDO_MAX + 5):
+        assert w.merge_ids(5, 3) and w.merge_ids(3, 5)
+    assert len(w.track_undo_ids) == _TRACK_UNDO_MAX
+
+
+def test_keep_label_does_not_advance_active_id():
+    """``keep_label=True`` (``auto_increment=False``) keeps the active id across edits from JS.
+
+    Strategy: paint id 1 on slice 0 and slice 1 via ``labels_from_js``.
+    Expected outcome: ``active_label`` stays 1 (default mode would advance to
+    2), and the extent readout reports both slices.
+    """
+    img = np.zeros((3, 6, 7), np.float32)
+    w = LabelAnnotator(img, axes="ZYX", keep_label=True)
+    assert w.auto_increment is False and w.active_label == 1
+    for z in (0, 1):
+        edit = np.zeros((6, 7), np.uint16)
+        edit[2:4, 2:4] = 1
+        w.labels_from_js = encode_label_slice(edit, z)
+        assert w.active_label == 1
+    assert w.active_label_extent == "label 1: z 0-1 (2 slices)"
+    w2 = LabelAnnotator(img, axes="ZYX")
+    assert w2.auto_increment is True
+    w2.labels_from_js = encode_label_slice(edit, 0)
+    assert w2.active_label == 2
+
+
+def test_adjacent_slice_traits_follow_z_edges_and_edits():
+    """``labels_prev_to_js`` / ``labels_next_to_js`` carry slices z-1 / z+1, empty out of range or when off."""
+    w, lab = _two_tracks()
+    assert w.show_adjacent is False
+    assert bytes(w.labels_prev_to_js) == b"" and bytes(w.labels_next_to_js) == b""
+    w.show_adjacent = True
+    for z in range(6):
+        w.z = z
+        prev, nxt = _decode_or_none(w.labels_prev_to_js), _decode_or_none(w.labels_next_to_js)
+        if z == 0:
+            assert prev is None
+        else:
+            assert prev[0] == z - 1
+            np.testing.assert_array_equal(prev[1], lab[z - 1])
+        if z == 5:
+            assert nxt is None
+        else:
+            assert nxt[0] == z + 1
+            np.testing.assert_array_equal(nxt[1], lab[z + 1])
+    w.z = 2
+    w.merge_ids(7, 5)  # edits slices 4-5 only; neighbour z+1 = 3 unchanged, still sent
+    w.z = 3
+    _, nxt = decode_label_slice(w.labels_next_to_js)
+    assert (nxt[lab[4] == 7] == 5).all(), "neighbour slice reflects the volume edit"
+    w2 = LabelAnnotator(np.zeros((2, 4, 4)), axes="ZYX", show_adjacent=True)
+    assert w2.z == 1 and decode_label_slice(w2.labels_prev_to_js)[0] == 0 and bytes(w2.labels_next_to_js) == b""
+
+
+def test_active_label_extent_readout():
+    """The extent string follows ``active_label`` and edits, and reports gaps."""
+    w, lab = _two_tracks()
+    w.active_label = 5
+    assert w.active_label_extent == "label 5: z 2-5 (4 slices)"
+    w.active_label = 42
+    assert w.active_label_extent == "label 42: not present"
+    w.auto_increment = False  # keep label: the readout stays on id 3 after the edit
+    w.active_label = 3
+    edit = lab[1].astype(np.uint16)
+    edit[edit == 3] = 0
+    w.labels_from_js = encode_label_slice(edit, 1)  # remove id 3 from z=1 -> gap
+    assert w.active_label_extent == "label 3: z 0-3 (3 slices), missing z 1"
+    w.active_label = 0
+    assert "background" in w.active_label_extent
+    sem = LabelAnnotator(np.zeros((4, 4)), mode="semantic")
+    assert sem.active_label_extent == ""
+
+
+def test_frontend_maps_alt_arrows_and_track_tools():
+    """The JS binds Alt+ArrowLeft/Right to z-1/z+1 (preventing browser navigation) and has the new tools."""
+    from eigenp_utils.label_annotator import LabelAnnotator as LA
+
+    js = LA._esm
+    assert 'ev.altKey && (k === "ArrowLeft" || k === "ArrowRight")' in js
+    assert 'stepZ(k === "ArrowRight" ? 1 : -1)' in js and "ev.preventDefault()" in js
+    for name in ('"merge"', '"split"', '"show_adjacent"', '"auto_increment", !keepCb.checked', '"track_request"'):
+        assert name in js
+
+
+def test_track_undo_keeps_voxels_edited_since_the_operation():
+    """Undo of a merge restores only voxels that still hold the merged id.
+
+    Strategy: merge 5 -> 3, then (as the browser would after a z change has
+    dropped its slice undo history) erase part of the merged mask on z=4 and
+    paint another part with a new id 9; then undo the merge.
+    Expected outcome: untouched former id-5 voxels are 5 again, the erased
+    voxels stay 0 and the repainted voxels stay 9 (the later edits are not
+    silently reverted); ``status`` reports the skipped voxels.
+    """
+    w, lab = _two_tracks()
+    assert w.merge_ids(5, 3)
+    edit = w.labels[4].astype(np.uint16)
+    ys, xs = np.nonzero(lab[4] == 5)
+    edit[ys[0], xs[0]] = 0
+    edit[ys[1], xs[1]] = 9
+    w.labels_from_js = encode_label_slice(edit, 4)
+    assert w.undo_track_op()
+    out = w.labels
+    assert out[4, ys[0], xs[0]] == 0 and out[4, ys[1], xs[1]] == 9
+    expected = lab.copy()
+    expected[4, ys[0], xs[0]] = 0
+    expected[4, ys[1], xs[1]] = 9
+    np.testing.assert_array_equal(out, expected)
+    assert "2 voxels edited since" in w.status
+
+
+def test_labels_rev_forces_reload_when_bytes_repeat():
+    """Volume edits bump ``labels_rev`` even when ``labels_to_js`` bytes do not change.
+
+    Strategy: the browser relabels mask 3 on z=1 as 6 with the fill tool
+    (``labels_from_js``; Python does not echo it, so ``labels_to_js`` still
+    holds the pre-fill slice), then ``merge_ids(6, 3)`` restores exactly that
+    slice.
+    Expected outcome: ``labels_to_js`` is byte-identical to before (hosts would
+    not deliver it), but ``labels_rev`` increments, which makes the browser
+    reload the slice instead of keeping (and later sending back) its stale ids.
+    ``set_labels`` bumps it too.
+    """
+    w, lab = _two_tracks()
+    w.z = 1
+    before = bytes(w.labels_to_js)
+    rev = w.labels_rev
+    edit = lab[1].astype(np.uint16)
+    edit[edit == 3] = 6
+    w.labels_from_js = encode_label_slice(edit, 1)
+    assert w.labels_rev == rev, "browser edits are not echoed"
+    assert w.merge_ids(6, 3)
+    assert bytes(w.labels_to_js) == before
+    assert w.labels_rev == rev + 1
+    w.set_labels(w.labels)
+    assert w.labels_rev == rev + 2
+
+
+def test_active_label_respects_wire_limit():
+    """Ids above 65535 cannot become active (uint16 painting would wrap 65536 -> 0, 65537 -> 1).
+
+    Strategy: set ``active_label`` to 65536; fill a volume up to id 65535 and
+    ask for a new id.
+    Expected outcome: 65536 raises ``TraitError`` and the active id is
+    unchanged; with id 65535 present, the next free id is the smallest unused
+    one instead of 65536.
+    """
+    import traitlets
+
+    lab = np.zeros((1, 4, 4), np.uint32)
+    lab[0, 0, 0] = 1
+    lab[0, 0, 1] = 65535
+    w = LabelAnnotator(np.zeros((4, 4), np.float32), labels=lab[0])
+    assert w.active_label == 2  # max + 1 would be 65536
+    with pytest.raises(traitlets.TraitError):
+        w.active_label = 65536
+    assert w.active_label == 2
+    w.new_label_trigger += 1
+    assert w.active_label == 2
