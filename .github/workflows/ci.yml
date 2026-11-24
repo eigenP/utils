@@ -39,7 +39,7 @@ jobs:
         uv pip install --system ".[single-cell,dev]"
         uv pip install --system pytest-playwright
         playwright install chromium --with-deps
-      
+
     - name: Run tests with pytest
       run: pytest
 

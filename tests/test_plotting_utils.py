@@ -1170,16 +1170,130 @@ def test_describe_image_dataarray_info_panel_wrapping_and_return_image_only():
     finally:
         plt.close(res["fig"])
 
-    # info_width wraps long info lines to <= info_width characters in the rendered text
+    # info_width wraps long value lines in the info table to <= info_width characters
     da_long = da.copy()
     da_long.attrs["source"] = "/very/long/path/" + "segment_" * 10 + "image.tif"
     res_wrap = describe_image(da_long, info_width=24)
     try:
-        rendered_lines = res_wrap["axes"]["Info"].texts[0].get_text().splitlines()
-        assert all(len(line) <= 24 for line in rendered_lines)
-        assert len(rendered_lines) > len(res_wrap["info"].splitlines())
+        rendered_lines = [t.get_text() for t in res_wrap["axes"]["Info"].texts]
+        assert any("segment_" in line for line in rendered_lines)
+        assert all(len(line) <= 24 for line in rendered_lines if "segment_" in line)
     finally:
         plt.close(res_wrap["fig"])
+
+
+def test_describe_image_layout_one_column_image_histogram_info():
+    """Layout invariants of describe_image, for a square, a wide and a tall image.
+
+    One column, top to bottom: the image (largest panel), a short histogram at
+    least as wide as the image, and the info table spanning the full width.
+    Every drawn artist (tick labels, axis labels, table text) must stay inside
+    the figure, since the axes are placed in inches without a layout engine.
+    """
+    rng = np.random.default_rng(0)
+    for shape in [(80, 80), (30, 200), (200, 30)]:
+        res = describe_image(rng.random(shape), image_size=4.0)
+        fig, axes = res["fig"], res["axes"]
+        try:
+            fig.draw_without_rendering()
+            img = axes["Image"].get_window_extent()
+            hist = axes["Histogram"].get_window_extent()
+            info = axes["Info"].get_window_extent()
+            assert hist.y1 < img.y0 and info.y1 < hist.y0  # stacked top to bottom
+            assert hist.x0 <= img.x0 + 1 and hist.x1 >= img.x1 - 1  # as wide as the image
+            assert hist.height < img.height or shape[0] < shape[1]
+            assert info.x0 <= min(img.x0, hist.x0) and info.x1 >= max(img.x1, hist.x1)
+            fb = fig.bbox
+            for ax in axes.values():
+                tb = ax.get_tightbbox()
+                assert tb.x0 >= fb.x0 - 1 and tb.x1 <= fb.x1 + 1 and tb.y0 >= fb.y0 - 1 and tb.y1 <= fb.y1 + 1
+        finally:
+            plt.close(fig)
+
+
+def test_describe_image_histogram_shows_pixel_fractions_log_only_over_a_decade():
+    """Verify histogram bars are pixel fractions, using log scale only when spanning > 1 decade."""
+    rng = np.random.default_rng(0)
+    skewed_res = describe_image(rng.exponential(100, (64, 64)))
+    flat_res = describe_image(np.tile(np.arange(64.0), (64, 1)))
+    try:
+        skewed = skewed_res["axes"]["Histogram"]
+        flat = flat_res["axes"]["Histogram"]
+        assert skewed.get_yscale() == "log" and flat.get_yscale() == "linear"
+        # 64 equally populated values in 64 bins: every bar is exactly 1/64 of the pixels
+        bar_y = flat.patches[0].get_path().vertices[:, 1]
+        assert bar_y.max() == pytest.approx(1 / 64)
+        assert np.all((bar_y == 0) | np.isclose(bar_y, 1 / 64))
+    finally:
+        plt.close(skewed_res["fig"])
+        plt.close(flat_res["fig"])
+
+
+def test_describe_image_marks_display_range_only_when_it_differs_from_data():
+    """Verify vmin/vmax markers, clipped shading, and display-row reporting on describe_image."""
+    img = np.tile(np.arange(100.0), (10, 1))  # 0..99, each value 1% of pixels
+    auto = describe_image(img)
+    res = describe_image(img, vmax=79.5)
+    wide = describe_image(img, vmax=200)
+    try:
+        assert not auto["axes"]["Histogram"].lines and "display" not in auto["info"]
+
+        ax = res["axes"]["Histogram"]
+        assert [ln.get_xdata()[0] for ln in ax.lines] == [79.5]
+        assert len([p for p in ax.patches if p.get_alpha() is not None and p.get_alpha() < 1]) == 1
+        assert "display: vmin 0  vmax 79.5  (20% of pixels clipped)" in res["info"]
+
+        assert wide["axes"]["Histogram"].get_xlim()[1] == pytest.approx(200)
+    finally:
+        plt.close(auto["fig"])
+        plt.close(res["fig"])
+        plt.close(wide["fig"])
+
+
+def test_describe_image_channel_table_swatches_and_shown_row():
+    """Verify DataArray channel table swatches, bold shown channel, info_html escaping, and path wrapping."""
+    pytest.importorskip("xarray")
+    from matplotlib.colors import to_rgb
+    from matplotlib.patches import Rectangle
+    from eigenp_utils.image_io import array_to_stczyx_xarray, set_channel_info
+    from eigenp_utils.plotting_utils import _wrap_value
+
+    arr = np.random.default_rng(2).random((3, 16, 20)).astype(np.float32)
+    da = array_to_stczyx_xarray(arr, input_axes="CYX", channel_names=["DAPI", "WGA", "TOMM20"])
+    da = set_channel_info(da, {"DAPI": {"color": "blue"}, "WGA": {"color": "green"}, "TOMM20": {"color": "red"}})
+    da.attrs["source"] = "/very/long/" + "directory_name/" * 12 + "file.ome.tif"
+    res = describe_image(da)
+    try:
+        ax = res["axes"]["Info"]
+        texts = {t.get_text(): t for t in ax.texts}
+        assert {"DAPI", "WGA", "TOMM20"} <= set(texts)
+        assert texts["WGA"].get_fontweight() == "bold" and texts["DAPI"].get_fontweight() == "normal"
+        swatches = [
+            tuple(p.get_facecolor()[:3])
+            for p in ax.patches
+            if isinstance(p, Rectangle) and p.get_linewidth() > 0
+        ]
+        for c in ("blue", "green", "red"):
+            assert any(np.allclose(sw, to_rgb(c)) for sw in swatches)
+        assert "C[1] WGA  color=green" in res["info"] and "shown: S=0, T=0, C=WGA, Z=0" in res["info"]
+
+        html = res["info_html"]
+        assert isinstance(html, str) and html._repr_html_() == html
+        assert "TOMM20" in html and "background:#008000" in html and "&#9664; shown" in html
+    finally:
+        plt.close(res["fig"])
+
+    da.attrs["source"] = "/data/<b>x</b>.tif"
+    res_esc = describe_image(da)
+    try:
+        assert "/data/&lt;b&gt;x&lt;/b&gt;.tif" in res_esc["info_html"]
+    finally:
+        plt.close(res_esc["fig"])
+
+    lines = _wrap_value("/a/" + "dir/" * 20 + "f.tif", 30)
+    assert all(len(line) <= 30 for line in lines)
+    assert all(line.endswith("/") for line in lines[:-1])
+    assert "".join(line.strip() for line in lines) == "/a/" + "dir/" * 20 + "f.tif"
 
 
 def test_hist_imshow_is_a_deprecated_alias_of_describe_image():
@@ -1189,7 +1303,8 @@ def test_hist_imshow_is_a_deprecated_alias_of_describe_image():
         res = hist_imshow(img, bins=16)
     ref = describe_image(img, bins=16)
     try:
-        assert res["info"] == ref["info"] and list(res["axes"]) == list(ref["axes"])
+        assert res["info"] == ref["info"] and res["info_html"] == ref["info_html"]
+        assert list(res["axes"]) == list(ref["axes"])
         with pytest.warns(DeprecationWarning):
             np.testing.assert_array_equal(hist_imshow(img, return_image_only=True), img)
     finally:

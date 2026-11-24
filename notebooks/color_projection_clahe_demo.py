@@ -96,12 +96,12 @@ def _(mo):
     # Color-coded projection and CLAHE demo
 
     This notebook demonstrates how to use the
-    `color_coded_projection` and `_my_clahe_` utilities provided in this
+    `color_coded_projection` and `clahe_u8` utilities provided in this
     repository. We load the sample `cells3d` dataset from scikit-image and
     showcase both functions:
 
     * **color_coded_projection** for creating a time/volume color projection
-    * **_my_clahe_** for applying Contrast Limited Adaptive Histogram Equalization (CLAHE)
+    * **clahe_u8** for applying Contrast Limited Adaptive Histogram Equalization (CLAHE)
 
     Use the controls below to explore different color mappings for the
     projection and adjust the CLAHE clip limit to see its effect on the
@@ -116,12 +116,11 @@ def _():
     import numpy as np
     from skimage.io import imread
 
-    # marimo keeps names starting with "_" private to their cell: alias it
-    from eigenp_utils.clahe_equalize_adapthist import _my_clahe_ as my_clahe
+    from eigenp_utils.clahe_equalize_adapthist import clahe_u8
     from eigenp_utils.plotting_utils import color_coded_projection
     from eigenp_utils.io import download_file_async
 
-    return color_coded_projection, download_file_async, imread, my_clahe, np, plt
+    return clahe_u8, color_coded_projection, download_file_async, imread, np, plt
 
 
 @app.cell
@@ -214,11 +213,11 @@ def _(membrane_stack):
 
 
 @app.cell
-def _(clahe_clip_slider, my_clahe, original_slice):
-    clahe_slice = my_clahe(
+def _(clahe_clip_slider, clahe_u8, original_slice):
+    # uint16 slice -> uint8 between the 0.1 / 99.9 percentiles, then CLAHE
+    clahe_slice = clahe_u8(
         original_slice,
         clip_limit=float(clahe_clip_slider.value),
-        nbins=256,
     )
     return (clahe_slice,)
 
