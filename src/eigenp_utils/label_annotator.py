@@ -47,6 +47,7 @@ works in marimo WASM). ``tifffile`` is imported lazily by ``save``.
 from __future__ import annotations
 
 import colorsys
+import re
 import struct
 from pathlib import Path
 
@@ -186,11 +187,18 @@ class LabelAnnotator(anywidget.AnyWidget):
 
     Parameters
     ----------
-    image : array-like or xarray.DataArray
+    image : array-like, xarray.DataArray or list of these
         2D/3D/4D image. Axes given by ``axes`` (subset of ``"CZYX"`` in any
         order) or by DataArray dims (other dims must have size 1). For a
         DataArray, channel names default to the ``C`` coordinate and colours to
         a ``color`` coordinate along ``C`` (``image_io.set_channel_info``).
+        A **list of stacks** (e.g. one 3D stack per cage / field of view; same
+        channels, shapes may differ) shows one at a time with a stack selector
+        (toolbar, ``stack`` trait, PageUp / PageDown). ``labels`` is then a
+        matching list (or None), ``stack_names`` the names. Each stack keeps its
+        own labels, z position and track-op undo history; ``labels`` returns the
+        shown stack, :attr:`stack_labels` all of them, ``save(..., stacks="all")``
+        writes all. ``axes`` applies to every stack.
     axes : str, optional
         Axis letters of ``image`` (e.g. ``"CYX"``, ``"ZYX"``, ``"CZYX"``);
         required for ndarrays with ndim > 2.
@@ -326,6 +334,9 @@ class LabelAnnotator(anywidget.AnyWidget):
     # reserve BACKGROUND_ID for annotated background (instance mode); see class docstring
     background = traitlets.Bool(False).tag(sync=True)
     counts_text = traitlets.Unicode("").tag(sync=True)
+    # several stacks (list input): index of the shown stack and the stacks' names
+    stack = traitlets.Int(0).tag(sync=True)
+    stack_names = traitlets.List(traitlets.Unicode()).tag(sync=True)
     brush_radius = traitlets.Int(2).tag(sync=True)
     overwrite = traitlets.Bool(False).tag(sync=True)
     auto_fill = traitlets.Bool(True).tag(sync=True)
@@ -355,6 +366,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         keep_label: bool = False,
         show_adjacent: bool = False,
         background: bool = False,
+        stack_names: list[str] | None = None,
         **kwargs,
     ):
         if mode not in ("instance", "semantic"):
@@ -370,7 +382,26 @@ class LabelAnnotator(anywidget.AnyWidget):
                 cols = list(image.coords["color"].values)
                 if all(isinstance(v, str) and v for v in cols):
                     channel_colors = cols
+        extra = []  # further stacks (list input): [(czyx, labels or None)]
+        if isinstance(image, (list, tuple)):
+            if not image:
+                raise ValueError("image: empty list of stacks")
+            imgs = list(image)
+            labs = list(labels) if isinstance(labels, (list, tuple)) else [None] * len(imgs)
+            if len(labs) != len(imgs):
+                raise ValueError(f"{len(imgs)} stacks but {len(labs)} label arrays")
+            if stack_names is not None and len(stack_names) != len(imgs):
+                raise ValueError(f"{len(imgs)} stacks but {len(stack_names)} stack_names")
+            names_in = list(stack_names) if stack_names is not None else [f"stack {i}" for i in range(len(imgs))]
+            for im, lb in zip(imgs[1:], labs[1:]):
+                extra.append((_to_czyx(im, axes)[0], lb))
+            image, labels = imgs[0], labs[0]
+        else:
+            names_in = []
         czyx, input_axes = _to_czyx(image, axes)
+        for e, _ in extra:
+            if e.shape[0] != czyx.shape[0]:
+                raise ValueError(f"all stacks need the same channels: {czyx.shape[0]} vs {e.shape[0]}")
         self._image = czyx
         self._spatial_axes = "".join(a for a in input_axes if a in "ZYX")
         c, nz, ny, nx = czyx.shape
@@ -396,8 +427,27 @@ class LabelAnnotator(anywidget.AnyWidget):
         self._track_undo: list[tuple[int, np.ndarray, np.ndarray, int, str]] = []
         self._track_serial = 0
 
+        # inactive stacks are parked here; the active one lives in self._image & co
+        self._stack_idx = 0
+        self._parked: list[dict | None] = [None] * (1 + len(extra))
+        for k, (e_img, e_lab) in enumerate(extra, start=1):
+            ez, ey, ex = e_img.shape[1:]
+            if e_lab is None:
+                el = np.zeros((ez, ey, ex), dtype=np.uint32)
+            else:
+                el = np.asarray(e_lab)
+                el = el[np.newaxis] if el.ndim == 2 else el
+                if el.shape != (ez, ey, ex):
+                    raise ValueError(f"stack {k}: labels shape {el.shape} does not match image {(ez, ey, ex)}")
+                el = _coerce_label_values(el, background)
+            self._parked[k] = dict(
+                image=e_img, labels=el, limits=[_robust_limits(e_img[i], *percentiles) for i in range(c)],
+                hist=[None] * ez, undo=[], serial=0, z=ez // 2,
+            )
+
         super().__init__(**kwargs)
         with self.hold_sync():
+            self.stack_names = names_in
             self.shape_zyx = [nz, ny, nx]
             self.channel_names = names
             self.channel_colors = colors
@@ -463,6 +513,48 @@ class LabelAnnotator(anywidget.AnyWidget):
     def _on_show_adjacent(self, change):
         if hasattr(self, "_image"):
             self._send_adjacent()
+
+    def _park(self) -> dict:
+        return dict(
+            image=self._image, labels=self._labels, limits=self._limits, hist=self._slice_hist,
+            undo=self._track_undo, serial=self._track_serial, z=int(self.z),
+        )
+
+    @traitlets.validate("stack")
+    def _valid_stack(self, proposal):
+        n = max(1, len(self._parked)) if hasattr(self, "_parked") else 1
+        return int(min(max(proposal["value"], 0), n - 1))
+
+    @traitlets.observe("stack")
+    def _on_stack(self, change):
+        if not hasattr(self, "_parked") or change["new"] == self._stack_idx:
+            return
+        self._parked[self._stack_idx] = self._park()
+        self._stack_idx = new = change["new"]
+        st = self._parked[new]
+        self._parked[new] = None
+        self._image, self._labels, self._limits = st["image"], st["labels"], st["limits"]
+        self._slice_hist, self._track_undo, self._track_serial = st["hist"], st["undo"], st["serial"]
+        with self.hold_sync():
+            nz, ny, nx = self._labels.shape
+            self.shape_zyx = [nz, ny, nx]
+            self.track_undo_ids = [u[0] for u in self._track_undo]
+            self.z = st["z"]  # triggers _send_slice when it differs; resend anyway below
+            self._send_slice()
+            self.labels_rev += 1
+            if self.mode == "instance":
+                self.active_label = self._next_label()
+            self._update_extent()
+            self._update_counts()
+
+    @property
+    def stack_labels(self) -> list[np.ndarray]:
+        """Labels of every stack (copies, ``uint32``, the input's spatial axes), in input order."""
+        out = []
+        for k, p in enumerate(self._parked):
+            lab = self._labels if k == self._stack_idx else p["labels"]
+            out.append(_restore_axes(lab.copy(), self._spatial_axes))
+        return out
 
     @traitlets.validate("z")
     def _valid_z(self, proposal):
@@ -869,7 +961,8 @@ class LabelAnnotator(anywidget.AnyWidget):
         return [int(z) for z in np.flatnonzero(self._labels.reshape(self._labels.shape[0], -1).any(axis=1))]
 
     def save(
-        self, out_dir, name: str, slices: str = "annotated", overwrite: bool = False, signed: bool = False
+        self, out_dir, name: str, slices: str = "annotated", overwrite: bool = False, signed: bool = False,
+        stacks: str = "current",
     ) -> list[Path]:
         """Write training pairs ``<name>[_z<k>]_img.tif`` / ``..._masks.tif``.
 
@@ -888,8 +981,22 @@ class LabelAnnotator(anywidget.AnyWidget):
             (``BACKGROUND_ID``), 1.. cells. For sparse-training loaders that
             mask out 0; Cellpose's own loader does not interpret -1. Default
             False: ``uint32`` masks with the background id stored as 65535.
+        stacks : {"current", "all"}
+            With several stacks, ``"all"`` saves every stack as
+            ``<name>_<stack name>...`` (the shown stack is restored afterwards).
         """
         import tifffile
+
+        if stacks == "all" and len(self._parked) > 1:
+            shown, written = self.stack, []
+            try:
+                for k in range(len(self._parked)):
+                    self.stack = k
+                    tag = re.sub(r"[^\w.-]+", "_", (self.stack_names[k] if k < len(self.stack_names) else f"stack{k}")).strip("_")
+                    written += self.save(out_dir, f"{name}_{tag or k}", slices, overwrite, signed, stacks="current")
+            finally:
+                self.stack = shown
+            return written
 
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)

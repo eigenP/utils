@@ -1068,3 +1068,28 @@ def test_display_defaults_and_outline_traits():
     with pytest.raises(Exception):
         w.display = "dotted"
     assert LabelAnnotator(np.zeros((8, 8), np.float32), display="outlined", outline_px=3).outline_px == 3
+
+
+def test_multiple_stacks_keep_separate_labels_and_state(tmp_path):
+    a = np.random.default_rng(0).random((3, 8, 9)).astype(np.float32)
+    b = np.random.default_rng(1).random((2, 6, 7)).astype(np.float32)
+    w = LabelAnnotator([a, b], axes="ZYX", stack_names=["cage A", "cage B"], brush_radius=0)
+    assert w.stack == 0 and w.stack_names == ["cage A", "cage B"] and w.shape_zyx == [3, 8, 9]
+    z0 = w.z
+    w.labels_from_js = encode_label_slice(np.full((8, 9), 5, np.uint32), 0)
+    w.stack = 1
+    assert w.shape_zyx == [2, 6, 7] and w.labels.shape == (2, 6, 7) and not w.labels.any()
+    assert w.active_label == 1  # new stack: next free id
+    w.labels_from_js = encode_label_slice(np.full((6, 7), 2, np.uint32), 1)
+    w.stack = 0
+    assert w.z == z0 and (w.labels[0] == 5).all()
+    labs = w.stack_labels
+    assert (labs[0][0] == 5).all() and (labs[1][1] == 2).all()
+    paths = w.save(tmp_path, "t", stacks="all")
+    assert sorted(p.name for p in paths) == sorted(
+        ["t_cage_A_z000_img.tif", "t_cage_A_z000_masks.tif", "t_cage_B_z001_img.tif", "t_cage_B_z001_masks.tif"])
+    assert w.stack == 0
+    w.stack = 7  # clamped
+    assert w.stack == 1
+    with pytest.raises(ValueError):
+        LabelAnnotator([a, b], stack_names=["x"], axes="ZYX")
