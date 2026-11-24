@@ -115,7 +115,8 @@ function render({ model, el: root }) {
   const zRow = el("div", { class: "lbl-zrow" });
   const statusBar = el("div", { class: "lbl-status" });
   const countsBar = el("div", { class: "lbl-counts", title: "annotation counts (current slice | whole volume)" });
-  root.append(toolbar, chanPanel, zRow, viewport, statusBar, countsBar);
+  const main = el("div", { class: "lbl-main" }, [viewport, chanPanel]); // channel controls: column on the right
+  root.append(toolbar, zRow, main, statusBar, countsBar);
 
   // toolbar controls
   const tools = ["brush", "eraser", "fill", "picker", "background", "delete", "merge", "split"];
@@ -208,7 +209,11 @@ function render({ model, el: root }) {
       lo.addEventListener("input", () => setListItem("vmin", i, parseInt(lo.value)));
       hi.addEventListener("input", () => setListItem("vmax", i, parseInt(hi.value)));
       ga.addEventListener("input", () => setListItem("gamma", i, parseInt(ga.value) / 100));
-      chanPanel.appendChild(el("div", { class: "lbl-chan" }, [vis, col, el("span", { class: "lbl-cname", text: name }), el("span", { text: "min" }), lo, el("span", { text: "max" }), hi, el("span", { text: "γ" }), ga]));
+      const slider = (txt, input) => el("label", { class: "lbl-sl" }, [el("span", { text: txt }), input]);
+      chanPanel.appendChild(el("div", { class: "lbl-chan" }, [
+        el("div", { class: "lbl-chan-head" }, [vis, col, el("span", { class: "lbl-cname", text: name, title: name })]),
+        slider("min", lo), slider("max", hi), slider("γ", ga),
+      ]));
     });
   }
   function setListItem(name, i, v) {
@@ -399,7 +404,8 @@ function render({ model, el: root }) {
   const refit = () => { if (!state.userView) fit(); };
   window.addEventListener("resize", refit);
   const ro = typeof ResizeObserver === "function" ? new ResizeObserver(refit) : null;
-  ro?.observe(viewport.parentElement || root);
+  ro?.observe(root);
+  ro?.observe(viewport);
 
   // ------------------------------------------------------------- painting
   function toPixel(ev) {
