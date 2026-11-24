@@ -548,3 +548,18 @@ def test_outlined_display_draws_coloured_boundary_over_black_border(page, serve)
     assert _lab_rgba(page, 10, 10)[3] > 60
     page.keyboard.press("o")
     assert _get(page, "display") == "outlined"
+
+
+def test_stack_keys_and_z_buttons(page, serve):
+    """PageDown/PageUp step ``stack`` (wrapping); the z ‹ › buttons step ``z``."""
+    img = np.random.default_rng(2).random((3, H, W)).astype(np.float32)
+    w = LabelAnnotator([img, img.copy()], axes="ZYX", stack_names=["a", "b"])
+    _open(page, serve(w))
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("PageDown")
+    assert _get(page, "stack") == 1
+    page.keyboard.press("PageDown")
+    assert _get(page, "stack") == 0
+    z0 = _get(page, "z")
+    page.locator(".lbl-zrow .lbl-step").nth(3).click()  # z ›
+    assert _get(page, "z") == min(z0 + 1, 2)
