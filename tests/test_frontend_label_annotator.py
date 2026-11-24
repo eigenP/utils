@@ -237,3 +237,84 @@ def test_semantic_fill_tool_and_class_hotkeys(page, serve):
     page.mouse.click(*_client_xy(page, 3, 3))
     _, lab = _last_labels(page)
     assert (lab == 2).all(), "flood fill of an empty slice labels every pixel"
+
+
+# ---------------------------------------------------------------- z-linking
+def _widget3d(**kw):
+    img = np.random.default_rng(1).random((3, H, W)).astype(np.float32)
+    lab = np.zeros((3, H, W), np.uint32)
+    lab[0, 5:15, 5:15] = 4  # z=0 only
+    lab[1, 25:35, 25:35] = 6
+    return LabelAnnotator(img, axes="ZYX", labels=lab, brush_radius=0, **kw), lab
+
+
+def _get(page, name):
+    return page.evaluate(f"window.mockModel.get('{name}')")
+
+
+def test_alt_arrows_step_z_and_keep_label_toggle(page, serve):
+    """Alt+ArrowRight/Left step z by +1/-1 (like ArrowUp/Down); 'keep label' sets ``auto_increment`` False."""
+    w, _ = _widget3d()
+    _open(page, serve(w))
+    assert _get(page, "z") == 1
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("Alt+ArrowRight")
+    assert _get(page, "z") == 2
+    page.keyboard.press("Alt+ArrowRight")  # clamped at the last slice
+    assert _get(page, "z") == 2
+    page.keyboard.press("Alt+ArrowLeft")
+    page.keyboard.press("Alt+ArrowLeft")
+    assert _get(page, "z") == 0
+    assert _get(page, "auto_increment") is True
+    page.locator("input.lbl-keep_label").check()
+    assert _get(page, "auto_increment") is False
+
+
+def test_merge_tool_sends_request_and_undo_routes_to_python(page, serve):
+    """The merge tool asks Python to merge the clicked id into the active id; undo then targets that op.
+
+    Strategy: active id 6, press ``m`` and click the id-4 mask (on slice 0);
+    apply the request in Python, mirror ``track_undo_ids`` into the page and
+    press ctrl+z.
+    Expected outcome: the request is ``{op: merge, src: 4, dst: 6}``; Python
+    relabels 4 -> 6; ctrl+z sends ``{op: undo, serial: <that op>}``, which
+    restores id 4 in Python.
+    """
+    w, lab = _widget3d()
+    w.z = 0
+    w.active_label = 6
+    _open(page, serve(w))
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("m")
+    assert _get(page, "tool") == "merge"
+    page.mouse.click(*_client_xy(page, 10, 10))
+    req = _get(page, "track_request")
+    assert {k: req[k] for k in ("op", "src", "dst")} == {"op": "merge", "src": 4, "dst": 6}
+    w.track_request = req
+    assert not (w.labels == 4).any()
+    page.evaluate(f"window.mockModel.set('track_undo_ids', {w.track_undo_ids})")
+    page.keyboard.press("Control+z")
+    req = _get(page, "track_request")
+    assert req["op"] == "undo" and req["serial"] == w.track_undo_ids[-1]
+    w.track_request = req
+    np.testing.assert_array_equal(w.labels, lab)
+
+
+def test_adjacent_outlines_drawn_only_on_mask_edges(page, serve):
+    """With ``show_adjacent`` the id-4 mask of slice z-1 appears as a (dotted) outline on slice z."""
+    w, _ = _widget3d(show_adjacent=True)
+    assert w.z == 1
+    _open(page, serve(w))
+    alpha = page.evaluate(
+        """() => { const c = document.querySelector('canvas.lbl-adj');
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        const a = []; for (let i = 3; i < d.length; i += 4) a.push(d[i]); return a; }"""
+    )
+    a = np.asarray(alpha).reshape(H, W)
+    edge = np.zeros((H, W), bool)
+    edge[5:15, 5:15] = True
+    edge[6:14, 6:14] = False
+    assert a[~edge].max() == 0, "only the outline of the neighbour's mask is drawn"
+    assert (a[edge] > 0).sum() >= edge.sum() // 2 - 1, "dotted outline covers about half the edge pixels"
+    page.locator("input.lbl-show_adjacent").uncheck()
+    assert _get(page, "show_adjacent") is False

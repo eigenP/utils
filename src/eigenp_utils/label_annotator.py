@@ -26,6 +26,13 @@ Design
   Labels > 65535 cannot be edited in the widget (checked on input).
 - Display scaling (8-bit conversion) is for viewing only; exported images are
   the original, unscaled array.
+- z-linking (instance mode): one id across z = one 3D object. Python also
+  sends the labels of slices z-1 / z+1 (``labels_prev_to_js`` /
+  ``labels_next_to_js``, same encoding, empty when out of range or when
+  ``show_adjacent`` is off) for the onion-skin outlines. Whole-track edits
+  (``merge_ids``, ``split_id``) run in Python on the full volume, requested by
+  the browser through ``track_request``; they keep their own undo stack
+  (``track_undo_ids`` mirrors it so the browser's undo can route to it).
 
 Only numpy, anywidget and traitlets are required (core dependencies; also
 works in marimo WASM). ``tifffile`` is imported lazily by ``save``.
@@ -47,6 +54,7 @@ _ASSETS = Path(__file__).parent
 _IMG_HDR = struct.Struct("<4I")
 _LBL_HDR = struct.Struct("<3I")
 _MAX_WIRE_LABEL = np.iinfo(np.uint16).max
+_TRACK_UNDO_MAX = 20  # whole-volume operations kept for undo
 
 _DEFAULT_CHANNEL_COLORS = ["#ff00ff", "#00ff00", "#00ffff", "#ff8000", "#ffff00", "#ffffff", "#ff0000", "#0080ff"]
 
@@ -177,11 +185,37 @@ class LabelAnnotator(anywidget.AnyWidget):
         as ``"gray"`` maps to its end colour).
     percentiles : (float, float)
         Display scaling to 8 bit, per channel over the whole volume.
+    brush_radius : int
+        Brush radius in pixels.
+    keep_label : bool
+        Instance mode: keep the active id after each stroke or fill instead of
+        advancing to the next free id (``auto_increment = not keep_label``).
+        Use it to paint the same object on consecutive z-slices.
+    show_adjacent : bool
+        Show outlines of the labels on slices z-1 (dotted) and z+1 (faint) over
+        the current slice, each in its id's colour ("onion skin").
 
     Attributes
     ----------
     labels : np.ndarray
         Current labels (``uint32``), spatial axes of the input.
+    active_label_extent : str
+        z extent of the active id, e.g. ``"label 37: z 12-19 (8 slices)"``.
+
+    Notes
+    -----
+    z-linking ground truth: in instance mode an id is one 3D object, so the
+    same id on several slices links those 2D masks. Tools for this:
+    ``keep label`` (paint one id slice after slice), the ``z±1`` outlines,
+    ``merge`` (click a mask: its id is replaced by the active id in all
+    slices; :meth:`merge_ids`) and ``split`` (click a mask at slice z: its
+    voxels at slices >= z get a new id; :meth:`split_id`). Both whole-track
+    operations are undoable (ctrl+z / undo, or :meth:`undo_track_op`).
+
+    Keyboard (viewport focused): b/e/f/p brush/eraser/fill/picker, m/s
+    merge/split track, n new id, [ / ] brush radius, ArrowUp/ArrowDown or
+    Alt+ArrowRight/Alt+ArrowLeft z+1/z-1, 0 fit, ctrl+z undo, space+drag or
+    right/middle drag pan, wheel zoom, 1-9 class (semantic mode).
     """
 
     _esm = _ASSETS.joinpath("label_annotator.js").read_text()
@@ -192,6 +226,9 @@ class LabelAnnotator(anywidget.AnyWidget):
     z = traitlets.Int(0).tag(sync=True)
     image_to_js = traitlets.Bytes(b"").tag(sync=True)
     labels_to_js = traitlets.Bytes(b"").tag(sync=True)
+    # labels of slices z-1 / z+1 for the onion-skin outlines (b"" = none)
+    labels_prev_to_js = traitlets.Bytes(b"").tag(sync=True)
+    labels_next_to_js = traitlets.Bytes(b"").tag(sync=True)
     # edits (JS -> Python); Any because buffers may arrive as memoryview
     labels_from_js = traitlets.Any(None, allow_none=True).tag(sync=True)
 
@@ -204,6 +241,7 @@ class LabelAnnotator(anywidget.AnyWidget):
     gamma = traitlets.List(traitlets.Float()).tag(sync=True)
     opacity = traitlets.Float(0.45).tag(sync=True)
     outline_only = traitlets.Bool(False).tag(sync=True)
+    show_adjacent = traitlets.Bool(False).tag(sync=True)
 
     # labelling
     mode = traitlets.Unicode("instance").tag(sync=True)
@@ -212,13 +250,20 @@ class LabelAnnotator(anywidget.AnyWidget):
     # instance colours: labels_cmap palette, id k -> palette[(k - 1) % len]
     instance_palette = traitlets.List(traitlets.Unicode()).tag(sync=True)
     active_label = traitlets.Int(1).tag(sync=True)
-    tool = traitlets.Unicode("brush").tag(sync=True)  # brush | eraser | fill | picker
+    tool = traitlets.Unicode("brush").tag(sync=True)  # brush | eraser | fill | picker | merge | split
     brush_radius = traitlets.Int(2).tag(sync=True)
     overwrite = traitlets.Bool(False).tag(sync=True)
     auto_fill = traitlets.Bool(True).tag(sync=True)
     auto_increment = traitlets.Bool(True).tag(sync=True)
     new_label_trigger = traitlets.Int(0).tag(sync=True)
     status = traitlets.Unicode("").tag(sync=True)
+    active_label_extent = traitlets.Unicode("").tag(sync=True)
+    # whole-track operations: JS -> Python requests
+    # {"op": "merge", "src", "dst"} | {"op": "split", "id", "z"} | {"op": "undo", "serial"},
+    # plus a counter "n" so repeated identical requests still notify
+    track_request = traitlets.Dict().tag(sync=True)
+    # serials of the undoable track operations, oldest first (Python -> JS)
+    track_undo_ids = traitlets.List(traitlets.Int()).tag(sync=True)
 
     def __init__(
         self,
@@ -231,6 +276,8 @@ class LabelAnnotator(anywidget.AnyWidget):
         channel_colors: list[str] | None = None,
         percentiles: tuple[float, float] = (0.1, 99.99),
         brush_radius: int = 2,
+        keep_label: bool = False,
+        show_adjacent: bool = False,
         **kwargs,
     ):
         if mode not in ("instance", "semantic"):
@@ -265,6 +312,9 @@ class LabelAnnotator(anywidget.AnyWidget):
         if len(names) != c or len(colors) != c:
             raise ValueError(f"need {c} channel names/colors")
         classes = list(classes) if classes else (["foreground"] if mode == "semantic" else [])
+        self._slice_ids: list[np.ndarray | None] = [None] * nz  # cached ids per slice (extent readout)
+        self._track_undo: list[tuple[int, np.ndarray, np.ndarray, str]] = []  # (serial, flat idx, old values, what)
+        self._track_serial = 0
 
         super().__init__(**kwargs)
         with self.hold_sync():
@@ -280,11 +330,13 @@ class LabelAnnotator(anywidget.AnyWidget):
             self.class_colors = _class_palette(len(classes))
             self.instance_palette = [_rgb_hex(c) for c in LABELS_CMAP_COLORS]
             self.auto_fill = mode == "instance"
-            self.auto_increment = mode == "instance"
+            self.auto_increment = mode == "instance" and not keep_label
             self.brush_radius = brush_radius
+            self.show_adjacent = bool(show_adjacent)
             self.active_label = self._next_label() if mode == "instance" else 1
             self.z = nz // 2
             self._send_slice()
+            self._update_extent()
 
     # ------------------------------------------------------------------ sync
     def _slice_u8(self, z: int) -> np.ndarray:
@@ -300,6 +352,27 @@ class LabelAnnotator(anywidget.AnyWidget):
         with self.hold_sync():
             self.image_to_js = encode_image_slice(self._slice_u8(z), z)
             self.labels_to_js = encode_label_slice(self._labels[z], z)
+            self._send_adjacent()
+
+    def _send_labels(self):
+        """Re-send the current slice's labels and its neighbours (after a volume edit)."""
+        with self.hold_sync():
+            self.labels_to_js = encode_label_slice(self._labels[self.z], self.z)
+            self._send_adjacent()
+
+    def _send_adjacent(self):
+        nz = self._labels.shape[0]
+
+        def enc(k):
+            return encode_label_slice(self._labels[k], k) if self.show_adjacent and 0 <= k < nz else b""
+
+        self.labels_prev_to_js = enc(self.z - 1)
+        self.labels_next_to_js = enc(self.z + 1)
+
+    @traitlets.observe("show_adjacent")
+    def _on_show_adjacent(self, change):
+        if hasattr(self, "_image"):
+            self._send_adjacent()
 
     @traitlets.validate("z")
     def _valid_z(self, proposal):
@@ -321,8 +394,10 @@ class LabelAnnotator(anywidget.AnyWidget):
             self.status = f"ignored label message for z={z} with shape {lab.shape}"
             return
         self._labels[z] = lab
+        self._slice_ids[z] = None
         if self.mode == "instance" and self.auto_increment:
             self.active_label = self._next_label()
+        self._update_extent()
 
     @traitlets.observe("new_label_trigger")
     def _on_new_label(self, change):
@@ -330,6 +405,173 @@ class LabelAnnotator(anywidget.AnyWidget):
 
     def _next_label(self) -> int:
         return int(self._labels.max()) + 1 if self._labels.size else 1
+
+    @traitlets.observe("active_label")
+    def _on_active_label(self, change):
+        if hasattr(self, "_slice_ids"):
+            self._update_extent()
+
+    def _ids_in_slice(self, z: int) -> np.ndarray:
+        ids = self._slice_ids[z]
+        if ids is None:
+            # ids <= 65535 (wire limit), so a bincount is a cheap O(n) unique
+            ids = self._slice_ids[z] = np.flatnonzero(np.bincount(self._labels[z].ravel()))
+        return ids
+
+    def label_extent(self, label: int) -> list[int]:
+        """z indices of the slices that contain ``label`` (sorted)."""
+        return [z for z in range(self._labels.shape[0]) if bool((self._ids_in_slice(z) == label).any())]
+
+    def _update_extent(self):
+        a = int(self.active_label)
+        if self.mode != "instance":
+            self.active_label_extent = ""
+            return
+        if a == 0:
+            self.active_label_extent = "label 0 (background)"
+            return
+        zs = self.label_extent(a)
+        if not zs:
+            self.active_label_extent = f"label {a}: not present"
+            return
+        lo, hi = zs[0], zs[-1]
+        txt = f"label {a}: z {lo}-{hi} ({len(zs)} slice{'s' if len(zs) != 1 else ''})"
+        missing = sorted(set(range(lo, hi + 1)) - set(zs))
+        if missing:
+            txt += f", missing z {', '.join(map(str, missing))}"
+        self.active_label_extent = txt
+
+    # ------------------------------------------------------- track operations
+    @traitlets.observe("track_request")
+    def _on_track_request(self, change):
+        req = change["new"] or {}
+        op = req.get("op")
+        if op == "merge":
+            self.merge_ids(int(req["src"]), int(req["dst"]))
+        elif op == "split":
+            self.split_id(int(req["id"]), int(req["z"]))
+        elif op == "undo":
+            serial = req.get("serial")
+            if self._track_undo and (serial is None or int(serial) == self._track_undo[-1][0]):
+                self.undo_track_op()
+            else:
+                self.status = "track undo out of sync; nothing undone"
+                self.track_undo_ids = [u[0] for u in self._track_undo]
+
+    def _apply_track_op(self, idx: np.ndarray, new_values, what: str) -> None:
+        """Write ``new_values`` at flat indices ``idx``, record the old values for undo, refresh."""
+        flat = self._labels.reshape(-1)
+        self._track_serial += 1
+        self._track_undo.append((self._track_serial, idx, flat[idx].copy(), what))
+        del self._track_undo[:-_TRACK_UNDO_MAX]
+        flat[idx] = new_values
+        self._after_volume_edit(idx)
+        self.status = what
+
+    def _after_volume_edit(self, idx: np.ndarray) -> None:
+        plane = self._labels.shape[1] * self._labels.shape[2]
+        for z in np.unique(idx // plane):
+            self._slice_ids[int(z)] = None
+        with self.hold_sync():
+            self.track_undo_ids = [u[0] for u in self._track_undo]
+            self._send_labels()
+        self._update_extent()
+
+    def merge_ids(self, src: int, dst: int) -> bool:
+        """Relabel ``src`` as ``dst`` in every slice (link two tracks into one object).
+
+        Parameters
+        ----------
+        src : int
+            Id to replace (e.g. the id of the clicked mask).
+        dst : int
+            Id it becomes (the active id in the widget).
+
+        Returns
+        -------
+        bool
+            True if voxels changed. Refused (False, reason in ``status``) if
+            either id is 0, they are equal, or ``src`` is absent. If both ids
+            occur on a common slice the merge is applied and ``status`` warns,
+            since that slice then holds one id on two masks.
+        """
+        src, dst = int(src), int(dst)
+        if self.mode != "instance":
+            self.status = "merge: instance mode only"
+            return False
+        if src == 0 or dst == 0:
+            self.status = "merge refused: id 0 is background"
+            return False
+        if src == dst:
+            self.status = f"merge refused: clicked label {src} is already the active label"
+            return False
+        if dst > _MAX_WIRE_LABEL:
+            self.status = f"merge refused: id {dst} > {_MAX_WIRE_LABEL}"
+            return False
+        idx = np.flatnonzero(self._labels.reshape(-1) == src)
+        if idx.size == 0:
+            self.status = f"merge refused: label {src} not present"
+            return False
+        both = sorted(set(self.label_extent(src)) & set(self.label_extent(dst)))
+        what = f"merged label {src} into {dst} ({len(np.unique(idx // (self._labels.shape[1] * self._labels.shape[2])))} slices)"
+        if both:
+            what += f"; warning: both on z {', '.join(map(str, both))}"
+        self._apply_track_op(idx, dst, what)
+        return True
+
+    def split_id(self, label: int, z_from: int) -> int | None:
+        """Give the voxels of ``label`` at slices ``>= z_from`` a new id (``max + 1``).
+
+        Parameters
+        ----------
+        label : int
+            Id to split (e.g. the clicked mask's id).
+        z_from : int
+            First slice of the new object.
+
+        Returns
+        -------
+        int or None
+            The new id, or None if refused (reason in ``status``): ``label`` is
+            0, or it has no voxels below ``z_from`` or none at/above it (the
+            split would only rename the track).
+        """
+        label, z_from = int(label), int(z_from)
+        if self.mode != "instance":
+            self.status = "split: instance mode only"
+            return None
+        if label == 0:
+            self.status = "split refused: id 0 is background"
+            return None
+        zs = self.label_extent(label)
+        if not any(z >= z_from for z in zs) or not any(z < z_from for z in zs):
+            self.status = f"split refused: label {label} has no slices on both sides of z={z_from}"
+            return None
+        new = self._next_label()
+        if new > _MAX_WIRE_LABEL:
+            self.status = f"split refused: new id {new} > {_MAX_WIRE_LABEL}"
+            return None
+        tail = self._labels[z_from:].reshape(-1)
+        idx = np.flatnonzero(tail == label) + z_from * self._labels.shape[1] * self._labels.shape[2]
+        self._apply_track_op(idx, new, f"split label {label} at z={z_from}: z>={z_from} -> label {new}")
+        if self.mode == "instance" and (self.auto_increment or int(self.active_label) == new):
+            self.active_label = self._next_label()  # the active id must not silently join the new track
+        return new
+
+    def undo_track_op(self) -> bool:
+        """Undo the most recent :meth:`merge_ids` / :meth:`split_id` (last few kept).
+
+        Restores the voxels the operation changed; returns False if there is
+        nothing to undo.
+        """
+        if not self._track_undo:
+            self.status = "no track operation to undo"
+            return False
+        _, idx, old, what = self._track_undo.pop()
+        self._labels.reshape(-1)[idx] = old
+        self._after_volume_edit(idx)
+        self.status = f"undone: {what}"
+        return True
 
     # ------------------------------------------------------------------ API
     @property
@@ -346,9 +588,13 @@ class LabelAnnotator(anywidget.AnyWidget):
         if lab.size and (lab.min() < 0 or lab.max() > _MAX_WIRE_LABEL):
             raise ValueError(f"labels must be in [0, {_MAX_WIRE_LABEL}]")
         self._labels = lab.astype(np.uint32, copy=True)
+        self._slice_ids = [None] * self._labels.shape[0]
+        self._track_undo.clear()
+        self.track_undo_ids = []
         self._send_slice()
         if self.mode == "instance":
             self.active_label = self._next_label()
+        self._update_extent()
 
     def annotated_slices(self) -> list[int]:
         """Indices of z-slices containing at least one labelled pixel."""

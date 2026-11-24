@@ -1,11 +1,16 @@
 // eigenp_utils LabelAnnotator front end (anywidget ESM).
 // Wire format (little-endian):
 //   image : uint32[4] (z, C, Y, X) + C*Y*X uint8
-//   labels: uint32[3] (z, Y, X)    + Y*X uint16
-// All compositing, painting and undo happen here; edited slice labels are sent
-// back to Python after every stroke.
+//   labels: uint32[3] (z, Y, X)    + Y*X uint16 (also labels_prev/next_to_js: slices z-1 / z+1)
+// All compositing, painting and per-slice undo happen here; edited slice labels
+// are sent back to Python after every stroke. Whole-track operations (merge /
+// split an id across z) run in Python on the full volume (track_request); the
+// undo stack holds markers for them (mirroring track_undo_ids) so undo routes
+// to Python when the last operation was a track operation.
 
 const UNDO_MAX = 30;
+const KEY_HELP = "keys: b/e/f/p brush/eraser/fill/picker, m/s merge/split track, n new id, [ ] radius, " +
+  "ArrowUp/Down or Alt+ArrowRight/Left z+1/z-1, 0 fit, ctrl+z undo, space/right drag pan, wheel zoom, 1-9 class (semantic)";
 
 function asBytes(v) {
   if (!v) return null;
@@ -73,6 +78,7 @@ function render({ model, el: root }) {
   const state = {
     img: null, // {z,c,y,x,data}
     lab: null, // {z,y,x,data}
+    prev: null, next: null, // labels of slices z-1 / z+1 (onion skin) or null
     undo: [],
     zoom: 1, panX: 0, panY: 0,
     painting: false, panning: false, spaceDown: false,
@@ -88,14 +94,15 @@ function render({ model, el: root }) {
   const stage = el("div", { class: "lbl-stage" });
   const imgCanvas = el("canvas", { class: "lbl-img" });
   const labCanvas = el("canvas", { class: "lbl-lab" });
+  const adjCanvas = el("canvas", { class: "lbl-adj" });
   const curCanvas = el("canvas", { class: "lbl-cur" });
-  stage.append(imgCanvas, labCanvas, curCanvas);
+  stage.append(imgCanvas, labCanvas, adjCanvas, curCanvas);
   viewport.appendChild(stage);
   // Geometry-critical styles inline, so painting coordinates stay correct even
   // if the host does not inject the stylesheet.
   Object.assign(viewport.style, { position: "relative", overflow: "hidden", touchAction: "none" });
   Object.assign(stage.style, { position: "absolute", left: "0", top: "0", transformOrigin: "0 0" });
-  for (const c of [imgCanvas, labCanvas, curCanvas]) {
+  for (const c of [imgCanvas, labCanvas, adjCanvas, curCanvas]) {
     Object.assign(c.style, { position: "absolute", left: "0", top: "0", imageRendering: "pixelated" });
   }
   const zRow = el("div", { class: "lbl-zrow" });
@@ -103,10 +110,14 @@ function render({ model, el: root }) {
   root.append(toolbar, chanPanel, zRow, viewport, statusBar);
 
   // toolbar controls
-  const tools = ["brush", "eraser", "fill", "picker"];
+  const tools = ["brush", "eraser", "fill", "picker", "merge", "split"];
+  const toolTitles = {
+    merge: "merge track (m): click a mask; its id becomes the active id in ALL slices",
+    split: "split track here (s): click a mask; its voxels on this and later slices get a new id",
+  };
   const toolBtns = {};
   for (const t of tools) {
-    toolBtns[t] = el("button", { class: "lbl-btn", "data-tool": t, text: t, title: `${t} (${t[0]})`, onclick: () => { model.set("tool", t); model.save_changes(); } });
+    toolBtns[t] = el("button", { class: "lbl-btn", "data-tool": t, text: t, title: toolTitles[t] || `${t} (${t[0]})`, onclick: () => { model.set("tool", t); model.save_changes(); } });
     toolbar.appendChild(toolBtns[t]);
   }
   const labelInput = el("input", { type: "number", min: "0", class: "lbl-label", title: "active label" });
@@ -126,13 +137,20 @@ function render({ model, el: root }) {
   const [fillCb, fillLbl] = mkToggle("auto_fill", "fill stroke", "close and fill each stroke");
   const [owCb, owLbl] = mkToggle("overwrite", "overwrite", "paint over other labels");
   const [olCb, olLbl] = mkToggle("outline_only", "outlines", "show label outlines only");
+  const [adjCb, adjLbl] = mkToggle("show_adjacent", "z±1", "outlines of slice z-1 (dotted) and z+1 (faint), in each id's colour");
+  // keep label = auto_increment off: the active id is not advanced after strokes / fills
+  const keepCb = el("input", { type: "checkbox", class: "lbl-keep_label" });
+  keepCb.addEventListener("change", () => { model.set("auto_increment", !keepCb.checked); model.save_changes(); });
+  const keepLbl = el("label", { class: "lbl-toggle", title: "keep the active id after each stroke (paint one object across z)" }, [keepCb, document.createTextNode("keep label")]);
+  const extentSpan = el("span", { class: "lbl-extent", title: "z extent of the active id" });
   const undoBtn = el("button", { class: "lbl-btn", text: "undo", title: "undo (ctrl+z)", onclick: () => undo() });
   const clearBtn = el("button", { class: "lbl-btn", text: "clear slice", onclick: () => clearSlice() });
   const fitBtn = el("button", { class: "lbl-btn", text: "fit", title: "reset zoom (0)", onclick: () => fit() });
   toolbar.append(
-    el("span", { class: "lbl-sep" }), labelInput, classSelect, newBtn,
+    el("span", { class: "lbl-sep" }), labelInput, classSelect, newBtn, keepLbl, extentSpan,
     el("span", { class: "lbl-sep" }), el("span", { text: "r" }), radius, el("span", { text: "α" }), opacity,
-    fillLbl, owLbl, olLbl, undoBtn, clearBtn, fitBtn,
+    fillLbl, owLbl, olLbl, adjLbl, undoBtn, clearBtn, fitBtn,
+    el("span", { class: "lbl-help", text: "?", title: KEY_HELP }),
   );
 
   const zSlider = el("input", { type: "range", min: "0", max: "0", class: "lbl-z" });
@@ -172,7 +190,7 @@ function render({ model, el: root }) {
     const im = state.img;
     if (!im) return;
     if (imgCanvas.width !== im.x || imgCanvas.height !== im.y) {
-      for (const c of [imgCanvas, labCanvas, curCanvas]) { c.width = im.x; c.height = im.y; }
+      for (const c of [imgCanvas, labCanvas, adjCanvas, curCanvas]) { c.width = im.x; c.height = im.y; }
       fit();
     }
     const vis = model.get("channel_visible") || [];
@@ -215,6 +233,36 @@ function render({ model, el: root }) {
     return pal.length ? hexToRgb(pal[(id - 1) % pal.length]) : instanceColor(id);
   }
 
+  function isEdge(d, p, W, H, id) {
+    const x = p % W, y = (p - x) / W;
+    return x === 0 || y === 0 || x === W - 1 || y === H - 1 ||
+      d[p - 1] !== id || d[p + 1] !== id || d[p - W] !== id || d[p + W] !== id;
+  }
+
+  function drawAdjacent() {
+    // Onion skin: outlines of slice z-1 (dotted) and z+1 (faint), in each id's colour.
+    const ctx = adjCanvas.getContext("2d");
+    ctx.clearRect(0, 0, adjCanvas.width, adjCanvas.height);
+    if (!model.get("show_adjacent") || !state.lab) return;
+    const W = state.lab.x, H = state.lab.y;
+    const out = ctx.createImageData(W, H);
+    const cache = new Map();
+    for (const [lb, dotted] of [[state.next, false], [state.prev, true]]) {
+      if (!lb || lb.x !== W || lb.y !== H) continue;
+      const d = lb.data;
+      for (let p = 0; p < d.length; p++) {
+        const id = d[p];
+        if (id === 0 || !isEdge(d, p, W, H, id)) continue;
+        if (dotted && ((p % W) + ((p / W) | 0)) % 2) continue;
+        let rgb = cache.get(id);
+        if (!rgb) { rgb = labelRgb(id); cache.set(id, rgb); }
+        out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
+        out.data[4 * p + 3] = dotted ? 255 : 110;
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+  }
+
   function drawLabels() {
     const lb = state.lab;
     if (!lb) return;
@@ -227,12 +275,7 @@ function render({ model, el: root }) {
     for (let p = 0; p < d.length; p++) {
       const id = d[p];
       if (id === 0) continue;
-      if (outline) {
-        const x = p % W, y = (p - x) / W;
-        const edge = x === 0 || y === 0 || x === W - 1 || y === H - 1 ||
-          d[p - 1] !== id || d[p + 1] !== id || d[p - W] !== id || d[p + W] !== id;
-        if (!edge) continue;
-      }
+      if (outline && !isEdge(d, p, W, H, id)) continue;
       let rgb = cache.get(id);
       if (!rgb) { rgb = labelRgb(id); cache.set(id, rgb); }
       out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
@@ -378,10 +421,30 @@ function render({ model, el: root }) {
     model.save_changes();
   }
 
+  function trackRequest(req) {
+    model.set("track_request", { ...req, n: (state.trackN = (state.trackN || 0) + 1) });
+    model.save_changes();
+  }
+
+  function syncTrackUndo() {
+    // mirror Python's track-operation undo stack as markers in state.undo
+    const ids = model.get("track_undo_ids") || [];
+    const live = new Set(ids);
+    state.undo = state.undo.filter((u) => u.track === undefined || live.has(u.track));
+    const have = new Set(state.undo.filter((u) => u.track !== undefined).map((u) => u.track));
+    for (const s of ids) if (!have.has(s)) state.undo.push({ track: s });
+  }
+
   function undo() {
     const lb = state.lab;
     if (!lb) return;
     for (let i = state.undo.length - 1; i >= 0; i--) {
+      if (state.undo[i].track !== undefined) {
+        // last operation was a whole-track merge/split: Python undoes it and
+        // removes the marker via track_undo_ids
+        trackRequest({ op: "undo", serial: state.undo[i].track });
+        return;
+      }
       if (state.undo[i].z === lb.z) {
         lb.data.set(state.undo[i].data);
         state.undo.splice(i, 1);
@@ -417,6 +480,16 @@ function render({ model, el: root }) {
     if (t === "picker") {
       const id = state.lab.data[y * state.lab.x + x];
       model.set("active_label", id); model.save_changes();
+      return;
+    }
+    if (t === "merge" || t === "split") {
+      const id = state.lab.data[y * state.lab.x + x];
+      const active = model.get("active_label") ?? 0;
+      if (id === 0) { setStatus(`${t}: click on a mask`); return; }
+      if (t === "split") { trackRequest({ op: "split", id, z: state.lab.z }); return; }
+      if (active === 0) { setStatus("merge refused: active label is 0"); return; }
+      if (active === id) { setStatus(`merge refused: clicked label ${id} is already the active label`); return; }
+      trackRequest({ op: "merge", src: id, dst: active });
       return;
     }
     if (t === "fill") {
@@ -479,7 +552,14 @@ function render({ model, el: root }) {
     const k = ev.key;
     if (k === " ") { state.spaceDown = true; ev.preventDefault(); return; }
     if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "z") { undo(); ev.preventDefault(); return; }
+    if (ev.altKey && (k === "ArrowLeft" || k === "ArrowRight")) {
+      // Alt+Left/Right step z (and must not trigger browser back/forward)
+      ev.preventDefault(); ev.stopPropagation();
+      stepZ(k === "ArrowRight" ? 1 : -1);
+      return;
+    }
     const map = { b: "brush", e: "eraser", f: "fill", p: "picker" };
+    if (model.get("mode") !== "semantic") Object.assign(map, { m: "merge", s: "split" });
     if (map[k]) { model.set("tool", map[k]); model.save_changes(); return; }
     if (k === "[" || k === "]") {
       const r = Math.max(0, (model.get("brush_radius") ?? 2) + (k === "]" ? 1 : -1));
@@ -493,11 +573,14 @@ function render({ model, el: root }) {
       return;
     }
     if (k === "ArrowUp" || k === "ArrowDown") {
-      const nz = (model.get("z") ?? 0) + (k === "ArrowUp" ? 1 : -1);
-      model.set("z", Math.min(Math.max(nz, 0), (model.get("shape_zyx") || [1])[0] - 1)); model.save_changes();
+      stepZ(k === "ArrowUp" ? 1 : -1);
       ev.preventDefault();
     }
   });
+  function stepZ(dz) {
+    const nz = (model.get("z") ?? 0) + dz;
+    model.set("z", Math.min(Math.max(nz, 0), (model.get("shape_zyx") || [1])[0] - 1)); model.save_changes();
+  }
   viewport.addEventListener("keyup", (ev) => { if (ev.key === " ") state.spaceDown = false; });
 
   // ------------------------------------------------------------ model sync
@@ -505,8 +588,7 @@ function render({ model, el: root }) {
     const t = model.get("tool");
     for (const [name, b] of Object.entries(toolBtns)) b.classList.toggle("lbl-active", name === t);
     const sem = model.get("mode") === "semantic";
-    labelInput.style.display = sem ? "none" : "";
-    newBtn.style.display = sem ? "none" : "";
+    for (const e of [labelInput, newBtn, keepLbl, extentSpan, toolBtns.merge, toolBtns.split]) e.style.display = sem ? "none" : "";
     classSelect.style.display = sem ? "" : "none";
     const names = model.get("class_names") || [];
     if (classSelect.options.length !== names.length + 1) {
@@ -522,11 +604,15 @@ function render({ model, el: root }) {
     fillCb.checked = !!model.get("auto_fill");
     owCb.checked = !!model.get("overwrite");
     olCb.checked = !!model.get("outline_only");
+    adjCb.checked = !!model.get("show_adjacent");
+    keepCb.checked = !model.get("auto_increment");
+    extentSpan.textContent = model.get("active_label_extent") || "";
     const shp = model.get("shape_zyx") || [1, 1, 1];
     zSlider.max = String(Math.max(0, shp[0] - 1));
     zSlider.value = String(model.get("z") ?? 0);
     zLabel.textContent = `${model.get("z") ?? 0} / ${Math.max(0, shp[0] - 1)}`;
     zRow.style.display = shp[0] > 1 ? "" : "none";
+    adjLbl.style.display = shp[0] > 1 ? "" : "none";
     const st = model.get("status");
     if (st) setStatus(st);
   }
@@ -540,17 +626,26 @@ function render({ model, el: root }) {
   function onLabels() {
     const lb = decodeLabels(model.get("labels_to_js"));
     if (!lb) return;
-    if (!state.lab || state.lab.z !== lb.z) state.undo = state.undo.filter((u) => u.z === lb.z);
+    if (!state.lab || state.lab.z !== lb.z) state.undo = state.undo.filter((u) => u.track !== undefined || u.z === lb.z);
     state.lab = lb;
     drawLabels();
+    drawAdjacent();
+  }
+  function onAdjacent() {
+    state.prev = decodeLabels(model.get("labels_prev_to_js"));
+    state.next = decodeLabels(model.get("labels_next_to_js"));
+    drawAdjacent();
   }
 
   const handlers = [
     ["change:image_to_js", onImage],
     ["change:labels_to_js", onLabels],
     ["change:channel_visible change:channel_colors change:vmin change:vmax change:gamma", compose],
-    ["change:opacity change:outline_only change:class_colors change:instance_palette change:mode", () => { drawLabels(); syncControls(); }],
-    ["change:tool change:active_label change:brush_radius change:auto_fill change:overwrite change:z change:shape_zyx change:class_names change:status", () => { syncControls(); drawCursor(); }],
+    ["change:labels_prev_to_js change:labels_next_to_js", onAdjacent],
+    ["change:opacity change:outline_only change:class_colors change:instance_palette change:mode", () => { drawLabels(); drawAdjacent(); syncControls(); }],
+    ["change:show_adjacent", () => { drawAdjacent(); syncControls(); }],
+    ["change:track_undo_ids", syncTrackUndo],
+    ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:shape_zyx change:class_names change:status change:active_label_extent", () => { syncControls(); drawCursor(); }],
     ["change:channel_names", buildChannels],
   ];
   for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.on(e, fn);
@@ -559,6 +654,8 @@ function render({ model, el: root }) {
   syncControls();
   onImage();
   onLabels();
+  onAdjacent();
+  syncTrackUndo();
   requestAnimationFrame(fit);
 
   return () => { for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.off?.(e, fn); };
