@@ -78,7 +78,7 @@ def serve():
         base = Path(tmp.name)
         (base / "label_annotator.js").write_text(LabelAnnotator._esm)
         (base / "label_annotator.css").write_text(LabelAnnotator._css if css else "")
-        (base / "index.html").write_text(_HARNESS % {"view": VIEW_PX, "state": _state_json(widget)})
+        (base / "index.html").write_text(_HARNESS % {"view": VIEW_PX + 230, "state": _state_json(widget)})
         handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(base))
         httpd = http.server.HTTPServer(("localhost", 0), handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
