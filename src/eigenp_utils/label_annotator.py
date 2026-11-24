@@ -217,6 +217,18 @@ class LabelAnnotator(anywidget.AnyWidget):
     show_adjacent : bool
         Show outlines of the labels on slices z-1 (dotted) and z+1 (faint) over
         the current slice, each in its id's colour ("onion skin").
+    display : {"filled", "outlined"}
+        ``"filled"`` (default): labels are filled at ``opacity``.
+        ``"outlined"``: each label's boundary is drawn ``outline_px`` wide in its
+        colour over an opaque black band ``outline_border_px`` wide on each side
+        (readable on bright and dark images); the interior is only faintly tinted
+        (``opacity`` / 4) and the outline fades with ``opacity`` below 0.45.
+        Background (id 65535) stays hatched grey. Toolbar toggle or key ``o``.
+        The legacy ``outline_only`` trait still draws thin 1-px outlines in the
+        filled style and is superseded by ``display="outlined"``.
+    outline_px, outline_border_px : int
+        Widths in pixels of the coloured outline (default 2) and of the black
+        border band around it (default 1) in the outlined display.
     background : bool
         Instance mode only: reserve ``BACKGROUND_ID`` (65535) for annotated
         background and add a ``background`` brush (key ``g``) that paints it
@@ -258,7 +270,7 @@ class LabelAnnotator(anywidget.AnyWidget):
     labelling convention only: training code must map it to its own loss
     (e.g. mask out 0); Cellpose itself does not interpret -1.
 
-    Keyboard (viewport focused): b/e/f/p brush/eraser/fill/picker, g
+    Keyboard (viewport focused): o toggle filled/outlined display, b/e/f/p brush/eraser/fill/picker, g
     background brush (``background=True``), x delete mask (shift+click: all
     slices), m/s merge/split track, n new id, [ / ] brush radius,
     ArrowUp/ArrowDown or Alt+ArrowRight/Alt+ArrowLeft z+1/z-1, 0 fit, ctrl+z
@@ -294,6 +306,12 @@ class LabelAnnotator(anywidget.AnyWidget):
     vmax = traitlets.List(traitlets.Int()).tag(sync=True)
     gamma = traitlets.List(traitlets.Float()).tag(sync=True)
     opacity = traitlets.Float(0.45).tag(sync=True)
+    # "filled" (default) | "outlined": per-label coloured boundary (outline_px wide)
+    # over an opaque black border band (outline_border_px wide), faint interior
+    display = traitlets.Enum(["filled", "outlined"], default_value="filled").tag(sync=True)
+    outline_px = traitlets.Int(2).tag(sync=True)
+    outline_border_px = traitlets.Int(1).tag(sync=True)
+    # legacy: thin 1-px outlines in the filled style; kept for old code (prefer ``display``)
     outline_only = traitlets.Bool(False).tag(sync=True)
     show_adjacent = traitlets.Bool(False).tag(sync=True)
 

@@ -151,7 +151,10 @@ function render({ model, el: root }) {
   };
   const [fillCb, fillLbl] = mkToggle("auto_fill", "fill stroke", "close and fill each stroke");
   const [owCb, owLbl] = mkToggle("overwrite", "overwrite", "paint over other labels");
-  const [olCb, olLbl] = mkToggle("outline_only", "outlines", "show label outlines only");
+  // display toggle: filled <-> outlined (thick coloured boundary over a black border band); key o
+  const olCb = el("input", { type: "checkbox", class: "lbl-display" });
+  olCb.addEventListener("change", () => { model.set("display", olCb.checked ? "outlined" : "filled"); model.save_changes(); });
+  const olLbl = el("label", { class: "lbl-toggle", title: "outlined labels: coloured boundary with a black border, no fill (o)" }, [olCb, document.createTextNode("outlined")]);
   const [adjCb, adjLbl] = mkToggle("show_adjacent", "z±1", "outlines of slice z-1 (dotted) and z+1 (faint), in each id's colour");
   // keep label = auto_increment off: the active id is not advanced after strokes / fills
   const keepCb = el("input", { type: "checkbox", class: "lbl-keep_label" });
@@ -286,28 +289,62 @@ function render({ model, el: root }) {
     const ctx = labCanvas.getContext("2d");
     const out = ctx.createImageData(lb.x, lb.y);
     const a = Math.round(255 * (model.get("opacity") ?? 0.45));
-    const outline = !!model.get("outline_only");
+    const outlined = model.get("display") === "outlined";
     const cache = new Map();
     const d = lb.data, W = lb.x, H = lb.y;
     const bg = bgOn();
     const bgA = Math.max(a, 140);
+    const color = (id) => { let rgb = cache.get(id); if (!rgb) { rgb = labelRgb(id); cache.set(id, rgb); } return rgb; };
     for (let p = 0; p < d.length; p++) {
       const id = d[p];
       if (id === 0) continue;
       if (id === BG_ID && bg) {
-        // annotated background: hatched neutral grey, filled also in outline mode
-        // (scribbles are thin; their outline would be the scribble itself)
+        // annotated background: hatched neutral grey, in every display mode
         const x = p % W, y = (p - x) / W;
         const rgb = ((x + y) & 3) < 2 ? BG_RGB_A : BG_RGB_B;
         out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
         out.data[4 * p + 3] = bgA;
         continue;
       }
-      if (outline && !isEdge(d, p, W, H, id)) continue;
-      let rgb = cache.get(id);
-      if (!rgb) { rgb = labelRgb(id); cache.set(id, rgb); }
+      if (outlined) {
+        // interior: very faint fill (opacity slider / 4); the outline is added below
+        const rgb = color(id);
+        out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
+        out.data[4 * p + 3] = a >> 2;
+        continue;
+      }
+      if (model.get("outline_only") && !isEdge(d, p, W, H, id)) continue;
+      const rgb = color(id);
       out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
-      out.data[4 * p + 3] = outline ? 255 : a;
+      out.data[4 * p + 3] = model.get("outline_only") ? 255 : a;
+    }
+    if (outlined) {
+      // Each non-background label's boundary pixels are stamped with a square of
+      // half-width rc (coloured) over one of rc + rb (opaque black border band).
+      // Cost: boundary pixels x (2r+1)^2, once per redraw, entirely in JS.
+      const px = Math.max(1, Math.round(model.get("outline_px") ?? 2));
+      const rc = (px - 1) >> 1, rc2 = px >> 1; // asymmetric for even widths
+      const rb = Math.max(0, Math.round(model.get("outline_border_px") ?? 1));
+      const oa = Math.min(255, Math.round(255 * Math.min(1, (a / 255) / 0.45)));
+      const edge = [];
+      for (let p = 0; p < d.length; p++) {
+        const id = d[p];
+        if (id === 0 || (id === BG_ID && bg) || !isEdge(d, p, W, H, id)) continue;
+        edge.push(p);
+      }
+      const stamp = (r0, r1, fn) => {
+        for (const p of edge) {
+          const x = p % W, y = (p - x) / W;
+          const ya = Math.max(0, y - r0), yb = Math.min(H - 1, y + r1);
+          const xa = Math.max(0, x - r0), xb = Math.min(W - 1, x + r1);
+          for (let yy = ya; yy <= yb; yy++) for (let xx = xa; xx <= xb; xx++) fn(yy * W + xx, p);
+        }
+      };
+      stamp(rc + rb, rc2 + rb, (q) => { const o = 4 * q; out.data[o] = out.data[o + 1] = out.data[o + 2] = 0; out.data[o + 3] = oa; });
+      stamp(rc, rc2, (q, p) => {
+        const rgb = color(d[p]), o = 4 * q;
+        out.data[o] = rgb[0]; out.data[o + 1] = rgb[1]; out.data[o + 2] = rgb[2]; out.data[o + 3] = oa;
+      });
     }
     ctx.putImageData(out, 0, 0);
   }
@@ -611,6 +648,7 @@ function render({ model, el: root }) {
     // letter keys only without modifiers: ctrl+s / ctrl+f / ctrl+p belong to the
     // host (saving the notebook must not silently arm the split tool)
     const mod = ev.ctrlKey || ev.metaKey || ev.altKey;
+    if (k === "o" && !mod) { model.set("display", model.get("display") === "outlined" ? "filled" : "outlined"); model.save_changes(); return; }
     const map = { b: "brush", e: "eraser", f: "fill", p: "picker", x: "delete" };
     if (model.get("mode") !== "semantic") Object.assign(map, { m: "merge", s: "split" });
     if (bgOn()) map.g = "background";
@@ -660,7 +698,7 @@ function render({ model, el: root }) {
     opacity.value = String(Math.round(100 * (model.get("opacity") ?? 0.45)));
     fillCb.checked = !!model.get("auto_fill");
     owCb.checked = !!model.get("overwrite");
-    olCb.checked = !!model.get("outline_only");
+    olCb.checked = model.get("display") === "outlined";
     adjCb.checked = !!model.get("show_adjacent");
     keepCb.checked = !model.get("auto_increment");
     extentSpan.textContent = model.get("active_label_extent") || "";
@@ -699,7 +737,7 @@ function render({ model, el: root }) {
     ["change:labels_to_js change:labels_rev", onLabels],
     ["change:channel_visible change:channel_colors change:vmin change:vmax change:gamma", compose],
     ["change:labels_prev_to_js change:labels_next_to_js", onAdjacent],
-    ["change:opacity change:outline_only change:class_colors change:instance_palette change:mode change:background", () => { drawLabels(); drawAdjacent(); syncControls(); }],
+    ["change:opacity change:outline_only change:display change:outline_px change:outline_border_px change:class_colors change:instance_palette change:mode change:background", () => { drawLabels(); drawAdjacent(); syncControls(); }],
     ["change:show_adjacent", () => { drawAdjacent(); syncControls(); }],
     ["change:track_undo_ids", syncTrackUndo],
     ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:shape_zyx change:class_names change:status change:active_label_extent change:counts_text", () => { syncControls(); drawCursor(); }],

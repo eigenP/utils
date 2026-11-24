@@ -437,7 +437,7 @@ def test_background_brush_paints_open_scribbles_with_reserved_id(page, serve):
         return Array.from(c.getContext('2d').getImageData(20, 10, 1, 1).data); }"""
     )
     assert rgba[0] == rgba[1] == rgba[2] and rgba[3] >= 140, rgba
-    page.locator("input.lbl-outline_only").check()
+    page.locator("input.lbl-display").check()
     rgba = page.evaluate(
         """() => { const c = document.querySelector('canvas.lbl-lab');
         return Array.from(c.getContext('2d').getImageData(20, 10, 1, 1).data); }"""
@@ -522,3 +522,29 @@ def test_counts_readout_shows_python_counts(page, serve):
     assert "1 cell, 80 bg px, 105 annotated px" in w.counts_text
     page.evaluate("window.mockModel.set('counts_text', 'x')")
     assert page.locator(".lbl-counts").inner_text() == "x"
+
+
+def _lab_rgba(page, x, y):
+    return page.evaluate(
+        f"""() => Array.from(document.querySelector('canvas.lbl-lab').getContext('2d').getImageData({x}, {y}, 1, 1).data)"""
+    )
+
+
+def test_outlined_display_draws_coloured_boundary_over_black_border(page, serve):
+    """Outlined mode: id-4 square (5:15) gets a coloured edge, black band outside it, faint interior; key ``o`` toggles."""
+    w, _ = _widget3d(display="outlined", outline_px=1, outline_border_px=2)
+    w.z = 0
+    _open(page, serve(w))
+    edge = _lab_rgba(page, 5, 10)
+    assert edge[3] == 255 and max(edge[:3]) > 0, edge
+    border = _lab_rgba(page, 4, 10)
+    assert border[:3] == [0, 0, 0] and border[3] == 255, border
+    assert _lab_rgba(page, 2, 10)[3] == 0, "nothing beyond the border band"
+    inner = _lab_rgba(page, 10, 10)
+    assert 0 < inner[3] < 60, "interior only faintly tinted"
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("o")
+    assert _get(page, "display") == "filled"
+    assert _lab_rgba(page, 10, 10)[3] > 60
+    page.keyboard.press("o")
+    assert _get(page, "display") == "outlined"
