@@ -33,6 +33,12 @@ Design
   (``merge_ids``, ``split_id``) run in Python on the full volume, requested by
   the browser through ``track_request``; they keep their own undo stack
   (``track_undo_ids`` mirrors it so the browser's undo can route to it).
+  Deleting a whole mask (``delete_id``) is a track operation too.
+- Annotated background (``background=True``, instance mode): the reserved id
+  ``BACKGROUND_ID`` (65535, the largest wire id) marks pixels annotated as
+  "not a cell", so a label volume has three states: 0 unannotated, 65535
+  background, 1..65534 cells. ``labels_signed`` / ``save(signed=True)`` give
+  the signed convention (-1 background) used for sparse Cellpose training.
 
 Only numpy, anywidget and traitlets are required (core dependencies; also
 works in marimo WASM). ``tifffile`` is imported lazily by ``save``.
@@ -54,6 +60,7 @@ _ASSETS = Path(__file__).parent
 _IMG_HDR = struct.Struct("<4I")
 _LBL_HDR = struct.Struct("<3I")
 _MAX_WIRE_LABEL = np.iinfo(np.uint16).max
+BACKGROUND_ID = _MAX_WIRE_LABEL  # reserved id for annotated background (background=True)
 _TRACK_UNDO_MAX = 20  # whole-volume operations kept for undo
 
 _DEFAULT_CHANNEL_COLORS = ["#ff00ff", "#00ff00", "#00ffff", "#ff8000", "#ffff00", "#ffffff", "#ff0000", "#0080ff"]
@@ -137,6 +144,22 @@ def _robust_limits(arr: np.ndarray, lo: float, hi: float, max_samples: int = 2_0
     return float(a), float(b)
 
 
+def _coerce_label_values(lab: np.ndarray, background: bool) -> np.ndarray:
+    """Validate label values and return them as ``uint32`` (a copy).
+
+    Accepts unsigned ids in ``[0, 65535]``; with ``background`` also negative
+    values (signed convention), which become ``BACKGROUND_ID``.
+    """
+    if lab.size:
+        lo, hi = lab.min(), lab.max()
+        if hi > _MAX_WIRE_LABEL or (lo < 0 and not background):
+            hint = " (negative values mean annotated background: pass background=True)" if lo < 0 else ""
+            raise ValueError(f"labels must be in [0, {_MAX_WIRE_LABEL}]{hint}")
+        if lo < 0:
+            return np.where(lab < 0, BACKGROUND_ID, lab).astype(np.uint32)
+    return lab.astype(np.uint32, copy=True)
+
+
 def encode_image_slice(slice_cyx_u8: np.ndarray, z: int) -> bytes:
     c, y, x = slice_cyx_u8.shape
     return _IMG_HDR.pack(z, c, y, x) + np.ascontiguousarray(slice_cyx_u8, dtype=np.uint8).tobytes()
@@ -194,13 +217,25 @@ class LabelAnnotator(anywidget.AnyWidget):
     show_adjacent : bool
         Show outlines of the labels on slices z-1 (dotted) and z+1 (faint) over
         the current slice, each in its id's colour ("onion skin").
+    background : bool
+        Instance mode only: reserve ``BACKGROUND_ID`` (65535) for annotated
+        background and add a ``background`` brush (key ``g``) that paints it
+        as open scribbles (never closed / filled). The id is never handed out
+        as a cell id, merge / split refuse it, and it is drawn in a fixed
+        neutral grey (hatched) in every display mode. ``labels`` may then
+        also be signed (negative values = background). Default False: 65535
+        is an ordinary id and nothing changes.
 
     Attributes
     ----------
     labels : np.ndarray
         Current labels (``uint32``), spatial axes of the input.
+    BACKGROUND_ID : int
+        65535, the reserved annotated-background id (with ``background=True``).
     active_label_extent : str
         z extent of the active id, e.g. ``"label 37: z 12-19 (8 slices)"``.
+    counts_text : str
+        Readout of :meth:`counts` for the current slice and the volume.
 
     Notes
     -----
@@ -212,11 +247,26 @@ class LabelAnnotator(anywidget.AnyWidget):
     voxels at slices >= z get a new id; :meth:`split_id`). Both whole-track
     operations are undoable (ctrl+z / undo, or :meth:`undo_track_op`).
 
-    Keyboard (viewport focused): b/e/f/p brush/eraser/fill/picker, m/s
-    merge/split track, n new id, [ / ] brush radius, ArrowUp/ArrowDown or
-    Alt+ArrowRight/Alt+ArrowLeft z+1/z-1, 0 fit, ctrl+z undo, space+drag or
-    right/middle drag pan, wheel zoom, 1-9 class (semantic mode).
+    Sparse training annotations (``background=True``): 0 = unannotated
+    (ignored in training), ``BACKGROUND_ID`` = annotated background (-1 in
+    :meth:`labels_signed` and ``save(signed=True)``), 1.. = cell instances.
+    Paint background with the ``background`` brush; the eraser removes it like
+    any id. The ``delete`` tool (and :meth:`delete_id`) removes a whole mask:
+    click = this slice, shift+click = all slices; undoable like merge/split.
+    The widget shows :meth:`counts` (cells, background and annotated pixels,
+    annotated fraction) for the current slice and the volume. This is a
+    labelling convention only: training code must map it to its own loss
+    (e.g. mask out 0); Cellpose itself does not interpret -1.
+
+    Keyboard (viewport focused): b/e/f/p brush/eraser/fill/picker, g
+    background brush (``background=True``), x delete mask (shift+click: all
+    slices), m/s merge/split track, n new id, [ / ] brush radius,
+    ArrowUp/ArrowDown or Alt+ArrowRight/Alt+ArrowLeft z+1/z-1, 0 fit, ctrl+z
+    undo, space+drag or right/middle drag pan, wheel zoom, 1-9 class
+    (semantic mode).
     """
+
+    BACKGROUND_ID = BACKGROUND_ID
 
     _esm = _ASSETS.joinpath("label_annotator.js").read_text()
     _css = _ASSETS.joinpath("label_annotator.css").read_text()
@@ -254,7 +304,10 @@ class LabelAnnotator(anywidget.AnyWidget):
     # instance colours: labels_cmap palette, id k -> palette[(k - 1) % len]
     instance_palette = traitlets.List(traitlets.Unicode()).tag(sync=True)
     active_label = traitlets.Int(1).tag(sync=True)
-    tool = traitlets.Unicode("brush").tag(sync=True)  # brush | eraser | fill | picker | merge | split
+    tool = traitlets.Unicode("brush").tag(sync=True)  # brush | eraser | fill | picker | merge | split | background | delete
+    # reserve BACKGROUND_ID for annotated background (instance mode); see class docstring
+    background = traitlets.Bool(False).tag(sync=True)
+    counts_text = traitlets.Unicode("").tag(sync=True)
     brush_radius = traitlets.Int(2).tag(sync=True)
     overwrite = traitlets.Bool(False).tag(sync=True)
     auto_fill = traitlets.Bool(True).tag(sync=True)
@@ -263,7 +316,8 @@ class LabelAnnotator(anywidget.AnyWidget):
     status = traitlets.Unicode("").tag(sync=True)
     active_label_extent = traitlets.Unicode("").tag(sync=True)
     # whole-track operations: JS -> Python requests
-    # {"op": "merge", "src", "dst"} | {"op": "split", "id", "z"} | {"op": "undo", "serial"},
+    # {"op": "merge", "src", "dst"} | {"op": "split", "id", "z"} | {"op": "delete", "id", "z" (None: all)}
+    # | {"op": "undo", "serial"},
     # plus a counter "n" so repeated identical requests still notify
     track_request = traitlets.Dict().tag(sync=True)
     # serials of the undoable track operations, oldest first (Python -> JS)
@@ -282,10 +336,14 @@ class LabelAnnotator(anywidget.AnyWidget):
         brush_radius: int = 2,
         keep_label: bool = False,
         show_adjacent: bool = False,
+        background: bool = False,
         **kwargs,
     ):
         if mode not in ("instance", "semantic"):
             raise ValueError("mode must be 'instance' or 'semantic'")
+        background = bool(background)
+        if background and mode != "instance":
+            raise ValueError("background=True is for instance mode; in semantic mode add a background class")
         if getattr(image, "dims", None) is not None and "C" in image.dims:
             # channel names / colours from the DataArray (image_io.set_channel_info)
             if channel_names is None and "C" in image.coords:
@@ -307,16 +365,15 @@ class LabelAnnotator(anywidget.AnyWidget):
             lab = lab[np.newaxis] if lab.ndim == 2 else lab
             if lab.shape != (nz, ny, nx):
                 raise ValueError(f"labels shape {np.asarray(labels).shape} does not match image spatial shape {(nz, ny, nx)}")
-            if lab.size and (lab.min() < 0 or lab.max() > _MAX_WIRE_LABEL):
-                raise ValueError(f"labels must be in [0, {_MAX_WIRE_LABEL}]")
-            self._labels = lab.astype(np.uint32, copy=True)
+            self._labels = _coerce_label_values(lab, background)
 
         names = list(channel_names) if channel_names else [f"ch{i}" for i in range(c)]
         colors = [_color_hex(v) for v in channel_colors] if channel_colors else (["#ffffff"] if c == 1 else _DEFAULT_CHANNEL_COLORS[:c])
         if len(names) != c or len(colors) != c:
             raise ValueError(f"need {c} channel names/colors")
         classes = list(classes) if classes else (["foreground"] if mode == "semantic" else [])
-        self._slice_ids: list[np.ndarray | None] = [None] * nz  # cached ids per slice (extent readout)
+        # cached (nonzero ids, pixel counts) per slice: extent / counts readouts, next id
+        self._slice_hist: list[tuple[np.ndarray, np.ndarray] | None] = [None] * nz
         # (serial, flat idx, old values, value written, what)
         self._track_undo: list[tuple[int, np.ndarray, np.ndarray, int, str]] = []
         self._track_serial = 0
@@ -338,10 +395,12 @@ class LabelAnnotator(anywidget.AnyWidget):
             self.auto_increment = mode == "instance" and not keep_label
             self.brush_radius = brush_radius
             self.show_adjacent = bool(show_adjacent)
+            self.background = background
             self.active_label = self._next_label() if mode == "instance" else 1
             self.z = nz // 2
             self._send_slice()
             self._update_extent()
+            self._update_counts()
 
     # ------------------------------------------------------------------ sync
     def _slice_u8(self, z: int) -> np.ndarray:
@@ -396,6 +455,13 @@ class LabelAnnotator(anywidget.AnyWidget):
     def _on_z(self, change):
         if hasattr(self, "_image"):
             self._send_slice()
+            self._update_counts()
+
+    @traitlets.observe("background")
+    def _on_background(self, change):
+        if hasattr(self, "_slice_hist"):
+            self._update_extent()
+            self._update_counts()
 
     @traitlets.observe("labels_from_js")
     def _on_labels_from_js(self, change):
@@ -407,24 +473,38 @@ class LabelAnnotator(anywidget.AnyWidget):
             self.status = f"ignored label message for z={z} with shape {lab.shape}"
             return
         self._labels[z] = lab
-        self._slice_ids[z] = None
+        self._slice_hist[z] = None
         if self.mode == "instance" and self.auto_increment:
             self.active_label = self._next_label()
         self._update_extent()
+        self._update_counts()
 
     @traitlets.observe("new_label_trigger")
     def _on_new_label(self, change):
         self.active_label = self._next_label()
 
+    def _max_cell_id(self) -> int:
+        """Largest id usable for an object: 65535, or 65534 when 65535 is the background id."""
+        return BACKGROUND_ID - 1 if self.background else _MAX_WIRE_LABEL
+
+    def _cell_ids(self) -> np.ndarray:
+        """Sorted ids present in the volume, excluding 0 and (with ``background``) ``BACKGROUND_ID``."""
+        ids = [self._hist(z)[0] for z in range(self._labels.shape[0])]
+        ids = np.unique(np.concatenate(ids)) if ids else np.zeros(0, np.intp)
+        return ids[ids != BACKGROUND_ID] if self.background else ids
+
     def _next_label(self) -> int:
-        """``max + 1``; once that exceeds the wire limit (65535), the smallest unused id."""
-        nxt = int(self._labels.max()) + 1 if self._labels.size else 1
-        if nxt <= _MAX_WIRE_LABEL:
+        """``max + 1`` over the object ids; once that exceeds the largest usable id
+        (65535, or 65534 with ``background``), the smallest unused id. Never the background id."""
+        top = self._max_cell_id()
+        ids = self._cell_ids()
+        nxt = int(ids[-1]) + 1 if ids.size else 1
+        if nxt <= top:
             return nxt
-        free = np.flatnonzero(np.bincount(self._labels.ravel(), minlength=_MAX_WIRE_LABEL + 1)[1:] == 0)
+        free = np.setdiff1d(np.arange(1, top + 1), ids, assume_unique=True)
         if free.size == 0:
-            raise ValueError(f"all ids 1..{_MAX_WIRE_LABEL} are in use")
-        return int(free[0]) + 1
+            raise ValueError(f"all ids 1..{top} are in use")
+        return int(free[0])
 
     @traitlets.validate("active_label")
     def _valid_active_label(self, proposal):
@@ -432,19 +512,28 @@ class LabelAnnotator(anywidget.AnyWidget):
         if not 0 <= v <= _MAX_WIRE_LABEL:
             # the browser paints uint16: a larger id would wrap (65536 -> 0, 65537 -> 1)
             raise traitlets.TraitError(f"active_label must be in [0, {_MAX_WIRE_LABEL}], got {v}")
+        if v == BACKGROUND_ID and self.background:
+            raise traitlets.TraitError(f"id {BACKGROUND_ID} is reserved for annotated background; use the background tool")
         return v
 
     @traitlets.observe("active_label")
     def _on_active_label(self, change):
-        if hasattr(self, "_slice_ids"):
+        if hasattr(self, "_slice_hist"):
             self._update_extent()
 
-    def _ids_in_slice(self, z: int) -> np.ndarray:
-        ids = self._slice_ids[z]
-        if ids is None:
+    def _hist(self, z: int) -> tuple[np.ndarray, np.ndarray]:
+        """(nonzero ids, their pixel counts) on slice ``z``; cached until the slice is edited."""
+        h = self._slice_hist[z]
+        if h is None:
             # ids <= 65535 (wire limit), so a bincount is a cheap O(n) unique
-            ids = self._slice_ids[z] = np.flatnonzero(np.bincount(self._labels[z].ravel()))
-        return ids
+            bc = np.bincount(self._labels[z].ravel())
+            ids = np.flatnonzero(bc)
+            ids = ids[ids != 0]
+            h = self._slice_hist[z] = (ids, bc[ids])
+        return h
+
+    def _ids_in_slice(self, z: int) -> np.ndarray:
+        return self._hist(z)[0]
 
     def label_extent(self, label: int) -> list[int]:
         """z indices of the slices that contain ``label`` (sorted)."""
@@ -456,7 +545,7 @@ class LabelAnnotator(anywidget.AnyWidget):
             self.active_label_extent = ""
             return
         if a == 0:
-            self.active_label_extent = "label 0 (background)"
+            self.active_label_extent = "label 0 (unannotated)" if self.background else "label 0 (background)"
             return
         zs = self.label_extent(a)
         if not zs:
@@ -469,6 +558,60 @@ class LabelAnnotator(anywidget.AnyWidget):
             txt += f", missing z {', '.join(map(str, missing))}"
         self.active_label_extent = txt
 
+    def counts(self, z: int | None = None) -> dict:
+        """Annotation counts for slice ``z`` or, with ``z=None``, the whole volume.
+
+        Returns
+        -------
+        dict
+            ``n_cells``: number of distinct object ids (excluding 0 and, with
+            ``background``, ``BACKGROUND_ID``); ``cell_px``: pixels with such
+            an id; ``background_px``: pixels with ``BACKGROUND_ID`` (0 unless
+            ``background``); ``annotated_px``: ``cell_px + background_px``
+            (all nonzero pixels); ``annotated_fraction``: ``annotated_px`` /
+            pixels in the slice or volume. In semantic mode "cells" are the
+            class ids.
+        """
+        nz = self._labels.shape[0]
+        if z is None:
+            zs = range(nz)
+        else:
+            z = int(z)
+            if not 0 <= z < nz:
+                raise ValueError(f"z={z} out of range [0, {nz - 1}]")
+            zs = [z]
+        cell_px = bg_px = 0
+        ids = []
+        for k in zs:
+            i, c = self._hist(k)
+            bg = (i == BACKGROUND_ID) if self.background else np.zeros(i.shape, bool)
+            bg_px += int(c[bg].sum())
+            cell_px += int(c[~bg].sum())
+            ids.append(i[~bg])
+        n_cells = int(np.unique(np.concatenate(ids)).size) if ids else 0
+        total = len(zs) * self._labels.shape[1] * self._labels.shape[2]
+        annotated = cell_px + bg_px
+        return {
+            "n_cells": n_cells,
+            "cell_px": cell_px,
+            "background_px": bg_px,
+            "annotated_px": annotated,
+            "annotated_fraction": annotated / total if total else 0.0,
+        }
+
+    def _update_counts(self) -> None:
+        def fmt(c):
+            frac = f"{c['annotated_px']} annotated px ({100 * c['annotated_fraction']:.1f}%)"
+            if self.mode != "instance":
+                return frac
+            bg = f", {c['background_px']} bg px" if self.background else ""
+            return f"{c['n_cells']} cell{'s' if c['n_cells'] != 1 else ''}{bg}, {frac}"
+
+        if self._labels.shape[0] == 1:
+            self.counts_text = fmt(self.counts(0))
+        else:
+            self.counts_text = f"z {self.z}: {fmt(self.counts(self.z))} | all z: {fmt(self.counts())}"
+
     # ------------------------------------------------------- track operations
     @traitlets.observe("track_request")
     def _on_track_request(self, change):
@@ -478,6 +621,9 @@ class LabelAnnotator(anywidget.AnyWidget):
             self.merge_ids(int(req["src"]), int(req["dst"]))
         elif op == "split":
             self.split_id(int(req["id"]), int(req["z"]))
+        elif op == "delete":
+            zr = req.get("z")
+            self.delete_id(int(req["id"]), None if zr is None else int(zr))
         elif op == "undo":
             serial = req.get("serial")
             if self._track_undo and (serial is None or int(serial) == self._track_undo[-1][0]):
@@ -499,11 +645,12 @@ class LabelAnnotator(anywidget.AnyWidget):
     def _after_volume_edit(self, idx: np.ndarray) -> None:
         plane = self._labels.shape[1] * self._labels.shape[2]
         for z in np.unique(idx // plane):
-            self._slice_ids[int(z)] = None
+            self._slice_hist[int(z)] = None
         with self.hold_sync():
             self.track_undo_ids = [u[0] for u in self._track_undo]
             self._send_labels()
         self._update_extent()
+        self._update_counts()
 
     def merge_ids(self, src: int, dst: int) -> bool:
         """Relabel ``src`` as ``dst`` in every slice (link two tracks into one object).
@@ -519,7 +666,8 @@ class LabelAnnotator(anywidget.AnyWidget):
         -------
         bool
             True if voxels changed. Refused (False, reason in ``status``) if
-            either id is 0, they are equal, or ``src`` is absent. If both ids
+            either id is 0 or the background id (``background=True``), they
+            are equal, or ``src`` is absent. If both ids
             occur on a common slice the merge is applied and ``status`` warns,
             since that slice then holds one id on two masks.
         """
@@ -529,6 +677,9 @@ class LabelAnnotator(anywidget.AnyWidget):
             return False
         if src == 0 or dst == 0:
             self.status = "merge refused: id 0 is background"
+            return False
+        if self.background and BACKGROUND_ID in (src, dst):
+            self.status = f"merge refused: id {BACKGROUND_ID} is annotated background, not a cell"
             return False
         if src == dst:
             self.status = f"merge refused: clicked label {src} is already the active label"
@@ -561,7 +712,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         -------
         int or None
             The new id, or None if refused (reason in ``status``): ``label`` is
-            0, or it has no voxels below ``z_from`` or none at/above it (the
+            0 or the background id (``background=True``), or it has no voxels below ``z_from`` or none at/above it (the
             split would only rename the track).
         """
         label, z_from = int(label), int(z_from)
@@ -571,14 +722,14 @@ class LabelAnnotator(anywidget.AnyWidget):
         if label == 0:
             self.status = "split refused: id 0 is background"
             return None
+        if self.background and label == BACKGROUND_ID:
+            self.status = f"split refused: id {BACKGROUND_ID} is annotated background, not a cell"
+            return None
         zs = self.label_extent(label)
         if not any(z >= z_from for z in zs) or not any(z < z_from for z in zs):
             self.status = f"split refused: label {label} has no slices on both sides of z={z_from}"
             return None
         new = self._next_label()
-        if new > _MAX_WIRE_LABEL:
-            self.status = f"split refused: new id {new} > {_MAX_WIRE_LABEL}"
-            return None
         tail = self._labels[z_from:].reshape(-1)
         idx = np.flatnonzero(tail == label) + z_from * self._labels.shape[1] * self._labels.shape[2]
         self._apply_track_op(idx, new, f"split label {label} at z={z_from}: z>={z_from} -> label {new}")
@@ -586,8 +737,52 @@ class LabelAnnotator(anywidget.AnyWidget):
             self.active_label = self._next_label()  # the active id must not silently join the new track
         return new
 
+    def delete_id(self, label: int, z: int | None = None) -> bool:
+        """Remove a whole mask: set ``label`` to 0 on slice ``z`` (``None``: every slice).
+
+        Undoable like merge / split (ctrl+z in the widget, :meth:`undo_track_op`).
+        Works for any nonzero id, including ``BACKGROUND_ID``.
+
+        Parameters
+        ----------
+        label : int
+            Id to remove (e.g. the clicked mask's id).
+        z : int, optional
+            Slice to remove it from; None (default) removes it from all slices.
+
+        Returns
+        -------
+        bool
+            True if voxels changed; False (reason in ``status``) if ``label`` is
+            0, ``z`` is out of range, or ``label`` is absent there.
+        """
+        label = int(label)
+        if label == 0:
+            self.status = "delete refused: id 0 is already unannotated"
+            return False
+        nz = self._labels.shape[0]
+        if z is None:
+            idx = np.flatnonzero(self._labels.reshape(-1) == label)
+            where = "all slices"
+        else:
+            z = int(z)
+            if not 0 <= z < nz:
+                self.status = f"delete refused: z={z} out of range [0, {nz - 1}]"
+                return False
+            plane = self._labels.shape[1] * self._labels.shape[2]
+            idx = np.flatnonzero(self._labels[z].reshape(-1) == label) + z * plane
+            where = f"z={z}"
+        if idx.size == 0:
+            self.status = f"delete refused: label {label} not present on {where}"
+            return False
+        if z is None:
+            n = len(np.unique(idx // (self._labels.shape[1] * self._labels.shape[2])))
+            where = f"all slices ({n} slice{'s' if n != 1 else ''})"
+        self._apply_track_op(idx, 0, f"deleted label {label} on {where} ({idx.size} px)")
+        return True
+
     def undo_track_op(self) -> bool:
-        """Undo the most recent :meth:`merge_ids` / :meth:`split_id` (last few kept).
+        """Undo the most recent :meth:`merge_ids` / :meth:`split_id` / :meth:`delete_id` (last few kept).
 
         Restores the voxels the operation changed that still hold the id it
         wrote; voxels edited since (e.g. erased or painted with another id on
@@ -613,16 +808,34 @@ class LabelAnnotator(anywidget.AnyWidget):
         """Copy of the labels (``uint32``) with the input's spatial axes."""
         return _restore_axes(self._labels.copy(), self._spatial_axes)
 
+    def labels_signed(self) -> np.ndarray:
+        """Copy of the labels as ``int32`` with ``BACKGROUND_ID`` -> -1 (input's spatial axes).
+
+        Signed convention for sparse training: 0 unannotated, -1 annotated
+        background, 1.. cells. Without ``background`` there is no background
+        id and this is ``labels`` as ``int32``.
+        """
+        return _restore_axes(self._signed(self._labels), self._spatial_axes)
+
+    def _signed(self, lab: np.ndarray) -> np.ndarray:
+        out = lab.astype(np.int32)
+        if self.background:
+            out[lab == BACKGROUND_ID] = -1
+        return out
+
     def set_labels(self, labels) -> None:
-        """Replace all labels (spatial axes of the input) and refresh the view."""
+        """Replace all labels (spatial axes of the input) and refresh the view.
+
+        Accepts unsigned ids in ``[0, 65535]`` and, with ``background=True``,
+        the signed convention of :meth:`labels_signed` (negative values become
+        ``BACKGROUND_ID``). Clears the track undo history.
+        """
         lab = np.asarray(labels)
         lab = lab[np.newaxis] if lab.ndim == 2 else lab
         if lab.shape != self._labels.shape:
             raise ValueError(f"expected labels of shape {self._labels.shape}, got {lab.shape}")
-        if lab.size and (lab.min() < 0 or lab.max() > _MAX_WIRE_LABEL):
-            raise ValueError(f"labels must be in [0, {_MAX_WIRE_LABEL}]")
-        self._labels = lab.astype(np.uint32, copy=True)
-        self._slice_ids = [None] * self._labels.shape[0]
+        self._labels = _coerce_label_values(lab, self.background)
+        self._slice_hist = [None] * self._labels.shape[0]
         self._track_undo.clear()
         self.track_undo_ids = []
         with self.hold_sync():
@@ -631,16 +844,19 @@ class LabelAnnotator(anywidget.AnyWidget):
         if self.mode == "instance":
             self.active_label = self._next_label()
         self._update_extent()
+        self._update_counts()
 
     def annotated_slices(self) -> list[int]:
-        """Indices of z-slices containing at least one labelled pixel."""
+        """Indices of z-slices containing at least one labelled pixel (cells or annotated background)."""
         return [int(z) for z in np.flatnonzero(self._labels.reshape(self._labels.shape[0], -1).any(axis=1))]
 
-    def save(self, out_dir, name: str, slices: str = "annotated", overwrite: bool = False) -> list[Path]:
+    def save(
+        self, out_dir, name: str, slices: str = "annotated", overwrite: bool = False, signed: bool = False
+    ) -> list[Path]:
         """Write training pairs ``<name>[_z<k>]_img.tif`` / ``..._masks.tif``.
 
         Images are the original (unscaled) data as ``(C, Y, X)`` per slice;
-        masks are ``uint32`` ``(Y, X)``. This matches Cellpose's
+        masks are ``uint32`` ``(Y, X)`` (``int32`` with ``signed=True``). This matches Cellpose's
         ``io.load_train_test_data(dir, image_filter="_img", mask_filter="_masks")``.
         Apply any training normalization afterwards (e.g. Cellpose with
         ``normalize={"normalize": False}`` on pre-normalized data).
@@ -648,6 +864,12 @@ class LabelAnnotator(anywidget.AnyWidget):
         Parameters
         ----------
         slices : {"annotated", "all", "current"}
+        signed : bool
+            Write masks as ``int32`` in the signed convention of
+            :meth:`labels_signed`: 0 unannotated, -1 annotated background
+            (``BACKGROUND_ID``), 1.. cells. For sparse-training loaders that
+            mask out 0; Cellpose's own loader does not interpret -1. Default
+            False: ``uint32`` masks with the background id stored as 65535.
         """
         import tifffile
 
@@ -666,6 +888,6 @@ class LabelAnnotator(anywidget.AnyWidget):
         for z, pi, pm in targets:
             img = self._image[:, z]
             tifffile.imwrite(pi, img[0] if img.shape[0] == 1 else img, compression="zlib")
-            tifffile.imwrite(pm, self._labels[z], compression="zlib")
+            tifffile.imwrite(pm, self._signed(self._labels[z]) if signed else self._labels[z], compression="zlib")
             written += [pi, pm]
         return written

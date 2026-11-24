@@ -4,13 +4,17 @@
 //   labels: uint32[3] (z, Y, X)    + Y*X uint16 (also labels_prev/next_to_js: slices z-1 / z+1)
 // All compositing, painting and per-slice undo happen here; edited slice labels
 // are sent back to Python after every stroke. Whole-track operations (merge /
-// split an id across z) run in Python on the full volume (track_request); the
+// split an id across z, delete a whole mask) run in Python on the full volume (track_request); the
 // undo stack holds markers for them (mirroring track_undo_ids) so undo routes
 // to Python when the last operation was a track operation.
 
 const UNDO_MAX = 30;
 const MAX_LABEL = 65535; // labels travel as uint16: larger ids would wrap (65536 -> 0)
-const KEY_HELP = "keys: b/e/f/p brush/eraser/fill/picker, m/s merge/split track, n new id, [ ] radius, " +
+// reserved annotated-background id when the model's `background` is on (Python BACKGROUND_ID)
+const BG_ID = 65535;
+const BG_RGB_A = [112, 112, 112], BG_RGB_B = [48, 48, 48]; // hatched neutral greys, not in the cell palette
+const KEY_HELP = "keys: b/e/f/p brush/eraser/fill/picker, g background brush (if enabled), " +
+  "x delete mask (shift+click: all z), m/s merge/split track, n new id, [ ] radius, " +
   "ArrowUp/Down or Alt+ArrowRight/Left z+1/z-1, 0 fit, ctrl+z undo, space/right drag pan, wheel zoom, 1-9 class (semantic)";
 
 function asBytes(v) {
@@ -109,14 +113,19 @@ function render({ model, el: root }) {
   }
   const zRow = el("div", { class: "lbl-zrow" });
   const statusBar = el("div", { class: "lbl-status" });
-  root.append(toolbar, chanPanel, zRow, viewport, statusBar);
+  const countsBar = el("div", { class: "lbl-counts", title: "annotation counts (current slice | whole volume)" });
+  root.append(toolbar, chanPanel, zRow, viewport, statusBar, countsBar);
 
   // toolbar controls
-  const tools = ["brush", "eraser", "fill", "picker", "merge", "split"];
+  const tools = ["brush", "eraser", "fill", "picker", "background", "delete", "merge", "split"];
   const toolTitles = {
+    background: "background brush (g): paint annotated background (open scribbles, not filled)",
+    delete: "delete mask (x): click a mask to remove it on this slice; shift+click: in ALL slices",
     merge: "merge track (m): click a mask; its id becomes the active id in ALL slices",
     split: "split track here (s): click a mask; its voxels on this and later slices get a new id",
   };
+  const bgOn = () => !!model.get("background") && model.get("mode") !== "semantic";
+  const maxCellId = () => (bgOn() ? BG_ID - 1 : MAX_LABEL);
   const toolBtns = {};
   for (const t of tools) {
     toolBtns[t] = el("button", { class: "lbl-btn", "data-tool": t, text: t, title: toolTitles[t] || `${t} (${t[0]})`, onclick: () => { model.set("tool", t); model.save_changes(); } });
@@ -124,7 +133,7 @@ function render({ model, el: root }) {
   }
   const labelInput = el("input", { type: "number", min: "0", max: String(MAX_LABEL), class: "lbl-label", title: "active label" });
   labelInput.addEventListener("change", () => {
-    const v = Math.min(MAX_LABEL, Math.max(0, parseInt(labelInput.value || "0") || 0));
+    const v = Math.min(maxCellId(), Math.max(0, parseInt(labelInput.value || "0") || 0));
     labelInput.value = String(v);
     model.set("active_label", v); model.save_changes();
   });
@@ -231,6 +240,7 @@ function render({ model, el: root }) {
   }
 
   function labelRgb(id) {
+    if (id === BG_ID && bgOn()) return BG_RGB_A;
     if (model.get("mode") === "semantic") {
       const cc = model.get("class_colors") || [];
       return hexToRgb(cc[id - 1] || "#ffffff");
@@ -253,12 +263,13 @@ function render({ model, el: root }) {
     const W = state.lab.x, H = state.lab.y;
     const out = ctx.createImageData(W, H);
     const cache = new Map();
+    const bg = bgOn(); // background scribbles are not objects: no onion-skin outline
     for (const [lb, dotted] of [[state.next, false], [state.prev, true]]) {
       if (!lb || lb.x !== W || lb.y !== H) continue;
       const d = lb.data;
       for (let p = 0; p < d.length; p++) {
         const id = d[p];
-        if (id === 0 || !isEdge(d, p, W, H, id)) continue;
+        if (id === 0 || (id === BG_ID && bg) || !isEdge(d, p, W, H, id)) continue;
         if (dotted && ((p % W) + ((p / W) | 0)) % 2) continue;
         let rgb = cache.get(id);
         if (!rgb) { rgb = labelRgb(id); cache.set(id, rgb); }
@@ -278,9 +289,20 @@ function render({ model, el: root }) {
     const outline = !!model.get("outline_only");
     const cache = new Map();
     const d = lb.data, W = lb.x, H = lb.y;
+    const bg = bgOn();
+    const bgA = Math.max(a, 140);
     for (let p = 0; p < d.length; p++) {
       const id = d[p];
       if (id === 0) continue;
+      if (id === BG_ID && bg) {
+        // annotated background: hatched neutral grey, filled also in outline mode
+        // (scribbles are thin; their outline would be the scribble itself)
+        const x = p % W, y = (p - x) / W;
+        const rgb = ((x + y) & 3) < 2 ? BG_RGB_A : BG_RGB_B;
+        out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
+        out.data[4 * p + 3] = bgA;
+        continue;
+      }
       if (outline && !isEdge(d, p, W, H, id)) continue;
       let rgb = cache.get(id);
       if (!rgb) { rgb = labelRgb(id); cache.set(id, rgb); }
@@ -295,9 +317,9 @@ function render({ model, el: root }) {
     ctx.clearRect(0, 0, curCanvas.width, curCanvas.height);
     if (!state.cursor) return;
     const t = model.get("tool");
-    if (t !== "brush" && t !== "eraser") return;
+    if (t !== "brush" && t !== "eraser" && t !== "background") return;
     const r = model.get("brush_radius") ?? 2;
-    ctx.strokeStyle = t === "eraser" ? "#ff4040" : "#ffffff";
+    ctx.strokeStyle = t === "eraser" ? "#ff4040" : t === "background" ? "#a0a0a0" : "#ffffff";
     ctx.lineWidth = Math.max(1 / state.zoom, 0.5);
     ctx.beginPath();
     ctx.arc(state.cursor[0] + 0.5, state.cursor[1] + 0.5, r + 0.5, 0, 2 * Math.PI);
@@ -329,8 +351,9 @@ function render({ model, el: root }) {
   function stamp(cx, cy) {
     const lb = state.lab;
     const r = model.get("brush_radius") ?? 2;
-    const eraser = model.get("tool") === "eraser";
-    const active = model.get("active_label") ?? 1;
+    const tool = model.get("tool");
+    const eraser = tool === "eraser";
+    const active = tool === "background" ? BG_ID : (model.get("active_label") ?? 1);
     const ow = !!model.get("overwrite");
     const r2 = (r + 0.5) * (r + 0.5);
     for (let dy = -r; dy <= r; dy++) {
@@ -494,13 +517,24 @@ function render({ model, el: root }) {
     const t = model.get("tool");
     if (t === "picker") {
       const id = state.lab.data[y * state.lab.x + x];
-      model.set("active_label", id); model.save_changes();
+      // the background id is never an active (cell) id: pick the background brush instead
+      if (id === BG_ID && bgOn()) model.set("tool", "background");
+      else model.set("active_label", id);
+      model.save_changes();
+      return;
+    }
+    if (t === "delete") {
+      const id = state.lab.data[y * state.lab.x + x];
+      if (id === 0) { setStatus("delete: click on a mask"); return; }
+      // shift+click: every slice; Python deletes (undoable via the track-op undo)
+      trackRequest({ op: "delete", id, z: ev.shiftKey ? null : state.lab.z });
       return;
     }
     if (t === "merge" || t === "split") {
       const id = state.lab.data[y * state.lab.x + x];
       const active = model.get("active_label") ?? 0;
       if (id === 0) { setStatus(`${t}: click on a mask`); return; }
+      if (id === BG_ID && bgOn()) { setStatus(`${t} refused: id ${BG_ID} is annotated background, not a cell`); return; }
       if (t === "split") { trackRequest({ op: "split", id, z: state.lab.z }); return; }
       if (active === 0) { setStatus("merge refused: active label is 0"); return; }
       if (active === id) { setStatus(`merge refused: clicked label ${id} is already the active label`); return; }
@@ -543,6 +577,7 @@ function render({ model, el: root }) {
     if (state.panning) { state.panning = false; return; }
     if (!state.painting) return;
     state.painting = false;
+    // only the cell brush closes and fills strokes; background strokes stay open scribbles
     if (model.get("tool") === "brush" && model.get("auto_fill")) fillEnclosed();
     state.stroke = null;
     drawLabels();
@@ -576,8 +611,9 @@ function render({ model, el: root }) {
     // letter keys only without modifiers: ctrl+s / ctrl+f / ctrl+p belong to the
     // host (saving the notebook must not silently arm the split tool)
     const mod = ev.ctrlKey || ev.metaKey || ev.altKey;
-    const map = { b: "brush", e: "eraser", f: "fill", p: "picker" };
+    const map = { b: "brush", e: "eraser", f: "fill", p: "picker", x: "delete" };
     if (model.get("mode") !== "semantic") Object.assign(map, { m: "merge", s: "split" });
+    if (bgOn()) map.g = "background";
     if (map[k]) { if (!mod) { model.set("tool", map[k]); model.save_changes(); } return; }
     if (k === "[" || k === "]") {
       const r = Math.max(0, (model.get("brush_radius") ?? 2) + (k === "]" ? 1 : -1));
@@ -607,6 +643,9 @@ function render({ model, el: root }) {
     for (const [name, b] of Object.entries(toolBtns)) b.classList.toggle("lbl-active", name === t);
     const sem = model.get("mode") === "semantic";
     for (const e of [labelInput, newBtn, keepLbl, extentSpan, toolBtns.merge, toolBtns.split]) e.style.display = sem ? "none" : "";
+    toolBtns.background.style.display = bgOn() ? "" : "none";
+    labelInput.max = String(maxCellId());
+    countsBar.textContent = model.get("counts_text") || "";
     classSelect.style.display = sem ? "" : "none";
     const names = model.get("class_names") || [];
     if (classSelect.options.length !== names.length + 1) {
@@ -660,10 +699,10 @@ function render({ model, el: root }) {
     ["change:labels_to_js change:labels_rev", onLabels],
     ["change:channel_visible change:channel_colors change:vmin change:vmax change:gamma", compose],
     ["change:labels_prev_to_js change:labels_next_to_js", onAdjacent],
-    ["change:opacity change:outline_only change:class_colors change:instance_palette change:mode", () => { drawLabels(); drawAdjacent(); syncControls(); }],
+    ["change:opacity change:outline_only change:class_colors change:instance_palette change:mode change:background", () => { drawLabels(); drawAdjacent(); syncControls(); }],
     ["change:show_adjacent", () => { drawAdjacent(); syncControls(); }],
     ["change:track_undo_ids", syncTrackUndo],
-    ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:shape_zyx change:class_names change:status change:active_label_extent", () => { syncControls(); drawCursor(); }],
+    ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:shape_zyx change:class_names change:status change:active_label_extent change:counts_text", () => { syncControls(); drawCursor(); }],
     ["change:channel_names", buildChannels],
   ];
   for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.on(e, fn);

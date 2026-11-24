@@ -766,3 +766,295 @@ def test_active_label_respects_wire_limit():
     assert w.active_label == 2
     w.new_label_trigger += 1
     assert w.active_label == 2
+
+
+# ------------------------------------------- sparse annotation: background, delete, counts
+def _sparse_volume():
+    """2 slices of 4x5 px: z0 = cell 1 (3 px), cell 2 (2 px), background (4 px);
+    z1 = cell 2 (5 px), cell 9 (1 px), background (1 px). Everything else unannotated (0)."""
+    from eigenp_utils.label_annotator import BACKGROUND_ID as BG
+
+    lab = np.zeros((2, 4, 5), dtype=np.uint32)
+    lab[0, 0, 0:3] = 1
+    lab[0, 1, 0:2] = 2
+    lab[0, 3, 1:5] = BG
+    lab[1, 2, 0:5] = 2
+    lab[1, 0, 4] = 9
+    lab[1, 3, 0] = BG
+    return lab
+
+
+def test_background_id_is_reserved_and_never_allocated():
+    """With ``background=True`` the id 65535 is annotated background, never a new cell id.
+
+    Strategy: (a) volume with cells 1 and 4 plus background: the next id is 5
+    (max over cells + 1, not over the raw max 65535); (b) cell 65534 present:
+    the next id is the smallest unused (2), never 65535; (c) every id
+    1..65534 used except 100: the next id is 100; (d) painting only background
+    from the browser keeps ``active_label`` a cell id; (e) ``active_label``
+    cannot be set to the background id.
+    Expected outcome: exactly those ids; ``n`` / ``new_label_trigger`` agree.
+    """
+    import traitlets
+
+    from eigenp_utils.label_annotator import BACKGROUND_ID
+
+    assert BACKGROUND_ID == LabelAnnotator.BACKGROUND_ID == 65535
+    lab = np.zeros((6, 7), np.uint32)
+    lab[0, 0] = 1
+    lab[1, 1] = 4
+    lab[5, :] = BACKGROUND_ID
+    img = np.zeros((6, 7), np.float32)
+    w = LabelAnnotator(img, labels=lab, background=True)
+    assert w.background is True and w.active_label == 5
+    w.new_label_trigger += 1
+    assert w.active_label == 5
+
+    lab2 = lab.copy()
+    lab2[2, 2] = 65534
+    w2 = LabelAnnotator(img, labels=lab2, background=True)
+    assert w2.active_label == 2
+
+    full = np.arange(256 * 256, dtype=np.uint32).reshape(256, 256)  # 0..65535: every cell id + background
+    full[full == 100] = 0
+    w3 = LabelAnnotator(np.zeros((256, 256), np.float32), labels=full, background=True)
+    assert w3.active_label == 100
+
+    w4 = LabelAnnotator(img, labels=lab, background=True)
+    edit = lab.astype(np.uint16)
+    edit[4, :] = BACKGROUND_ID  # a background scribble from the browser
+    w4.labels_from_js = encode_label_slice(edit, 0)
+    assert w4.active_label == 5, "background strokes do not advance or become the active id"
+    with pytest.raises(traitlets.TraitError, match="reserved"):
+        w4.active_label = BACKGROUND_ID
+    assert w4.active_label == 5
+
+
+def test_background_requires_instance_mode():
+    """``background=True`` with ``mode='semantic'`` raises (semantic mode uses a background class)."""
+    with pytest.raises(ValueError, match="instance mode"):
+        LabelAnnotator(np.zeros((4, 4)), mode="semantic", background=True)
+
+
+def test_labels_signed_and_set_labels_round_trip_with_negatives():
+    """Signed labels (-1 = background) round-trip through ``set_labels`` / ``labels_signed``.
+
+    Strategy: build a signed 2D array with -1, 0 and cell ids; pass it to
+    ``set_labels`` and to the constructor (``background=True``); also pass the
+    unsigned form (65535).
+    Expected outcome: ``labels`` stores 65535 where the input was -1 (uint32),
+    ``labels_signed()`` is int32, has the input's spatial axes and equals the
+    signed input exactly; the unsigned form gives the same volume; the wire
+    slice carries 65535; any negative value maps to background.
+    """
+    from eigenp_utils.label_annotator import BACKGROUND_ID
+
+    signed = np.zeros((6, 7), np.int32)
+    signed[0, :3] = 1
+    signed[2, 2:5] = 7
+    signed[5, :] = -1
+    img = np.zeros((6, 7), np.float32)
+    w = LabelAnnotator(img, background=True)
+    w.set_labels(signed)
+    assert w.labels.dtype == np.uint32
+    np.testing.assert_array_equal(w.labels == BACKGROUND_ID, signed == -1)
+    out = w.labels_signed()
+    assert out.dtype == np.int32 and out.shape == (6, 7)
+    np.testing.assert_array_equal(out, signed)
+    _, wire = decode_label_slice(w.labels_to_js)
+    assert (wire[5] == BACKGROUND_ID).all()
+    assert w.active_label == 8
+
+    unsigned = np.where(signed < 0, BACKGROUND_ID, signed).astype(np.uint32)
+    w.set_labels(unsigned)
+    np.testing.assert_array_equal(w.labels_signed(), signed)
+    w.set_labels(np.where(signed < 0, -5, signed))  # any negative value is background
+    np.testing.assert_array_equal(w.labels_signed(), signed)
+
+    w2 = LabelAnnotator(img, labels=signed, background=True)
+    np.testing.assert_array_equal(w2.labels, unsigned)
+    w3d = LabelAnnotator(np.zeros((2, 6, 7), np.float32), axes="ZYX", background=True)
+    w3d.set_labels(np.stack([signed, -signed]))
+    assert w3d.labels_signed().shape == (2, 6, 7)
+    assert w3d.labels_signed()[1, 0, 0] == -1 and w3d.labels_signed()[1, 5, 0] == 1
+
+
+def test_delete_id_on_one_slice_and_all_slices_with_undo():
+    """``delete_id`` removes a whole mask on one slice or everywhere; both are undoable track ops.
+
+    Strategy: on the two-track phantom delete id 3 on z=1, then id 5 in all
+    slices; undo both (newest first); then the same through ``track_request``
+    as the browser sends it (``z`` None for shift+click). Refusals: id 0, an
+    absent id, an id absent from the given slice, an out-of-range z.
+    Expected outcome: only the targeted voxels become 0; extents follow;
+    each undo restores the previous volume exactly; refusals change nothing
+    and say "refused".
+    """
+    w, lab = _two_tracks()
+    assert w.delete_id(3, z=1)
+    expected = lab.copy()
+    expected[1][lab[1] == 3] = 0
+    np.testing.assert_array_equal(w.labels, expected)
+    assert w.label_extent(3) == [0, 2, 3]
+    assert w.delete_id(5)
+    expected[expected == 5] = 0
+    np.testing.assert_array_equal(w.labels, expected)
+    assert w.label_extent(5) == [] and "all slices (4 slices)" in w.status
+    assert len(w.track_undo_ids) == 2
+    assert w.undo_track_op()
+    assert w.label_extent(5) == [2, 3, 4, 5]
+    assert w.undo_track_op()
+    np.testing.assert_array_equal(w.labels, lab)
+
+    for args in [(0, None), (42, None), (7, 0), (3, 99)]:
+        assert not w.delete_id(*args)
+        assert "refused" in w.status
+    np.testing.assert_array_equal(w.labels, lab)
+    assert w.track_undo_ids == []
+
+    w.z = 2
+    w.track_request = {"op": "delete", "id": 3, "z": 2, "n": 1}
+    assert w.label_extent(3) == [0, 1, 3]
+    _, cur = decode_label_slice(w.labels_to_js)
+    assert not (cur == 3).any(), "the current slice is re-sent after the delete"
+    w.track_request = {"op": "delete", "id": 7, "z": None, "n": 2}
+    assert w.label_extent(7) == []
+    w.track_request = {"op": "undo", "serial": w.track_undo_ids[-1], "n": 3}
+    w.track_request = {"op": "undo", "serial": w.track_undo_ids[-1], "n": 4}
+    np.testing.assert_array_equal(w.labels, lab)
+
+
+def test_delete_id_removes_background_scribbles():
+    """The background id can be deleted like any mask (all slices), and the delete is undoable."""
+    from eigenp_utils.label_annotator import BACKGROUND_ID
+
+    lab = _sparse_volume()
+    w = LabelAnnotator(np.zeros(lab.shape, np.float32), axes="ZYX", labels=lab, background=True)
+    assert w.delete_id(BACKGROUND_ID)
+    assert not (w.labels == BACKGROUND_ID).any()
+    np.testing.assert_array_equal(w.labels[lab != BACKGROUND_ID], lab[lab != BACKGROUND_ID])
+    assert w.counts()["background_px"] == 0
+    assert w.undo_track_op()
+    np.testing.assert_array_equal(w.labels, lab)
+
+
+def test_counts_on_hand_built_volume_and_readout_updates():
+    """``counts`` gives cells / background / annotated pixels per slice and for the volume.
+
+    Strategy: hand-built 2x4x5 volume (see ``_sparse_volume``): z0 has cells
+    1, 2 (5 px) and 4 background px; z1 has cells 2, 9 (6 px) and 1 background px.
+    Then erase cell 9 from the browser and change z.
+    Expected outcome: z0 -> 2 cells, 5/4/9 px, 9/20; z1 -> 2 cells, 6/1/7 px,
+    7/20; volume -> 3 distinct cells (2 spans both slices), 11/5/16 px, 0.4.
+    ``counts_text`` shows the slice and volume numbers and follows the edit
+    and the z change. Without ``background`` 65535 counts as a cell.
+    """
+    from eigenp_utils.label_annotator import BACKGROUND_ID
+
+    lab = _sparse_volume()
+    w = LabelAnnotator(np.zeros(lab.shape, np.float32), axes="ZYX", labels=lab, background=True)
+    keys = ("n_cells", "cell_px", "background_px", "annotated_px", "annotated_fraction")
+    assert tuple(w.counts(0)) == keys
+    assert w.counts(0) == {"n_cells": 2, "cell_px": 5, "background_px": 4, "annotated_px": 9, "annotated_fraction": 9 / 20}
+    assert w.counts(1) == {"n_cells": 2, "cell_px": 6, "background_px": 1, "annotated_px": 7, "annotated_fraction": 7 / 20}
+    assert w.counts() == {"n_cells": 3, "cell_px": 11, "background_px": 5, "annotated_px": 16, "annotated_fraction": 0.4}
+    with pytest.raises(ValueError):
+        w.counts(2)
+    assert w.z == 1
+    assert w.counts_text == (
+        "z 1: 2 cells, 1 bg px, 7 annotated px (35.0%) | all z: 3 cells, 5 bg px, 16 annotated px (40.0%)"
+    )
+    edit = lab[1].astype(np.uint16)
+    edit[edit == 9] = 0
+    w.labels_from_js = encode_label_slice(edit, 1)
+    assert w.counts() == {"n_cells": 2, "cell_px": 10, "background_px": 5, "annotated_px": 15, "annotated_fraction": 15 / 40}
+    assert w.counts_text.startswith("z 1: 1 cell, 1 bg px, 6 annotated px (30.0%)")
+    w.z = 0
+    assert w.counts_text.startswith("z 0: 2 cells, 4 bg px, 9 annotated px (45.0%)")
+
+    plain = LabelAnnotator(np.zeros(lab.shape, np.float32), axes="ZYX", labels=lab)
+    assert plain.counts() == {"n_cells": 4, "cell_px": 16, "background_px": 0, "annotated_px": 16, "annotated_fraction": 0.4}
+    assert "bg px" not in plain.counts_text
+    flat = LabelAnnotator(np.zeros((4, 5), np.float32), labels=lab[0], background=True)
+    assert flat.counts_text == "2 cells, 4 bg px, 9 annotated px (45.0%)"
+    assert flat.counts() == flat.counts(0)
+    sem = LabelAnnotator(np.zeros((4, 5), np.float32), mode="semantic", labels=np.where(lab[0] == BACKGROUND_ID, 2, lab[0]))
+    assert sem.counts_text == "9 annotated px (45.0%)"
+
+
+def test_merge_and_split_refuse_background_id():
+    """Merge / split never touch the background id (it is not a cell); the volume is unchanged."""
+    from eigenp_utils.label_annotator import BACKGROUND_ID
+
+    lab = np.zeros((3, 6, 7), np.uint32)
+    lab[0:3, 0:2, 0:2] = 4
+    lab[0:3, 4:6, :] = BACKGROUND_ID
+    w = LabelAnnotator(np.zeros(lab.shape, np.float32), axes="ZYX", labels=lab, background=True)
+    assert not w.merge_ids(BACKGROUND_ID, 4)
+    assert "annotated background" in w.status and "refused" in w.status
+    assert not w.merge_ids(4, BACKGROUND_ID)
+    assert "annotated background" in w.status
+    assert w.split_id(BACKGROUND_ID, 1) is None
+    assert "annotated background" in w.status and "refused" in w.status
+    w.track_request = {"op": "merge", "src": BACKGROUND_ID, "dst": 4, "n": 1}
+    np.testing.assert_array_equal(w.labels, lab)
+    assert w.track_undo_ids == []
+    assert w.split_id(4, 1) == 5, "cells still split; the new id is not the background id"
+
+
+def test_save_signed_writes_int32_with_minus_one_background(tmp_path):
+    """``save(signed=True)`` writes int32 masks with -1 background; the default stays uint32 / 65535."""
+    tifffile = pytest.importorskip("tifffile")
+    from eigenp_utils.label_annotator import BACKGROUND_ID
+
+    lab = _sparse_volume()
+    img = np.random.default_rng(3).integers(0, 999, size=lab.shape, dtype=np.uint16)
+    w = LabelAnnotator(img, axes="ZYX", labels=lab, background=True)
+    paths = w.save(tmp_path / "s", "a", signed=True)
+    assert [p.name for p in paths] == ["a_z000_img.tif", "a_z000_masks.tif", "a_z001_img.tif", "a_z001_masks.tif"]
+    for z, pm in ((0, paths[1]), (1, paths[3])):
+        m = tifffile.imread(pm)
+        assert m.dtype == np.int32
+        np.testing.assert_array_equal(m, np.where(lab[z] == BACKGROUND_ID, -1, lab[z].astype(np.int64)))
+    np.testing.assert_array_equal(tifffile.imread(paths[2]), img[1])
+    plain = w.save(tmp_path / "u", "a")
+    m = tifffile.imread(plain[1])
+    assert m.dtype == np.uint32
+    np.testing.assert_array_equal(m, lab[0])
+
+
+def test_background_false_keeps_previous_behaviour():
+    """Default ``background=False``: 65535 is an ordinary id, negatives are rejected, no background counts.
+
+    Strategy: a volume with ids 1 and 65535 and no ``background`` argument.
+    Expected outcome: ``background`` is False; 65535 can be active, merged and
+    split; ``labels_signed`` keeps 65535; signed input still raises
+    ``ValueError`` (with a hint); ``counts`` reports no background pixels.
+    """
+    lab = np.zeros((2, 6, 7), np.uint32)
+    lab[:, 0, 0] = 1
+    lab[:, 5, 5] = 65535
+    w = LabelAnnotator(np.zeros(lab.shape, np.float32), axes="ZYX", labels=lab)
+    assert w.background is False
+    assert w.active_label == 2
+    w.active_label = 65535
+    assert w.active_label == 65535
+    out = w.labels_signed()
+    assert out.dtype == np.int32 and out[0, 5, 5] == 65535
+    assert w.counts()["background_px"] == 0 and w.counts()["n_cells"] == 2
+    with pytest.raises(ValueError, match="background=True"):
+        w.set_labels(np.full(lab.shape, -1, np.int32))
+    assert w.split_id(65535, 1) == 2
+    assert w.merge_ids(2, 65535)
+    np.testing.assert_array_equal(w.labels, lab)
+
+
+def test_frontend_has_background_and_delete_tools():
+    """The JS defines the background brush (``g``, open scribbles) and the delete tool (``x``, shift = all z)."""
+    js = LabelAnnotator._esm
+    assert "const BG_ID = 65535;" in js
+    for needle in (
+        '"background"', '"delete"', 'map.g = "background"', 'x: "delete"', 'op: "delete"',
+        "ev.shiftKey ? null : state.lab.z", '"counts_text"', 'model.get("tool") === "brush" && model.get("auto_fill")',
+    ):
+        assert needle in js, needle
