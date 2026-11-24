@@ -19,3 +19,5 @@
 .lbl-status { color: #aaa; min-height: 16px; margin-top: 4px; font-family: ui-monospace, monospace; }
 .lbl-extent { color: #9cf; font-family: ui-monospace, monospace; margin-left: 4px; }
 .lbl-help { color: #888; border: 1px solid #555; border-radius: 50%; width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; cursor: help; margin-left: 4px; }
+.lbl-counts { color: #8c8; min-height: 16px; font-family: ui-monospace, monospace; }
+.lbl-btn[data-tool="background"].lbl-active { background: #666; border-color: #888; }

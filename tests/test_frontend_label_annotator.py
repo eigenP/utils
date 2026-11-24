@@ -402,3 +402,123 @@ def test_label_input_is_clamped_to_uint16(page, serve):
     page.locator("input.lbl-label").fill("70000")
     page.locator("input.lbl-label").dispatch_event("change")
     assert _get(page, "active_label") == 65535
+
+
+# ------------------------------------------------- sparse annotation: background, delete
+def test_background_brush_paints_open_scribbles_with_reserved_id(page, serve):
+    """The background brush (``g``) paints 65535 as an open scribble, never filled, in a hatched grey.
+
+    Strategy: ``background=True``; press ``g`` and draw the same closed square
+    that the cell brush would fill; read the label canvas.
+    Expected outcome: the stroke pixels are 65535 and the interior stays 0
+    (no fill, although ``auto_fill`` is on); Python applies the message
+    without advancing the active id; background pixels are drawn grey
+    (r == g == b) and opaque enough to see; ``g`` does nothing without
+    ``background``.
+    """
+    w = _widget(background=True)
+    assert w.auto_fill is True
+    _open(page, serve(w))
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("g")
+    assert _get(page, "tool") == "background"
+    square = [(10, 10), (30, 10), (30, 30), (10, 30), (10, 10)]
+    _stroke(page, square)
+    _, lab = _last_labels(page)
+    assert lab[10, 20] == 65535 and lab[30, 30] == 65535
+    assert lab[20, 20] == 0, "background strokes are not closed / filled"
+    assert set(np.unique(lab).tolist()) == {0, 65535}
+    active = w.active_label
+    w.labels_from_js = base64.b64decode(page.evaluate("window.lastLabelsB64()"))
+    assert w.active_label == active
+    assert w.counts()["background_px"] == int((lab == 65535).sum())
+    rgba = page.evaluate(
+        """() => { const c = document.querySelector('canvas.lbl-lab');
+        return Array.from(c.getContext('2d').getImageData(20, 10, 1, 1).data); }"""
+    )
+    assert rgba[0] == rgba[1] == rgba[2] and rgba[3] >= 140, rgba
+    page.locator("input.lbl-outline_only").check()
+    rgba = page.evaluate(
+        """() => { const c = document.querySelector('canvas.lbl-lab');
+        return Array.from(c.getContext('2d').getImageData(20, 10, 1, 1).data); }"""
+    )
+    assert rgba[3] > 0, "background stays visible in outline mode"
+    assert page.locator('button[data-tool="background"]').is_visible()
+
+    w2 = _widget()
+    _open(page, serve(w2))
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("g")
+    assert _get(page, "tool") == "brush"
+    assert not page.locator('button[data-tool="background"]').is_visible()
+
+
+def test_delete_tool_requests_slice_or_all_slices_and_undo_routes_to_python(page, serve):
+    """``x`` arms delete: click -> delete on this slice, shift+click -> all slices; ctrl+z undoes in Python.
+
+    Strategy: 3-slice volume (id 4 on z=0); on z=0 press ``x``, click the
+    mask, apply the request in Python; mirror ``track_undo_ids``; ctrl+z;
+    then shift+click the mask.
+    Expected outcome: the first request is ``{op: delete, id: 4, z: 0}`` and
+    removes id 4; ctrl+z sends the undo for that serial, which restores it;
+    shift+click sends ``z: null`` (all slices). Clicking unannotated pixels
+    sends nothing.
+    """
+    w, lab = _widget3d()
+    w.z = 0
+    _open(page, serve(w))
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("x")
+    assert _get(page, "tool") == "delete"
+    page.mouse.click(*_client_xy(page, 30, 30))  # unannotated on z=0
+    assert not _get(page, "track_request")
+    page.mouse.click(*_client_xy(page, 10, 10))
+    req = _get(page, "track_request")
+    assert {k: req[k] for k in ("op", "id", "z")} == {"op": "delete", "id": 4, "z": 0}
+    w.track_request = req
+    assert not (w.labels == 4).any()
+    page.evaluate(f"window.mockModel.set('track_undo_ids', {w.track_undo_ids})")
+    page.keyboard.press("Control+z")
+    req = _get(page, "track_request")
+    assert req["op"] == "undo" and req["serial"] == w.track_undo_ids[-1]
+    w.track_request = req
+    np.testing.assert_array_equal(w.labels, lab)
+    page.keyboard.down("Shift")
+    page.mouse.click(*_client_xy(page, 10, 10))
+    page.keyboard.up("Shift")
+    req = _get(page, "track_request")
+    assert req["op"] == "delete" and req["id"] == 4 and req["z"] is None
+
+
+def test_background_is_not_merged_split_or_picked_as_active_id(page, serve):
+    """Clicking background with merge / split is refused locally; the picker arms the background brush."""
+    init = np.zeros((H, W), np.uint32)
+    init[0:5, :] = 65535
+    init[20:25, 20:25] = 3
+    w = _widget(labels=init, background=True)
+    _open(page, serve(w))
+    page.locator(".lbl-viewport").focus()
+    active = _get(page, "active_label")
+    page.keyboard.press("m")
+    page.mouse.click(*_client_xy(page, 10, 2))
+    assert not _get(page, "track_request")
+    assert "annotated background" in page.locator(".lbl-status").inner_text()
+    page.keyboard.press("p")
+    page.mouse.click(*_client_xy(page, 10, 2))
+    assert _get(page, "tool") == "background" and _get(page, "active_label") == active
+    page.locator("input.lbl-label").fill("70000")
+    page.locator("input.lbl-label").dispatch_event("change")
+    assert _get(page, "active_label") == 65534, "the background id cannot be typed in as a cell id"
+
+
+def test_counts_readout_shows_python_counts(page, serve):
+    """The counts row shows ``counts_text`` and follows its changes."""
+    init = np.zeros((H, W), np.uint32)
+    init[0:2, :] = 65535
+    init[20:25, 20:25] = 3
+    w = _widget(labels=init, background=True)
+    _open(page, serve(w))
+    assert page.locator(".lbl-counts").inner_text() == w.counts_text
+    assert "1 cell, 80 bg px, 105 annotated px" in w.counts_text
+    page.evaluate("window.mockModel.set('counts_text', 'x')")
+    assert page.locator(".lbl-counts").inner_text() == "x"

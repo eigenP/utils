@@ -115,6 +115,13 @@ def _(mo):
     clicked mask's id by the active id in all slices, **split** (`s`) gives the clicked
     mask's voxels on this and later slices a new id (both undoable with `Ctrl+Z`; also
     `merge_ids` / `split_id` from code). The toolbar shows the active id's z extent.
+
+    **Sparse training labels** (`background=True`): 0 = unannotated (ignored in
+    training), the **background** brush (`g`) paints annotated background as open
+    scribbles (reserved id 65535, -1 in `labels_signed()` / `save(signed=True)`),
+    1.. = cells. The **delete** tool (`x`) removes a clicked mask on this slice
+    (shift+click: all slices; undoable). The row under the image counts cells,
+    background and annotated pixels (`counts()`).
     """)
     return
 
@@ -139,7 +146,7 @@ def _():
 @app.cell
 def _(LabelAnnotator, image, mo):
     instance_widget = LabelAnnotator(
-        image, axes="CZYX", mode="instance",
+        image, axes="CZYX", mode="instance", background=True,
         channel_names=["membrane", "organelle"], channel_colors=["#ff00ff", "#00ff00"],
     )
     instance_ui = mo.ui.anywidget(instance_widget)
@@ -151,9 +158,10 @@ def _(LabelAnnotator, image, mo):
 def _(instance_widget, mo):
     mo.md(f"""
     Instance labels: shape `{instance_widget.labels.shape}`, ids present:
-    `{sorted(set(instance_widget.labels.ravel().tolist()) - {0})[:20]}`;
-    annotated slices: `{instance_widget.annotated_slices()}`.
-    Rerun this cell after painting (or save with `instance_widget.save(dir, name)`).
+    `{sorted(set(instance_widget.labels.ravel().tolist()) - {0, instance_widget.BACKGROUND_ID})[:20]}`;
+    annotated slices: `{instance_widget.annotated_slices()}`; counts: `{instance_widget.counts()}`.
+    Rerun this cell after painting (or save with `instance_widget.save(dir, name, signed=True)`
+    for int32 masks with -1 background).
     """)
     return
 
