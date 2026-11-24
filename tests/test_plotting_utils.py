@@ -871,11 +871,14 @@ def test_i_series_colormaps_registration():
     ]
     assert set(I_SERIES_COLORMAPS.keys()) == set(expected_names)
 
+    samples = np.linspace(0.0, 1.0, 16)
     for name in expected_names:
         registered_cmap = plt.get_cmap(name)
         assert registered_cmap.name == name
-        alias_cmap = plt.get_cmap(name.lower().replace(" ", "_"))
-        assert alias_cmap.name == name
+        alias = name.lower().replace(" ", "_")
+        alias_cmap = plt.get_cmap(alias)
+        assert alias_cmap.name == alias
+        np.testing.assert_allclose(alias_cmap(samples), registered_cmap(samples))
 
     exports = [i_blue, i_bordeaux, i_forest, i_orange, i_purple, i_teal, i_rose, i_gold, i_slate]
     assert [cm.name for cm in exports] == expected_names
@@ -1175,9 +1178,12 @@ def test_describe_image_dataarray_info_panel_wrapping_and_return_image_only():
     da_long.attrs["source"] = "/very/long/path/" + "segment_" * 10 + "image.tif"
     res_wrap = describe_image(da_long, info_width=24)
     try:
-        rendered_lines = [t.get_text() for t in res_wrap["axes"]["Info"].texts]
-        assert any("segment_" in line for line in rendered_lines)
-        assert all(len(line) <= 24 for line in rendered_lines if "segment_" in line)
+        rendered_lines = [
+            line for t in res_wrap["axes"]["Info"].texts for line in t.get_text().splitlines()
+        ]
+        seg_lines = [line for line in rendered_lines if "segment_" in line]
+        assert len(seg_lines) > 1
+        assert all(len(line) <= 24 for line in seg_lines)
     finally:
         plt.close(res_wrap["fig"])
 

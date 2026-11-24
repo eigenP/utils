@@ -2588,12 +2588,16 @@ def test_kknn_ingest_validation():
 def test_kknn_ingest_lle_manifold_and_temp_key_cleanup():
     """barycenter='lle' accurately reconstructs an affine 2D manifold in PCA space and removes temp keys."""
     rng = np.random.default_rng(7)
-    n_ref, n_query, n_genes = 200, 30, 10
+    n_query, n_genes = 30, 10
 
-    # Embed a 2D square [-1, 1]^2 into 10D gene space via an orthonormal basis
+    # Embed a regular 15x15 grid on [-1, 1]^2 into 10D gene space via an orthonormal basis.
+    # A regular grid guarantees every interior query point lies inside the convex hull of its
+    # 4 nearest neighbors (required by NNLS LLE's non-negative weights even after kkNN pruning).
     Q, _ = np.linalg.qr(rng.normal(size=(n_genes, 2)))
     B = Q.T  # (2, 10)
-    Z_ref = rng.uniform(-1.0, 1.0, size=(n_ref, 2))
+    gx, gy = np.meshgrid(np.linspace(-1.0, 1.0, 15), np.linspace(-1.0, 1.0, 15))
+    Z_ref = np.column_stack([gx.ravel(), gy.ravel()])
+    n_ref = len(Z_ref)
     X_ref = Z_ref @ B + 5.0 + 1e-4 * rng.normal(size=(n_ref, n_genes))
 
     A_map = np.array([[2.0, -0.5], [0.3, 1.5]])
@@ -2603,7 +2607,7 @@ def test_kknn_ingest_lle_manifold_and_temp_key_cleanup():
     adata_ref.obsm["X_umap"] = Z_ref @ A_map + shift
     sc.tl.pca(adata_ref, n_comps=2, svd_solver="full")
 
-    # Interior query points lie inside the convex hull of their reference neighbors
+    # Interior query points lie strictly inside the convex hull of their nearest grid neighbors
     Z_query = rng.uniform(-0.6, 0.6, size=(n_query, 2))
     X_query = Z_query @ B + 5.0
     expected_umap = Z_query @ A_map + shift
@@ -2624,7 +2628,7 @@ def test_kknn_ingest_lle_manifold_and_temp_key_cleanup():
     )
 
     assert not any(k.startswith("__temp_ingest_") for k in adata_query.obsm)
-    np.testing.assert_allclose(adata_query.obsm["X_umap_kknn"], expected_umap, atol=0.05)
+    np.testing.assert_allclose(adata_query.obsm["X_umap_kknn"], expected_umap, atol=0.01)
 
 
 @pytest.mark.parametrize("max_value", [None, 2.0])

@@ -364,13 +364,23 @@ def test_download_file_async_native_roundtrip(tmp_path):
         assert dest.read_bytes() == b"cached"
 
 
+def _drive_sync_coroutine(coro):
+    """Step a coroutine whose awaits resolve immediately (works in Pyodide without threads)."""
+    try:
+        coro.send(None)
+    except StopIteration as exc:
+        return exc.value
+    coro.close()
+    raise AssertionError("Coroutine unexpectedly yielded an awaited future")
+
+
 def test_download_file_async_wasm_pyfetch_paths(tmp_path, monkeypatch):
     """Verify ``download_file_async`` WASM branch: success, cache hit, CORS error, and HTTP error.
 
     Strategy: set ``IN_WASM = True`` and inject a fake ``pyodide.http.pyfetch``
-    module via ``sys.modules`` covering (1) successful binary download into a
-    new directory, (2) cache hit skipping ``pyfetch``, (3) network/CORS exception
-    wrapping, and (4) non-OK HTTP status error.
+    covering (1) successful binary download into a new directory, (2) cache hit
+    skipping ``pyfetch``, (3) network/CORS exception wrapping, and (4) non-OK
+    HTTP status error.
     Expected outcome: (1) exact bytes written; (2) ``pyfetch`` not called on
     existing file; (3) ``OSError`` mentions ``Access-Control-Allow-Origin``;
     (4) ``OSError`` includes HTTP status code and writes no file.
@@ -397,23 +407,26 @@ def test_download_file_async_wasm_pyfetch_paths(tmp_path, monkeypatch):
             raise RuntimeError("TypeError: Failed to fetch")
         return FakePyfetchResp(False, 404, b"")
 
-    pyodide_http = types.ModuleType("pyodide.http")
-    pyodide_http.pyfetch = fake_pyfetch
-    pyodide_pkg = types.ModuleType("pyodide")
-    pyodide_pkg.http = pyodide_http
-    monkeypatch.setitem(sys.modules, "pyodide", pyodide_pkg)
-    monkeypatch.setitem(sys.modules, "pyodide.http", pyodide_http)
+    if "pyodide.http" in sys.modules:
+        monkeypatch.setattr(sys.modules["pyodide.http"], "pyfetch", fake_pyfetch)
+    else:
+        pyodide_http = types.ModuleType("pyodide.http")
+        pyodide_http.pyfetch = fake_pyfetch
+        pyodide_pkg = types.ModuleType("pyodide")
+        pyodide_pkg.http = pyodide_http
+        monkeypatch.setitem(sys.modules, "pyodide", pyodide_pkg)
+        monkeypatch.setitem(sys.modules, "pyodide.http", pyodide_http)
 
     # 1. Success + parent dir creation
     dest = tmp_path / "wasm_out" / "blob.bin"
-    result = _run_coroutine(download_file_async("https://example.invalid/blob.bin", dest))
+    result = _drive_sync_coroutine(download_file_async("https://example.invalid/blob.bin", dest))
     assert result == dest
     assert dest.read_bytes() == payload
     assert len(calls) == 1
 
     # 2. Cache hit must not call pyfetch
     dest.write_bytes(b"cached")
-    assert _run_coroutine(download_file_async("https://example.invalid/blob.bin", dest)) == dest
+    assert _drive_sync_coroutine(download_file_async("https://example.invalid/blob.bin", dest)) == dest
     assert dest.read_bytes() == b"cached"
     assert len(calls) == 1
 
@@ -421,12 +434,12 @@ def test_download_file_async_wasm_pyfetch_paths(tmp_path, monkeypatch):
     mode["behavior"] = "cors"
     cors_dest = tmp_path / "cors.bin"
     with pytest.raises(OSError, match="Access-Control-Allow-Origin"):
-        _run_coroutine(download_file_async("https://example.invalid/cors.bin", cors_dest))
+        _drive_sync_coroutine(download_file_async("https://example.invalid/cors.bin", cors_dest))
     assert not cors_dest.exists()
 
     # 4. Non-OK HTTP status -> OSError with status code and no file created
     mode["behavior"] = "404"
     err_dest = tmp_path / "missing.bin"
     with pytest.raises(OSError, match="HTTP 404"):
-        _run_coroutine(download_file_async("https://example.invalid/missing.bin", err_dest))
+        _drive_sync_coroutine(download_file_async("https://example.invalid/missing.bin", err_dest))
     assert not err_dest.exists()

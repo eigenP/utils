@@ -144,16 +144,27 @@ def estimate_drift(frame1, frame2, return_ccm = False):
     # frame1_max_proj_y = gaussian_filter1d(frame1_max_proj_y, sigma = 3, radius = 5)
     # frame2_max_proj_y = gaussian_filter1d(frame2_max_proj_y, sigma = 3, radius = 5)
 
-    # Plain (unnormalised) cross-correlation: see estimate_shift_1d_iterative
-    shift_x, error, diffphase = phase_cross_correlation(frame1_max_proj_x,
-                                                      frame2_max_proj_x, upsample_factor=100,
-                                                      normalization=None)
+    # Plain (unnormalised) cross-correlation: see estimate_shift_1d_iterative.
+    # Constant projections become all zeros after _remove_baseline; calling
+    # phase_cross_correlation on all-zero arrays emits an RMS warning and picks
+    # the first bin of the upsampled grid (-0.75 px) instead of 0.
+    if np.any(frame1_max_proj_x) and np.any(frame2_max_proj_x):
+        shift_x, error, diffphase = phase_cross_correlation(frame1_max_proj_x,
+                                                          frame2_max_proj_x, upsample_factor=100,
+                                                          normalization=None)
+        sx = shift_x[0]
+    else:
+        sx = 0.0
 
-    shift_y, error, diffphase = phase_cross_correlation(frame1_max_proj_y,
-                                                      frame2_max_proj_y, upsample_factor=100,
-                                                      normalization=None)
+    if np.any(frame1_max_proj_y) and np.any(frame2_max_proj_y):
+        shift_y, error, diffphase = phase_cross_correlation(frame1_max_proj_y,
+                                                          frame2_max_proj_y, upsample_factor=100,
+                                                          normalization=None)
+        sy = shift_y[0]
+    else:
+        sy = 0.0
 
-    shift = np.array((shift_x[0], shift_y[0]))
+    shift = np.array((sx, sy))
 
 
     # ### --- Add a test if shifts are too large
@@ -224,6 +235,10 @@ def estimate_shift_1d_iterative(ref_proj, moving_proj, window=None, max_iter=3, 
     if window is None:
         window = np.ones_like(ref_proj)
 
+    ref_win = ref_proj * window
+    if not np.any(ref_win) or not np.any(moving_proj):
+        return 0.0
+
     current_shift = 0.0
 
     for _ in range(max_iter):
@@ -244,7 +259,10 @@ def estimate_shift_1d_iterative(ref_proj, moving_proj, window=None, max_iter=3, 
         # the spectrum gives the noise-dominated high frequencies of a max projection as
         # much weight as the signal, so Poisson noise produced spurious peaks once the
         # background pedestal (which had anchored the peak at zero) is removed.
-        res, _, _ = phase_cross_correlation(ref_proj * window, aligned_mov * window, upsample_factor=100,
+        mov_win = aligned_mov * window
+        if not np.any(mov_win):
+            break
+        res, _, _ = phase_cross_correlation(ref_win, mov_win, upsample_factor=100,
                                             normalization=None)
         res = res[0]
 

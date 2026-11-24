@@ -442,8 +442,10 @@ def test_remove_outliers_univariate_containers(method, container):
     filtering only filters on the requested column while all-column filtering drops rows with
     an outlier in any numeric column.
     """
-    col_a = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 100.0, 2.0])
-    col_b = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 2.0, -100.0])
+    # Both columns share median 3.0 and MAD 1.0, so all inliers [1..5] stay within
+    # |robust_z| <= 2 / 1.4826 ≈ 1.35 <= 1.5 while ±100 are extreme outliers.
+    col_a = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 100.0, 3.0])
+    col_b = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 3.0, -100.0])
 
     if container == "ndarray":
         arr = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 100.0, -100.0])
