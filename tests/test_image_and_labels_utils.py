@@ -1,669 +1,154 @@
-from scipy.ndimage import shift
 import numpy as np
 import pytest
+from scipy import ndimage as ndi
+from scipy.ndimage import gaussian_filter, map_coordinates, shift
+from skimage import feature, filters, segmentation
 
 from eigenp_utils.image_and_labels_utils import (
-    _ensure_pixel_size_array,
+    create_ellipsoid_struct,
+    estimate_inter_label_distance,
     fit_plane_ransac,
+    generate_morphological_surface_mask,
     generate_plane_basis,
+    optimized_entire_labels_touching_mask,
+    sample_intensity_along_surface_normals,
+    sample_intensity_around_points,
     sample_volume_plane,
     voronoi_otsu_labeling,
     windowed_slice_projection,
-    sample_intensity_around_points,
-    optimized_entire_labels_touching_mask,
-    sample_intensity_along_surface_normals,
-    create_ellipsoid_struct,
-    generate_morphological_surface_mask,
-    estimate_inter_label_distance,
 )
 
+ISO_3D = {"Z": 1.0, "Y": 1.0, "X": 1.0}
+ISO_2D = {"Y": 1.0, "X": 1.0}
 
 
-# =========================================
-# Source: test_image_and_labels_utils.py
-# =========================================
+def _blob_volume(shape, centers, sigma, amplitude=1000.0):
+    """Create a synthetic volume with Gaussian blobs placed at `centers`."""
+    vol = np.zeros(shape, dtype=np.float64)
+    for c in centers:
+        vol[tuple(c)] = 1.0
+    vol = gaussian_filter(vol, sigma)
+    return vol / vol.max() * amplitude
+
 
 def test_voronoi_otsu_labeling():
-    """Test that voronoi otsu labeling works as expected."""
-    # Test 2D without spacing
-    img_2d = np.zeros((20, 20), dtype=float)
-    # create two distinct Gaussian spots
-    for center, scale in [((5, 5), 3), ((15, 15), 3)]:
-        y, x = np.ogrid[-center[0]:20-center[0], -center[1]:20-center[1]]
-        img_2d += np.exp(-(x**2 + y**2) / (2 * scale**2)) * 10
+    """Verify 2D isotropic and 3D anisotropic Voronoi-Otsu segmentation of two spots.
 
-    # We add some background noise so Otsu thresholding finds something besides straight zeros
-    img_2d += np.random.rand(20, 20) * 0.1
+    Strategy: synthesize two well-separated Gaussian spots with seeded low-level
+    background noise in 2D and in anisotropic 3D (`Z=2.0, Y=0.5, X=0.5`), then
+    segment with scalar and tuple sigmas.
+    Expected outcome: both runs produce exactly 2 distinct positive labels whose
+    spot centers carry different non-zero IDs.
+    """
+    rng = np.random.default_rng(42)
+
+    img_2d = np.zeros((20, 20), dtype=float)
+    for center, scale in [((5, 5), 3), ((15, 15), 3)]:
+        y, x = np.ogrid[-center[0] : 20 - center[0], -center[1] : 20 - center[1]]
+        img_2d += np.exp(-(x**2 + y**2) / (2 * scale**2)) * 10
+    img_2d += rng.random((20, 20)) * 0.1
 
     labels_2d = voronoi_otsu_labeling(img_2d, spot_sigma=1, outline_sigma=1)
-
     assert labels_2d.shape == (20, 20)
-    # Check that there are at least 2 distinct labeled regions
-    assert len(np.unique(labels_2d[labels_2d > 0])) >= 2
-    # Verify the centers belong to labeled spots
-    assert labels_2d[5, 5] > 0
-    assert labels_2d[15, 15] > 0
+    assert len(np.unique(labels_2d[labels_2d > 0])) == 2
+    assert labels_2d[5, 5] > 0 and labels_2d[15, 15] > 0
+    assert labels_2d[5, 5] != labels_2d[15, 15]
 
-    # Test 3D with spacing
     img_3d = np.zeros((10, 20, 20), dtype=float)
     for center, scale in [((5, 5, 5), 2), ((5, 15, 15), 2)]:
-        z, y, x = np.ogrid[-center[0]:10-center[0], -center[1]:20-center[1], -center[2]:20-center[2]]
+        z, y, x = np.ogrid[
+            -center[0] : 10 - center[0],
+            -center[1] : 20 - center[1],
+            -center[2] : 20 - center[2],
+        ]
         img_3d += np.exp(-(x**2 + y**2 + z**2) / (2 * scale**2)) * 10
+    img_3d += rng.random((10, 20, 20)) * 0.1
 
-    img_3d += np.random.rand(10, 20, 20) * 0.1
-
-    spacing = {'Z': 2.0, 'Y': 0.5, 'X': 0.5}
-    # Pass a tuple to spot_sigma
-    labels_3d = voronoi_otsu_labeling(img_3d, spot_sigma=(2, 1, 1), outline_sigma=1, pixel_sizes=spacing)
-
-    assert labels_3d.shape == (10, 20, 20)
-    assert len(np.unique(labels_3d[labels_3d > 0])) >= 2
-    assert labels_3d[5, 5, 5] > 0
-    assert labels_3d[5, 15, 15] > 0
-
-
-def test_windowed_slice_projection_max():
-    """Test that windowed slice projection max works as expected."""
-    img = np.zeros((5, 10, 10))
-    img[2, 5, 5] = 10
-
-    thick = windowed_slice_projection(img, window_size=3, axis=0, operation='max')
-
-    assert thick.shape == (5, 10, 10)
-    assert thick[1, 5, 5] == 10
-    assert thick[2, 5, 5] == 10
-    assert thick[3, 5, 5] == 10
-    assert thick[0, 5, 5] == 0
-    assert thick[4, 5, 5] == 0
-
-def test_windowed_slice_projection_average():
-    """Test that windowed slice projection average works as expected."""
-    img = np.ones((5, 10, 10)) * 3
-
-    thick = windowed_slice_projection(img, window_size=3, axis=0, operation='average')
-
-    # average of 3 values of 3 is 3; edge windows average only the slices inside the
-    # volume (boundary 0: (3 + 3) / 2 = 3), so the padding does not dim them
-    assert np.allclose(thick[2, :, :], 3)
-    assert np.allclose(thick[0, :, :], 3)
-
-def test_optimized_entire_labels_touching_mask():
-    """Test that optimized entire labels touching mask works as expected."""
-    labels = np.zeros((20, 20), dtype=int)
-    # create two labels
-    labels[5:10, 5:10] = 1
-    labels[15:20, 15:20] = 2
-
-    mask = np.zeros((20, 20), dtype=int)
-    # mask touching label 1 after expansion
-    mask[2:4, 2:4] = 1
-
-    res = optimized_entire_labels_touching_mask(labels, mask)
-
-    # label 1 should be completely retained
-    assert np.all(res[5:10, 5:10] == 1)
-    # label 2 should be gone
-    assert np.all(res[15:20, 15:20] == 0)
-
-def test_sample_intensity_around_points():
-    """Test that sample intensity around points works as expected."""
-    image_3d = np.ones((10, 10, 10))
-    image_3d[5, 5, 5] = 10 # central high intensity point
-
-    points = np.array([
-        [5, 5, 5],
-        [1, 1, 1],
-        [20, 20, 20] # out of bounds
-    ])
-
-    # A physical diameter of 2.0 -> physical radius 1.0 -> 1 pixel radius -> 3x3x3 cube
-    res = sample_intensity_around_points(image_3d, points, diameter=2.0)
-
-    # [5,5,5] is average of 3x3x3 cube = 27 voxels
-    # 26 ones + 1 ten = 36 / 27 = 1.333
-
-    assert len(res) == 3
-    assert np.isclose(res[0], 36 / 27)
-    assert np.isclose(res[1], 1.0) # all ones
-    assert np.isnan(res[2]) # out of bounds
-
-def test_sample_intensity_xyz_warning():
-    """Test that sample intensity xyz warning works as expected."""
-    # Z, Y, X order: 5 slices, 20 rows, 30 columns
-    image_3d = np.zeros((5, 20, 30))
-
-    # Intentionally inverted (X, Y, Z) order
-    points_xyz = np.array([
-        [25, 10, 2]
-    ])
-
-    with pytest.warns(UserWarning, match=r"Points appear to be in \(X, Y, Z\) order"):
-        res = sample_intensity_around_points(image_3d, points_xyz, diameter=3)
-        assert np.isnan(res[0]) # Since 25 >= 5 (Z-dimension), it will be considered out of bounds
-
-def test_sample_intensity_along_surface_normals_anisotropic_profile():
-    """
-    Test sampling intensity along surface normals for a planar mesh on an anisotropic volume.
-
-    Verifies that for an image with a Gaussian intensity profile centered at Z_phys = 10.0 um,
-    sampling along normals of a surface grid at Z_phys = 10.0 um (with Z pixel size = 2.0 um)
-    recovers a peak intensity at the central sampling step (offset 0.0) and symmetric falloff at +/- offsets.
-    """
-    # 3D volume of shape (11, 20, 20) with Z pixel size 2.0 um, Y & X 0.5 um
-    pixel_sizes = {'Z': 2.0, 'Y': 0.5, 'X': 0.5}
-
-    z_indices = np.arange(11)
-    z_phys = z_indices * pixel_sizes['Z']  # [0, 2, 4, ..., 20] um
-
-    # Peak intensity at Z_phys = 10.0 um (voxel Z = 5)
-    gaussian_z = np.exp(-((z_phys - 10.0) ** 2) / (2 * (2.0 ** 2))) * 100.0
-
-    img = np.zeros((11, 20, 20), dtype=float)
-    for z in range(11):
-        img[z, :, :] = gaussian_z[z]
-
-    # Create a planar surface grid at voxel Z = 5 (Z_phys = 10.0 um)
-    u_grid, v_grid = np.meshgrid(np.linspace(5, 15, 6), np.linspace(5, 15, 6), indexing='ij')
-    surface_grid = np.zeros((6, 6, 3), dtype=float)
-    surface_grid[:, :, 0] = 5.0  # Z coordinate in voxels
-    surface_grid[:, :, 1] = u_grid  # Y coordinate in voxels
-    surface_grid[:, :, 2] = v_grid  # X coordinate in voxels
-
-    # Sample thickness = 8.0 um centered at Z_phys = 10.0 um with 5 steps (-4.0, -2.0, 0.0, 2.0, 4.0 um)
-    # Using bicubic interpolation for smooth subpixel intensity evaluation
-    sampled = sample_intensity_along_surface_normals(
-        img,
-        surface_grid,
-        thickness=8.0,
-        num_steps=5,
-        interpolation='bicubic',
-        pixel_sizes=pixel_sizes
+    spacing = {"Z": 2.0, "Y": 0.5, "X": 0.5}
+    labels_3d = voronoi_otsu_labeling(
+        img_3d, spot_sigma=(2, 1, 1), outline_sigma=1, pixel_sizes=spacing
     )
+    assert labels_3d.shape == (10, 20, 20)
+    assert len(np.unique(labels_3d[labels_3d > 0])) == 2
+    assert labels_3d[5, 5, 5] > 0 and labels_3d[5, 15, 15] > 0
+    assert labels_3d[5, 5, 5] != labels_3d[5, 15, 15]
 
-    assert sampled.shape == (6, 6, 5)
-
-    # Check that for all interior grid points, step index 2 (offset 0.0 um, Z_phys = 10.0 um) is maximum
-    peak_step_indices = np.argmax(sampled, axis=-1)
-    assert np.all(peak_step_indices == 2)
-
-    # Check symmetry of sampled intensities across the central normal step
-    profile = sampled[3, 3, :]
-    assert np.isclose(profile[0], profile[4])
-    assert np.isclose(profile[1], profile[3])
-    assert profile[2] > profile[1] > profile[0]
-
-
-def test_sample_intensity_along_surface_normals_curved_surface_bicubic():
-    """
-    Test sampling intensity along surface normals over a curved mesh using bicubic interpolation.
-
-    Verifies subpixel continuous intensity sampling across normals of a spherical surface grid,
-    and checks that a UserWarning is raised when `pixel_sizes` is not provided.
-    """
-    # Create synthetic volume with a spherical intensity distribution centered at (15, 15, 15)
-    z, y, x = np.ogrid[:31, :31, :31]
-    radius_grid = np.sqrt((z - 15) ** 2 + (y - 15) ** 2 + (x - 15) ** 2)
-    img = np.exp(-((radius_grid - 8.0) ** 2) / (2 * (2.0 ** 2))) * 250.0
-
-    # Create a spherical surface grid at radius ~ 8 voxels
-    theta = np.linspace(0, np.pi, 8)
-    phi = np.linspace(0, 2 * np.pi, 12, endpoint=False)
-    theta_grid, phi_grid = np.meshgrid(theta, phi, indexing='ij')
-
-    r = 8.0
-    grid_z = 15.0 + r * np.cos(theta_grid)
-    grid_y = 15.0 + r * np.sin(theta_grid) * np.sin(phi_grid)
-    grid_x = 15.0 + r * np.sin(theta_grid) * np.cos(phi_grid)
-
-    surface_grid = np.stack([grid_z, grid_y, grid_x], axis=-1)
-
-    # Calling without pixel_sizes must issue a UserWarning
-    with pytest.warns(UserWarning, match="pixel_sizes not provided"):
-        sampled = sample_intensity_along_surface_normals(
-            img,
-            surface_grid,
-            thickness=4.0,
-            num_steps=7,
-            interpolation='bicubic',
-            pixel_sizes=None
-        )
-
-    assert sampled.shape == (8, 12, 7)
-    assert not np.isnan(sampled).any()
-
-    # The peak of the Gaussian shell is at radius = 8.0 (the surface grid position)
-    # The middle step (index 3, offset 0.0) should correspond to the maximum intensity along the normal profile
-    interior_peaks = np.argmax(sampled[2:6, :, :], axis=-1)
-    assert np.all(interior_peaks == 3)
-
-def test_sample_intensity_around_points_pixel_sizes():
-    """Test that sample intensity around points pixel sizes works as expected."""
-    img = np.ones((10, 10, 10))
-    points = [[5, 5, 5]]
-    res = sample_intensity_around_points(img, points, diameter=5.0, pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 1.0})
-    assert np.isclose(res[0], 1.0)
-
-def test_optimized_entire_labels_touching_mask_dilation_preservation():
-    """
-    Control 1: Preservation of Shape (Dilation)
-    Test that expanding a label by 6.0 physical units results in matching physical dimensions
-    regardless of grid anisotropy.
-    """
-    from skimage.segmentation import expand_labels
-
-    # Check if expand_labels supports 'spacing'
-    try:
-        import inspect
-        if 'spacing' not in inspect.signature(expand_labels).parameters:
-            import pytest
-            pytest.skip("scikit-image < 0.21.0 does not support 'spacing' parameter in expand_labels")
-    except Exception:
-        pass
-
-    # Isotropic grid (1x1x1)
-    iso_labels = np.zeros((15, 15, 15), dtype=int)
-    iso_labels[7, 7, 7] = 1
-    # Expand by 6.0 um -> radius 6 -> expected size 13x13x13 (12 + 1)
-    iso_mask = np.zeros_like(iso_labels)
-    # distance is total distance from origin
-    # using our tested internal expansion function wrapped manually for check
-    try:
-        iso_dilated = expand_labels(iso_labels, distance=6.0, spacing=(1.0, 1.0, 1.0))
-    except TypeError:
-        # Fallback for old skimage
-        iso_dilated = expand_labels(iso_labels, distance=6)
-
-    # Anisotropic grid (3x1x1)
-    # Z-axis has 3.0 pixel size
-    aniso_labels = np.zeros((15, 15, 15), dtype=int)
-    aniso_labels[7, 7, 7] = 1
-
-    try:
-        aniso_dilated = expand_labels(aniso_labels, distance=6.0, spacing=(3.0, 1.0, 1.0))
-    except TypeError:
-        import pytest
-        pytest.skip("scikit-image < 0.21.0 does not support 'spacing' parameter in expand_labels")
-
-    def get_bounding_box_size(mask, spacing):
-        coords = np.argwhere(mask > 0)
-        min_coords = coords.min(axis=0)
-        max_coords = coords.max(axis=0)
-        pixel_size = max_coords - min_coords + 1
-        physical_size = pixel_size * np.array(spacing)
-        return physical_size
-
-    iso_size = get_bounding_box_size(iso_dilated, [1.0, 1.0, 1.0])
-    aniso_size = get_bounding_box_size(aniso_dilated, [3.0, 1.0, 1.0])
-
-    # 6 um distance -> diam 12 + 1 center? The exact mathematical dilation shape
-    # might vary (diamond/L1 vs square/Linf) but between the two grids, the PHYSICAL
-    # size should remain the same within a tolerance of 1 pixel width (max 3.0 um)
-    assert np.allclose(iso_size, aniso_size, atol=3.0)
-
-def test_sample_intensity_around_points_intensity_conservation():
-    """
-    Control 2: Intensity Conservation (Uniform Filter)
-    Query points located near the boundary layers using mode='reflect' via our function.
-    The output mean intensity must evaluate strictly to 100 across all valid spaces.
-    """
-    # synthetic volume filled with constant intensity 100
-    img = np.full((10, 10, 10), 100.0)
-
-    # points near boundary
-    points = [
-        [0, 0, 0],
-        [0, 5, 5],
-        [9, 9, 9],
-        [9, 0, 5]
-    ]
-
-    res = sample_intensity_around_points(img, points, diameter=5.0)
-
-    # Assert intensity is conserved exactly (no zero-padding dilution)
-    for r in res:
-        assert np.isclose(r, 100.0)
-
-def test_windowed_slice_projection_pixel_sizes():
-    """Test that windowed slice projection pixel sizes works as expected."""
-    img = np.ones((10, 10, 10))
-    res = windowed_slice_projection(img, window_size=5.0, pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 1.0})
-    assert res.shape == img.shape
-
-def test_optimized_entire_labels_touching_mask_pixel_sizes():
-    """Test that optimized entire labels touching mask pixel sizes works as expected."""
-    labels = np.zeros((10, 10), dtype=int)
-    labels[2:4, 2:4] = 1
-    mask = np.zeros((10, 10), dtype=int)
-    mask[6:8, 6:8] = 1
-    res = optimized_entire_labels_touching_mask(labels, mask, distance=3.0, pixel_sizes={'Y': 1.0, 'X': 1.0})
-    assert res.shape == labels.shape
 
 def test_voronoi_otsu_translation_invariance():
+    """Verify binary foreground segmentation of `voronoi_otsu_labeling` is translation-invariant.
+
+    Strategy: shift a synthetic 2D Gaussian spot by an integer offset using
+    `scipy.ndimage.shift`, segment both images, shift the mask back, and compare
+    the interior region.
+    Expected outcome: foreground overlap exceeds 95% inside the unclipped interior.
     """
-    🔎 Testr: Verify Translation Invariance of Voronoi Otsu Labeling
-    💡 What: Segmenting a translated image must produce an identically translated label mask.
-    🎯 Why: Ensures that the segmentation logic (filtering, Otsu, watershed) is completely position-independent.
-    🧪 How: Shift a synthetic spot image using `scipy.ndimage.shift`, run labeling on both, and compare.
-    """
-    # Create a base image with a distinct spot
+    rng = np.random.default_rng(42)
     img = np.zeros((30, 30))
     y, x = np.ogrid[-10:20, -15:15]
     img += np.exp(-(x**2 + y**2) / (2 * 2**2)) * 10
+    img += rng.random((30, 30)) * 0.1
 
-    # Needs some noise so Otsu isn't singular
-    np.random.seed(42)
-    img += np.random.rand(30, 30) * 0.1
-
-    # Shift by integer pixels
     shift_vec = (5, -3)
-    img_shifted = shift(img, shift_vec, order=1, mode='constant', cval=0.0)
+    img_shifted = shift(img, shift_vec, order=1, mode="constant", cval=0.0)
 
     labels_original = voronoi_otsu_labeling(img, spot_sigma=1, outline_sigma=1)
     labels_shifted = voronoi_otsu_labeling(img_shifted, spot_sigma=1, outline_sigma=1)
 
-    # We can't guarantee label IDs match perfectly due to watershed connected components,
-    # but the binary mask of "labeled" vs "background" must be translation invariant.
     mask_original = (labels_original > 0).astype(int)
     mask_shifted = (labels_shifted > 0).astype(int)
+    mask_shifted_back = shift(
+        mask_shifted, (-shift_vec[0], -shift_vec[1]), order=0, mode="constant", cval=0
+    )
 
-    mask_shifted_back = shift(mask_shifted, (-shift_vec[0], -shift_vec[1]), order=0, mode='constant', cval=0)
-
-    # Measure overlap inside the valid non-boundary region
-    # Avoid edge effects introduced by shift
-    valid_region = mask_original[5:-5, 5:-5]
-    valid_region_shifted_back = mask_shifted_back[5:-5, 5:-5]
-
-    overlap_ratio = np.mean(valid_region == valid_region_shifted_back)
-    assert overlap_ratio > 0.95, f"Translation invariance failed, overlap ratio was only {overlap_ratio}"
+    overlap_ratio = np.mean(mask_original[5:-5, 5:-5] == mask_shifted_back[5:-5, 5:-5])
+    assert overlap_ratio > 0.95, f"Translation invariance failed, overlap ratio was {overlap_ratio}"
 
 
 def test_voronoi_otsu_intensity_scale_invariance():
+    """Verify uniform positive intensity scaling does not alter Voronoi-Otsu boundaries.
+
+    Strategy: run `voronoi_otsu_labeling` on a seeded noisy spot image and on
+    `img * 5.0`, comparing the resulting binary foreground masks.
+    Expected outcome: both masks are bit-for-bit identical.
     """
-    🔎 Testr: Verify Intensity Scale Invariance of Voronoi Otsu Labeling
-    💡 What: Multiplying the entire image intensity by a constant factor > 0 must not change the segmentation.
-    🎯 Why: Otsu thresholding determines an optimal relative separation; uniform brightness changes should not alter object boundaries.
-    🧪 How: Run labeling on `img` and `img * 5.0` and assert exact equality of the binary segmentation mask.
-    """
+    rng = np.random.default_rng(42)
     img = np.zeros((30, 30))
     y, x = np.ogrid[-15:15, -15:15]
     img += np.exp(-(x**2 + y**2) / (2 * 3**2)) * 10
-    np.random.seed(42)
-    img += np.random.rand(30, 30) * 0.1
+    img += rng.random((30, 30)) * 0.1
 
     labels_base = voronoi_otsu_labeling(img, spot_sigma=1, outline_sigma=1)
     labels_scaled = voronoi_otsu_labeling(img * 5.0, spot_sigma=1, outline_sigma=1)
-
-    mask_base = (labels_base > 0)
-    mask_scaled = (labels_scaled > 0)
-
-    assert np.array_equal(mask_base, mask_scaled), "Segmentation boundaries changed under global intensity scaling"
+    assert np.array_equal(labels_base > 0, labels_scaled > 0)
 
 
-def test_windowed_slice_projection_constant_identity():
+def test_voronoi_otsu_deprecated_spacing_matches_pixel_sizes():
+    """Verify deprecated `spacing` tuple parameter emits `DeprecationWarning` and matches `pixel_sizes`.
+
+    Strategy: segment a 3D blob volume with `spacing=(2.0, 0.5, 0.5)` and with
+    `pixel_sizes={'Z': 2.0, 'Y': 0.5, 'X': 0.5}`.
+    Expected outcome: `spacing` emits `DeprecationWarning` and yields the exact
+    same label array as `pixel_sizes`.
     """
-    🔎 Testr: Verify Constant Identity of Windowed Slicing (Average)
-    💡 What: Averaging a windowed slice of a uniform constant volume must perfectly recover that constant.
-    🎯 Why: Ensures no mathematical bias or off-by-one errors in the window divisor or summation limits.
-    🧪 How: Create a volume of all 7.0s, project, and check the non-padded interior.
-    """
-    vol = np.ones((10, 10, 10)) * 7.0
-
-    # window_size=5 means +/- 2 margin padding
-    proj = windowed_slice_projection(vol, window_size=5, axis=0, operation='average')
-
-    # The valid interior (indices 2 through 7) should be exactly 7.0
-    valid_interior = proj[2:8, :, :]
-    assert np.allclose(valid_interior, 7.0, atol=1e-14), "Averaging a constant volume did not yield the constant value"
-
-
-def test_windowed_slice_projection_monotonicity():
-    """
-    🔎 Testr: Verify Monotonicity of Windowed Slicing (Max)
-    💡 What: Increasing the window size for a 'max' projection cannot decrease the result.
-    🎯 Why: The maximum of a set is less than or equal to the maximum of any superset.
-    🧪 How: Calculate max projections with window sizes 3 and 5. The result of 5 must be >= the result of 3 everywhere.
-    """
-    np.random.seed(42)
-    vol = np.random.rand(15, 10, 10) * 100
-
-    proj_win3 = windowed_slice_projection(vol, window_size=3, axis=0, operation='max')
-    proj_win5 = windowed_slice_projection(vol, window_size=5, axis=0, operation='max')
-
-    assert np.all(proj_win5 >= proj_win3), "Max projection is not monotonically non-decreasing with window size"
-
-
-def test_sample_intensity_constant_background():
-    """
-    🔎 Testr: Verify Identity of Intensity Sampling in Constant Background
-    💡 What: Sampling points anywhere in a constant image must exactly return that constant value.
-    🎯 Why: Proves that the underlying mean filtering kernel is correctly normalized and localized.
-    🧪 How: Create an image filled with pi, sample random valid coordinates.
-    """
-    img = np.ones((20, 20, 20)) * np.pi
-
-    # Random valid coordinates, making sure they are not exactly on the edge
-    # to avoid mode='constant', cval=0.0 boundary conditions of uniform_filter
-    np.random.seed(42)
-    points = np.random.rand(50, 3) * 14.0 + 3.0
-
-    sampled = sample_intensity_around_points(img, points, diameter=5)
-
-    assert np.allclose(sampled, np.pi, atol=1e-14), "Sampled values deviate from the constant background"
-
-
-def test_sample_intensity_linear_scaling():
-    """
-    🔎 Testr: Verify Linear Scaling of Intensity Sampling
-    💡 What: f(c * img) = c * f(img)
-    🎯 Why: The underlying operation (local mean) is a linear filter and must respect scalar multiplication.
-    🧪 How: Compute sampling for an image, multiply image by 10, sample again, and assert values are 10x larger.
-    """
-    np.random.seed(43)
-    img = np.random.rand(20, 20, 20) * 100.0
-    # Avoid edge points that include padding zeroes
-    points = np.random.rand(10, 3) * 16.0 + 2.0
-
-    sampled_base = np.array(sample_intensity_around_points(img, points, diameter=3))
-    sampled_scaled = np.array(sample_intensity_around_points(img * 10.0, points, diameter=3))
-
-    assert np.allclose(sampled_scaled, sampled_base * 10.0, atol=1e-12), "Local intensity sampling is not linearly scalable"
-
-# =========================================
-# Source: test_image_utils_new_funcs.py
-# =========================================
-
-def test_ensure_pixel_size_array():
-    """Test that ensure pixel size array works as expected."""
-    # Test None
-    with pytest.warns(UserWarning):
-        res = _ensure_pixel_size_array(None)
-    assert np.allclose(res, [1.0, 1.0, 1.0])
-
-    # Test dict
-    res = _ensure_pixel_size_array({'Z': 2.0, 'Y': 1.5, 'X': 0.5})
-    assert np.allclose(res, [2.0, 1.5, 0.5])
-
-    # Test missing keys in dict fallback to 1.0
-    res = _ensure_pixel_size_array({'Z': 2.0, 'X': 0.5})
-    assert np.allclose(res, [2.0, 1.0, 0.5])
-
-    # Test list
-    res = _ensure_pixel_size_array([2.0, 1.5, 0.5])
-    assert np.allclose(res, [2.0, 1.5, 0.5])
-
-def test_generate_plane_basis():
-    """Test that generate plane basis works as expected."""
-    normal = np.array([1.0, 0.0, 0.0])
-    u, v = generate_plane_basis(normal)
-    # Check orthogonality
-    assert np.isclose(np.dot(u, normal), 0.0)
-    assert np.isclose(np.dot(v, normal), 0.0)
-    assert np.isclose(np.dot(u, v), 0.0)
-    # Check unit length
-    assert np.isclose(np.linalg.norm(u), 1.0)
-    assert np.isclose(np.linalg.norm(v), 1.0)
-
-def test_fit_plane_ransac():
-    """Test that fit plane ransac works as expected."""
-    # Points on the plane Z = 2.0
-    points_zyx = np.array([
-        [2.0, 0.0, 0.0],
-        [2.0, 1.0, 0.0],
-        [2.0, 0.0, 1.0],
-        [2.0, 1.0, 1.0],
-        [5.0, 5.0, 5.0] # Outlier
-    ])
-
-    p0, normal = fit_plane_ransac(points_zyx, pixel_sizes={'Z': 1.0, 'Y': 1.0, 'X': 1.0}, inlier_threshold_um=0.1)
-
-    assert np.isclose(p0[0], 2.0)
-    assert np.isclose(np.abs(normal[0]), 1.0)
-    assert np.isclose(normal[1], 0.0)
-    assert np.isclose(normal[2], 0.0)
-
-def test_sample_volume_plane():
-    """Test that sample volume plane works as expected."""
-    volume = np.zeros((10, 10, 10))
-    volume[5, :, :] = 1.0
-
-    p0 = np.array([5.0, 5.0, 5.0])
-    normal = np.array([1.0, 0.0, 0.0]) # plane Z=5
-
-    sampled, spacing = sample_volume_plane(
-        volume, pixel_sizes={'Z': 1.0, 'Y': 1.0, 'X': 1.0},
-        p0_phys=p0, normal_phys=normal,
-        u_range_um=(-2, 2), v_range_um=(-2, 2),
-        u_res=5, v_res=5
-    )
-
-    # Should all be 1s since we are sampling the plane at Z=5
-    assert np.allclose(sampled, 1.0)
-
-
-def test_create_ellipsoid_struct():
-    """
-    🔎 Test: Verify structuring element creation for 3D morphological operations.
-    💡 What: Tests that `create_ellipsoid_struct` generates correct boolean 3D masks for given radius and spacing.
-    🎯 Why: Ensures physical scaling correctly determines voxel bounding dimensions and active ellipsoid region.
-    """
-    # Isotropic test: radius = 3.0 um, spacing = 1.0 um -> radius 3 voxels -> shape (7, 7, 7)
-    struct_iso = create_ellipsoid_struct(radius_um=3.0, pixel_sizes={'Z': 1.0, 'Y': 1.0, 'X': 1.0})
-    assert struct_iso.shape == (7, 7, 7)
-    assert struct_iso.dtype == bool
-    # Center voxel must be True
-    assert struct_iso[3, 3, 3]
-
-    # Anisotropic test: spacing (2.0, 1.0, 1.0) -> radii_vox = (1.5, 3, 3) -> shape (5, 7, 7)
-    struct_aniso = create_ellipsoid_struct(radius_um=3.0, spacing=(2.0, 1.0, 1.0))
-    assert struct_aniso.shape == (5, 7, 7)
-    assert struct_aniso[2, 3, 3]
-
-    # Tiny radius returns 3x3x3 grid with center voxel True
-    struct_tiny = create_ellipsoid_struct(radius_um=1e-8, spacing=(1.0, 1.0, 1.0))
-    assert struct_tiny.shape == (3, 3, 3)
-    assert struct_tiny[1, 1, 1]
-    assert np.sum(struct_tiny) == 1
-
-
-def test_generate_morphological_surface_mask():
-    """
-    🔎 Test: Verify generation of morphological envelope and surface layer.
-    💡 What: Tests envelope closing and surface mask calculation on a synthetic 3D sphere/cube binary mask.
-    🎯 Why: Ensures surface layer extraction is accurately bounded within specified physical surface depth.
-    """
-    # Create synthetic 3D mask with a sphere of radius 10 at center
-    vol = np.zeros((30, 30, 30), dtype=bool)
-    z, y, x = np.ogrid[:30, :30, :30]
-    mask = (z - 15)**2 + (y - 15)**2 + (x - 15)**2 <= 10**2
-    vol[mask] = True
-
-    surface_mask, envelope = generate_morphological_surface_mask(
-        vol,
-        spacing=(1.0, 1.0, 1.0),
-        closing_radius_um=2.0,
-        surface_depth_um=3.0,
-        downscale_factor=1,
-        fill_holes=True
-    )
-
-    assert surface_mask.shape == vol.shape
-    assert envelope.shape == vol.shape
-    assert envelope.dtype == bool
-    assert surface_mask.dtype == bool
-
-    # Envelope should cover all foreground mask voxels
-    assert np.all(envelope[vol])
-    # Surface mask must be a subset of envelope
-    assert np.all(envelope[surface_mask])
-    # Center of sphere (dist > surface_depth_um) should not be in surface_mask
-    assert not surface_mask[15, 15, 15]
-
-    # Test empty mask handling
-    empty_vol = np.zeros((10, 10, 10), dtype=bool)
-    surf_empty, env_empty = generate_morphological_surface_mask(empty_vol)
-    assert not np.any(surf_empty)
-    assert not np.any(env_empty)
-
-
-def test_estimate_inter_label_distance():
-    """
-    🔎 Test: Verify inter-nucleus distance estimation using label centroids and KDTree.
-    💡 What: Tests inter-label physical distance calculations for synthetic 3D labeled centroids.
-    🎯 Why: Guarantees accurate statistical estimation (median, p75, p90, recommended closing radius).
-    """
-    labels = np.zeros((50, 50, 50), dtype=int)
-    # Place 3 distinct spherical labels at known physical locations
-    # Label 1 at (10, 10, 10), Label 2 at (10, 10, 20) -> dist = 10 um (with 1um spacing)
-    # Label 3 at (10, 10, 30) -> dist to nearest = 10 um
-    labels[8:12, 8:12, 8:12] = 1
-    labels[8:12, 8:12, 18:22] = 2
-    labels[8:12, 8:12, 28:32] = 3
-
-    metrics = estimate_inter_label_distance(
-        labels,
-        pixel_sizes={'Z': 1.0, 'Y': 1.0, 'X': 1.0},
-        k_nearest=2
-    )
-
-    assert "median_um" in metrics
-    assert "p75_um" in metrics
-    assert "p90_um" in metrics
-    assert "recommended_closing_um" in metrics
-
-    assert np.isclose(metrics["median_um"], 10.0, atol=0.5)
-
-    # Test fallback when fewer labels than k_nearest are provided
-    few_labels = np.zeros((20, 20, 20), dtype=int)
-    few_labels[5:8, 5:8, 5:8] = 1
-    fallback_metrics = estimate_inter_label_distance(few_labels, spacing=(2.0, 2.0, 2.0), k_nearest=2)
-    assert fallback_metrics["median_um"] == 2.0
-
-
-# =========================================
-# Regression tests: scan batch 5
-# =========================================
-
-from scipy import ndimage as _ndi
-from scipy.ndimage import gaussian_filter as _gaussian_filter, map_coordinates as _map_coordinates
-
-
-def _blob_volume(shape, centers, sigma, amplitude=1000.0):
-    vol = np.zeros(shape, dtype=np.float64)
-    for c in centers:
-        vol[tuple(c)] = 1.0
-    vol = _gaussian_filter(vol, sigma)
-    return vol / vol.max() * amplitude
+    vol = _blob_volume((10, 30, 30), [(5, 15, 15)], sigma=(1.0, 3.0, 3.0))
+    with pytest.warns(DeprecationWarning):
+        a = voronoi_otsu_labeling(vol, 1, 1, spacing=(2.0, 0.5, 0.5))
+    b = voronoi_otsu_labeling(vol, 1, 1, pixel_sizes={"Z": 2.0, "Y": 0.5, "X": 0.5})
+    np.testing.assert_array_equal(a, b)
 
 
 def test_voronoi_keeps_nuclei_in_thin_stacks_and_at_borders():
-    """peak_local_max's default exclude_border dropped every seed within 3 px of a face."""
-    # 6-slice stack with 4 well-separated nuclei: thinner than 2 * 3 + 1 slices
+    """Verify border seeds and nuclei in thin 3D stacks are retained (`exclude_border=False`).
+
+    Strategy: segment a 6-slice 3D stack with 4 nuclei and a 2D image with 3
+    nuclei within 1-2 px of image borders.
+    Expected outcome: all 4 3D nuclei and all 3 border 2D nuclei receive distinct labels.
+    """
     centers = [(3, 15, 15), (3, 15, 45), (2, 45, 15), (3, 45, 45)]
     vol = _blob_volume((6, 60, 60), centers, sigma=(1.0, 3.0, 3.0))
     labels = voronoi_otsu_labeling(vol, spot_sigma=1, outline_sigma=1)
     assert len(np.unique(labels[labels > 0])) == 4
 
-    # 2D nuclei centred on or next to the border are labelled too
     img = _blob_volume((64, 64), [(1, 30), (32, 62), (62, 5)], sigma=3.0)
     labels_2d = voronoi_otsu_labeling(img, spot_sigma=1, outline_sigma=1)
     for c in [(1, 30), (32, 62), (62, 5)]:
@@ -672,28 +157,34 @@ def test_voronoi_keeps_nuclei_in_thin_stacks_and_at_borders():
 
 
 def test_voronoi_seed_spacing_is_physical():
-    """Seeds must be 3 finest-axis pixels apart in physical units, not 3 px on every axis."""
-    # Z = 2 um, XY = 0.5 um: two nuclei 6 um (3 slices) apart in Z are distinct objects,
-    # but a 3-px Chebyshev footprint in Z (6 um) let the brighter one suppress the other.
-    ps = {'Z': 2.0, 'Y': 0.5, 'X': 0.5}
+    """Verify peak suppression distance is measured in physical units (3 finest-axis pixels).
+
+    Strategy: place two Z-stacked nuclei 6 um (3 slices at Z=2 um) apart and
+    compare with two XY-adjacent nuclei 1 um (2 px at XY=0.5 um) apart.
+    Expected outcome: the Z-separated nuclei yield 2 distinct labels while the
+    closely spaced XY pair merges into 1 label.
+    """
+    ps = {"Z": 2.0, "Y": 0.5, "X": 0.5}
     vol = _blob_volume((12, 40, 40), [(4, 20, 20), (7, 20, 20)], sigma=(0.4, 3.0, 3.0))
     vol[7] *= 0.9
     labels = voronoi_otsu_labeling(vol, spot_sigma=0.5, outline_sigma=0.5, pixel_sizes=ps)
     assert labels[4, 20, 20] > 0 and labels[7, 20, 20] > 0
     assert labels[4, 20, 20] != labels[7, 20, 20]
 
-    # Control: XY spacing is unchanged (3 px of the finest axis), so two maxima
-    # 1 um (2 px) apart in XY still give a single seed
     vol_xy = _blob_volume((12, 40, 40), [(6, 20, 20), (6, 20, 22)], sigma=(0.4, 3.0, 3.0))
     labels_xy = voronoi_otsu_labeling(vol_xy, spot_sigma=0.5, outline_sigma=0.5, pixel_sizes=ps)
     assert len(np.unique(labels_xy[labels_xy > 0])) == 1
 
 
 def test_voronoi_isotropic_matches_peak_local_max_reference():
-    """Control: without pixel sizes the seeds are exactly peak_local_max(min_distance=3)."""
-    from skimage import feature, filters, segmentation
+    """Verify isotropic `voronoi_otsu_labeling` matches a direct scikit-image reference pipeline.
+
+    Strategy: run `voronoi_otsu_labeling` without pixel sizes on a seeded random
+    blurred 3D volume and compare against `peak_local_max(min_distance=3)` + watershed.
+    Expected outcome: the labeled arrays are bit-for-bit identical.
+    """
     rng = np.random.default_rng(0)
-    vol = _gaussian_filter(rng.random((24, 48, 48)), 2.0)
+    vol = gaussian_filter(rng.random((24, 48, 48)), 2.0)
     labels = voronoi_otsu_labeling(vol, spot_sigma=1, outline_sigma=1)
 
     blurred = filters.gaussian(vol, sigma=(1, 1, 1))
@@ -701,219 +192,976 @@ def test_voronoi_isotropic_matches_peak_local_max_reference():
     peaks[tuple(feature.peak_local_max(blurred, min_distance=3, exclude_border=False).T)] = True
     outline = filters.gaussian(vol, sigma=(1, 1, 1))
     mask = outline > filters.threshold_otsu(outline)
-    markers, _ = _ndi.label(peaks)
+    markers, _ = ndi.label(peaks)
     expected = segmentation.watershed(-outline, markers, mask=mask, compactness=0.5)
     np.testing.assert_array_equal(labels, expected)
 
 
+def test_windowed_slice_projection_max():
+    """Verify Z-axis max projection spreads a single impulse across the exact window span.
+
+    Strategy: place an impulse of 10 at `(2, 5, 5)` in a `(5, 10, 10)` volume
+    and project with `window_size=3, axis=0, operation='max'`.
+    Expected outcome: slices 1, 2, and 3 at `(5, 5)` equal 10; slices 0 and 4 remain 0.
+    """
+    img = np.zeros((5, 10, 10))
+    img[2, 5, 5] = 10
+
+    thick = windowed_slice_projection(
+        img, window_size=3, axis=0, operation="max", pixel_sizes=ISO_3D
+    )
+    assert thick.shape == (5, 10, 10)
+    np.testing.assert_array_equal(thick[:, 5, 5], [0, 10, 10, 10, 0])
+
+
+def test_windowed_slice_projection_physical_scaling_axes_and_window_rounding():
+    """Verify physical window scaling (dict & tuple), `axis=1, 2`, even rounding, and `< 1` clamping.
+
+    Strategy: project a single-voxel delta impulse at `(7, 7, 7)` in a `(15, 15, 15)`
+    volume with anisotropic pixel sizes `{'Z': 2.0, 'Y': 0.5, 'X': 1.0}` across
+    axes 0, 1, and 2, plus an even window (`4 -> 5`) and a sub-voxel window (`< 1 -> 1`).
+    Expected outcome: impulse spreads over the exact odd pixel window on each
+    axis for both `'max'` (value 1) and `'average'` (value `1 / win_px`), tuple
+    and dict pixel sizes match identically, and sub-voxel windows preserve the impulse.
+    """
+    img = np.zeros((15, 15, 15), dtype=float)
+    img[7, 7, 7] = 1.0
+    ps_dict = {"Z": 2.0, "Y": 0.5, "X": 1.0}
+    ps_tuple = (2.0, 0.5, 1.0)
+
+    # axis=0 (Z=2.0): window_size=6.0 um -> 3 px (indices 6, 7, 8)
+    max_z_dict = windowed_slice_projection(img, window_size=6.0, axis=0, operation="max", pixel_sizes=ps_dict)
+    max_z_tuple = windowed_slice_projection(img, window_size=6.0, axis=0, operation="max", pixel_sizes=ps_tuple)
+    np.testing.assert_array_equal(max_z_dict, max_z_tuple)
+    assert np.array_equal(np.nonzero(max_z_dict[:, 7, 7])[0], [6, 7, 8])
+    assert max_z_dict.sum() == 3.0
+
+    avg_z = windowed_slice_projection(img, window_size=6.0, axis=0, operation="average", pixel_sizes=ps_dict)
+    np.testing.assert_allclose(avg_z[6:9, 7, 7], 1.0 / 3.0)
+    assert avg_z[5, 7, 7] == 0.0 and avg_z[9, 7, 7] == 0.0
+
+    # axis=1 (Y=0.5): window_size=2.5 um -> 5 px (indices 5..9)
+    max_y = windowed_slice_projection(img, window_size=2.5, axis=1, operation="max", pixel_sizes=ps_dict)
+    assert np.array_equal(np.nonzero(max_y[7, :, 7])[0], [5, 6, 7, 8, 9])
+    assert max_y.sum() == 5.0
+
+    avg_y = windowed_slice_projection(img, window_size=2.5, axis=1, operation="average", pixel_sizes=ps_dict)
+    np.testing.assert_allclose(avg_y[7, 5:10, 7], 1.0 / 5.0)
+
+    # axis=2 (X=1.0): window_size=5.0 um -> 5 px (indices 5..9)
+    max_x = windowed_slice_projection(img, window_size=5.0, axis=2, operation="max", pixel_sizes=ps_dict)
+    assert np.array_equal(np.nonzero(max_x[7, 7, :])[0], [5, 6, 7, 8, 9])
+    assert max_x.sum() == 5.0
+
+    # Even window (4 -> 5 px)
+    avg_even = windowed_slice_projection(img, window_size=4.0, axis=0, operation="average", pixel_sizes=ISO_3D)
+    assert np.array_equal(np.nonzero(avg_even[:, 7, 7])[0], [5, 6, 7, 8, 9])
+    np.testing.assert_allclose(avg_even[5:10, 7, 7], 1.0 / 5.0)
+
+    # Sub-voxel window (0.2 / 2.0 = 0.1 -> clamped to 1 px: exact identity)
+    for op in ("max", "average"):
+        out_tiny = windowed_slice_projection(img, window_size=0.2, axis=0, operation=op, pixel_sizes=ps_dict)
+        np.testing.assert_array_equal(out_tiny, img)
+
+
+def test_windowed_slice_projection_monotonicity():
+    """Verify max projection is monotonically non-decreasing with window size.
+
+    Strategy: compute `'max'` projections with `window_size=3` and `window_size=5`
+    on a seeded random 3D volume.
+    Expected outcome: `proj_win5 >= proj_win3` holds at every voxel.
+    """
+    rng = np.random.default_rng(42)
+    vol = rng.random((15, 10, 10)) * 100
+
+    proj_win3 = windowed_slice_projection(vol, window_size=3, axis=0, operation="max", pixel_sizes=ISO_3D)
+    proj_win5 = windowed_slice_projection(vol, window_size=5, axis=0, operation="max", pixel_sizes=ISO_3D)
+    assert np.all(proj_win5 >= proj_win3)
+
+
+def test_windowed_slice_projection_negative_values_and_unknown_operation():
+    """Verify `'max'` handles negative values without zero-pad domination and rejects unknown ops.
+
+    Strategy: project a strictly negative Z ramp with `'max'` and pass invalid
+    `operation='mean'`.
+    Expected outcome: negative values are preserved accurately across edges and
+    unknown operations raise `ValueError`.
+    """
+    prof = np.array([-1, -2, -3, -4, -5], dtype=float)[:, None, None] * np.ones((1, 2, 2))
+    out = windowed_slice_projection(prof, window_size=3, operation="max", pixel_sizes=ISO_3D)
+    np.testing.assert_array_equal(out[:, 0, 0], [-1, -1, -2, -3, -4])
+    with pytest.raises(ValueError):
+        windowed_slice_projection(prof, window_size=3, operation="mean", pixel_sizes=ISO_3D)
+
+
+def test_windowed_slice_projection_average_does_not_dim_edges():
+    """Verify `'average'` normalizes by in-bounds slice count so edges are not dimmed by padding.
+
+    Strategy: average a constant stack of ones with `window_size=11` and a
+    linear Z ramp with `window_size=5`.
+    Expected outcome: constant stack stays identically 1.0 everywhere (including
+    boundary slices), interior ramp slices match the input, and slice 0 equals
+    `mean([0, 1, 2])`.
+    """
+    stack = np.ones((12, 4, 4), dtype=np.float32)
+    out = windowed_slice_projection(stack, window_size=11, operation="average", pixel_sizes=ISO_3D)
+    np.testing.assert_allclose(out, 1.0)
+
+    ramp = np.arange(30, dtype=float)[:, None, None] * np.ones((1, 2, 2))
+    out = windowed_slice_projection(ramp, window_size=5, operation="average", pixel_sizes=ISO_3D)
+    np.testing.assert_allclose(out[2:-2, 0, 0], ramp[2:-2, 0, 0])
+    np.testing.assert_allclose(out[0, 0, 0], np.mean([0, 1, 2]))
+
+
+def test_optimized_entire_labels_touching_mask():
+    """Verify full extent of touching labels is kept while non-touching labels are removed.
+
+    Strategy: place two 2D label blocks and a mask within default expansion
+    distance of label 1 only.
+    Expected outcome: label 1 is retained completely and label 2 is zeroed out.
+    """
+    labels = np.zeros((20, 20), dtype=int)
+    labels[5:10, 5:10] = 1
+    labels[15:20, 15:20] = 2
+
+    mask = np.zeros((20, 20), dtype=int)
+    mask[2:4, 2:4] = 1
+
+    res = optimized_entire_labels_touching_mask(labels, mask, pixel_sizes=ISO_2D)
+    assert np.all(res[5:10, 5:10] == 1)
+    assert np.all(res[15:20, 15:20] == 0)
+
+
+def test_optimized_labels_touching_mask_float_distance_not_truncated():
+    """Verify float `distance` is not truncated when `pixel_sizes=None` and matches unit pixel sizes.
+
+    Strategy: place a mask `sqrt(5) ≈ 2.24` px from a label and expand by
+    `distance=2.9` with `pixel_sizes=None` (warning expected) and with unit pixel sizes.
+    Expected outcome: both return the same non-zero label (proving `2.9` was not truncated to `2`).
+    """
+    labels = np.zeros((1, 9, 9), dtype=int)
+    labels[0, 4, 4] = 1
+    mask = np.zeros_like(labels)
+    mask[0, 6, 5] = 1
+
+    with pytest.warns(UserWarning):
+        implicit = optimized_entire_labels_touching_mask(labels, mask, distance=2.9)
+    explicit = optimized_entire_labels_touching_mask(labels, mask, distance=2.9, pixel_sizes=ISO_3D)
+    np.testing.assert_array_equal(implicit, explicit)
+    assert implicit[0, 4, 4] == 1
+
+
+def test_optimized_entire_labels_touching_mask_anisotropic_distance():
+    """Verify expansion distance is evaluated in physical units on anisotropic grids.
+
+    Strategy: compare a label 3 slices away in Z (`9 um` at `Z=3 um`) against a
+    label 3 px away in X (`3 um` at `X=1 um`) using `distance=5.0 um`, plus an
+    isotropic negative control.
+    Expected outcome: anisotropic run retains only the X-neighbouring label;
+    isotropic control retains the Z-neighbouring label too.
+    """
+    aniso = {"Z": 3.0, "Y": 1.0, "X": 1.0}
+    mask = np.zeros((9, 9, 9), dtype=int)
+    mask[4, 4, 4] = 1
+
+    below = np.zeros_like(mask)
+    below[1, 4, 4] = 1  # 3 slices from mask: 9 um
+    beside = np.zeros_like(mask)
+    beside[4, 4, 1] = 1  # 3 pixels from mask: 3 um
+
+    assert optimized_entire_labels_touching_mask(below, mask, distance=5.0, pixel_sizes=aniso).max() == 0
+    assert optimized_entire_labels_touching_mask(beside, mask, distance=5.0, pixel_sizes=aniso).max() == 1
+    assert optimized_entire_labels_touching_mask(below, mask, distance=5.0, pixel_sizes=ISO_3D).max() == 1
+
+
+def test_sample_intensity_around_points():
+    """Verify 3D mean sampling around interior points and NaN for positive and negative OOB coordinates.
+
+    Strategy: sample around an impulse voxel, a uniform region, and both
+    positive and negative out-of-bounds coordinates with `diameter=2.0` (3x3x3 box).
+    Expected outcome: center point returns `(26 + 10) / 27`, uniform point
+    returns `1.0`, and all OOB coordinates (positive and negative) return `NaN`.
+    """
+    image_3d = np.ones((10, 10, 10))
+    image_3d[5, 5, 5] = 10
+
+    points = np.array(
+        [
+            [5.0, 5.0, 5.0],
+            [1.0, 1.0, 1.0],
+            [20.0, 20.0, 20.0],
+            [-1.0, 5.0, 5.0],
+            [5.0, -2.0, 5.0],
+            [5.0, 5.0, -0.6],
+        ]
+    )
+
+    res = sample_intensity_around_points(image_3d, points, diameter=2.0, pixel_sizes=ISO_3D)
+    assert len(res) == 6
+    assert np.isclose(res[0], 36 / 27)
+    assert np.isclose(res[1], 1.0)
+    assert all(np.isnan(res[i]) for i in range(2, 6))
+
+
+def test_sample_intensity_around_points_anisotropic_impulse_footprint():
+    """Verify anisotropic pixel sizes produce the exact expected box footprint in 3D and 2D.
+
+    Strategy: place a unit impulse at the center of a 3D `(15, 15, 15)` volume
+    with `pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 0.5}` and `diameter=5.0`
+    (expected box `3 x 5 x 11 = 165` voxels), plus a 2D `(15, 15)` image with
+    `{'Y': 1.0, 'X': 0.5}` and `diameter=3.0` (`3 x 7 = 21` pixels).
+    Expected outcome: points inside the anisotropic footprint evaluate to exact
+    `1 / volume`, points one voxel outside evaluate to `0.0`, and tuple pixel
+    sizes match dict pixel sizes identically.
+    """
+    img = np.zeros((15, 15, 15), dtype=float)
+    img[7, 7, 7] = 1.0
+    ps_dict = {"Z": 2.0, "Y": 1.0, "X": 0.5}
+    ps_tuple = (2.0, 1.0, 0.5)
+
+    # Footprints: Z=3 (6..8), Y=5 (5..9), X=11 (2..12) -> 165 voxels
+    pts = [
+        [7, 7, 7],  # center -> 1/165
+        [6, 7, 7],  # Z edge inside -> 1/165
+        [5, 7, 7],  # Z outside -> 0
+        [7, 5, 7],  # Y edge inside -> 1/165
+        [7, 4, 7],  # Y outside -> 0
+        [7, 7, 2],  # X edge inside -> 1/165
+        [7, 7, 1],  # X outside -> 0
+    ]
+    expected = [1.0 / 165, 1.0 / 165, 0.0, 1.0 / 165, 0.0, 1.0 / 165, 0.0]
+
+    res_dict = sample_intensity_around_points(img, pts, diameter=5.0, pixel_sizes=ps_dict)
+    res_tuple = sample_intensity_around_points(img, pts, diameter=5.0, pixel_sizes=ps_tuple)
+    np.testing.assert_allclose(res_dict, expected, atol=1e-14)
+    np.testing.assert_allclose(res_tuple, expected, atol=1e-14)
+
+    # 2D input: Y=3 (6..8), X=7 (4..10) -> 21 pixels
+    img_2d = np.zeros((15, 15), dtype=float)
+    img_2d[7, 7] = 1.0
+    ps_2d = {"Y": 1.0, "X": 0.5}
+    res_2d = sample_intensity_around_points(
+        img_2d, [[7, 7], [7, 4], [7, 3], [-1, 7], [15, 7]], diameter=3.0, pixel_sizes=ps_2d
+    )
+    np.testing.assert_allclose(res_2d[:3], [1.0 / 21, 1.0 / 21, 0.0], atol=1e-14)
+    assert np.isnan(res_2d[3]) and np.isnan(res_2d[4])
+    assert sample_intensity_around_points(img_2d, [7, 7], diameter=3.0, pixel_sizes=ps_2d) == [
+        pytest.approx(1.0 / 21)
+    ]
+
+
+def test_sample_intensity_around_points_constant_conservation():
+    """Verify constant intensity is conserved everywhere (interior and boundary via `mode='reflect'`).
+
+    Strategy: sample corners, face boundaries, and 30 seeded random points in a
+    uniform `np.pi` volume using `diameter=5.0`.
+    Expected outcome: every sample returns `np.pi` within `1e-14` with no boundary dilution.
+    """
+    img = np.full((12, 12, 12), np.pi)
+    rng = np.random.default_rng(42)
+    boundary_pts = np.array([[0, 0, 0], [0, 5, 5], [11, 11, 11], [11, 0, 5]], dtype=float)
+    random_pts = rng.uniform(0.0, 11.0, size=(30, 3))
+    points = np.vstack([boundary_pts, random_pts])
+
+    sampled = sample_intensity_around_points(img, points, diameter=5.0, pixel_sizes=ISO_3D)
+    np.testing.assert_allclose(sampled, np.pi, atol=1e-14)
+
+
+def test_sample_intensity_linear_scaling():
+    """Verify local mean sampling obeys scalar linearity `f(c * img) = c * f(img)`.
+
+    Strategy: sample a seeded random 3D volume and its `10x` scaled copy at the
+    same 10 coordinates.
+    Expected outcome: scaled outputs equal `10 * base` within `1e-12`.
+    """
+    rng = np.random.default_rng(43)
+    img = rng.random((20, 20, 20)) * 100.0
+    points = rng.uniform(0.0, 19.0, size=(10, 3))
+
+    sampled_base = np.array(sample_intensity_around_points(img, points, diameter=3, pixel_sizes=ISO_3D))
+    sampled_scaled = np.array(
+        sample_intensity_around_points(img * 10.0, points, diameter=3, pixel_sizes=ISO_3D)
+    )
+    np.testing.assert_allclose(sampled_scaled, sampled_base * 10.0, atol=1e-12)
+
+
+def test_sample_intensity_xyz_warning():
+    """Verify likely `(X, Y, Z)` point order triggers a `UserWarning` and yields `NaN` when OOB.
+
+    Strategy: pass `[25, 10, 2]` to a `(5, 20, 30)` volume with explicit pixel sizes.
+    Expected outcome: emits the XYZ-order `UserWarning` and returns `NaN`.
+    """
+    image_3d = np.zeros((5, 20, 30))
+    points_xyz = np.array([[25, 10, 2]])
+
+    with pytest.warns(UserWarning, match=r"Points appear to be in \(X, Y, Z\) order"):
+        res = sample_intensity_around_points(image_3d, points_xyz, diameter=3, pixel_sizes=ISO_3D)
+    assert np.isnan(res[0])
+
+
 def test_sample_intensity_around_points_integer_means_not_truncated():
-    """uniform_filter kept the integer dtype, truncating every mean (Poisson(5) -> ~3.9)."""
+    """Verify integer images are averaged in float64 rather than truncated to integer dtype.
+
+    Strategy: compare sampled means on a `uint16` Poisson(5) volume against its
+    `float64` cast, plus a single `255` voxel in a `uint8` 3-cube.
+    Expected outcome: `uint16` matches `float64` within `1e-9` and the `uint8`
+    impulse evaluates to `255 / 27`.
+    """
     rng = np.random.default_rng(1)
     img = rng.poisson(5.0, size=(40, 40, 40)).astype(np.uint16)
     pts = rng.integers(5, 35, size=(200, 3))
-    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
-    means_int = np.array(sample_intensity_around_points(img, pts, diameter=5, pixel_sizes=ps))
-    means_float = np.array(sample_intensity_around_points(img.astype(np.float64), pts, diameter=5, pixel_sizes=ps))
+    means_int = np.array(sample_intensity_around_points(img, pts, diameter=5, pixel_sizes=ISO_3D))
+    means_float = np.array(
+        sample_intensity_around_points(img.astype(np.float64), pts, diameter=5, pixel_sizes=ISO_3D)
+    )
     np.testing.assert_allclose(means_int, means_float, rtol=0, atol=1e-9)
     assert abs(means_int.mean() - 5.0) < 0.15
     assert len(np.unique(means_int)) > 10
 
-    # A single bright uint8 voxel averaged over a 3-cube: 255 / 27, not 0
     one = np.zeros((9, 9, 9), dtype=np.uint8)
     one[4, 4, 4] = 255
-    val = sample_intensity_around_points(one, [[4, 4, 4]], diameter=3, pixel_sizes=ps)[0]
+    val = sample_intensity_around_points(one, [[4, 4, 4]], diameter=3, pixel_sizes=ISO_3D)[0]
     assert val == pytest.approx(255 / 27)
 
 
 def test_sample_intensity_around_points_window_matches_diameter():
-    """round() is banker's rounding: diameter 3 averaged a 5-cube, diameter 7 a 9-cube."""
+    """Verify odd window side length matches diameter without banker's rounding drift.
+
+    Strategy: sample a unit impulse at `(7, 7, 7)` for diameters 1, 2, 3, 4, 5, 7.
+    Expected outcome: each diameter yields `1 / side^3` with sides 1, 3, 3, 5, 5, 7.
+    """
     one = np.zeros((15, 15, 15))
     one[7, 7, 7] = 1.0
-    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
     for diameter, side in [(1, 1), (2, 3), (3, 3), (4, 5), (5, 5), (7, 7)]:
-        val = sample_intensity_around_points(one, [[7, 7, 7]], diameter=diameter, pixel_sizes=ps)[0]
-        assert val == pytest.approx(1.0 / side ** 3), diameter
+        val = sample_intensity_around_points(one, [[7, 7, 7]], diameter=diameter, pixel_sizes=ISO_3D)[0]
+        assert val == pytest.approx(1.0 / side**3), diameter
 
 
 def test_sample_intensity_around_points_empty_and_flat_points():
+    """Verify empty point list, single flat point vector, and mismatched dimensionality handling.
+
+    Strategy: pass `[]`, `[2, 2, 2]`, and a `(4, 2)` array for a 3D volume.
+    Expected outcome: returns `[]` and `[1.0]` respectively, and raises `ValueError` for `(4, 2)`.
+    """
     img = np.ones((5, 5, 5))
-    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
-    assert sample_intensity_around_points(img, [], 3, ps) == []
-    assert sample_intensity_around_points(img, [2, 2, 2], 3, ps) == [1.0]
+    assert sample_intensity_around_points(img, [], 3, ISO_3D) == []
+    assert sample_intensity_around_points(img, [2, 2, 2], 3, ISO_3D) == [1.0]
     with pytest.raises(ValueError):
-        sample_intensity_around_points(img, np.zeros((4, 2)), 3, ps)
+        sample_intensity_around_points(img, np.zeros((4, 2)), 3, ISO_3D)
 
 
-def test_estimate_inter_label_distance_neighbours_from_all_labels():
-    """Neighbours were searched only within the random subsample (8 um lattice -> 17.9 um)."""
-    # 30^3 lattice of 2x2x2-voxel nuclei every 4 voxels; 2 um voxels -> 8 um spacing
-    n, step = 30, 4
-    labels = np.zeros((n * step,) * 3, dtype=np.int32)
-    ids = np.arange(1, n ** 3 + 1, dtype=np.int32).reshape((n,) * 3)
-    for dz in range(2):
-        for dy in range(2):
-            for dx in range(2):
-                labels[dz::step, dy::step, dx::step] = ids
-    ps = {'Z': 2.0, 'Y': 2.0, 'X': 2.0}
-    m = estimate_inter_label_distance(labels, pixel_sizes=ps, sample_size=500)
-    assert m["median_um"] == pytest.approx(8.0)
-    assert m["p90_um"] == pytest.approx(8.0)
-    assert m["recommended_closing_um"] == pytest.approx(4.8)
-    # seed makes the subsample reproducible
-    assert estimate_inter_label_distance(labels, pixel_sizes=ps, seed=3) == estimate_inter_label_distance(labels, pixel_sizes=ps, seed=3)
+def test_sample_intensity_along_surface_normals_anisotropic_profile():
+    """Verify anisotropic normal sampling recovers a symmetric Gaussian Z profile centered on the surface.
+
+    Strategy: place a planar grid at `Z=5` (`10 um` at `Z=2 um`) inside a
+    Gaussian-in-Z volume peaked at `10 um` and sample with `thickness=8 um, num_steps=5`.
+    Expected outcome: output shape is `(6, 6, 5)`, peak lies at step 2 (offset 0),
+    and `+/-` offset intensities are symmetric.
+    """
+    pixel_sizes = {"Z": 2.0, "Y": 0.5, "X": 0.5}
+    z_phys = np.arange(11) * pixel_sizes["Z"]
+    gaussian_z = np.exp(-((z_phys - 10.0) ** 2) / (2 * (2.0**2))) * 100.0
+    img = np.broadcast_to(gaussian_z[:, None, None], (11, 20, 20)).copy()
+
+    u_grid, v_grid = np.meshgrid(np.linspace(5, 15, 6), np.linspace(5, 15, 6), indexing="ij")
+    surface_grid = np.stack([np.full_like(u_grid, 5.0), u_grid, v_grid], axis=-1)
+
+    sampled = sample_intensity_along_surface_normals(
+        img, surface_grid, thickness=8.0, num_steps=5, interpolation="bicubic", pixel_sizes=pixel_sizes
+    )
+    assert sampled.shape == (6, 6, 5)
+    assert np.all(np.argmax(sampled, axis=-1) == 2)
+
+    profile = sampled[3, 3, :]
+    assert np.isclose(profile[0], profile[4])
+    assert np.isclose(profile[1], profile[3])
+    assert profile[2] > profile[1] > profile[0]
+
+
+def test_sample_intensity_along_surface_normals_curved_surface_bicubic():
+    """Verify bicubic normal sampling over a curved spherical shell and default `pixel_sizes=None` warning.
+
+    Strategy: construct a spherical Gaussian shell at `r=8` and sample normals
+    from a matching spherical mesh with `pixel_sizes=None`.
+    Expected outcome: emits `UserWarning`, produces finite `(8, 12, 7)` output,
+    and peaks at the middle step (index 3) across interior latitudes.
+    """
+    z, y, x = np.ogrid[:31, :31, :31]
+    radius_grid = np.sqrt((z - 15) ** 2 + (y - 15) ** 2 + (x - 15) ** 2)
+    img = np.exp(-((radius_grid - 8.0) ** 2) / (2 * (2.0**2))) * 250.0
+
+    theta = np.linspace(0, np.pi, 8)
+    phi = np.linspace(0, 2 * np.pi, 12, endpoint=False)
+    theta_grid, phi_grid = np.meshgrid(theta, phi, indexing="ij")
+    r = 8.0
+    surface_grid = np.stack(
+        [
+            15.0 + r * np.cos(theta_grid),
+            15.0 + r * np.sin(theta_grid) * np.sin(phi_grid),
+            15.0 + r * np.sin(theta_grid) * np.cos(phi_grid),
+        ],
+        axis=-1,
+    )
+
+    with pytest.warns(UserWarning, match="pixel_sizes not provided"):
+        sampled = sample_intensity_along_surface_normals(
+            img, surface_grid, thickness=4.0, num_steps=7, interpolation="bicubic", pixel_sizes=None
+        )
+    assert sampled.shape == (8, 12, 7)
+    assert not np.isnan(sampled).any()
+    assert np.all(np.argmax(sampled[2:6, :, :], axis=-1) == 3)
+
+
+def test_surface_normals_single_step_samples_surface():
+    """Verify `num_steps=1` samples directly on the surface (offset 0) rather than at `-thickness/2`.
+
+    Strategy: sample a linear Z ramp at `Z=10` with `thickness=4, num_steps=1`.
+    Expected outcome: all sampled values equal `10.0`.
+    """
+    vol = np.broadcast_to(np.arange(20, dtype=float)[:, None, None], (20, 20, 20)).copy()
+    yy, xx = np.meshgrid(np.arange(5, 15), np.arange(5, 15), indexing="ij")
+    grid = np.stack([np.full_like(yy, 10.0), yy, xx], axis=-1).astype(float)
+    out = sample_intensity_along_surface_normals(
+        vol, grid, thickness=4, num_steps=1, pixel_sizes=ISO_3D
+    )
+    assert np.all(out == 10.0)
+
+
+def test_surface_normals_interpolation_degenerate_and_oob():
+    """Verify nearest vs bicubic subpixel behavior, degenerate zero normals, and OOB `cval=0`.
+
+    Strategy: (1) sample a linear Z ramp at subpixel offsets `+/- 0.3` with
+    `'nearest'` vs `'bicubic'`, (2) pass a collapsed constant mesh where
+    `t_u x t_v == 0`, and (3) sample a grid sitting on `Z=0` so negative offsets
+    leave the volume.
+    Expected outcome: `'nearest'` rounds to the center slice (`100`) while
+    `'bicubic'` recovers `[97, 100, 103]`; degenerate normals yield zero offset
+    without NaNs; out-of-bounds normal steps return `0.0`.
+    """
+    ramp = np.broadcast_to(np.arange(20, dtype=float)[:, None, None] * 10.0, (20, 10, 10)).copy()
+    yy, xx = np.meshgrid(np.arange(3, 7), np.arange(3, 7), indexing="ij")
+    grid = np.stack([np.full_like(yy, 10.0), yy, xx], axis=-1).astype(float)
+
+    near = sample_intensity_along_surface_normals(
+        ramp, grid, thickness=0.6, num_steps=3, interpolation="nearest", pixel_sizes=ISO_3D
+    )
+    cubic = sample_intensity_along_surface_normals(
+        ramp, grid, thickness=0.6, num_steps=3, interpolation="bicubic", pixel_sizes=ISO_3D
+    )
+    np.testing.assert_allclose(near, 100.0)
+    np.testing.assert_allclose(cubic[1, 1, :], [97.0, 100.0, 103.0], atol=1e-2)
+
+    # Degenerate surface (constant coordinates -> zero normal) must not produce NaN
+    collapsed = np.full((3, 3, 3), 5.0)
+    deg_out = sample_intensity_along_surface_normals(
+        ramp, collapsed, thickness=4.0, num_steps=3, interpolation="nearest", pixel_sizes=ISO_3D
+    )
+    assert not np.isnan(deg_out).any()
+    np.testing.assert_allclose(deg_out, ramp[5, 5, 5])
+
+    # Out-of-bounds normal steps fill with cval=0
+    const_vol = np.full((10, 10, 10), 42.0)
+    top_grid = np.stack([np.zeros_like(yy), yy, xx], axis=-1).astype(float)
+    oob_out = sample_intensity_along_surface_normals(
+        const_vol, top_grid, thickness=4.0, num_steps=5, interpolation="nearest", pixel_sizes=ISO_3D
+    )
+    np.testing.assert_allclose(oob_out[1, 1, :], [0.0, 0.0, 42.0, 42.0, 42.0])
+
+
+def test_pixel_sizes_parsing_and_validation_via_public_apis():
+    """Verify dict, partial dict, sequence, default `None`, and invalid pixel sizes via public APIs.
+
+    Strategy: compare `create_ellipsoid_struct` outputs for dict, partial dict
+    (missing `'Y'` defaults to `1.0`), list/tuple sequences, and `None` (warning),
+    then verify invalid values (zero, negative, NaN, +/-inf, wrong length) raise
+    `ValueError` through `create_ellipsoid_struct` and `sample_intensity_around_points`.
+    Expected outcome: equivalent pixel-size representations yield identical
+    structuring elements and all invalid specifications raise `ValueError`.
+    """
+    from_dict = create_ellipsoid_struct(2.0, pixel_sizes={"Z": 2.0, "Y": 1.0, "X": 0.5})
+    from_partial = create_ellipsoid_struct(2.0, pixel_sizes={"Z": 2.0, "X": 0.5})
+    from_list = create_ellipsoid_struct(2.0, pixel_sizes=[2.0, 1.0, 0.5])
+    np.testing.assert_array_equal(from_dict, from_partial)
+    np.testing.assert_array_equal(from_dict, from_list)
+
+    with pytest.warns(UserWarning, match="pixel_sizes not provided"):
+        from_none = create_ellipsoid_struct(2.0)
+    np.testing.assert_array_equal(from_none, create_ellipsoid_struct(2.0, pixel_sizes=ISO_3D))
+
+    invalid_cases = [
+        {"Z": 0.0, "Y": 1.0, "X": 1.0},
+        {"Z": -1.0, "Y": 1.0, "X": 1.0},
+        (-0.5, 1.0, 1.0),
+        {"Z": np.nan, "Y": 1.0, "X": 1.0},
+        {"Z": np.inf, "Y": 1.0, "X": 1.0},
+        (1.0, -np.inf, 1.0),
+        (1.0, 1.0),
+        (1.0, 1.0, 1.0, 1.0),
+    ]
+    vol = np.ones((4, 4, 4))
+    for bad in invalid_cases:
+        with pytest.raises(ValueError):
+            create_ellipsoid_struct(2.0, pixel_sizes=bad)
+        with pytest.raises(ValueError):
+            sample_intensity_around_points(vol, [[2, 2, 2]], diameter=3, pixel_sizes=bad)
 
 
 def test_none_pixel_size_falls_back_to_one_with_warning():
-    """Readers give {'Z': None} for uncalibrated axes; that erased labels or returned zeros."""
+    """Verify `None` axis entries from uncalibrated readers warn and fall back to 1.0.
+
+    Strategy: pass `{'Z': None, 'Y': 1.0, 'X': 1.0}` to
+    `optimized_entire_labels_touching_mask` and `sample_intensity_along_surface_normals`.
+    Expected outcome: each call warns naming `axis Z` and produces valid outputs
+    equivalent to `Z=1.0`.
+    """
     labels = np.zeros((10, 10, 10), dtype=int)
     labels[1:5, 1:5, 1:5] = 1
     labels[6:10, 6:10, 6:10] = 2
     mask = np.zeros_like(labels)
     mask[2:4, 2:4, 2:4] = 1
     with pytest.warns(UserWarning, match="axis Z"):
-        out = optimized_entire_labels_touching_mask(labels, mask, distance=1, pixel_sizes={'Z': None, 'Y': 1.0, 'X': 1.0})
+        out = optimized_entire_labels_touching_mask(
+            labels, mask, distance=1, pixel_sizes={"Z": None, "Y": 1.0, "X": 1.0}
+        )
     np.testing.assert_array_equal(out, labels * (labels == 1))
 
     vol = np.full((20, 20, 20), 100.0)
-    yy, xx = np.meshgrid(np.arange(5, 15), np.arange(5, 15), indexing='ij')
+    yy, xx = np.meshgrid(np.arange(5, 15), np.arange(5, 15), indexing="ij")
     grid = np.stack([np.full_like(yy, 10.0), yy, xx], axis=-1).astype(float)
     with pytest.warns(UserWarning, match="axis Z"):
-        sampled = sample_intensity_along_surface_normals(vol, grid, pixel_sizes={'X': 0.5, 'Y': 0.5, 'Z': None})
+        sampled = sample_intensity_along_surface_normals(
+            vol, grid, pixel_sizes={"X": 0.5, "Y": 0.5, "Z": None}
+        )
     assert np.all(sampled == 100.0)
 
-    for bad in ({'Z': 0.0, 'Y': 1.0, 'X': 1.0}, {'Z': np.nan, 'Y': 1.0, 'X': 1.0}):
-        with pytest.raises(ValueError):
-            _ensure_pixel_size_array(bad)
+
+@pytest.mark.parametrize(
+    "normal",
+    [
+        np.array([1.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+        np.array([0.0, 0.0, 1.0]),
+        np.array([-2.0, 0.0, 0.0]),
+        np.array([1.0, 1.0, 1.0]),
+        np.array([3.0, -2.0, 5.0]),
+    ],
+)
+def test_generate_plane_basis(normal):
+    """Verify `generate_plane_basis` builds a right-handed orthonormal triad for cardinal and oblique normals.
+
+    Strategy: generate `(u, v)` across all three cardinal axes, a scaled negative
+    cardinal normal, and oblique normals.
+    Expected outcome: `u` and `v` are unit length, mutually orthogonal,
+    orthogonal to `normal`, and satisfy `u x v == normal / ||normal||`.
+    """
+    n_hat = normal / np.linalg.norm(normal)
+    u, v = generate_plane_basis(normal)
+    assert np.isclose(np.linalg.norm(u), 1.0)
+    assert np.isclose(np.linalg.norm(v), 1.0)
+    assert np.isclose(np.dot(u, n_hat), 0.0, atol=1e-12)
+    assert np.isclose(np.dot(v, n_hat), 0.0, atol=1e-12)
+    assert np.isclose(np.dot(u, v), 0.0, atol=1e-12)
+    np.testing.assert_allclose(np.cross(u, v), n_hat, atol=1e-12)
 
 
-def test_tuple_pixel_sizes_accepted():
-    vol = _blob_volume((10, 30, 30), [(5, 15, 15)], sigma=(1.0, 3.0, 3.0))
-    with pytest.warns(DeprecationWarning):
-        a = voronoi_otsu_labeling(vol, 1, 1, spacing=(2.0, 0.5, 0.5))
-    b = voronoi_otsu_labeling(vol, 1, 1, pixel_sizes={'Z': 2.0, 'Y': 0.5, 'X': 0.5})
+def test_generate_plane_basis_zero_normal_raises():
+    """Verify `generate_plane_basis` rejects the zero vector with `ValueError`.
+
+    Strategy: call `generate_plane_basis(np.zeros(3))`.
+    Expected outcome: raises `ValueError` mentioning non-zero normal.
+    """
+    with pytest.raises(ValueError, match="non-zero"):
+        generate_plane_basis(np.zeros(3))
+
+
+def test_fit_plane_ransac():
+    """Verify RANSAC plane fitting on isotropic horizontal and anisotropic tilted planes plus error cases.
+
+    Strategy: fit (1) a horizontal plane with an outlier, (2) an anisotropic
+    tilted physical plane `z_phys = 0.5 * y_phys + 0.25 * x_phys + 4.0` with
+    3 gross outliers, (3) fewer than 3 points, and (4) collinear points.
+    Expected outcome: recovers exact physical normals with canonical sign
+    `normal[0] >= 0` and inlier centroid on the plane; `< 3` points raises
+    `ValueError` and collinear points raise `RuntimeError`.
+    """
+    points_zyx = np.array(
+        [[2.0, 0.0, 0.0], [2.0, 1.0, 0.0], [2.0, 0.0, 1.0], [2.0, 1.0, 1.0], [5.0, 5.0, 5.0]]
+    )
+    p0, normal = fit_plane_ransac(points_zyx, pixel_sizes=ISO_3D, inlier_threshold_um=0.1)
+    assert np.isclose(p0[0], 2.0)
+    assert normal[0] >= 0.0
+    np.testing.assert_allclose(normal, [1.0, 0.0, 0.0], atol=1e-6)
+
+    # Anisotropic tilted plane: z_phys - 0.5*y_phys - 0.25*x_phys = 4.0
+    ps = {"Z": 2.0, "Y": 1.0, "X": 0.5}
+    yy, xx = np.meshgrid(np.linspace(0.0, 8.0, 5), np.linspace(0.0, 8.0, 5), indexing="ij")
+    y_phys = yy.ravel()
+    x_phys = xx.ravel()
+    z_phys = 0.5 * y_phys + 0.25 * x_phys + 4.0
+    inliers_vox = np.column_stack([z_phys / ps["Z"], y_phys / ps["Y"], x_phys / ps["X"]])
+    outliers_vox = np.array([[50.0, 2.0, 4.0], [60.0, 5.0, 1.0], [-40.0, 3.0, 6.0]])
+    pts_all = np.vstack([inliers_vox, outliers_vox])
+
+    p0_t, n_t = fit_plane_ransac(pts_all, pixel_sizes=ps, inlier_threshold_um=0.05)
+    expected_n = np.array([1.0, -0.5, -0.25]) / np.linalg.norm([1.0, -0.5, -0.25])
+    assert n_t[0] >= 0.0
+    np.testing.assert_allclose(n_t, expected_n, atol=1e-6)
+    assert np.isclose(np.dot(p0_t, n_t), 4.0 / np.linalg.norm([1.0, -0.5, -0.25]), atol=1e-6)
+
+    with pytest.raises(ValueError, match="At least 3 points"):
+        fit_plane_ransac(np.zeros((2, 3)), pixel_sizes=ISO_3D)
+
+    collinear = np.column_stack([np.arange(5, dtype=float), np.zeros(5), np.zeros(5)])
+    with pytest.raises(RuntimeError, match="RANSAC failed"):
+        fit_plane_ransac(collinear, pixel_sizes=ISO_3D, max_iters=50)
+
+
+def test_sample_volume_plane_normalises_normal_and_labels_axes_zyx():
+    """Verify `sample_volume_plane` normalizes `normal_phys` and returns ZYX output pixel sizes.
+
+    Strategy: sample a Z-ramp volume with `normal_phys=[3, 0, 0]` and `[1, 0, 0]`
+    at `num_offsets=1, offset_step_um=1.0`.
+    Expected outcome: both runs agree identically, offset slices land at Z = 9, 10, 11,
+    output shape is `(3, 9, 5)`, and pixel sizes map `u -> Y` and `v -> X`.
+    """
+    vol = np.broadcast_to(np.arange(20, dtype=np.float32)[:, None, None], (20, 20, 20)).copy()
+    kw = dict(
+        pixel_sizes=ISO_3D,
+        p0_phys=np.array([10.0, 10.0, 10.0]),
+        u_range_um=(-4, 4),
+        v_range_um=(-4, 4),
+        u_res=9,
+        v_res=5,
+        num_offsets=1,
+        offset_step_um=1.0,
+    )
+    a, sp_a = sample_volume_plane(vol, normal_phys=np.array([3.0, 0.0, 0.0]), **kw)
+    b, _ = sample_volume_plane(vol, normal_phys=np.array([1.0, 0.0, 0.0]), **kw)
     np.testing.assert_array_equal(a, b)
-    proj = windowed_slice_projection(vol, window_size=4, pixel_sizes=(2.0, 0.5, 0.5))
-    assert proj.shape == vol.shape
+    np.testing.assert_allclose(a[:, 4, 2], [9, 10, 11])
+    assert a.shape == (3, 9, 5)
+    assert sp_a == {"Z": 1.0, "Y": 1.0, "X": 2.0}
 
 
-def test_optimized_labels_touching_mask_float_distance_not_truncated():
-    """Without pixel sizes, int(distance) disagreed with explicit unit pixel sizes."""
-    labels = np.zeros((1, 9, 9), dtype=int)
-    labels[0, 4, 4] = 1
-    mask = np.zeros_like(labels)
-    mask[0, 6, 5] = 1  # sqrt(5) = 2.24 px from the label
-    with pytest.warns(UserWarning):
-        implicit = optimized_entire_labels_touching_mask(labels, mask, distance=2.9)
-    explicit = optimized_entire_labels_touching_mask(labels, mask, distance=2.9, pixel_sizes={'Z': 1, 'Y': 1, 'X': 1})
-    np.testing.assert_array_equal(implicit, explicit)
-    assert implicit[0, 4, 4] == 1
+def test_sample_volume_plane_cubic_interpolates():
+    """Verify prefiltered cubic sampling interpolates exact voxel centers and matches whole-volume reference.
+
+    Strategy: sample a random `float32` volume on an axis-aligned voxel-center
+    grid (comparing cubic vs linear) and on an oblique plane (comparing cropped
+    prefilter against full-volume `map_coordinates(..., order=3, prefilter=True)`).
+    Expected outcome: voxel-center samples match linear within `1e-5` and oblique
+    cubic samples match the full-volume reference within `1e-4`.
+    """
+    rng = np.random.default_rng(3)
+    vol = rng.random((12, 16, 16)).astype(np.float32)
+    n = np.array([1.0, 0.0, 0.0])
+    plane, _ = sample_volume_plane(
+        vol,
+        ISO_3D,
+        p0_phys=np.array([5.0, 0.0, 0.0]),
+        normal_phys=n,
+        u_range_um=(-15, 15),
+        v_range_um=(-15, 15),
+        u_res=31,
+        v_res=31,
+        method="cubic",
+    )
+    linear, _ = sample_volume_plane(
+        vol,
+        ISO_3D,
+        p0_phys=np.array([5.0, 0.0, 0.0]),
+        normal_phys=n,
+        u_range_um=(-15, 15),
+        v_range_um=(-15, 15),
+        u_res=31,
+        v_res=31,
+        method="linear",
+    )
+    np.testing.assert_allclose(plane, linear, atol=1e-5)
+    assert np.count_nonzero(linear) == 16 * 16
+
+    vol2 = rng.random((40, 40, 40)).astype(np.float32)
+    n2 = np.array([1.0, 0.3, -0.2])
+    plane2, _ = sample_volume_plane(
+        vol2,
+        ISO_3D,
+        p0_phys=np.array([20.0, 20.0, 20.0]),
+        normal_phys=n2,
+        u_range_um=(-6, 6),
+        v_range_um=(-6, 6),
+        u_res=25,
+        v_res=25,
+        method="cubic",
+    )
+    u_dir, v_dir = generate_plane_basis(n2)
+    uu, vv = np.meshgrid(np.linspace(-6, 6, 25), np.linspace(-6, 6, 25), indexing="ij")
+    pts = (
+        np.array([20.0, 20.0, 20.0])[:, None, None]
+        + uu * u_dir[:, None, None]
+        + vv * v_dir[:, None, None]
+    )
+    expected = map_coordinates(
+        vol2, pts.reshape(3, -1), order=3, mode="constant", cval=0, prefilter=True
+    ).reshape(25, 25)
+    np.testing.assert_allclose(plane2, expected, atol=1e-4)
 
 
-def test_windowed_slice_projection_negative_values_and_unknown_operation():
-    prof = np.array([-1, -2, -3, -4, -5], dtype=float)[:, None, None] * np.ones((1, 2, 2))
-    out = windowed_slice_projection(prof, window_size=3, operation='max', pixel_sizes={'Z': 1, 'Y': 1, 'X': 1})
-    np.testing.assert_array_equal(out[:, 0, 0], [-1, -1, -2, -3, -4])
-    with pytest.raises(ValueError):
-        windowed_slice_projection(prof, window_size=3, operation='mean', pixel_sizes={'Z': 1, 'Y': 1, 'X': 1})
+def test_sample_volume_plane_dynamic_bounds_uint8_clamping_oob_and_errors():
+    """Verify dynamic extent/resolution, `uint8` cubic overshoot clamping, outside-volume cubic, and errors.
+
+    Strategy: (1) sample with `u_range_um=v_range_um=u_res=v_res=None` on an
+    anisotropic constant volume, (2) sample a sharp `0 -> 255` `uint8` step at
+    half-voxel coordinates using `method='cubic'`, (3) sample a cubic plane far
+    outside the volume, and (4) test missing `p0_phys`/`normal_phys` and zero normal.
+    Expected outcome: dynamic bounds pick exact finest spacing (`0.5`), `uint8`
+    cubic overshoot clamps to `[0, 255]` without wraparound, out-of-volume cubic
+    returns all zeros, and invalid plane definitions raise `ValueError`.
+    """
+    # 1. Dynamic bounds & resolution: Z=5*2=10, Y=7*1=7, X=9*0.5=4.5; optimal_res=0.5
+    # For normal=[1,0,0], u is +X (span 4.5 -> 10 px), v is -Y (span 7.0 -> 15 px).
+    vol = np.full((6, 8, 10), 7.0, dtype=np.float32)
+    ps = {"Z": 2.0, "Y": 1.0, "X": 0.5}
+    dyn_plane, dyn_ps = sample_volume_plane(
+        vol, pixel_sizes=ps, p0_phys=np.array([4.0, 3.0, 2.0]), normal_phys=np.array([1.0, 0.0, 0.0])
+    )
+    assert dyn_plane.shape == (10, 15)
+    np.testing.assert_allclose(dyn_plane, 7.0)
+    assert dyn_ps == {"Z": 0.0, "Y": pytest.approx(0.5), "X": pytest.approx(0.5)}
+
+    # 2. Integer dtype + cubic overshoot clamping (no uint8 underflow/overflow wraparound)
+    step_u8 = np.zeros((10, 16, 16), dtype=np.uint8)
+    step_u8[:, :, 8:] = 255
+    # u is +X: u_vals in [-7, 7] step 0.5 -> X in [1.0, 15.0]; idx 11 is X=6.5, idx 15 is X=8.5
+    clamped, _ = sample_volume_plane(
+        step_u8,
+        pixel_sizes=ISO_3D,
+        p0_phys=np.array([5.0, 8.0, 8.0]),
+        normal_phys=np.array([1.0, 0.0, 0.0]),
+        u_range_um=(-7.0, 7.0),
+        v_range_um=(-3.0, 3.0),
+        u_res=29,
+        v_res=7,
+        method="cubic",
+    )
+    assert clamped.dtype == np.uint8
+    assert np.all(clamped[11, :] == 0)
+    assert np.all(clamped[15, :] == 255)
+    assert np.all(clamped[:13, :] < 30)
+    assert np.all(clamped[14:, :] > 225)
+
+    # 3. Outside-volume cubic returns zeros cleanly
+    oob_plane, _ = sample_volume_plane(
+        np.ones((10, 10, 10), dtype=np.float32),
+        pixel_sizes=ISO_3D,
+        p0_phys=np.array([100.0, 100.0, 100.0]),
+        normal_phys=np.array([1.0, 0.0, 0.0]),
+        u_range_um=(-2.0, 2.0),
+        v_range_um=(-2.0, 2.0),
+        u_res=5,
+        v_res=5,
+        method="cubic",
+    )
+    np.testing.assert_array_equal(oob_plane, 0.0)
+
+    # 4. Missing p0_phys / normal_phys or zero normal_phys raises ValueError
+    with pytest.raises(ValueError, match="must be provided"):
+        sample_volume_plane(vol, pixel_sizes=ps, p0_phys=None, normal_phys=np.array([1.0, 0.0, 0.0]))
+    with pytest.raises(ValueError, match="must be provided"):
+        sample_volume_plane(vol, pixel_sizes=ps, p0_phys=np.zeros(3), normal_phys=None)
+    with pytest.raises(ValueError, match="non-zero"):
+        sample_volume_plane(vol, pixel_sizes=ps, p0_phys=np.zeros(3), normal_phys=np.zeros(3))
+
+
+def test_create_ellipsoid_struct():
+    """Verify exact voxel membership, reflection symmetry, tiny radius, and default warning.
+
+    Strategy: inspect exact on/off voxel coordinates and 3-axis symmetry of
+    isotropic and anisotropic (`Z=2, Y=1, X=1`) ellipsoids of radius `3 um`,
+    plus a tiny `1e-8 um` radius and a `None` spacing warning check.
+    Expected outcome: shapes match `2 * ceil(r / s) + 1`, boundary voxels obey
+    `sum((d * s)^2) <= r^2`, struct is symmetric along all 3 axes, and `None`
+    spacing warns and defaults to `(1, 1, 1)`.
+    """
+    struct_iso = create_ellipsoid_struct(radius_um=3.0, pixel_sizes=ISO_3D)
+    assert struct_iso.shape == (7, 7, 7) and struct_iso.dtype == bool
+    assert struct_iso[3, 3, 3]
+    assert struct_iso[0, 3, 3] and not struct_iso[0, 0, 0]
+
+    # Anisotropic spacing (2, 1, 1), radius 3 um -> radii_vox (1.5, 3, 3) -> shape (5, 7, 7), center (2, 3, 3)
+    struct_aniso = create_ellipsoid_struct(radius_um=3.0, spacing=(2.0, 1.0, 1.0))
+    assert struct_aniso.shape == (5, 7, 7)
+    assert struct_aniso[2, 3, 3]
+    assert struct_aniso[1, 3, 3] and struct_aniso[3, 3, 3]  # |dz|=1 -> 2 um <= 3 um
+    assert not struct_aniso[0, 3, 3] and not struct_aniso[4, 3, 3]  # |dz|=2 -> 4 um > 3 um
+    assert struct_aniso[2, 0, 3] and struct_aniso[2, 6, 3]  # |dy|=3 -> 3 um <= 3 um
+    assert struct_aniso[3, 5, 4]  # 2^2 + 2^2 + 1^2 = 9 <= 9
+    assert not struct_aniso[3, 5, 5]  # 2^2 + 2^2 + 2^2 = 12 > 9
+
+    # Reflection symmetry across all 3 axes
+    np.testing.assert_array_equal(struct_aniso, struct_aniso[::-1, :, :])
+    np.testing.assert_array_equal(struct_aniso, struct_aniso[:, ::-1, :])
+    np.testing.assert_array_equal(struct_aniso, struct_aniso[:, :, ::-1])
+
+    # Tiny radius preserves only the center voxel
+    struct_tiny = create_ellipsoid_struct(radius_um=1e-8, spacing=(1.0, 1.0, 1.0))
+    assert struct_tiny.shape == (3, 3, 3)
+    assert struct_tiny[1, 1, 1] and np.sum(struct_tiny) == 1
+
+    # Default None spacing warns and equals unit spacing
+    with pytest.warns(UserWarning, match="pixel_sizes not provided"):
+        struct_default = create_ellipsoid_struct(radius_um=2.0)
+    np.testing.assert_array_equal(struct_default, create_ellipsoid_struct(radius_um=2.0, pixel_sizes=ISO_3D))
+
+
+def test_generate_morphological_surface_mask():
+    """Verify morphological surface extraction, `fill_holes=False`, thin-depth fallback, and empty input.
+
+    Strategy: run on (1) a solid sphere, (2) a hollow cube with `fill_holes=True`
+    vs `False`, (3) a solid cube with `surface_depth_um < min_spacing` triggering
+    the 1-voxel outer shell fallback, and (4) an all-False volume.
+    Expected outcome: envelope covers foreground, surface is a proper shell
+    subset, `fill_holes=False` keeps interior cavity empty, thin depth returns
+    the exact 1-voxel eroded shell, and empty input yields empty masks.
+    """
+    vol = np.zeros((30, 30, 30), dtype=bool)
+    z, y, x = np.ogrid[:30, :30, :30]
+    vol[(z - 15) ** 2 + (y - 15) ** 2 + (x - 15) ** 2 <= 10**2] = True
+
+    surface_mask, envelope = generate_morphological_surface_mask(
+        vol, spacing=(1.0, 1.0, 1.0), closing_radius_um=2.0, surface_depth_um=3.0, downscale_factor=1, fill_holes=True
+    )
+    assert surface_mask.shape == vol.shape and envelope.shape == vol.shape
+    assert surface_mask.dtype == bool and envelope.dtype == bool
+    assert np.all(envelope[vol])
+    assert np.all(envelope[surface_mask])
+    assert not surface_mask[15, 15, 15]
+
+    # Hollow cube: fill_holes=True fills the cavity, fill_holes=False preserves it
+    hollow = np.zeros((24, 24, 24), dtype=bool)
+    hollow[4:20, 4:20, 4:20] = True
+    hollow[8:16, 8:16, 8:16] = False
+    _, env_filled = generate_morphological_surface_mask(
+        hollow, pixel_sizes=ISO_3D, closing_radius_um=1.0, surface_depth_um=2.0, downscale_factor=1, fill_holes=True
+    )
+    _, env_hollow = generate_morphological_surface_mask(
+        hollow, pixel_sizes=ISO_3D, closing_radius_um=1.0, surface_depth_um=2.0, downscale_factor=1, fill_holes=False
+    )
+    assert env_filled[12, 12, 12]
+    assert not env_hollow[12, 12, 12]
+    assert env_hollow[4, 12, 12]
+
+    # Thin surface_depth_um (< min voxel spacing) falls back to the immediate 1-voxel outer shell
+    cube = np.zeros((16, 16, 16), dtype=bool)
+    cube[3:13, 3:13, 3:13] = True
+    surf_thin, env_thin = generate_morphological_surface_mask(
+        cube,
+        pixel_sizes={"Z": 2.0, "Y": 2.0, "X": 2.0},
+        closing_radius_um=1.0,
+        surface_depth_um=0.5,
+        downscale_factor=1,
+    )
+    expected_shell = env_thin & ~ndi.binary_erosion(env_thin)
+    np.testing.assert_array_equal(surf_thin, expected_shell)
+    assert surf_thin[3, 8, 8] and not np.any(surf_thin[4:12, 4:12, 4:12])
+
+    # Empty mask handling
+    empty_vol = np.zeros((10, 10, 10), dtype=bool)
+    surf_empty, env_empty = generate_morphological_surface_mask(empty_vol, pixel_sizes=ISO_3D)
+    assert not np.any(surf_empty) and not np.any(env_empty)
 
 
 def test_morphological_envelope_contains_input_when_downscaled():
-    """Nearest-neighbour decimation left 17% of foreground voxels outside the envelope."""
+    """Verify block max-pool downscaling keeps 100% of foreground voxels inside the envelope.
+
+    Strategy: scatter 150 small ellipsoids in a `(40, 120, 120)` anisotropic mask
+    and run `generate_morphological_surface_mask` with `downscale_factor` in `(1, 2, 3)`.
+    Expected outcome: zero foreground voxels fall outside `envelope`, and
+    `surface` is non-empty with matching shape.
+    """
     rng = np.random.default_rng(2)
     shape = (40, 120, 120)
     mask = np.zeros(shape, dtype=bool)
-    zz, yy, xx = np.ogrid[:shape[0], :shape[1], :shape[2]]
+    zz, yy, xx = np.ogrid[: shape[0], : shape[1], : shape[2]]
     for c in rng.integers((3, 4, 4), (37, 116, 116), size=(150, 3)):
         mask |= ((zz - c[0]) / 2) ** 2 + ((yy - c[1]) / 3) ** 2 + ((xx - c[2]) / 3) ** 2 <= 1
-    ps = {'Z': 1.0, 'Y': 0.5, 'X': 0.5}
+    ps = {"Z": 1.0, "Y": 0.5, "X": 0.5}
     for f in (1, 2, 3):
-        surface, envelope = generate_morphological_surface_mask(mask, pixel_sizes=ps, closing_radius_um=6.0, downscale_factor=f)
+        surface, envelope = generate_morphological_surface_mask(
+            mask, pixel_sizes=ps, closing_radius_um=6.0, downscale_factor=f
+        )
         assert np.count_nonzero(mask & ~envelope) == 0, f
         assert surface.shape == mask.shape and np.any(surface)
 
 
-def test_sample_volume_plane_normalises_normal_and_labels_axes_zyx():
-    vol = np.broadcast_to(np.arange(20, dtype=np.float32)[:, None, None], (20, 20, 20)).copy()
-    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
-    kw = dict(pixel_sizes=ps, p0_phys=np.array([10.0, 10.0, 10.0]), u_range_um=(-4, 4), v_range_um=(-4, 4),
-              u_res=9, v_res=5, num_offsets=1, offset_step_um=1.0)
-    a, sp_a = sample_volume_plane(vol, normal_phys=np.array([3.0, 0.0, 0.0]), **kw)
-    b, sp_b = sample_volume_plane(vol, normal_phys=np.array([1.0, 0.0, 0.0]), **kw)
-    np.testing.assert_array_equal(a, b)
-    # Offsets land at z = 9, 10, 11 (not 7, 10, 13)
-    np.testing.assert_allclose(a[:, 4, 2], [9, 10, 11])
-    u, v = generate_plane_basis(np.array([3.0, 0.0, 0.0]))
-    assert np.linalg.norm(u) == pytest.approx(1) and np.linalg.norm(v) == pytest.approx(1)
-    # Output (9, 5) planes: axis 0 (u, step 1.0) is Y, axis 1 (v, step 2.0) is X
-    assert a.shape == (3, 9, 5)
-    assert sp_a == {'Z': 1.0, 'Y': 1.0, 'X': 2.0}
+def test_estimate_inter_label_distance():
+    """Verify isotropic, anisotropic, few-label, and all-zero inter-label distance estimation.
+
+    Strategy: evaluate `estimate_inter_label_distance` on (1) 3 collinear labels
+    spaced 10 px apart isotropically, (2) 2 Z-stacked labels 4 slices apart at
+    `Z=3 um` (`12 um`), (3) a single label (`< k_nearest`), and (4) an all-zero volume.
+    Expected outcome: physical medians and `recommended_closing_um` match exact
+    centroid distances, and under-populated/empty volumes fall back cleanly to `min(spacing)`.
+    """
+    labels = np.zeros((50, 50, 50), dtype=int)
+    labels[8:12, 8:12, 8:12] = 1
+    labels[8:12, 8:12, 18:22] = 2
+    labels[8:12, 8:12, 28:32] = 3
+
+    metrics = estimate_inter_label_distance(labels, pixel_sizes=ISO_3D, k_nearest=2)
+    assert {"median_um", "p75_um", "p90_um", "recommended_closing_um"} <= metrics.keys()
+    assert np.isclose(metrics["median_um"], 10.0, atol=0.5)
+
+    # Anisotropic Z separation: 4 slices * 3.0 um = 12.0 um
+    aniso_labels = np.zeros((20, 20, 20), dtype=int)
+    aniso_labels[4:6, 8:10, 8:10] = 1
+    aniso_labels[8:10, 8:10, 8:10] = 2
+    aniso_metrics = estimate_inter_label_distance(
+        aniso_labels, pixel_sizes={"Z": 3.0, "Y": 0.5, "X": 0.5}, k_nearest=2
+    )
+    assert aniso_metrics["median_um"] == pytest.approx(12.0)
+    assert aniso_metrics["p75_um"] == pytest.approx(12.0)
+    assert aniso_metrics["p90_um"] == pytest.approx(12.0)
+    assert aniso_metrics["recommended_closing_um"] == pytest.approx(7.2)
+
+    # Fewer labels than k_nearest falls back to min spacing
+    few_labels = np.zeros((20, 20, 20), dtype=int)
+    few_labels[5:8, 5:8, 5:8] = 1
+    fallback = estimate_inter_label_distance(few_labels, spacing=(2.0, 2.0, 2.0), k_nearest=2)
+    assert fallback["median_um"] == 2.0 and fallback["recommended_closing_um"] == 3.0
+
+    # Empty all-zero labels fall back to min spacing without error
+    empty = np.zeros((10, 10, 10), dtype=int)
+    empty_metrics = estimate_inter_label_distance(
+        empty, pixel_sizes={"Z": 2.0, "Y": 0.4, "X": 0.4}, k_nearest=2
+    )
+    assert empty_metrics == {
+        "median_um": 0.4,
+        "p75_um": 0.4,
+        "p90_um": 0.4,
+        "recommended_closing_um": 0.6,
+    }
 
 
-def test_sample_volume_plane_cubic_interpolates():
-    """order=3 without prefiltering is a smoothing B-spline, not an interpolation."""
-    rng = np.random.default_rng(3)
-    vol = rng.random((12, 16, 16)).astype(np.float32)
-    ps = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
-    n = np.array([1.0, 0.0, 0.0])
-    plane, _ = sample_volume_plane(vol, ps, p0_phys=np.array([5.0, 0.0, 0.0]), normal_phys=n,
-                                   u_range_um=(-15, 15), v_range_um=(-15, 15), u_res=31, v_res=31, method='cubic')
-    linear, _ = sample_volume_plane(vol, ps, p0_phys=np.array([5.0, 0.0, 0.0]), normal_phys=n,
-                                    u_range_um=(-15, 15), v_range_um=(-15, 15), u_res=31, v_res=31, method='linear')
-    # The plane samples sit on voxel centres, where interpolation must return the voxels
-    # (linear does so exactly); unprefiltered cubic was off by up to 0.46 there
-    np.testing.assert_allclose(plane, linear, atol=1e-5)
-    assert np.count_nonzero(linear) == 16 * 16
+def test_estimate_inter_label_distance_neighbours_from_all_labels():
+    """Verify subsampled query centroids search nearest neighbours across ALL labels, not only the subsample.
 
-    # Oblique plane: the cropped prefilter matches prefiltering the whole volume
-    vol2 = rng.random((40, 40, 40)).astype(np.float32)
-    n2 = np.array([1.0, 0.3, -0.2])
-    plane2, _ = sample_volume_plane(vol2, ps, p0_phys=np.array([20.0, 20.0, 20.0]), normal_phys=n2,
-                                    u_range_um=(-6, 6), v_range_um=(-6, 6), u_res=25, v_res=25, method='cubic')
-    u_dir, v_dir = generate_plane_basis(n2)
-    uu, vv = np.meshgrid(np.linspace(-6, 6, 25), np.linspace(-6, 6, 25), indexing='ij')
-    pts = np.array([20.0, 20.0, 20.0])[:, None, None] + uu * u_dir[:, None, None] + vv * v_dir[:, None, None]
-    expected = _map_coordinates(vol2, pts.reshape(3, -1), order=3, mode='constant', cval=0, prefilter=True).reshape(25, 25)
-    np.testing.assert_allclose(plane2, expected, atol=1e-4)
-
-
-def test_surface_normals_single_step_samples_surface():
-    vol = np.broadcast_to(np.arange(20, dtype=float)[:, None, None], (20, 20, 20)).copy()
-    yy, xx = np.meshgrid(np.arange(5, 15), np.arange(5, 15), indexing='ij')
-    grid = np.stack([np.full_like(yy, 10.0), yy, xx], axis=-1).astype(float)
-    out = sample_intensity_along_surface_normals(vol, grid, thickness=4, num_steps=1, pixel_sizes={'Z': 1, 'Y': 1, 'X': 1})
-    assert np.all(out == 10.0)
-
-
-def test_optimized_entire_labels_touching_mask_anisotropic_distance():
-    """Distance is physical: 3 slices at Z = 3 µm are 9 µm, 3 pixels at XY = 1 µm are 3 µm."""
-    aniso = {'Z': 3.0, 'Y': 1.0, 'X': 1.0}
-    mask = np.zeros((9, 9, 9), dtype=int)
-    mask[4, 4, 4] = 1
-
-    below = np.zeros_like(mask)
-    below[1, 4, 4] = 1  # 3 slices from the mask: 9 µm
-    beside = np.zeros_like(mask)
-    beside[4, 4, 1] = 1  # 3 pixels from the mask: 3 µm
-
-    assert optimized_entire_labels_touching_mask(below, mask, distance=5.0, pixel_sizes=aniso).max() == 0
-    assert optimized_entire_labels_touching_mask(beside, mask, distance=5.0, pixel_sizes=aniso).max() == 1
-    # negative control: with isotropic pixels the label 3 slices away is within 5 µm
-    iso = {'Z': 1.0, 'Y': 1.0, 'X': 1.0}
-    assert optimized_entire_labels_touching_mask(below, mask, distance=5.0, pixel_sizes=iso).max() == 1
-
-
-def test_windowed_slice_projection_average_does_not_dim_edges():
-    """'average' divides each window by the slices inside the volume, so a constant stack
-    stays constant (edge windows used to include zero padding: the first slice of a
-    constant 1.0 stack read 6/11 with window 11)."""
-    from eigenp_utils.image_and_labels_utils import windowed_slice_projection
-
-    iso = {'Z': 1, 'Y': 1, 'X': 1}
-    stack = np.ones((12, 4, 4), dtype=np.float32)
-    out = windowed_slice_projection(stack, window_size=11, operation='average', pixel_sizes=iso)
-    np.testing.assert_allclose(out, 1.0)
-    # interior windows still average over the full window; the first one over 3 slices
-    ramp = np.arange(30, dtype=float)[:, None, None] * np.ones((1, 2, 2))
-    out = windowed_slice_projection(ramp, window_size=5, operation='average', pixel_sizes=iso)
-    np.testing.assert_allclose(out[2:-2, 0, 0], ramp[2:-2, 0, 0])
-    np.testing.assert_allclose(out[0, 0, 0], np.mean([0, 1, 2]))
+    Strategy: build a 30^3 lattice of 2x2x2-voxel nuclei every 4 voxels (`8 um`
+    at `2 um` spacing) and query with `sample_size=500`.
+    Expected outcome: `median_um` and `p90_um` equal `8.0`, `recommended_closing_um`
+    equals `4.8`, and identical `seed` produces identical results.
+    """
+    n, step = 30, 4
+    labels = np.zeros((n * step,) * 3, dtype=np.int32)
+    ids = np.arange(1, n**3 + 1, dtype=np.int32).reshape((n,) * 3)
+    for dz in range(2):
+        for dy in range(2):
+            for dx in range(2):
+                labels[dz::step, dy::step, dx::step] = ids
+    ps = {"Z": 2.0, "Y": 2.0, "X": 2.0}
+    m = estimate_inter_label_distance(labels, pixel_sizes=ps, sample_size=500)
+    assert m["median_um"] == pytest.approx(8.0)
+    assert m["p90_um"] == pytest.approx(8.0)
+    assert m["recommended_closing_um"] == pytest.approx(4.8)
+    assert estimate_inter_label_distance(labels, pixel_sizes=ps, seed=3) == estimate_inter_label_distance(
+        labels, pixel_sizes=ps, seed=3
+    )

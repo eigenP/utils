@@ -16,6 +16,7 @@ def add_stat_annotations(
     return_annotator=False,
     order=None,
     hue_order=None,
+    orient=None,
     **kwargs
 ):
     """
@@ -52,6 +53,9 @@ def add_stat_annotations(
         the right groups; otherwise statannotations' default (first appearance) is used.
     hue_order : list, optional
         Order of the hue levels, as drawn.
+    orient : {'v', 'h'}, optional
+        Plot orientation passed to ``statannotations.Annotator``. If None, inferred
+        as ``'h'`` when ``x`` is numeric and ``y`` is categorical, else ``'v'``.
     **kwargs : dict
         Additional kwargs passed to annotator.configure()
 
@@ -71,10 +75,23 @@ def add_stat_annotations(
             "'pip install eigenp_utils[plotting]'."
         )
 
-    if order is None:
-        order = _order_from_ticks(ax, data, x, y)
+    if orient is None:
+        orient = _infer_orient(data, x, y)
 
-    annotator = Annotator(ax, pairs, data=data, x=x, y=y, hue=hue, order=order, hue_order=hue_order)
+    if order is None:
+        order = _order_from_ticks(ax, data, x, y, orient=orient)
+
+    annotator = Annotator(
+        ax,
+        pairs,
+        data=data,
+        x=x,
+        y=y,
+        hue=hue,
+        order=order,
+        hue_order=hue_order,
+        orient=orient,
+    )
     annotator.configure(
         test=test,
         text_format=text_format,
@@ -89,20 +106,33 @@ def add_stat_annotations(
     return ax
 
 
-def _order_from_ticks(ax, data, x, y):
+def _is_categorical_col(series):
+    """Return True if a Series represents categorical (non-numeric or Categorical) data."""
+    return isinstance(series.dtype, pd.CategoricalDtype) or not pd.api.types.is_numeric_dtype(series)
+
+
+def _infer_orient(data, x, y):
+    """Infer ``'h'`` when ``x`` is numeric and ``y`` is categorical, otherwise ``'v'``."""
+    if isinstance(data, pd.DataFrame) and x in data and y in data:
+        if _is_categorical_col(data[y]) and not _is_categorical_col(data[x]):
+            return "h"
+    return "v"
+
+
+def _order_from_ticks(ax, data, x, y, orient="v"):
     """Group order as drawn on ax, read from the tick labels of the categorical axis.
 
     Returns None unless the tick labels name exactly the groups present in `data`.
     """
     if not isinstance(data, pd.DataFrame):
         return None
-    for col, ticks in ((x, ax.get_xticklabels()), (y, ax.get_yticklabels())):
-        if col is None or col not in data or (pd.api.types.is_numeric_dtype(data[col]) and not isinstance(data[col].dtype, pd.CategoricalDtype)):
-            continue
-        groups = {str(v): v for v in pd.unique(data[col].dropna())}
-        labels = [t.get_text() for t in ticks]
-        if labels and len(labels) == len(groups) and set(labels) == set(groups):
-            return [groups[label] for label in labels]
+    col, ticks = (y, ax.get_yticklabels()) if orient in ("h", "y") else (x, ax.get_xticklabels())
+    if col is None or col not in data or not _is_categorical_col(data[col]):
+        return None
+    groups = {str(v): v for v in pd.unique(data[col].dropna())}
+    labels = [t.get_text() for t in ticks]
+    if labels and len(labels) == len(groups) and set(labels) == set(groups):
+        return [groups[label] for label in labels]
     return None
 
 import scipy.special

@@ -263,7 +263,7 @@ def project_onto_plane(vectors, tangent_vectors):
     valid = tangent_norms_squared > 0
 
     # Calculate the projection of each vector onto its corresponding tangent vector
-    projections = np.zeros_like(vectors)
+    projections = np.zeros(vectors.shape, dtype=np.result_type(vectors, tangent_vectors, float))
     projections[valid] = (
         dot_products[valid, None] / tangent_norms_squared[valid, None]
     ) * tangent_vectors[valid]

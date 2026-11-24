@@ -20,10 +20,10 @@ def _scene(shape=(320, 320), seed=0):
     return np.round(img * 60000).astype(np.uint16)
 
 
-def _tiles(scene, jitter_seed=1, jitter=5, extra_leading=()):
+def _tiles(scene, jitter_seed=1, jitter=5):
     """Cut a 3x3 grid of tiles at nominal + random jitter positions (the true positions).
 
-    Returns (tiles array (S, *extra_leading, Y, X), true top-left positions, nominal positions).
+    Returns (tiles array (S, Y, X), true top-left positions, nominal positions).
     """
     rng = np.random.default_rng(jitter_seed)
     nominal = np.array([(y, x) for y in NOMINAL for x in NOMINAL]) + jitter
@@ -45,9 +45,12 @@ def _expected(scene, true):
 def test_stitch_tiles_recovers_true_positions_and_scene():
     """Positive control: stage reports nominal grid positions, tiles were taken at jittered ones.
 
-    The stitcher must recover the true relative positions exactly (integer shifts,
-    noise-free data) and reproduce the ground-truth scene over the covered area,
-    for every channel, although only channel 0 is registered.
+    Strategy: build a 2-channel 3x3 grid with random stage jitter up to +/-5 px
+    and stitch using channel 0 only.
+    Expected outcome: recovers exact true integer positions using strictly the
+    12 side-neighbour pairs (excluding the 4 diagonal corner pairs), reproduces
+    both channels over the covered area, leaves gaps at 0, and preserves dtype,
+    pixel sizes, DataArray name, and custom attrs.
     """
     scene = _scene()
     cuts, true, nominal = _tiles(scene)
@@ -56,18 +59,22 @@ def test_stitch_tiles_recovers_true_positions_and_scene():
     px = 0.5
     da = array_to_stczyx_xarray(
         data, 'SCYX', channel_names=['A', 'B'],
+        attrs={'experiment': 'mosaic_1'},
         pixel_sizes={'Y': px, 'X': px, 'unit': 'µm'},
         stage_positions={'Y': nominal[:, 0] * px, 'X': nominal[:, 1] * px},
     )
+    da.name = 'tile_grid'
     mosaic = stitch_tiles(da)
 
     positions = np.array(mosaic.attrs['stitching']['positions_px'])
     np.testing.assert_array_equal(positions, true - true.min(axis=0))
-    assert mosaic.attrs['stitching']['n_pairs'] >= 12  # the 12 edge-sharing neighbours
+    assert mosaic.attrs['stitching']['n_pairs'] == 12  # strictly the 12 side neighbours, no diagonals
 
     expected, mask = _expected(scene, true)
     assert mosaic.dims == tuple('STCZYX') and mosaic.sizes['S'] == 1
     assert mosaic.dtype == np.uint16
+    assert mosaic.name == 'tile_grid'
+    assert mosaic.attrs['experiment'] == 'mosaic_1'
     a = mosaic.sel(C='A').values[0, 0, 0]
     b = mosaic.sel(C='B').values[0, 0, 0]
     np.testing.assert_array_equal(a[mask], expected[mask])
@@ -78,10 +85,16 @@ def test_stitch_tiles_recovers_true_positions_and_scene():
 
 
 def test_stitch_tiles_stage_only_placement_is_off_without_registration():
-    """With registration disabled (min_ncc > 1), the mosaic is the stage-only placement,
-    which differs from the truth by the jitter; this shows the registration does the work."""
+    """With registration disabled (min_ncc > 1), the mosaic falls back to the jittered stage grid.
+
+    Strategy: verify nominal stage positions genuinely differ from true tile
+    positions, then call ``stitch_tiles(..., min_ncc=1.1)``.
+    Expected outcome: zero pairs are registered and output positions equal the
+    normalized stage positions rather than ground truth.
+    """
     scene = _scene()
     cuts, true, nominal = _tiles(scene)
+    assert not np.array_equal(nominal - nominal.min(axis=0), true - true.min(axis=0))
     da = array_to_stczyx_xarray(cuts, 'SYX', pixel_sizes=(1.0, 1.0, 1.0),
                                 stage_positions={'Y': nominal[:, 0], 'X': nominal[:, 1]})
     mosaic = stitch_tiles(da, min_ncc=1.1)
@@ -124,8 +137,90 @@ def test_stitch_tiles_flipped_stage_axis_and_z_t_projection():
     np.testing.assert_array_equal(mosaic.coords['Z'].values, [0.0, 2.0])
 
 
+def test_stitch_tiles_anisotropic_pixels_and_stage_origin_invariance():
+    """Verify anisotropic Y/X pixel scaling and translation invariance of the stage origin.
+
+    Strategy: construct tiles with distinct ``Y=0.5`` and ``X=1.25`` pixel sizes
+    and stitch once at the original stage coordinates and once after adding an
+    arbitrary constant offset ``(432.5, -187.25)`` to every tile's stage position.
+    Expected outcome: anisotropic pixel sizes recover exact true pixel positions
+    (no Y/X axis swap) and shifting the stage origin yields an identical mosaic.
+    """
+    scene = _scene(seed=7)
+    cuts, true, nominal = _tiles(scene, jitter_seed=7)
+    py, px = 0.5, 1.25
+    da = array_to_stczyx_xarray(
+        cuts, 'SYX',
+        pixel_sizes={'Y': py, 'X': px, 'unit': 'µm'},
+        stage_positions={'Y': nominal[:, 0] * py, 'X': nominal[:, 1] * px},
+    )
+    mosaic = stitch_tiles(da)
+    np.testing.assert_array_equal(mosaic.attrs['stitching']['positions_px'], true - true.min(axis=0))
+    assert mosaic.attrs['pixel_sizes'] == {'Z': None, 'Y': py, 'X': px, 'unit': 'µm'}
+
+    da_shifted = array_to_stczyx_xarray(
+        cuts, 'SYX',
+        pixel_sizes={'Y': py, 'X': px, 'unit': 'µm'},
+        stage_positions={'Y': nominal[:, 0] * py + 432.5, 'X': nominal[:, 1] * px - 187.25},
+    )
+    mosaic_shifted = stitch_tiles(da_shifted)
+    xr.testing.assert_identical(mosaic, mosaic_shifted)
+
+
+def test_stitch_tiles_max_shift_disjoint_and_noise_robustness():
+    """Verify ``max_shift`` bounds, disjoint-tile stage fallback, and modest-noise robustness.
+
+    Strategy: (1) construct two overlapping tiles with a 6 px relative stage
+    error and test ``max_shift=4`` (must reject border peak) vs ``max_shift=10``
+    (must recover exact shift); (2) place two tiles with no overlap (disjoint);
+    (3) add Gaussian noise (sigma=1500 on 0..60000 uint16) to a 3x3 jittered grid.
+    Expected outcome: (1) too-small ``max_shift`` registers 0 pairs while
+    adequate ``max_shift`` recovers exact positions; (2) disjoint tiles stay at
+    stage positions with zero-filled gap; (3) noisy 3x3 grid still recovers
+    exact integer positions.
+    """
+    scene = _scene(seed=9)
+    # 1. Two tiles with 30 px nominal overlap and 6 px true relative shift
+    t0 = scene[20:20 + TILE, 20:20 + TILE]
+    t1 = scene[20:20 + TILE, 20 + 96:20 + 96 + TILE]  # true dx = 96, nominal dx = 90 (error = +6)
+    pair = array_to_stczyx_xarray(
+        np.stack([t0, t1]), 'SYX',
+        pixel_sizes=(1.0, 1.0, 1.0),
+        stage_positions={'Y': [0.0, 0.0], 'X': [0.0, 90.0]},
+    )
+    too_tight = stitch_tiles(pair, max_shift=4)
+    assert too_tight.attrs['stitching']['n_pairs'] == 0
+    enough = stitch_tiles(pair, max_shift=10)
+    assert enough.attrs['stitching']['n_pairs'] == 1
+    np.testing.assert_array_equal(enough.attrs['stitching']['positions_px'], [[0, 0], [0, 96]])
+
+    # 2. Disjoint tiles: gap of 10 px between tiles stays zero-filled
+    disjoint = array_to_stczyx_xarray(
+        np.stack([np.full((40, 40), 50, np.uint16), np.full((40, 40), 80, np.uint16)]),
+        'SYX',
+        pixel_sizes=(1.0, 1.0, 1.0),
+        stage_positions={'Y': [0.0, 0.0], 'X': [0.0, 50.0]},
+    )
+    m_dis = stitch_tiles(disjoint)
+    assert m_dis.attrs['stitching']['n_pairs'] == 0
+    assert m_dis.sizes['X'] == 90
+    assert np.all(m_dis.values[0, 0, 0, 0, :, 40:50] == 0)
+
+    # 3. Modest additive Gaussian noise still recovers exact 3x3 positions
+    cuts, true, nominal = _tiles(scene, jitter_seed=9)
+    rng = np.random.default_rng(42)
+    noisy = np.clip(cuts.astype(np.float64) + rng.normal(0.0, 1500.0, cuts.shape), 0, 65535).astype(np.uint16)
+    da_noisy = array_to_stczyx_xarray(
+        noisy, 'SYX',
+        pixel_sizes=(1.0, 1.0, 1.0),
+        stage_positions={'Y': nominal[:, 0], 'X': nominal[:, 1]},
+    )
+    m_noisy = stitch_tiles(da_noisy)
+    np.testing.assert_array_equal(m_noisy.attrs['stitching']['positions_px'], true - true.min(axis=0))
+
+
 def test_stitch_tiles_rejects_bad_input_and_warns():
-    """Missing stage coords, missing pixel sizes, wrong dims and bad options raise;
+    """Missing stage coords, missing pixel sizes, wrong dims, bad options, and bad transforms raise;
     every call points users to multiview-stitcher."""
     tiles = np.zeros((2, 8, 8))
     no_stage = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes=(1, 1, 1))
@@ -142,8 +237,16 @@ def test_stitch_tiles_rejects_bad_input_and_warns():
         stitch_tiles(ok, blending='max')
     with pytest.raises(ValueError, match="prior_weight"):
         stitch_tiles(ok, prior_weight=0)  # unregistered tiles would collapse onto each other
+    with pytest.raises(ValueError, match="prior_weight"):
+        stitch_tiles(ok, prior_weight=np.nan)
     with pytest.raises(ValueError, match="min_ncc"):
         stitch_tiles(ok, min_ncc=-1)
+    with pytest.raises(ValueError, match="min_ncc"):
+        stitch_tiles(ok, min_ncc=np.nan)
+    with pytest.raises(ValueError, match="2x2"):
+        stitch_tiles(ok, stage_to_image=np.eye(3))
+    with pytest.raises(KeyError):
+        stitch_tiles(ok, registration_channel='missing_channel')
     with pytest.warns(UserWarning, match="multiview-stitcher"):
         stitch_tiles(ok, min_overlap=4)
 
@@ -180,12 +283,13 @@ def test_stitch_tiles_non_square_tiles_and_transposed_stage(shape):
 
 
 def test_stitch_tiles_linear_blending_and_overwrite_order():
-    """Two featureless tiles of values 100 and 200 overlapping by 20 columns (stage placement).
+    """Verify exact feather weights for float64 and uint8 linear blending, plus overwrite order.
 
-    'linear': each tile's weight is its distance to its own edge, so across the overlap
-    the value rises monotonically from ~100 to ~200 and is exactly 150 where the
-    weights are equal; outside the overlap the tile values are untouched.
-    'overwrite': the later tile (S = 1) wins in the overlap.
+    Strategy: place two featureless tiles overlapping by 20 columns in both
+    ``float64`` (100 vs 200) and ``uint8`` (100 vs 201), and compare against the
+    closed-form distance-to-edge feather formula and ``blending='overwrite'``.
+    Expected outcome: float64 matches the exact weighted blend; uint8 rounds
+    properly without truncation or dtype change; overwrite lets S=1 win.
     """
     h, w = 10, 50
     tiles = np.stack([np.full((h, w), 100.0), np.full((h, w), 200.0)])
@@ -201,6 +305,16 @@ def test_stitch_tiles_linear_blending_and_overwrite_order():
     k = np.arange(20)
     w0, w1 = np.minimum(31 + k, 20 - k), k + 1
     np.testing.assert_allclose(overlap, (100.0 * w0 + 200.0 * w1) / (w0 + w1))
+
+    # Integer rounding and dtype preservation
+    tiles_u8 = np.stack([np.full((h, w), 100, np.uint8), np.full((h, w), 201, np.uint8)])
+    da_u8 = array_to_stczyx_xarray(tiles_u8, 'SYX', pixel_sizes=(1.0, 1.0, 1.0),
+                                   stage_positions={'Y': [0, 0], 'X': [0, 30]})
+    mosaic_u8 = stitch_tiles(da_u8)
+    assert mosaic_u8.dtype == np.uint8
+    expected_u8 = np.round((100.0 * w0 + 201.0 * w1) / (w0 + w1)).astype(np.uint8)
+    np.testing.assert_array_equal(mosaic_u8.values[0, 0, 0, 0, h // 2, 30:50], expected_u8)
+
     over = stitch_tiles(da, blending='overwrite').values[0, 0, 0, 0, h // 2]
     np.testing.assert_array_equal(over[30:50], 200.0)
     np.testing.assert_array_equal(over[:30], 100.0)

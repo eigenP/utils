@@ -1074,17 +1074,17 @@ def raincloud_plot(data,
             pc.set_alpha(alpha_violin)
 
             # Clipping to half
-            # get_paths()[0].vertices is (N, 2) array of (x, y)
+            # get_paths()[0].vertices is (N, 2) array of (x, y); use `pos` directly
+            # rather than verts.mean(), because the repeated closing vertex biases
+            # the vertex average away from the violin center when boundary density > 0.
             verts = pc.get_paths()[0].vertices
 
             if vert:
                 # Vertical: x is dim 0. Center is 'pos'.
-                mean_val = verts[:, 0].mean()
-                verts[:, 0] = np.clip(verts[:, 0], None, mean_val)
+                verts[:, 0] = np.clip(verts[:, 0], None, pos)
             else:
                 # Horizontal: y is dim 1. Center is 'pos'.
-                mean_val = verts[:, 1].mean()
-                verts[:, 1] = np.clip(verts[:, 1], mean_val, None)
+                verts[:, 1] = np.clip(verts[:, 1], pos, None)
 
         # B. Scatter (Rain)
         rng = np.random.default_rng(0)

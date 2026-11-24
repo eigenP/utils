@@ -1,6 +1,8 @@
-"""The demo notebooks' setup cell must not overwrite a developer's local checkout."""
+"""Repo setup and demo notebook installation-guard tests."""
 import ast
 import importlib.util
+import re
+import tomllib
 import types
 from pathlib import Path
 
@@ -24,6 +26,12 @@ def _local_checkout_fn(path):
 
 
 def test_notebooks_with_a_setup_cell_were_found():
+    """Verify the repository contains the expected marimo demo notebooks with setup cells.
+
+    Strategy: scan ``notebooks/*.py`` for setup cells invoking ``install_local``.
+    Expected outcome: at least 9 demo notebooks are discovered (or skipped when
+    running against an installed wheel without ``notebooks/``).
+    """
     if not (Path(__file__).parents[1] / "notebooks").exists():
         pytest.skip("notebooks/ not available")
     assert len(NOTEBOOKS) >= 9
@@ -31,6 +39,14 @@ def test_notebooks_with_a_setup_cell_were_found():
 
 @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
 def test_setup_cell_skips_install_for_a_local_checkout(path, monkeypatch):
+    """Ensure every demo notebook's setup cell avoids overwriting a local checkout.
+
+    Strategy: compile each notebook's ``local_checkout`` helper from its AST and
+    probe editable/source paths, site-packages installs, missing specs, and the
+    ``EIGENP_UTILS_NO_INSTALL`` opt-out env var, plus branch ordering after WASM.
+    Expected outcome: returns True for source checkouts and explicit opt-outs,
+    False for site-packages or uninstalled packages, and guards only local installs.
+    """
     local_checkout = _local_checkout_fn(path)
     monkeypatch.delenv("EIGENP_UTILS_NO_INSTALL", raising=False)
 
@@ -53,3 +69,21 @@ def test_setup_cell_skips_install_for_a_local_checkout(path, monkeypatch):
     src = path.read_text(encoding="utf-8")
     assert "elif local_checkout():" in src
     assert src.index("micropip.install") < src.index("elif local_checkout():")
+
+
+def test_dev_extra_includes_pytest_playwright():
+    """Verify the ``dev`` optional dependency extra declares ``pytest-playwright``.
+
+    Strategy: parse ``pyproject.toml`` and normalize each PEP 508 requirement name
+    in ``[project.optional-dependencies].dev``; also verify no legacy
+    ``requirements-dev.txt`` file exists.
+    Expected outcome: ``pytest-playwright`` is declared in ``dev`` and
+    ``requirements-dev.txt`` is absent.
+    """
+    pyproject = Path(__file__).parents[1] / "pyproject.toml"
+    if not pyproject.exists():
+        pytest.skip("pyproject.toml not available (installed-package test run)")
+    dev = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["optional-dependencies"]["dev"]
+    pkg_names = {re.split(r"[<>=!~;\[\s]", d, maxsplit=1)[0].strip().lower() for d in dev}
+    assert "pytest-playwright" in pkg_names
+    assert not (pyproject.parent / "requirements-dev.txt").exists()
