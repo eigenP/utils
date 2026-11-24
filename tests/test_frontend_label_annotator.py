@@ -95,8 +95,17 @@ def serve():
 def _open(page, url):
     page.goto(url)
     page.wait_for_function("window.ready === true")
-    page.wait_for_function(f"document.querySelector('canvas.lbl-img').width === {W}")
-    page.wait_for_timeout(50)  # fit() runs in requestAnimationFrame
+    page.wait_for_function(
+        f"""() => {{
+            const c = document.querySelector('canvas.lbl-img');
+            const vp = document.querySelector('.lbl-viewport');
+            const st = document.querySelector('.lbl-stage');
+            if (!c || !vp || !st || c.width !== {W}) return false;
+            const cw = c.getBoundingClientRect().width;
+            return vp.clientWidth > 0 && st.style.transform.includes('scale(')
+                && Math.abs(cw - vp.clientWidth) <= 1;
+        }}"""
+    )
 
 
 def _client_xy(page, x, y):
@@ -124,6 +133,15 @@ def _widget(**kw):
 
 
 def test_closed_stroke_is_filled_and_python_receives_it(page, serve):
+    """Closed brush strokes auto-fill their interior and round-trip to Python.
+
+    Strategy: draw a closed square perimeter from (10, 10) to (30, 30) with
+    ``brush_radius=0`` in instance mode (``auto_fill=True``), decode the wire
+    payload emitted by JS, and feed it into ``w.labels_from_js``.
+    Expected outcome: the decoded mask equals the exact filled ``[10..30]^2``
+    square with exterior pixels at 0, Python updates ``w.labels`` identically,
+    and ``w.active_label`` advances to 2.
+    """
     w = _widget()
     _open(page, serve(w))
     square = [(10, 10), (30, 10), (30, 30), (10, 30), (10, 10)]
@@ -144,7 +162,12 @@ def test_closed_stroke_is_filled_and_python_receives_it(page, serve):
 
 
 def test_painting_coordinates_do_not_depend_on_host_css(page, serve):
-    """Hosts that fail to inject the stylesheet must not shift the paint position."""
+    """Hosts that fail to inject the stylesheet must not shift the paint position.
+
+    Strategy: serve the widget with an empty CSS file (``css=False``) and tap a
+    single pixel ``(7, 12)`` with ``brush_radius=0`` and ``auto_fill=False``.
+    Expected outcome: only pixel ``[12, 7]`` is labelled with id 1.
+    """
     w = _widget()
     w.auto_fill = False
     _open(page, serve(w, css=False))
@@ -154,6 +177,14 @@ def test_painting_coordinates_do_not_depend_on_host_css(page, serve):
 
 
 def test_open_stroke_without_fill_and_eraser_and_undo(page, serve):
+    """Open strokes, the eraser hotkey, and Ctrl+Z undo behave consistently.
+
+    Strategy: disable ``auto_fill``, paint a horizontal line across ``y=20``,
+    press ``e`` to select the eraser and cross the line vertically at ``x=20``,
+    then press ``Control+z`` to undo the erasure.
+    Expected outcome: the initial stroke paints 31 pixels, erasing removes only
+    the single intersection ``(20, 20)``, and undo restores all 31 pixels.
+    """
     w = _widget()
     w.auto_fill = False
     _open(page, serve(w))
@@ -171,6 +202,13 @@ def test_open_stroke_without_fill_and_eraser_and_undo(page, serve):
 
 
 def test_no_overwrite_protects_existing_labels(page, serve):
+    """With ``overwrite=False`` (default), painting across an existing label preserves it.
+
+    Strategy: pre-populate column 20 with label 7 and paint a horizontal stroke
+    crossing column 20 at row 10.
+    Expected outcome: ``lab[10, 20]`` remains 7 while unlabelled pixels along
+    the stroke receive ``w.active_label``.
+    """
     init = np.zeros((H, W), np.uint32)
     init[:, 20] = 7
     w = _widget(labels=init)
@@ -183,6 +221,13 @@ def test_no_overwrite_protects_existing_labels(page, serve):
 
 
 def test_semantic_fill_tool_and_class_hotkeys(page, serve):
+    """Semantic class hotkeys switch ``active_label`` and ``f`` triggers flood fill.
+
+    Strategy: open a semantic annotator with two classes, press ``2`` to select
+    class 2, press ``f`` for flood fill, and click inside the empty canvas.
+    Expected outcome: ``active_label`` becomes 2 and the entire slice is filled
+    with class id 2.
+    """
     w = LabelAnnotator(np.zeros((H, W), np.float32), mode="semantic", classes=["mito", "perox"], brush_radius=0)
     _open(page, serve(w))
     page.locator(".lbl-viewport").focus()

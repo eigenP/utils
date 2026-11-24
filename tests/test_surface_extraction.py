@@ -1,383 +1,41 @@
-from scipy import ndimage
-from scipy.ndimage import gaussian_filter
 import numpy as np
 import pytest
-import unittest
+from scipy import ndimage
 
-from eigenp_utils.surface_extraction import extract_surface
-from eigenp_utils.surface_extraction import extract_surface, pad_z_slices, crop_edges, expand_surface_z, adjust_mask_location
+from eigenp_utils.surface_extraction import (
+    adjust_mask_location,
+    crop_edges,
+    expand_surface_z,
+    extract_surface,
+    extract_surface_tiled,
+    pad_z_slices,
+)
 
 
+def _generate_slanted_plane(
+    shape=(50, 64, 64),
+    slope_y=0.2,
+    slope_x=0.1,
+    z_offset=10.0,
+    noise_sigma=0.0,
+    seed=0,
+):
+    """Generate a uint8 3D volume with a 1-px ramped slanted plane interface.
 
-# =========================================
-# Source: test_surface_extraction.py
-# =========================================
-
-
-def test_extract_surface():
-    """Test that extract surface works as expected."""
-    # Create a synthetic 3D image with a surface (a sphere)
-    shape = (50, 50, 50)
-    image = np.zeros(shape, dtype=np.uint8)
-
-    # Create a sphere in the center
-    z, y, x = np.indices(shape)
-    center = np.array(shape) / 2
-    radius = 15
-    mask = (z - center[0])**2 + (y - center[1])**2 + (x - center[2])**2 <= radius**2
-    image[mask] = 200 # Surface intensity
-
-    # Add noise
-    rng = np.random.default_rng(42)
-    noise = rng.normal(0, 10, shape)
-    image = np.clip(image + noise, 0, 255).astype(np.uint8)
-
-    # Extract surface
-    surface = extract_surface(image, downscale_factor=2)
-
-    assert surface.shape == shape
-    assert surface.dtype == bool
-    # Check if surface is detected (some True values)
-    assert np.any(surface)
-
-    # The surface should be somewhat around the sphere shell
-    # We can check if the detected surface points are roughly at radius distance
-    # This is a basic sanity check, not precision validation
-    surface_points = np.argwhere(surface)
-    distances = np.sqrt(np.sum((surface_points - center)**2, axis=1))
-    # Check if average distance is reasonable (near radius)
-    # Since it extracts top surface, it might be different, but for a sphere top surface is the upper hemisphere.
-    # extract_surface finds "top" surface along Z.
-
-    # Let's trust it returns a mask for now.
-
-def test_extract_surface_padding_mismatch():
+    Voxels above the plane (low Z) are dark (0) and voxels below (high Z) are
+    bright (255), with a linear ramp over 1 voxel across `gt_height`.
     """
-    Test extract_surface with dimensions that are not divisible by block size,
-    causing internal padding that previously led to IndexError.
-    """
-    # Y = 10, X = 10. Block size = (2, 4, 4)
-    # 10 % 4 = 2 != 0. Requires padding.
-    Z, Y, X = 20, 10, 10
-    image = np.zeros((Z, Y, X), dtype=np.uint8)
-    image[10:, :, :] = 200 # Foreground
-
-    # Pad Z manually as in the user report (optional, but good for consistency)
-    padded_image = pad_z_slices(image, num_slices=4)
-
-    _BLOCK_SIZE = (2, 4, 4)
-
-    # This should not raise IndexError
-    surface = extract_surface(padded_image, downscale_factor=_BLOCK_SIZE)
-
-    assert surface.shape == padded_image.shape
-    assert surface.dtype == bool
-
-def test_pad_z_slices():
-    """Test that pad z slices works as expected."""
-    arr = np.zeros((10, 10, 10))
-    # Pad 1 slice before
-    padded = pad_z_slices(arr, num_slices=1, pad_before=True, pad_after=False)
-    assert padded.shape == (11, 10, 10)
-
-    # Pad 10% -> 1 slice (10 * 0.1 = 1)
-    padded = pad_z_slices(arr, num_slices=0.1, pad_before=True, pad_after=True)
-    assert padded.shape == (12, 10, 10)
-
-    # Pad with value
-    arr[:] = 5
-    padded = pad_z_slices(arr, num_slices=1, fill_value=99, pad_before=True)
-    assert padded[0, 0, 0] == 99
-    assert padded[1, 0, 0] == 5
-
-def test_crop_edges():
-    """Test that crop edges works as expected."""
-    arr = np.ones((10, 20, 20))
-    # Crop 10% from Y and X
-    # Y: 20 * 0.1 = 2 pixels from each side
-    # X: 20 * 0.1 = 2 pixels from each side
-    cropped = crop_edges(arr, 0, 0.1, 0.1)
-    assert cropped.shape == arr.shape
-
-    # Central region should be 1
-    assert cropped[5, 10, 10] == 1
-    # Edges should be 0
-    assert cropped[5, 0, 0] == 0
-    assert cropped[5, 1, 1] == 0 # 0 and 1 are cropped (0..2)
-    assert cropped[5, 2, 2] == 1 # 2 is start of valid region
-
-    # Test 0 crop
-    cropped_zero = crop_edges(arr, 0, 0.0, 0.0)
-    assert np.all(cropped_zero == arr)
-
-def test_expand_surface_z():
-    """Test that expand surface z works as expected."""
-    shape = (10, 10, 10)
-    surface = np.zeros(shape, dtype=bool)
-    surface[5, 5, 5] = True
-
-    expanded = expand_surface_z(surface, thickness=1)
-
-    # Should cover z=4, 5, 6 at y=5, x=5
-    assert expanded[4, 5, 5]
-    assert expanded[5, 5, 5]
-    assert expanded[6, 5, 5]
-    # Should not cover z=3 or 7
-    assert not expanded[3, 5, 5]
-    assert not expanded[7, 5, 5]
-
-def test_adjust_mask_location():
-    """Test that adjust mask location works as expected."""
-    shape = (10, 10, 10)
-    mask = np.zeros(shape, dtype=bool)
-    mask[5, 5, 5] = True
-
-    # Translate by (1, 1, 1) -> (6, 6, 6)
-    translated = adjust_mask_location(mask, translation=(1, 1, 1))
-    assert translated[6, 6, 6]
-    assert not translated[5, 5, 5]
-
-    # Dilate
-    dilated = adjust_mask_location(mask, morph='dilate', iterations=1)
-    # Check neighbors
-    assert dilated[5, 5, 6]
-    assert dilated[5, 6, 5]
-
-    # Erode
-    # Mask with a small block
-    mask_block = np.zeros(shape, dtype=bool)
-    mask_block[4:7, 4:7, 4:7] = True
-    eroded = adjust_mask_location(mask_block, morph='erode', iterations=1)
-    # Center should remain, edges eroded
-    assert eroded[5, 5, 5]
-    assert not eroded[4, 4, 4]
-
-# =========================================
-# Source: test_surface_accuracy.py
-# =========================================
-
-
-class TestSurfaceAccuracy(unittest.TestCase):
-    """
-    Matth 🧠 Verification: Surface Extraction Accuracy
-
-    Validates that the surface extraction algorithm correctly identifies
-    the surface of a 3D object and measures the precision of the height map.
-    """
-
-    def generate_slanted_plane(self, shape=(50, 64, 64), slope_y=0.2, slope_x=0.1, z_offset=10, noise_sigma=0.0):
-        """
-        Generates a 3D volume with a slanted plane interface.
-        Voxels ABOVE the plane (low Z) are dark (background).
-        Voxels BELOW the plane (high Z) are bright (foreground).
-        """
-        Z, Y, X = shape
-        vol = np.zeros(shape, dtype=np.float32)
-
-        y_idx, x_idx = np.indices((Y, X))
-
-        # True surface height at each (y, x)
-        gt_height = z_offset + slope_y * y_idx + slope_x * x_idx
-
-        # Fill volume
-        # I(z) = 0 if z < h, 1 if z > h
-        # Ramp: I(z) = clip(z - h + 0.5, 0, 1)
-
-        for z in range(Z):
-            # Signed distance from surface (positive = inside object, below surface)
-            dist = z - gt_height
-
-            # Clamp to 0-1 (linear ramp over 1 pixel thickness)
-            val = np.clip(dist + 0.5, 0.0, 1.0)
-
-            vol[z] = val
-
-        # Add noise
-        if noise_sigma > 0:
-            vol += np.random.normal(0, noise_sigma, size=shape)
-            vol = np.clip(vol, 0.0, 1.0)
-
-        # Scale to uint8 for the algorithm
-        vol_u8 = (vol * 255).astype(np.uint8)
-
-        return vol_u8, gt_height
-
-    def test_surface_precision(self):
-        """
-        Measure the RMSE of the extracted surface against the ground truth.
-        """
-        # Parameters
-        shape = (40, 64, 64)
-        slope_y = 0.15
-        slope_x = 0.05
-        z_offset = 5.0
-
-        # No noise to test pure quantization error
-        vol, gt_height = self.generate_slanted_plane(shape, slope_y, slope_x, z_offset, noise_sigma=0.0)
-
-        # Run extraction
-        # We increase gaussian_sigma to 2.0 to ensure the sharp step function of the synthetic data
-        # is blurred enough to create a gradient for subpixel interpolation.
-        # This simulates real microscopy data which is always band-limited (PSF).
-        surface_mask, height_map = extract_surface(vol, downscale_factor=1, gaussian_sigma=2.0, clahe_clip=0.0, return_heightmap=True)
-
-        found_mask = np.any(surface_mask, axis=0)
-
-        # Compare ground truth to the floating point height map
-        error = height_map[found_mask] - gt_height[found_mask]
-
-        H, W = height_map.shape
-        crop = 5
-        valid_crop = found_mask[crop:-crop, crop:-crop]
-        error_crop = error.reshape(H, W)[crop:-crop, crop:-crop][valid_crop]
-
-        rmse = np.sqrt(np.mean(error_crop**2))
-
-        print(f"Surface RMSE (Float): {rmse:.4f} pixels")
-
-        # With sufficient smoothing, subpixel interpolation works effectively.
-        self.assertLess(rmse, 0.20, "RMSE should be better than integer quantization (0.29)")
-
-    def test_translation_invariance(self):
-        """
-        The surface should not change shape when the object is shifted in Z.
-        Subpixel extraction should shift smoothly.
-        """
-        shape = (40, 32, 32)
-        # Shift by 0.5 pixels
-        vol1, gt1 = self.generate_slanted_plane(shape, z_offset=10.0)
-        vol2, gt2 = self.generate_slanted_plane(shape, z_offset=10.5)
-
-        # Use sigma=2.0 for smoothing
-        mask1, h1 = extract_surface(vol1, downscale_factor=1, gaussian_sigma=2.0, return_heightmap=True)
-        mask2, h2 = extract_surface(vol2, downscale_factor=1, gaussian_sigma=2.0, return_heightmap=True)
-
-        valid = (np.any(mask1, axis=0)) & (np.any(mask2, axis=0))
-
-        crop = 5
-        valid[:crop, :] = False
-        valid[-crop:, :] = False
-        valid[:, :crop] = False
-        valid[:, -crop:] = False
-
-        z1 = h1[valid]
-        z2 = h2[valid]
-
-        mean_shift = np.mean(z2 - z1)
-        print(f"Detected Shift (True=0.5): {mean_shift:.4f}")
-
-        diff_std = np.std(z2 - z1)
-        print(f"Shift StdDev: {diff_std:.4f}")
-
-        self.assertAlmostEqual(mean_shift, 0.5, delta=0.05)
-
-        # With sigma=2.0, the "staircase" effect is smoothed out, so the shift should be consistent.
-        self.assertLess(diff_std, 0.15, "Shift StdDev should be low for rigid shift")
-
-    def test_downscaling_alignment(self):
-        """
-        Verify that surface extraction with downscaling does not introduce
-        spatial shift bias or boundary artifacts.
-        """
-        # Create a simple block volume
-        Z, Y, X = 64, 64, 64
-        vol = np.zeros((Z, Y, X), dtype=np.uint8)
-
-        # Surface at Z=32 in the center
-        # Margin 16 ensures alignment with 4x4 blocks
-        margin = 16
-        vol[32:, margin:-margin, margin:-margin] = 200
-        vol[:32, margin:-margin, margin:-margin] = 50
-
-        # Background
-        # vol[:, :margin, :] = 10
-        # etc... implicitly handled by initialization
-
-        downscale = 4
-        # Use low sigma to see the edge clearly
-        mask, hmap = extract_surface(vol, downscale_factor=downscale, gaussian_sigma=0.5, return_heightmap=True)
-
-        # Check alignment at the left edge (X=margin)
-        # The first valid pixel should be at margin
-        center_y = Y // 2
-        profile = hmap[center_y, :]
-
-        valid_indices = np.where(profile > 0)[0]
-        self.assertTrue(len(valid_indices) > 0, "Surface not found")
-
-        first_valid = valid_indices[0]
-        self.assertEqual(first_valid, margin, f"Surface start shifted! Expected {margin}, got {first_valid}")
-
-        # Check for boundary artifacts (curl down)
-        # The value at the edge should be close to the value inside
-        val_edge = profile[margin]
-        val_inside = profile[margin + 2]
-
-        diff = abs(val_inside - val_edge)
-        self.assertLess(diff, 2.0, f"Significant boundary artifact detected: edge={val_edge}, inside={val_inside}")
-
-        # Check Z value (should be ~31.5 due to interpolation of transition 31-32)
-        # Ground truth is step at 32. Otsu threshold ~125.
-        # Transition happens between 31 (50) and 32 (200).
-        # Linear interp for 125: (125-50)/(200-50) = 75/150 = 0.5.
-        # So Z = 31 + 0.5 = 31.5.
-        # Relaxed delta to account for Otsu threshold variability
-        self.assertAlmostEqual(val_inside, 31.5, delta=2.0)
-
-if __name__ == '__main__':
-    unittest.main()
-
-
-# =========================================
-# Regression tests: scan batch 5
-# =========================================
-
-def test_extract_surface_tissue_from_first_slice():
-    """Columns already foreground at z=0 got heights like -361 that spread to their neighbours."""
-    vol = np.zeros((96, 64, 64), dtype=np.uint8)
-    vol[:, :, :32] = 200          # left half: tissue from the first slice
-    vol[40:, :, 32:] = 200        # right half: surface at z = 40
-    mask, heights = extract_surface(vol, return_heightmap=True)
-
-    # Every column has exactly one surface voxel, and no height is far below the volume
-    assert np.all(mask.sum(axis=0) == 1)
-    assert heights.min() > -0.5
-    # Away from the boundary, each half gets its own surface (within the blur's
-    # resolution: sigma=4 reduced px is 16 full px here)
-    assert np.all(heights[:, :20] <= 2.0)
-    assert np.all(np.abs(heights[:, 44:] - 40) <= 4.0)
-
-
-def test_extract_surface_covers_outer_rim():
-    """Block centres start half a block in; the outer rim got no surface (12% of 64x64)."""
-    vol = np.zeros((96, 64, 64), dtype=np.uint8)
-    vol[40:] = 200
-    mask, heights = extract_surface(vol, return_heightmap=True)
-    assert np.all(mask.sum(axis=0) == 1)
-    assert np.ptp(heights) < 1e-6
-
-
-@pytest.mark.parametrize("shape", [(32, 1, 64), (32, 64, 1)])
-def test_extract_surface_single_row_or_column(shape):
-    vol = np.zeros(shape, dtype=np.uint8)
-    vol[16:] = 200
-    mask, heights = extract_surface(vol, return_heightmap=True)
-    assert mask.shape == shape and heights.shape == shape[1:]
-    assert np.all(mask.sum(axis=0) == 1)
-
-
-def test_extract_surface_numpy_integer_factor():
-    vol = np.zeros((48, 32, 32), dtype=np.uint8)
-    vol[20:] = 200
-    np.testing.assert_array_equal(extract_surface(vol, downscale_factor=np.int64(4)), extract_surface(vol, downscale_factor=4))
-
-
-def test_expand_surface_z_zero_thickness_returns_copy():
-    s = np.zeros((4, 3, 3), dtype=bool)
-    r = expand_surface_z(s, 0)
-    r[0, 0, 0] = True
-    assert not s[0, 0, 0]
-    assert expand_surface_z(s, 0, in_place=True) is s
+    Z, Y, X = shape
+    y_idx, x_idx = np.indices((Y, X))
+    gt_height = z_offset + slope_y * y_idx + slope_x * x_idx
+    z_idx = np.arange(Z, dtype=np.float32)[:, None, None]
+    vol = np.clip(z_idx - gt_height[None, :, :] + 0.5, 0.0, 1.0).astype(np.float32)
+
+    if noise_sigma > 0:
+        rng = np.random.default_rng(seed)
+        vol = np.clip(vol + rng.normal(0.0, noise_sigma, size=shape).astype(np.float32), 0.0, 1.0)
+
+    return (vol * 255).astype(np.uint8), gt_height
 
 
 def _soft_slab(shape=(48, 64, 256), surface=16, gain=None, seed=0):
@@ -391,12 +49,462 @@ def _soft_slab(shape=(48, 64, 256), surface=16, gain=None, seed=0):
     return vol + rng.normal(0, 0.02, vol.shape).astype(np.float32)
 
 
+def test_extract_surface_curved_paraboloid_accuracy():
+    """Verify heightmap accuracy on an analytical 3D curved paraboloid surface.
+
+    Strategy: construct a `(48, 64, 64)` volume whose top interface follows the
+    paraboloid `z(y, x) = 12 + 0.015 * ((y - 31.5)^2 + (x - 31.5)^2)`, extract
+    with `downscale_factor=2`, and compare interior heights against ground truth.
+    Expected outcome: every column has one surface voxel, center is shallower
+    than edges, and interior heightmap RMSE is below 0.5 px (max error < 1.0 px).
+    """
+    Z, Y, X = 48, 64, 64
+    y_idx, x_idx = np.indices((Y, X))
+    gt_height = 12.0 + 0.015 * ((y_idx - 31.5) ** 2 + (x_idx - 31.5) ** 2)
+    z_idx = np.arange(Z, dtype=np.float32)[:, None, None]
+    vol = (np.clip(z_idx - gt_height[None, :, :] + 0.5, 0.0, 1.0) * 255).astype(np.uint8)
+
+    surface, heights = extract_surface(vol, downscale_factor=2, gaussian_sigma=1.0, return_heightmap=True)
+
+    assert surface.shape == (Z, Y, X) and surface.dtype == bool
+    assert heights.shape == (Y, X)
+    assert np.all(surface.sum(axis=0) == 1)
+    assert heights[32, 32] < heights[10, 32]
+
+    crop = 6
+    error = heights[crop:-crop, crop:-crop] - gt_height[crop:-crop, crop:-crop]
+    rmse = float(np.sqrt(np.mean(error**2)))
+    assert rmse < 0.5
+    assert float(np.max(np.abs(error))) < 1.0
+
+
+def test_extract_surface_padding_mismatch():
+    """Verify extraction succeeds and recovers the shifted height when dimensions are not block-divisible.
+
+    Strategy: pad a `(20, 10, 10)` step volume (surface at z=10) by 4 slices in
+    Z (moving the surface to z=14) and run with `downscale_factor=(2, 4, 4)`
+    where `10 % 4 != 0`.
+    Expected outcome: no `IndexError`, every column has one surface voxel, and
+    the flat heightmap sits near z=14 (within 1.5 px of 13.5) with zero lateral ripple.
+    """
+    Z, Y, X = 20, 10, 10
+    image = np.zeros((Z, Y, X), dtype=np.uint8)
+    image[10:, :, :] = 200
+    padded_image = pad_z_slices(image, num_slices=4)
+
+    surface, heights = extract_surface(
+        padded_image, downscale_factor=(2, 4, 4), gaussian_sigma=1.0, return_heightmap=True
+    )
+
+    assert surface.shape == padded_image.shape
+    assert surface.dtype == bool
+    assert np.all(surface.sum(axis=0) == 1)
+    np.testing.assert_allclose(heights, 13.5, atol=1.5)
+    assert np.ptp(heights) < 1e-5
+
+
+def test_extract_surface_with_clahe():
+    """Verify the `clahe_clip > 0` preprocessing branch produces a valid heightmap.
+
+    Strategy: build a `(48, 64, 64)` step volume at `z=24` with a lateral
+    brightness gradient (`80..200`) and extract with `clahe_clip=0.02`.
+    Expected outcome: every column has one surface voxel and the recovered
+    heightmap tracks the `z=24` interface without collapsing or diverging.
+    """
+    vol = np.zeros((48, 64, 64), dtype=np.uint8)
+    vol[24:, :, :] = np.round(np.linspace(80, 200, 64)).astype(np.uint8)[None, None, :]
+
+    mask, heights = extract_surface(
+        vol, downscale_factor=2, gaussian_sigma=1.0, clahe_clip=0.02, return_heightmap=True
+    )
+
+    assert mask.shape == vol.shape and mask.dtype == bool
+    assert np.all(mask.sum(axis=0) == 1)
+    assert np.median(np.abs(heights - 23.5)) < 3.0
+    assert heights.min() >= 16.0 and heights.max() <= 30.0
+
+
+@pytest.mark.parametrize("fill_val", [0, 128])
+def test_extract_surface_constant_or_empty_volume(fill_val):
+    """Verify constant or all-zero volumes yield an all-False mask and `-1.0` heightmap.
+
+    Strategy: run `extract_surface(..., return_heightmap=True)` on uniform zero
+    and uniform non-zero uint8 volumes.
+    Expected outcome: no surface voxels are marked and every heightmap entry is `-1.0`.
+    """
+    vol = np.full((24, 32, 32), fill_val, dtype=np.uint8)
+    mask, heights = extract_surface(vol, downscale_factor=2, gaussian_sigma=1.0, return_heightmap=True)
+    assert mask.shape == vol.shape and mask.dtype == bool
+    assert not np.any(mask)
+    np.testing.assert_array_equal(heights, -1.0)
+
+
+def test_pad_z_slices():
+    """Verify padding count, fractional sizing, min-fill default, arbitrary axes, dtype preservation, and errors.
+
+    Strategy: pad arrays with integer and fractional `num_slices`, `fill_value=None`
+    and explicit values, along axes 0, 1, and 2 across `uint16` and `float32`
+    dtypes, and probe invalid `axis` / negative `num_slices`.
+    Expected outcome: padded shapes, fill values, data placement, and dtypes
+    match specification, and out-of-range axes or negative counts raise `ValueError`.
+    """
+    arr = np.zeros((10, 10, 10), dtype=np.float32)
+    padded_before = pad_z_slices(arr, num_slices=1, pad_before=True, pad_after=False)
+    assert padded_before.shape == (11, 10, 10) and padded_before.dtype == np.float32
+
+    padded_frac = pad_z_slices(arr, num_slices=0.1, pad_before=True, pad_after=True)
+    assert padded_frac.shape == (12, 10, 10)
+
+    # Explicit fill value and dtype preservation on uint16
+    u16 = np.full((6, 5, 4), 7, dtype=np.uint16)
+    u16[2, 2, 2] = 3
+    padded_explicit = pad_z_slices(u16, num_slices=2, fill_value=99, pad_before=True)
+    assert padded_explicit.dtype == np.uint16
+    assert np.all(padded_explicit[:2] == 99)
+    np.testing.assert_array_equal(padded_explicit[2:], u16)
+
+    # fill_value=None defaults to arr.min() (= 3)
+    padded_min = pad_z_slices(u16, num_slices=2, fill_value=None, pad_before=True)
+    assert padded_min.dtype == np.uint16
+    assert np.all(padded_min[:2] == 3)
+    np.testing.assert_array_equal(padded_min[2:], u16)
+
+    # Axis 1 and axis 2 padding
+    padded_y = pad_z_slices(u16, num_slices=2, fill_value=0, axis=1, pad_before=False, pad_after=True)
+    assert padded_y.shape == (6, 7, 4)
+    assert np.all(padded_y[:, 5:, :] == 0)
+    np.testing.assert_array_equal(padded_y[:, :5, :], u16)
+
+    padded_x = pad_z_slices(u16, num_slices=3, fill_value=9, axis=2, pad_before=True, pad_after=True)
+    assert padded_x.shape == (6, 5, 10)
+    assert np.all(padded_x[:, :, :3] == 9) and np.all(padded_x[:, :, -3:] == 9)
+    np.testing.assert_array_equal(padded_x[:, :, 3:-3], u16)
+
+    # Validation errors
+    for bad_axis in (-1, 3):
+        with pytest.raises(ValueError, match="out of bounds"):
+            pad_z_slices(u16, num_slices=1, axis=bad_axis)
+    with pytest.raises(ValueError, match="non-negative"):
+        pad_z_slices(u16, num_slices=-1)
+
+
+@pytest.mark.parametrize(
+    "crop_fracs",
+    [
+        (0.0, 0.0, 0.0),
+        (0.2, 0.0, 0.0),
+        (0.0, 0.1, 0.1),
+        (0.2, 0.1, 0.15),
+    ],
+)
+@pytest.mark.parametrize("in_place", [False, True])
+def test_crop_edges(crop_fracs, in_place):
+    """Verify edge zeroing across Z, Y, and X for both out-of-place and in-place modes.
+
+    Strategy: apply `crop_edges` to a uniform `(10, 20, 20)` volume over
+    combinations of `(cz, cy, cx)` and `in_place`.
+    Expected outcome: cropped border slabs are zeroed, interior values remain 1,
+    `in_place=True` mutates and returns the input array, and `in_place=False`
+    leaves the input array untouched.
+    """
+    cz, cy, cx = crop_fracs
+    arr = np.ones((10, 20, 20), dtype=np.float32)
+    src = arr.copy()
+
+    out = crop_edges(src, cz, cy, cx, in_place=in_place)
+    assert out.shape == arr.shape
+    if in_place:
+        assert out is src
+    else:
+        assert out is not src
+        np.testing.assert_array_equal(src, arr)
+
+    crops = [int(n * f) for n, f in zip(arr.shape, crop_fracs)]
+    expected = np.zeros_like(arr)
+    keep = tuple(slice(c, n - c) if c > 0 else slice(None) for c, n in zip(crops, arr.shape))
+    expected[keep] = 1.0
+    np.testing.assert_array_equal(out, expected)
+
+
+def test_expand_surface_z():
+    """Verify Z expansion thickness, boundary clamping, negative/zero thickness, and in-place mutation.
+
+    Strategy: expand single-voxel surfaces with `thickness=1`, `thickness=3`,
+    boundary voxels at `z=0` and `z=Z-1`, `thickness=-2`, and `in_place=True`.
+    Expected outcome: expands symmetrically along Z without wrapping or raising
+    at Z boundaries, respects `in_place`, and returns unchanged copy/self for
+    non-positive thickness.
+    """
+    surface = np.zeros((12, 10, 10), dtype=bool)
+    surface[5, 5, 5] = True
+
+    exp1 = expand_surface_z(surface, thickness=1)
+    assert np.array_equal(np.nonzero(exp1)[0], [4, 5, 6])
+    assert not surface[4, 5, 5]
+
+    exp3 = expand_surface_z(surface, thickness=3)
+    assert np.array_equal(np.nonzero(exp3)[0], [2, 3, 4, 5, 6, 7, 8])
+
+    # Z boundary clamping (no wraparound or IndexError at z=0 and z=Z-1)
+    edge = np.zeros((6, 4, 4), dtype=bool)
+    edge[0, 1, 1] = True
+    edge[5, 2, 2] = True
+    exp_edge = expand_surface_z(edge, thickness=2)
+    assert np.array_equal(exp_edge[:, 1, 1], [True, True, True, False, False, False])
+    assert np.array_equal(exp_edge[:, 2, 2], [False, False, False, True, True, True])
+
+    # Negative thickness behaves like no-op with copy/in_place semantics
+    neg_copy = expand_surface_z(surface, thickness=-2, in_place=False)
+    assert neg_copy is not surface and np.array_equal(neg_copy, surface)
+    assert expand_surface_z(surface, thickness=-2, in_place=True) is surface
+
+    # in_place=True mutates the input mask directly
+    target = surface.copy()
+    res = expand_surface_z(target, thickness=2, in_place=True)
+    assert res is target
+    assert np.array_equal(np.nonzero(target)[0], [3, 4, 5, 6, 7])
+
+
+def test_expand_surface_z_zero_thickness_returns_copy():
+    """Verify `thickness=0` returns an independent copy by default and the input when `in_place=True`.
+
+    Strategy: expand a boolean mask with `thickness=0`, mutate the returned copy,
+    and verify the original is unaffected; then verify `in_place=True` identity.
+    Expected outcome: `in_place=False` returns a separate array; `in_place=True` returns `s`.
+    """
+    s = np.zeros((4, 3, 3), dtype=bool)
+    r = expand_surface_z(s, 0)
+    r[0, 0, 0] = True
+    assert not s[0, 0, 0]
+    assert expand_surface_z(s, 0, in_place=True) is s
+
+
+def test_adjust_mask_location(capsys):
+    """Verify translation, rollover clamping, OOB clearing, in-place overlap, morphology, and error handling.
+
+    Strategy: exercise positive/negative shifts, boundary rollover (checking no
+    wraparound and warning message), out-of-bounds clearing, overlapping
+    `in_place=True` shifts, dilation/erosion, combined translation + dilation,
+    and an invalid `morph` name.
+    Expected outcome: shifted voxels land at exact target indices, rolled-over
+    voxels are dropped without wrapping, overlapping in-place shifts avoid
+    corruption, morphological operations match 6-connected erosion/dilation,
+    and unknown `morph` raises `ValueError`.
+    """
+    shape = (10, 10, 10)
+    mask = np.zeros(shape, dtype=bool)
+    mask[5, 5, 5] = True
+
+    # Positive and negative translations
+    pos = adjust_mask_location(mask, translation=(1, 1, 1))
+    assert pos[6, 6, 6] and pos.sum() == 1
+    neg = adjust_mask_location(mask, translation=(-2, -3, -1))
+    assert neg[3, 2, 4] and neg.sum() == 1
+
+    # Boundary rollover drops out-of-frame voxels without wrapping and prints warning
+    roll = np.zeros(shape, dtype=bool)
+    roll[0, 5, 5] = True
+    roll[5, 5, 5] = True
+    rolled = adjust_mask_location(roll, translation=(-1, 0, 0))
+    assert rolled[4, 5, 5] and not rolled[9, 5, 5] and rolled.sum() == 1
+    assert "rolled over the boundaries" in capsys.readouterr().out
+
+    # Out-of-bounds translation clears entirely for both out-of-place and in-place
+    for in_place in (False, True):
+        src = mask.copy()
+        cleared = adjust_mask_location(src, translation=(10, 0, 0), in_place=in_place)
+        assert not np.any(cleared)
+        if in_place:
+            assert cleared is src
+
+    # Overlapping in_place=True shifts (positive and negative) must not self-corrupt
+    block = np.zeros(shape, dtype=bool)
+    block[3:6, 3:6, 3:6] = True
+    shifted_pos = adjust_mask_location(block, translation=(1, 1, 1), in_place=True)
+    assert shifted_pos is block
+    expected_pos = np.zeros(shape, dtype=bool)
+    expected_pos[4:7, 4:7, 4:7] = True
+    np.testing.assert_array_equal(shifted_pos, expected_pos)
+
+    shifted_neg = adjust_mask_location(block, translation=(-1, -1, -1), in_place=True)
+    assert shifted_neg is block
+    expected_neg = np.zeros(shape, dtype=bool)
+    expected_neg[3:6, 3:6, 3:6] = True
+    np.testing.assert_array_equal(shifted_neg, expected_neg)
+
+    # Standalone dilation & erosion
+    dilated = adjust_mask_location(mask, morph="dilate", iterations=1)
+    assert dilated[5, 5, 6] and dilated[5, 6, 5] and dilated.sum() == 7
+
+    mask_block = np.zeros(shape, dtype=bool)
+    mask_block[4:7, 4:7, 4:7] = True
+    eroded = adjust_mask_location(mask_block, morph="erode", iterations=1)
+    assert eroded[5, 5, 5] and not eroded[4, 4, 4] and eroded.sum() == 1
+
+    # Combined translation + dilation
+    combo = adjust_mask_location(mask, translation=(1, -1, 2), morph="dilate", iterations=1)
+    assert combo[6, 4, 7] and combo[5, 4, 7] and combo[7, 4, 7] and combo.sum() == 7
+
+    # Invalid morph raises ValueError
+    with pytest.raises(ValueError, match="Invalid morphological operation"):
+        adjust_mask_location(mask, morph="open")
+
+
+def test_surface_precision():
+    """Verify subpixel heightmap RMSE on a noise-free slanted plane beats integer quantization.
+
+    Strategy: generate a slanted plane volume with 1-px ramp interface, extract
+    at `downscale_factor=1, gaussian_sigma=2.0`, and compute interior RMSE.
+    Expected outcome: RMSE is strictly below 0.20 px (better than 0.29 px integer quantization).
+    """
+    vol, gt_height = _generate_slanted_plane(
+        shape=(40, 64, 64), slope_y=0.15, slope_x=0.05, z_offset=5.0, noise_sigma=0.0
+    )
+    surface_mask, height_map = extract_surface(
+        vol, downscale_factor=1, gaussian_sigma=2.0, clahe_clip=0.0, return_heightmap=True
+    )
+
+    found_mask = np.any(surface_mask, axis=0)
+    assert found_mask.all()
+
+    crop = 5
+    error_crop = (height_map - gt_height)[crop:-crop, crop:-crop]
+    rmse = float(np.sqrt(np.mean(error_crop**2)))
+    assert rmse < 0.20, f"RMSE ({rmse:.4f}) should be better than integer quantization (0.29)"
+
+
+def test_translation_invariance():
+    """Verify subpixel Z translation invariance of extracted surface heightmaps.
+
+    Strategy: extract surfaces from two slanted plane volumes shifted by 0.5 px
+    in Z and measure the mean and standard deviation of their height difference.
+    Expected outcome: detected mean shift equals `0.5 +/- 0.05` with std < 0.15.
+    """
+    shape = (40, 32, 32)
+    vol1, _ = _generate_slanted_plane(shape, z_offset=10.0)
+    vol2, _ = _generate_slanted_plane(shape, z_offset=10.5)
+
+    mask1, h1 = extract_surface(vol1, downscale_factor=1, gaussian_sigma=2.0, return_heightmap=True)
+    mask2, h2 = extract_surface(vol2, downscale_factor=1, gaussian_sigma=2.0, return_heightmap=True)
+
+    valid = np.any(mask1, axis=0) & np.any(mask2, axis=0)
+    crop = 5
+    valid[:crop, :] = False
+    valid[-crop:, :] = False
+    valid[:, :crop] = False
+    valid[:, -crop:] = False
+
+    diff = h2[valid] - h1[valid]
+    assert abs(float(np.mean(diff)) - 0.5) < 0.05
+    assert float(np.std(diff)) < 0.15, "Shift StdDev should be low for rigid shift"
+
+
+def test_downscaling_alignment():
+    """Verify downscaled surface extraction has zero lateral shift bias and minimal edge curl.
+
+    Strategy: construct a block-aligned `(64, 64, 64)` volume with a foreground
+    region starting at `margin=16` and surface at `z=32`, extract at
+    `downscale_factor=4, gaussian_sigma=0.5`, and inspect the central X profile.
+    Expected outcome: first valid pixel starts exactly at `X=16`, edge-to-interior
+    height difference is < 2.0 px, and interior height is within 2.0 px of 31.5.
+    """
+    Z, Y, X = 64, 64, 64
+    vol = np.zeros((Z, Y, X), dtype=np.uint8)
+    margin = 16
+    vol[32:, margin:-margin, margin:-margin] = 200
+    vol[:32, margin:-margin, margin:-margin] = 50
+
+    _, hmap = extract_surface(vol, downscale_factor=4, gaussian_sigma=0.5, return_heightmap=True)
+    profile = hmap[Y // 2, :]
+
+    valid_indices = np.where(profile > 0)[0]
+    assert len(valid_indices) > 0, "Surface not found"
+    assert valid_indices[0] == margin, f"Surface start shifted! Expected {margin}, got {valid_indices[0]}"
+
+    val_edge = profile[margin]
+    val_inside = profile[margin + 2]
+    assert abs(val_inside - val_edge) < 2.0
+    assert abs(val_inside - 31.5) < 2.0
+
+
+@pytest.mark.parametrize("noise_amp", [0, 10])
+def test_extract_surface_tissue_from_first_slice_and_sharp_step(noise_amp):
+    """Verify columns foreground at z=0 and sharp 40-voxel steps stay clamped inside `[0, Z - 1]`.
+
+    Strategy: construct clean and noisy `(96, 64, 64)` volumes with tissue
+    starting at `z=0` on the left half and `z=40` on the right half, then
+    extract the heightmap.
+    Expected outcome: every column has one valid surface voxel with heights
+    strictly in `[0, Z - 1]`, and away from the step boundary the left half sits
+    near `z=0` while the right half sits near `z=40`.
+    """
+    vol = np.zeros((96, 64, 64), dtype=np.uint8)
+    vol[:, :, :32] = 200
+    vol[40:, :, 32:] = 200
+    if noise_amp > 0:
+        rng = np.random.default_rng(0)
+        vol = (vol + rng.integers(0, noise_amp, vol.shape)).astype(np.uint8)
+
+    mask, heights = extract_surface(vol, return_heightmap=True)
+
+    assert np.all(heights != -1.0)
+    assert heights.min() >= 0.0 and heights.max() <= vol.shape[0] - 1
+    assert np.all(mask.sum(axis=0) == 1)
+    assert np.all(heights[:, :20] <= 2.5)
+    assert np.all(np.abs(heights[:, 44:] - 40.0) <= 4.0)
+
+
+def test_extract_surface_covers_outer_rim():
+    """Verify full-image surface coverage extends all the way to the outer pixel rim.
+
+    Strategy: extract a uniform flat slab at `z=40` in a `(96, 64, 64)` volume
+    with default `downscale_factor=4`.
+    Expected outcome: every column including the outer rim gets exactly one
+    surface voxel and the heightmap is flat (`ptp < 1e-6`).
+    """
+    vol = np.zeros((96, 64, 64), dtype=np.uint8)
+    vol[40:] = 200
+    mask, heights = extract_surface(vol, return_heightmap=True)
+    assert np.all(mask.sum(axis=0) == 1)
+    assert np.ptp(heights) < 1e-6
+
+
+@pytest.mark.parametrize("shape", [(32, 1, 64), (32, 64, 1)])
+def test_extract_surface_single_row_or_column(shape):
+    """Verify single-row and single-column volumes extract cleanly without interpolator errors.
+
+    Strategy: run `extract_surface` on `(32, 1, 64)` and `(32, 64, 1)` step volumes.
+    Expected outcome: output shapes match input and every column has one surface voxel.
+    """
+    vol = np.zeros(shape, dtype=np.uint8)
+    vol[16:] = 200
+    mask, heights = extract_surface(vol, return_heightmap=True)
+    assert mask.shape == shape and heights.shape == shape[1:]
+    assert np.all(mask.sum(axis=0) == 1)
+
+
+def test_extract_surface_numpy_integer_factor():
+    """Verify NumPy integer scalar `downscale_factor` matches Python `int` identically.
+
+    Strategy: compare `downscale_factor=np.int64(4)` against `downscale_factor=4`.
+    Expected outcome: both return bit-identical boolean surface masks.
+    """
+    vol = np.zeros((48, 32, 32), dtype=np.uint8)
+    vol[20:] = 200
+    np.testing.assert_array_equal(
+        extract_surface(vol, downscale_factor=np.int64(4)),
+        extract_surface(vol, downscale_factor=4),
+    )
+
+
 @pytest.mark.parametrize("tile_size", [16, 50, 64, (40, 24), 1024])
 def test_extract_surface_tiled_matches_whole_volume(tile_size):
-    """Tiled binning + one global threshold reproduces a single whole-volume call exactly,
-    for aligned, unaligned and rectangular tiles (incl. a short last tile)."""
-    from eigenp_utils.surface_extraction import extract_surface_tiled
+    """Verify tiled extraction reproduces whole-volume extraction across aligned, unaligned, and rectangular tiles.
 
+    Strategy: compare `extract_surface_tiled` (with `return_mask=True` and
+    `return_mask=False`) against `extract_surface` on a `(40, 203, 157)` graded slab.
+    Expected outcome: masks and heightmaps are bit-for-bit identical for all tile sizes.
+    """
     vol = _soft_slab(shape=(40, 203, 157), gain=np.linspace(0.6, 1.0, 157))
     kw = dict(downscale_factor=(2, 4, 4), gaussian_sigma=2.0, return_heightmap=True)
     m0, h0 = extract_surface(vol, **kw)
@@ -408,11 +516,14 @@ def test_extract_surface_tiled_matches_whole_volume(tile_size):
 
 
 def test_extract_surface_tiled_has_no_seams_unlike_per_chunk_calls():
-    """Running extract_surface per chunk (the old dask vignette) normalises and
-    Otsu-thresholds each chunk on its own, so a brightness gradient gives height
-    steps at chunk seams; the tiled path has none."""
-    from eigenp_utils.surface_extraction import extract_surface_tiled
+    """Verify tiled extraction eliminates height steps at tile boundaries under a brightness gradient.
 
+    Strategy: compare boundary height steps between independent per-chunk
+    `extract_surface` calls and a single `extract_surface_tiled` call on a
+    horizontally graded slab.
+    Expected outcome: per-chunk calls show seams > 0.4 px while tiled extraction
+    keeps seam jumps below 0.1 px.
+    """
     vol = _soft_slab(gain=np.linspace(0.6, 1.0, 256))
     kw = dict(downscale_factor=(1, 4, 4), gaussian_sigma=1.0, return_heightmap=True)
 
@@ -421,86 +532,79 @@ def test_extract_surface_tiled_has_no_seams_unlike_per_chunk_calls():
         return np.array([profile[x] - profile[x - 1] for x in (64, 128, 192)])
 
     per_chunk = np.concatenate(
-        [extract_surface(vol[:, :, x0:x0 + 64], **kw)[1] for x0 in range(0, 256, 64)], axis=1
+        [extract_surface(vol[:, :, x0 : x0 + 64], **kw)[1] for x0 in range(0, 256, 64)], axis=1
     )
     _, tiled = extract_surface_tiled(vol, tile_size=64, **kw)
-    assert np.abs(seam_steps(per_chunk)).min() > 0.4  # control: the per-chunk seams exist
+    assert np.abs(seam_steps(per_chunk)).min() > 0.4
     assert np.abs(seam_steps(tiled)).max() < 0.1
 
 
 def test_extract_surface_tiled_judges_debris_against_whole_sample():
-    """A floating blob that is >10% of one chunk's tissue but <10% of the sample's is
-    debris: per-chunk filtering keeps it (the surface jumps up to it), the tiled path
-    removes it."""
-    from eigenp_utils.surface_extraction import extract_surface_tiled
+    """Verify tiled debris filtering compares component size against the full sample, not a single chunk.
 
+    Strategy: place a floating blob that is 25% of one 32-wide chunk's tissue
+    but < 10% of the full 128-wide sample's tissue, comparing single-chunk vs tiled extraction.
+    Expected outcome: single-chunk extraction keeps the blob (`h < 12`), whereas
+    `extract_surface_tiled` removes it and lands on the true surface (`~23.5`).
+    """
     Z, Y, X = 40, 32, 128
     vol = np.zeros((Z, Y, X), np.float32)
-    vol[24:] = 1.0                       # tissue: 16 x 32 x 128 voxels
-    vol[4:12, 8:24, 8:24] = 1.0          # debris: 8*16*16 = 2048 = 25% of one 32-wide chunk
+    vol[24:] = 1.0
+    vol[4:12, 8:24, 8:24] = 1.0
     kw = dict(downscale_factor=1, gaussian_sigma=0.5, return_heightmap=True)
 
     _, per_chunk = extract_surface(vol[:, :, :32], **kw)
-    assert per_chunk[16, 16] < 12        # control: the chunk-level filter keeps the blob
+    assert per_chunk[16, 16] < 12
     _, tiled = extract_surface_tiled(vol, tile_size=32, **kw)
     assert abs(tiled[16, 16] - 23.5) < 1.0
 
 
 def test_extract_surface_fixed_threshold():
-    """`threshold` is in input units: scaling the data and the threshold together gives
-    the same surface, and it cannot be combined with CLAHE."""
+    """Verify fixed `threshold` scales linearly with data intensity and rejects CLAHE on both APIs.
+
+    Strategy: compare `(vol, threshold=0.5)` against `(vol * 10, threshold=5.0)`,
+    verify height matches the soft edge at `z=16`, and check `ValueError` when
+    combining `threshold` with `clahe_clip > 0` in both `extract_surface` and
+    `extract_surface_tiled`.
+    Expected outcome: scaled runs match identically, median height is within 1 px
+    of 15.5, and both functions raise `ValueError` mentioning CLAHE.
+    """
     vol = _soft_slab(shape=(40, 32, 32))
     m1, h1 = extract_surface(vol, downscale_factor=2, threshold=0.5, return_heightmap=True)
     m2, h2 = extract_surface(vol * 10, downscale_factor=2, threshold=5.0, return_heightmap=True)
     np.testing.assert_array_equal(m1, m2)
     np.testing.assert_allclose(h1, h2, atol=1e-4)
-    # the 0.5 level of the soft edge sits at the true surface (16)
     assert abs(np.median(h1) - 15.5) < 1.0
+
     with pytest.raises(ValueError, match="CLAHE"):
         extract_surface(vol, threshold=0.5, clahe_clip=0.01)
-
-
-def test_crop_edges_crops_z():
-    """crop_percentage_z zeroes the first and last slices like the y/x crops (it was ignored)."""
-    arr = np.ones((10, 20, 20))
-    for in_place in (False, True):
-        out = crop_edges(arr.copy(), 0.2, 0.0, 0.0, in_place=in_place)
-        assert out[:2].sum() == 0 and out[-2:].sum() == 0
-        assert np.all(out[2:-2] == 1)
+    with pytest.raises(ValueError, match="CLAHE"):
+        extract_surface_tiled(vol, threshold=0.5, clahe_clip=0.01)
 
 
 def test_extract_surface_tiled_reads_one_tile_at_a_time():
-    """Any array with .shape and slicing works (dask, zarr, memmap); no read is larger
-    than one block-aligned tile, and the result equals the in-memory call."""
-    from eigenp_utils.surface_extraction import extract_surface_tiled
+    """Verify tiled extraction works on lazy sliceable arrays and bounds peak tile reads.
 
+    Strategy: wrap a `(24, 96, 80)` slab in a minimal lazy reader recording
+    `self.largest_read`, run `extract_surface_tiled(..., tile_size=32)`, and
+    compare against in-memory `extract_surface`.
+    Expected outcome: masks match bit-for-bit and no single slice read exceeds
+    one `(Z, 32, 32)` tile (`24 * 32 * 32` elements).
+    """
     vol = _soft_slab(shape=(24, 96, 80))
 
     class LazyVolume:
-        shape = vol.shape
-        largest_read = 0
+        def __init__(self, data):
+            self._data = data
+            self.shape = data.shape
+            self.largest_read = 0
 
         def __getitem__(self, key):
-            block = vol[key]
-            LazyVolume.largest_read = max(LazyVolume.largest_read, block.size)
+            block = self._data[key]
+            self.largest_read = max(self.largest_read, block.size)
             return block
 
-    m_lazy = extract_surface_tiled(LazyVolume(), downscale_factor=4, gaussian_sigma=1.0, tile_size=32)
+    lazy = LazyVolume(vol)
+    m_lazy = extract_surface_tiled(lazy, downscale_factor=4, gaussian_sigma=1.0, tile_size=32)
     np.testing.assert_array_equal(m_lazy, extract_surface(vol, downscale_factor=4, gaussian_sigma=1.0))
-    assert LazyVolume.largest_read <= 24 * 32 * 32
-
-
-def test_heightmap_stays_inside_the_volume_at_a_sharp_step():
-    """Cubic upscaling overshoots next to a 40-voxel step; valid heights are clamped to [0, Z - 1]."""
-    rng = np.random.default_rng(0)
-    vol = np.zeros((96, 64, 64), np.uint8)
-    vol[:, :, :32] = 200          # tissue from the first slice: surface at z = 0
-    vol[40:, :, 32:] = 200        # surface at z = 40
-    vol = (vol + rng.integers(0, 10, vol.shape)).astype(np.uint8)
-    mask, h = extract_surface(vol, return_heightmap=True)
-    valid = h != -1.0
-    assert valid.all()
-    assert h[valid].min() >= 0.0 and h[valid].max() <= vol.shape[0] - 1
-    assert mask.any(axis=0).all()  # every column keeps one surface voxel
-    # control: the step itself is preserved
-    assert np.median(h[:, :24]) < 3 and np.median(h[:, 40:]) > 35
+    assert lazy.largest_read <= 24 * 32 * 32

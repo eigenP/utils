@@ -1,90 +1,146 @@
+"""Browser tests of the TNIA ortho-viewer front end (real ESM, mock anywidget model)."""
+
 import functools
-import json
 import http.server
-from pathlib import Path
+import json
 import tempfile
 import threading
+from pathlib import Path
+
 import pytest
 
-from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 from conftest import create_sham_volume
+from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+
 
 @pytest.fixture(scope="module")
-def static_rangeslider_server():
-    """Spins up a lightweight HTTP server to host the range slider JS frontend with sham volume."""
+def static_widget_server():
+    """Serve the widget ESM plus two mock-model test harnesses on one HTTP server.
+
+    - ``/index.html``: full range-slider and channel-control harness backed by a
+      real two-channel sham volume widget.
+    - ``/isolated.html``: minimal proxy and startup-race harness with realistic
+      normalized ``[0, 1]`` multi-plane ``axis_bounds`` (``xy``, ``zy``, ``xz``).
+    """
     tmpdir = tempfile.TemporaryDirectory()
     base_path = Path(tmpdir.name)
 
-    vol = create_sham_volume() # (2, 64, 128, 128)
-    im_list = [vol[0], vol[1]]
-    w = show_zyx_max_slice_interactive(im_list, colormap=['magenta', 'green'], channel_labels=['Cube', 'Circle'])
+    vol = create_sham_volume()  # (2, 64, 128, 128)
+    w = show_zyx_max_slice_interactive(
+        [vol[0], vol[1]],
+        colormap=["magenta", "green"],
+        channel_labels=["Cube", "Circle"],
+    )
 
-    js_path = base_path / "tnia_plotting_anywidgets.js"
-    js_path.write_text(w._esm)
+    (base_path / "tnia_plotting_anywidgets.js").write_text(w._esm)
 
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        body {{ font-family: sans-serif; padding: 20px; }}
-      </style>
-    </head>
-    <body>
-      <div id="widget-container"></div>
-      <script type="module">
-        import widget from './tnia_plotting_anywidgets.js';
+    full_state = {
+        "image_data": w.image_data,
+        "x_s": w.x_s, "y_s": w.y_s, "z_s": w.z_s,
+        "x_t": w.x_t, "y_t": w.y_t, "z_t": w.z_t,
+        "x_start": w.x_start, "x_end": w.x_end, "x_max_pos": w.x_max_pos, "sx": w.sx,
+        "y_start": w.y_start, "y_end": w.y_end, "y_max_pos": w.y_max_pos, "sy": w.sy,
+        "z_start": w.z_start, "z_end": w.z_end, "z_max_pos": w.z_max_pos, "sz": w.sz,
+        "channel_names": list(w.channel_names),
+        "channel_dtypes": list(w.channel_dtypes),
+        "channel_colors": list(w.channel_colors),
+        "vmin_list": list(w.vmin_list),
+        "vmax_list": list(w.vmax_list),
+        "gamma_list": list(w.gamma_list),
+        "opacity_list": list(w.opacity_list),
+        "histograms_data": w.histograms_data,
+        "show_crosshair": w.show_crosshair,
+        "sync_on_hover": w.sync_on_hover,
+        "scale_bar_show": w.scale_bar_show,
+        "scale_bar_fontsize_pt": w.scale_bar_fontsize_pt,
+        "warning_msg": w.warning_msg,
+        "save_filename": w.save_filename,
+    }
 
-        const listeners = {{}};
+    full_html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {{ font-family: sans-serif; padding: 20px; }}
+  </style>
+</head>
+<body>
+  <div id="widget-container"></div>
+  <script type="module">
+    import widget from './tnia_plotting_anywidgets.js';
 
-        window.mockModel = {{
-          state: {{
-            image_data: '{w.image_data}',
-            x_s: {w.x_s}, y_s: {w.y_s}, z_s: {w.z_s},
-            x_t: {w.x_t}, y_t: {w.y_t}, z_t: {w.z_t},
-            x_start: {w.x_start}, x_end: {w.x_end}, x_max_pos: {w.x_max_pos}, sx: {w.sx},
-            y_start: {w.y_start}, y_end: {w.y_end}, y_max_pos: {w.y_max_pos}, sy: {w.sy},
-            z_start: {w.z_start}, z_end: {w.z_end}, z_max_pos: {w.z_max_pos}, sz: {w.sz},
-            channel_names: {w.channel_names},
-            channel_dtypes: {w.channel_dtypes},
-            channel_colors: {w.channel_colors},
-            vmin_list: {w.vmin_list},
-            vmax_list: {w.vmax_list},
-            gamma_list: {w.gamma_list},
-            opacity_list: {w.opacity_list},
-            histograms_data: {json.dumps(w.histograms_data)},
-            show_crosshair: {str(w.show_crosshair).lower()},
-            sync_on_hover: {str(w.sync_on_hover).lower()},
-            warning_msg: '{w.warning_msg}',
-            save_filename: '{w.save_filename}'
-          }},
-          get(key) {{ return this.state[key]; }},
-          set(key, val) {{
-            this.state[key] = val;
-            if (listeners[`change:${{key}}`]) {{
-              listeners[`change:${{key}}`].forEach(cb => cb());
-            }}
-          }},
-          save_changes() {{ window.saveTriggered = true; }},
-          on(evt, cb) {{
-            if (!listeners[evt]) listeners[evt] = [];
-            listeners[evt].push(cb);
-          }}
-        }};
+    const listeners = {{}};
+    const state = {json.dumps(full_state)};
 
-        // Exposed so tests can assert the widget does not accumulate
-        // listeners when it rebuilds parts of its UI.
-        window.listenerCount = (evt) => (listeners[evt] || []).length;
+    window.mockModel = {{
+      state,
+      get(key) {{ return this.state[key]; }},
+      set(key, val) {{
+        this.state[key] = val;
+        if (listeners[`change:${{key}}`]) {{
+          listeners[`change:${{key}}`].forEach(cb => cb());
+        }}
+      }},
+      save_changes() {{ window.saveTriggered = true; }},
+      on(evt, cb) {{
+        if (!listeners[evt]) listeners[evt] = [];
+        listeners[evt].push(cb);
+      }}
+    }};
 
-        widget.render({{ model: window.mockModel, el: document.getElementById('widget-container') }});
-      </script>
-    </body>
-    </html>
-    """
-    (base_path / "index.html").write_text(html_content)
+    // Exposed so tests can assert the widget does not accumulate
+    // listeners when it rebuilds parts of its UI.
+    window.listenerCount = (evt) => (listeners[evt] || []).length;
 
-    Handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(base_path))
-    httpd = http.server.HTTPServer(('localhost', 0), Handler)
+    widget.render({{ model: window.mockModel, el: document.getElementById('widget-container') }});
+  </script>
+</body>
+</html>
+"""
+    (base_path / "index.html").write_text(full_html)
+
+    # Normalized [0, 1] multi-plane figure bounds matching the 2x2 ortho layout
+    # (XY top-left, ZY top-right, XZ bottom-left, dead space bottom-right).
+    isolated_bounds = {
+        "xy": {"x0": 0.05, "x1": 0.65, "y0_js": 0.05, "y1_js": 0.65, "bbox": [0.05, 0.05, 0.60, 0.60]},
+        "zy": {"x0": 0.70, "x1": 0.95, "y0_js": 0.05, "y1_js": 0.65, "bbox": [0.70, 0.05, 0.25, 0.60]},
+        "xz": {"x0": 0.05, "x1": 0.65, "y0_js": 0.70, "y1_js": 0.95, "bbox": [0.05, 0.70, 0.60, 0.25]},
+    }
+    isolated_html = f"""<!DOCTYPE html>
+<html>
+<body style="margin: 0;">
+  <div id="widget-container"></div>
+  <script type="module">
+    import widget from './tnia_plotting_anywidgets.js';
+
+    const rawBounds = {json.dumps(isolated_bounds)};
+    const proxiedBounds = new Proxy({{
+      xy: new Proxy(rawBounds.xy, {{}}),
+      zy: new Proxy(rawBounds.zy, {{}}),
+      xz: new Proxy(rawBounds.xz, {{}}),
+    }}, {{}});
+
+    window.mockModel = {{
+      state: {{
+        annotation_mode: undefined, // Emulate the startup race condition
+        sync_on_hover: true,
+        axis_bounds: proxiedBounds, // Emulate the AnyWidget proxy wrapper
+      }},
+      get(key) {{ return this.state[key]; }},
+      set(key, val) {{ this.state[key] = val; }},
+      save_changes() {{ window.syncTriggered = true; }},
+      on(evt, cb) {{}},
+    }};
+
+    widget.render({{ model: window.mockModel, el: document.getElementById('widget-container') }});
+  </script>
+</body>
+</html>
+"""
+    (base_path / "isolated.html").write_text(isolated_html)
+
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(base_path))
+    httpd = http.server.HTTPServer(("localhost", 0), handler)
     port = httpd.server_address[1]
 
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -96,9 +152,66 @@ def static_rangeslider_server():
     httpd.server_close()
     tmpdir.cleanup()
 
-def test_frontend_rangeslider_ui(page, static_rangeslider_server):
-    """Uses Playwright to visually inspect and test range slider handles and range translation on sham volume."""
-    page.goto(static_rangeslider_server)
+
+def test_frontend_click_registers_despite_proxies_and_race_conditions(page, static_widget_server):
+    """Clicks register and disambiguate planes even behind JS Proxies and late state sync.
+
+    Strategy: mount the widget with ``annotation_mode`` initially ``undefined``
+    and ``axis_bounds`` wrapped in JS ``Proxy`` objects with realistic normalized
+    ``[0, 1]`` regions for ``xy``, ``zy``, and ``xz``. Resolve the startup race
+    by enabling ``annotation_mode`` after mount, then click the center of each
+    panel and the dead bottom-right corner.
+    Expected outcome: each panel click reports its own plane name and accurate
+    fractional coordinates; clicking outside all three panels leaves
+    ``click_coords`` untouched.
+    """
+    page.goto(f"{static_widget_server}/isolated.html")
+
+    img = page.locator("img")
+    img.wait_for(state="attached")
+
+    # Give the image a deterministic 500x500 box via a 1x1 transparent GIF.
+    page.evaluate("""() => {
+        const img = document.querySelector('img');
+        img.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+        img.style.width = '500px';
+        img.style.height = '500px';
+    }""")
+    page.wait_for_function(
+        "() => { const r = document.querySelector('img').getBoundingClientRect(); "
+        "return r.width === 500 && r.height === 500; }"
+    )
+
+    # Resolve the simulated startup race (Python finishes syncing after mount).
+    page.evaluate("window.mockModel.state.annotation_mode = true")
+
+    for plane, fx, fy in (
+        ("xy", 0.35, 0.35),
+        ("zy", 0.825, 0.35),
+        ("xz", 0.35, 0.825),
+    ):
+        page.evaluate("window.mockModel.state.click_coords = null")
+        img.click(position={"x": fx * 500, "y": fy * 500})
+        click_coords = page.evaluate("window.mockModel.state.click_coords")
+        assert click_coords is not None, f"Click listener failed to fire on {plane}."
+        assert click_coords["plane"] == plane, f"Expected plane {plane!r}, got {click_coords}"
+        assert click_coords["x"] == pytest.approx(fx, abs=0.02)
+        assert click_coords["y"] == pytest.approx(fy, abs=0.02)
+
+    # Negative control: clicking the dead bottom-right corner matches no plane.
+    page.evaluate("window.mockModel.state.click_coords = null")
+    img.click(position={"x": 0.85 * 500, "y": 0.85 * 500})
+    assert page.evaluate("window.mockModel.state.click_coords") is None
+
+
+def test_frontend_rangeslider_ui(page, static_widget_server):
+    """Dragging the middle range-slider thumb translates the slab while preserving its width.
+
+    Strategy: locate the ``Translate Range`` thumb on the X range slider, drag it
+    30 px to the right, and read ``x_start`` and ``x_end`` back from the mock model.
+    Expected outcome: both bounds shift upward by the exact same delta.
+    """
+    page.goto(static_widget_server)
 
     x_range_label = page.get_by_text("X Range")
     x_range_label.wait_for(state="visible")
@@ -127,7 +240,7 @@ def test_frontend_rangeslider_ui(page, static_rangeslider_server):
     assert (new_x_end - new_x_start) == (initial_x_end - initial_x_start)
 
 
-def test_frontend_rangeslider_integer_step_on_both_inputs(page, static_rangeslider_server):
+def test_frontend_rangeslider_integer_step_on_both_inputs(page, static_widget_server):
     """Both numeric boxes of a range slider must expose an integer step when unscaled.
 
     The fixture volume is built without `pixel_sizes`, so every scale trait is
@@ -137,7 +250,7 @@ def test_frontend_rangeslider_integer_step_on_both_inputs(page, static_rangeslid
     spinner arrows produce fractional slab bounds on one side only, so every
     box is expected to report a step of exactly "1".
     """
-    page.goto(static_rangeslider_server)
+    page.goto(static_widget_server)
     page.get_by_text("X Range").wait_for(state="visible")
 
     steps = page.evaluate(
@@ -149,7 +262,7 @@ def test_frontend_rangeslider_integer_step_on_both_inputs(page, static_rangeslid
     assert set(steps) == {"1"}
 
 
-def test_frontend_channel_rebuild_does_not_leak_listeners(page, static_rangeslider_server):
+def test_frontend_channel_rebuild_does_not_leak_listeners(page, static_widget_server):
     """Rebuilding the channel rows must not accumulate model listeners.
 
     `updateChannelsUI` discards and recreates every channel row whenever
@@ -161,7 +274,7 @@ def test_frontend_channel_rebuild_does_not_leak_listeners(page, static_rangeslid
     that survived are still wired to the model by pushing a new `gamma_list`
     through and reading it back out of the inputs.
     """
-    page.goto(static_rangeslider_server)
+    page.goto(static_widget_server)
     page.get_by_text("X Range").wait_for(state="visible")
 
     channel_traits = [
@@ -186,10 +299,15 @@ def test_frontend_channel_rebuild_does_not_leak_listeners(page, static_rangeslid
     assert gamma_values == ["0.25", "0.75"]
 
 
-def test_frontend_channel_inputs_allow_negative_signed_limits_and_positive_gamma(page, static_rangeslider_server):
-    """Signed-integer channels accept a negative vmin, unsigned ones are clamped at 0,
-    and gamma is clamped to a small positive value (gamma 0 floods the panel)."""
-    page.goto(static_rangeslider_server)
+def test_frontend_channel_inputs_allow_negative_signed_limits_and_positive_gamma(page, static_widget_server):
+    """Signed-integer channels accept a negative vmin, unsigned ones clamp at 0, and gamma stays positive.
+
+    Strategy: rebuild the channel rows with ``['int16', 'uint8']`` dtypes, enter
+    ``-300`` into both ``vmin`` inputs and ``0`` into ``gamma``.
+    Expected outcome: the signed channel keeps ``-300``, the unsigned channel
+    clamps to ``0``, and ``gamma`` clamps to ``0.05`` so it never floods the panel.
+    """
+    page.goto(static_widget_server)
     page.get_by_text("X Range").wait_for(state="visible")
 
     # Rebuild the channel rows as an int16 and a uint8 channel
@@ -214,19 +332,20 @@ def test_frontend_channel_inputs_allow_negative_signed_limits_and_positive_gamma
     assert page.evaluate("window.mockModel.get('gamma_list')")[0] == 0.05
 
 
-def test_frontend_histogram_vrange_slider_and_width(page, static_rangeslider_server):
+def test_frontend_histogram_vrange_slider_and_width(page, static_widget_server):
     """The vmin/vmax slider under each histogram drives the model; the histogram fills the row.
 
     The fixture channels are uint8 (histogram range 0..255). Strategy: drag the
     vmax thumb of channel 0 to the middle of its track; mid-drag the thumb must
     follow the pointer while the model is untouched (no re-render per pointer
-    move); after release vmax must be an integer near 128 and vmin untouched; drag the middle thumb and check
-    vmin and vmax shift together with the window width preserved. Then compare
-    the histogram width in a wide and a narrow viewport: it must grow beyond
-    its 160 px minimum when space is available and never shrink below it.
+    move); after release vmax must be an integer near 128 and vmin untouched;
+    drag the middle thumb and check vmin and vmax shift together with the window
+    width preserved. Then compare the histogram width in a wide and a narrow
+    viewport: it must grow beyond its 160 px minimum when space is available and
+    never shrink below it, and the canvas buffer must follow the laid-out width.
     """
     page.set_viewport_size({"width": 1800, "height": 900})
-    page.goto(static_rangeslider_server)
+    page.goto(static_widget_server)
     page.get_by_text("X Range").wait_for(state="visible")
 
     track = page.locator("div[title='vmax']").first.locator("..")
@@ -264,7 +383,12 @@ def test_frontend_histogram_vrange_slider_and_width(page, static_rangeslider_ser
     canvas_w = "() => document.querySelector('canvas').getBoundingClientRect().width"
     wide = page.evaluate(canvas_w)
     page.set_viewport_size({"width": 700, "height": 900})
-    page.wait_for_timeout(100)
+    page.wait_for_function(
+        "wide => { const c = document.querySelector('canvas'); "
+        "const w = c.getBoundingClientRect().width; "
+        "return w < wide && Math.abs(c.width - w) <= 2; }",
+        arg=wide,
+    )
     narrow = page.evaluate(canvas_w)
     assert wide > 200
     assert narrow >= 160 and narrow < wide
@@ -272,14 +396,14 @@ def test_frontend_histogram_vrange_slider_and_width(page, static_rangeslider_ser
     assert abs(page.evaluate("() => document.querySelector('canvas').width") - narrow) <= 2
 
 
-def test_frontend_scale_bar_checkbox_toggles_model(page, static_rangeslider_server):
+def test_frontend_scale_bar_checkbox_toggles_model(page, static_widget_server):
     """The "Scale Bar" checkbox writes `scale_bar_show` and follows model changes.
 
     Strategy: the checkbox starts checked (default on), unchecking it must set
     the trait to false and save, and a change pushed from Python must be
     reflected back in the checkbox.
     """
-    page.goto(static_rangeslider_server)
+    page.goto(static_widget_server)
     page.get_by_text("X Range").wait_for(state="visible")
 
     cb = page.get_by_label("Scale Bar")
@@ -293,13 +417,13 @@ def test_frontend_scale_bar_checkbox_toggles_model(page, static_rangeslider_serv
     assert cb.is_checked()
 
 
-def test_frontend_scale_bar_fontsize_box(page, static_rangeslider_server):
+def test_frontend_scale_bar_fontsize_box(page, static_widget_server):
     """The scale-bar size box writes `scale_bar_fontsize_pt`: a number, 0 (label hidden) or null (auto).
 
     Strategy: type 14, then 0, then clear the box, and read the trait back;
     a negative entry is clamped to 0 and non-numeric text is rejected.
     """
-    page.goto(static_rangeslider_server)
+    page.goto(static_widget_server)
     page.get_by_text("X Range").wait_for(state="visible")
     box = page.locator("input[placeholder='auto']")
 
@@ -315,7 +439,7 @@ def test_frontend_scale_bar_fontsize_box(page, static_rangeslider_server):
     assert enter("abc") is None and box.input_value() == ""
 
 
-def test_frontend_copy_png_button_writes_clipboard(page, static_rangeslider_server):
+def test_frontend_copy_png_button_writes_clipboard(page, static_widget_server):
     """The "📋 PNG" button asks Python for the PNG and writes it to the clipboard.
 
     Strategy: clicking must bump `copy_png_trigger`; pushing a PNG into
@@ -324,7 +448,7 @@ def test_frontend_copy_png_button_writes_clipboard(page, static_rangeslider_serv
     Negative control: an "error" payload must not write and must show ❌.
     """
     page.context.grant_permissions(["clipboard-read", "clipboard-write"])
-    page.goto(static_rangeslider_server)
+    page.goto(static_widget_server)
     page.get_by_text("X Range").wait_for(state="visible")
     btn = page.get_by_role("button", name="📋 PNG", exact=True)
     # The kwargs copy button is labelled separately so the two are not confused.
@@ -335,7 +459,7 @@ def test_frontend_copy_png_button_writes_clipboard(page, static_rangeslider_serv
     assert page.evaluate("window.mockModel.get('copy_png_trigger')") == before + 1
 
     png_b64 = page.evaluate("window.mockModel.get('image_data')")
-    page.evaluate(f"window.mockModel.set('copy_png_data', '{png_b64}')")
+    page.evaluate("data => window.mockModel.set('copy_png_data', data)", png_b64)
     page.get_by_role("button", name="✅").wait_for(state="visible", timeout=5000)
     roundtrip = page.evaluate("""async () => {
         const items = await navigator.clipboard.read();

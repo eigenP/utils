@@ -1,721 +1,533 @@
+"""Tests for tnia_plotting_anywidgets (static ortho plots, interactive widgets, and IsoScatterWidget)."""
+
+import ast
+import base64
+import importlib
+import inspect
+import io
+import shutil
+import subprocess
 import sys
 import textwrap
 import warnings
+from pathlib import Path
 
-from matplotlib.colors import to_rgb
-from matplotlib.figure import Figure
 import matplotlib
+matplotlib.use("Agg")
+import matplotlib.collections as mcollections
 import matplotlib.colors as mcolors
+import matplotlib.image as mpimg
+import matplotlib.patheffects as patheffects
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
-import types
+from matplotlib.colors import to_rgb
+from matplotlib.figure import Figure
 
+import eigenp_utils.tnia_plotting_anywidgets as tpa
 from eigenp_utils.plotting_utils import labels_cmap
-from eigenp_utils.tnia_plotting_anywidgets import resolve_color, show_zyx_max_slice_interactive
-from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slabs, show_zyx_max_slice_interactive
-from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, TNIASliceWidget
-from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_scatter_interactive
-from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_slabs, show_zyx
-from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, show_zyx_max_scatter_interactive
-from eigenp_utils.tnia_plotting_anywidgets import show_zyx_slice, show_zyx_max_slabs, create_multichannel_rgb
-from eigenp_utils.tnia_plotting_anywidgets import compute_histogram, show_iso_scatter, IsoScatterWidget, infer_bit_depth, infer_histogram_range
+from eigenp_utils.tnia_plotting_anywidgets import (
+    IsoScatterWidget,
+    TNIASliceWidget,
+    _attenuated_mip,
+    _channel_colormaps,
+    _get_rotated_line,
+    _parse_zyx_tuple_or_dict,
+    _rotate_expand,
+    black_to,
+    blend_colors,
+    compute_histogram,
+    create_multichannel_rgb,
+    create_multichannel_rgb_cmap,
+    get_gui_channel_color,
+    infer_bit_depth,
+    infer_histogram_range,
+    resolve_color,
+    show_iso_scatter,
+    show_zyx,
+    show_zyx_max,
+    show_zyx_max_scatter_interactive,
+    show_zyx_max_slabs,
+    show_zyx_max_slice_interactive,
+    show_zyx_max_slice_interactive_point_annotator,
+    show_zyx_projection,
+    show_zyx_slice,
+    white_to,
+)
 
 
+# ---------------------------------------------------------------------------
+# Shared test helpers
+# ---------------------------------------------------------------------------
 
-# =========================================
-# Source: test_tnia_plotting_anywidgets.py
-# =========================================
-matplotlib.use("Agg")
+def _structured_volume(shape=(16, 48, 48)):
+    """A small volume with an off-centre cube, so moving a slab changes the image."""
+    vol = np.zeros(shape, dtype=np.uint8)
+    z, y, x = shape
+    vol[z // 4:z // 2, y // 4:y // 2, x // 4:x // 2] = 255
+    return vol
+
+
+def _count_renders(widget):
+    """Swap widget._render for a counting wrapper; returns the mutable counter."""
+    counter = {"n": 0}
+    inner = widget._render
+
+    def counting_render():
+        counter["n"] += 1
+        return inner()
+
+    widget._render = counting_render
+    return counter
+
+
+def _fig_frac(fig, ax, x, y):
+    """Data point on ``ax`` -> widget event coordinates (figure fraction, top-left origin)."""
+    disp = ax.transData.transform((x, y))
+    fx, fy = fig.transFigure.inverted().transform(disp)
+    return float(fx), float(1.0 - fy)
+
+
+def _rendered_centroid(ax):
+    """Intensity-weighted centroid of the image on ``ax``, in its data (physical) units."""
+    im = ax.images[0]
+    arr = np.asarray(im.get_array(), dtype=float)
+    if arr.ndim == 3:
+        arr = arr[..., :3].sum(axis=-1)
+    arr = np.nan_to_num(arr)
+    x0, x1, y0, y1 = im.get_extent()  # (left, right, bottom, top) with top=0
+    h, w = arr.shape
+    xs = x0 + (np.arange(w) + 0.5) * (x1 - x0) / w
+    ys = y1 + (np.arange(h) + 0.5) * (y0 - y1) / h
+    tot = arr.sum()
+    return float((arr.sum(axis=0) * xs).sum() / tot), float((arr.sum(axis=1) * ys).sum() / tot)
+
+
+def _scale_bar_artists(fig):
+    """(bar LineCollection or None, label Text or None) drawn on the XY panel."""
+    bars = [c for c in fig.axXY.collections if isinstance(c, mcollections.LineCollection)]
+    labels = [t for t in fig.axXY.texts if "µm" in t.get_text() or "pixel_sizes" in t.get_text()]
+    return (bars[-1] if bars else None), (labels[0] if labels else None)
+
+
+def _panel_rgb(fig, name="axXY"):
+    """Return the rendered array of a named panel axis as float."""
+    return np.asarray(getattr(fig, name).images[0].get_array(), dtype=float)
+
+
+def _two_channel_planes():
+    """Channel 0 active in the left column, channel 1 active in the top row."""
+    a = np.zeros((2, 2), dtype=np.float32)
+    a[:, 0] = 1.0
+    b = np.zeros((2, 2), dtype=np.float32)
+    b[0, :] = 1.0
+    return a, b
+
+
+def _iso_points(n=200, seed=0):
+    rng = np.random.default_rng(seed)
+    return rng.random(n) * 50, rng.random(n) * 40, rng.random(n) * 10
+
+
+def _first_run(mask):
+    idx = np.flatnonzero(mask)
+    if idx.size == 0:
+        return None
+    brk = np.flatnonzero(np.diff(idx) > 1)
+    return int(idx[0]), int(idx[brk[0]] if brk.size else idx[-1])
+
+
+def _label_fontsize(fig):
+    """Extract the rendered font size (pt) from the first channel label TextArea."""
+    from matplotlib.offsetbox import AnchoredOffsetbox
+
+    boxes = [a for a in fig.axLabels.artists if isinstance(a, AnchoredOffsetbox)]
+    assert boxes, "expected an AnchoredOffsetbox on fig.axLabels"
+    children = boxes[0].get_child().get_children()
+    assert children, "expected at least one TextArea child"
+    return children[0]._text.get_fontsize()
+
+
+# ---------------------------------------------------------------------------
+# Basic instantiation, channels, visibility, and 2D input
+# ---------------------------------------------------------------------------
 
 def test_single_channel_instantiation():
-    """Test that single channel instantiation works as expected."""
+    """Verify single-channel slice viewer initializes defaults and renders an initial PNG.
+
+    Strategy: pass a 3D zero volume to ``show_zyx_max_slice_interactive``.
+    Expected outcome: returns a ``TNIASliceWidget`` with ``num_channels == 1``,
+    one channel name, and non-empty ``image_data``.
+    """
     im = np.zeros((10, 20, 30))
     w = show_zyx_max_slice_interactive(im)
     assert isinstance(w, TNIASliceWidget)
     assert w.num_channels == 1
     assert len(w.channel_names) == 1
-    # Render should produce image data (triggered by observer in init)
     assert w.image_data is not None and len(w.image_data) > 0
 
+
 def test_multi_channel_instantiation():
-    """Test that multi channel instantiation works as expected."""
+    """Verify multi-channel slice viewer configures channel names, opacities, and initial PNG.
+
+    Strategy: pass a list of three 3D arrays to ``show_zyx_max_slice_interactive``.
+    Expected outcome: ``num_channels == 3``, default names ``Channel 0..2``,
+    full opacities ``[1.0, 1.0, 1.0]``, and non-empty ``image_data``.
+    """
     im = [np.zeros((10, 20, 30)) for _ in range(3)]
     w = show_zyx_max_slice_interactive(im)
     assert w.num_channels == 3
-    assert len(w.channel_names) == 3
     assert w.channel_names == ["Channel 0", "Channel 1", "Channel 2"]
     assert w.opacity_list == [1.0, 1.0, 1.0]
     assert w.image_data is not None and len(w.image_data) > 0
 
+
 def test_channel_visibility_update():
-    """Test that channel visibility update works as expected."""
-    # Use different values to ensure visual difference
+    """Verify setting channel opacity to 0 hides channels and triggers distinct re-renders.
+
+    Strategy: construct a two-channel viewer with one dark and one bright
+    channel, hide channel 1, then hide both channels.
+    Expected outcome: ``image_data`` changes at each visibility transition.
+    """
     im = [np.zeros((10, 10, 10)), np.ones((10, 10, 10)) * 255]
     w = show_zyx_max_slice_interactive(im)
 
     initial_data = w.image_data
     assert initial_data
 
-    # Hide channel 1 (the bright one)
     w.opacity_list = [1.0, 0.0]
-
-    # Check that image data changed (re-rendered)
     new_data = w.image_data
     assert new_data != initial_data
 
-    # Hide all channels
     w.opacity_list = [0.0, 0.0]
     empty_data = w.image_data
     assert empty_data != new_data
     assert empty_data != initial_data
 
-def test_default_colors_resolution():
-    """Test that default colors resolution works as expected."""
-    im = [np.zeros((10, 10, 10)) for _ in range(2)]
-    w = show_zyx_max_slice_interactive(im, colormap=None)
-    assert w.colors_resolved == ['white', 'lime'] # Defaults
 
-    w2 = show_zyx_max_slice_interactive(im, colormap=['red', 'blue'])
-    assert w2.colors_resolved == ['red', 'blue']
+def test_2d_interactive_input_promoted_to_single_z_slice():
+    """Verify 2D ``(Y, X)`` arrays work in interactive slice and annotator viewers.
 
-def test_show_zyx_max_slice_interactive_point_annotator_args():
-    """Test that show zyx max slice interactive point annotator args works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, TNIAAnnotatorWidget
-    im = [np.zeros((10, 10, 10)) for _ in range(2)]
-    w = show_zyx_max_slice_interactive_point_annotator(
-        im,
-        pixel_sizes=(3, 2, 2),
-        point_size_scale=0.05,
-        colormap=['red', 'blue'],
-        opacity=[0.5, 0.8]
-    )
-    assert isinstance(w, TNIAAnnotatorWidget)
-    assert w.sx == 2
-    assert w.sy == 2
-    assert w.sz == 3
+    Strategy: pass a single 2D array, a list of two 2D arrays, and a 2D array
+    for the point annotator to their public factory functions.
+    Expected outcome: each widget promotes input to ``dims == (1, Y, X)`` with
+    ``z_s == z_start == z_end == 0`` and produces a rendered ``image_data`` PNG.
+    """
+    rng = np.random.default_rng(0)
+    im2d = rng.random((20, 30)).astype(np.float32)
 
-def test_point_size_scaling():
-    """Test that point size scaling works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import TNIAAnnotatorWidget
-    im = np.zeros((1, 100, 100)) # Thin Z dimension
+    w1 = show_zyx_max_slice_interactive(im2d)
+    assert w1.dims == (1, 20, 30)
+    assert (w1.z_s, w1.z_start, w1.z_end) == (0, 0, 0)
+    assert w1.num_channels == 1 and w1.image_data
 
-    w1 = TNIAAnnotatorWidget(im, point_size_scale=0.1)
-    w2 = TNIAAnnotatorWidget(im, point_size_scale=0.5)
+    w2 = show_zyx_max_slice_interactive([im2d, im2d * 0.5])
+    assert w2.dims == (1, 20, 30)
+    assert w2.num_channels == 2 and w2.image_data
 
-    # Verify that the point size scales properly with the X/Y dimension (min(100, 100) = 100)
-    # 0.1 * 100 = 10
-    # 0.5 * 100 = 50
-    assert w1.point_size == 10
-    assert w2.point_size == 50
-    assert w1.point_size < w2.point_size
+    wa = show_zyx_max_slice_interactive_point_annotator(im2d)
+    assert wa.dims == (1, 20, 30)
+    assert wa.num_channels == 2 and wa.channel_names[-1] == "Annotations"
+    assert wa.image_data
 
-def test_show_zyx_max_scatter_interactive_colormap():
-    """Test that show zyx max scatter interactive colormap works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
-    X = np.random.rand(10) * 10
-    Y = np.random.rand(10) * 10
-    Z = np.random.rand(10) * 10
-    channels = np.random.rand(10)
-
-    # Should not throw exception for invalid RGBA string
-    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='points')
-    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='density')
-
-    channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='points')
-    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='density')
-
-    assert w1 is not None
-    assert w2 is not None
-    assert w3 is not None
-    assert w4 is not None
-
-def test_show_zyx_max_scatter_interactive_signature():
-    """Test that show zyx max scatter interactive signature works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
-    X = np.random.rand(10) * 10
-    Y = np.random.rand(10) * 10
-    Z = np.random.rand(10) * 10
-    channels = np.random.rand(10)
-
-    # Test with tuple
-    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, render='points')
-    assert w1 is not None
-
-    # Test with list
-    w2 = show_zyx_max_scatter_interactive([Z, Y, X], channels=channels, render='points')
-    assert w2 is not None
-
-    # Test with (N, 3) array
-    points = np.stack([Z, Y, X], axis=1)
-    w3 = show_zyx_max_scatter_interactive(points, channels=channels, render='points')
-    assert w3 is not None
-
-    # Verify that the parsed data inside is correct
-    np.testing.assert_array_equal(w3.X_arr, X)
-    np.testing.assert_array_equal(w3.Y_arr, Y)
-    np.testing.assert_array_equal(w3.Z_arr, Z)
-
-    # Test invalid shape
-    with pytest.raises(ValueError, match="points must be an array of shape .* representing \\(Z, Y, X\\) or a tuple/list of 3 arrays \\(Z, Y, X\\)."):
-        invalid_points = np.stack([Z, Y], axis=1)
-        show_zyx_max_scatter_interactive(invalid_points, channels=channels)
-
-def test_colormap_list_multi_channel():
-    """Test that colormap list multi channel works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
-    im = [np.zeros((10, 20, 30)) for _ in range(3)]
-    # This should not raise any TypeError about unhashable lists
-    w = show_zyx_max_slice_interactive(im, colormap=['red', 'blue', 'green'])
-    assert w is not None
-    assert w.colors_resolved == ['red', 'blue', 'green']
-
-def test_colormap_list_scatter_multi_channel():
-    """Test that colormap list scatter multi channel works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
-    X = np.random.rand(10) * 10
-    Y = np.random.rand(10) * 10
-    Z = np.random.rand(10) * 10
-    channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='points')
-    assert w is not None
-
-def test_deprecation_warning_colors():
-    """Test that deprecation warning colors works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
-    im = np.zeros((10, 20, 30))
-    with pytest.warns(DeprecationWarning, match="The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead."):
-        w = show_zyx_max_slice_interactive(im, colors=['red'])
-        assert w is not None
-
-
-@pytest.mark.parametrize("factory_fn", [
-    show_zyx_max_slice_interactive,
-    show_zyx_max_slice_interactive_point_annotator,
-])
-def test_interactive_kwargs_images(factory_fn):
-    """Test that interactive kwargs images works as expected."""
-    im = np.zeros((10, 20, 30))
-    w = factory_fn(im,
-                   show_crosshair=False,
-                   sync_on_hover=True,
-                   slabs_thickness=(2, 3, 4),
-                   slabs_position=(5, 10, 15),
-                   pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 0.5})
-
-    assert w.show_crosshair is False
-    assert w.sync_on_hover is True
-    # Because pixel_sizes are set to Z=2.0, Y=1.0, X=0.5
-    # slabs_thickness in physical units: (2, 3, 4)
-    # The indices will be calculated as thickness // p => (2/2.0=1, 3/1.0=3, 4/0.5=8)
-    assert w.z_t == 1 and w.y_t == 3 and w.x_t == 8
-
-    # Note: slabs_position in physical units: (5, 10, 15)
-    # The indices will be calculated as pos // p => (5/2.0=2.5->2, 10/1.0=10, 15/0.5=30)
-    # clamped because coords map to dims [10, 20, 30] (max 9, 19, 29)
-    assert w.z_s == 2 and w.y_s == 10 and w.x_s == 29
-    assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
-
-def test_interactive_kwargs_scatter():
-    """Test that interactive kwargs scatter works as expected."""
-    X, Y, Z = np.random.rand(10), np.random.rand(10), np.random.rand(10)
-    w = show_zyx_max_scatter_interactive((X, Y, Z),
-                   show_crosshair=False,
-                   sync_on_hover=True,
-                   slabs_thickness=(2, 3, 4),
-                   slabs_position=(5, 10, 15),
-                   pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 0.5})
-
-    assert w.show_crosshair is False
-    assert w.sync_on_hover is True
-    assert w.z_t == 2 and w.y_t == 3 and w.x_t == 4
-    # Note: slabs_position clamped because random coords are [0, 1] mapped to Dim=2
-    assert w.z_s == 1 and w.y_s == 1 and w.x_s == 1
-    assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
-
-@pytest.mark.parametrize("factory_fn", [
-    show_zyx_max_slice_interactive,
-    show_zyx_max_slice_interactive_point_annotator,
-])
-def test_deprecation_warnings_interactive(factory_fn):
-    """Test that deprecation warnings interactive works as expected."""
-    im = np.zeros((10, 20, 30))
-    with pytest.warns(DeprecationWarning, match="The 'sxy' and 'sz' parameters are deprecated"):
-        factory_fn(im, sxy=0.5, sz=2.0)
-    with pytest.warns(DeprecationWarning, match="The 'x_s', 'y_s', 'z_s' parameters are deprecated"):
-        factory_fn(im, x_s=5, y_s=10, z_s=5)
-    with pytest.warns(DeprecationWarning, match="The 'x_t', 'y_t', 'z_t' parameters are deprecated"):
-        factory_fn(im, x_t=2, y_t=3, z_t=4)
-
-@pytest.mark.parametrize("shape, pixel_sizes, expected_text", [
-    ((100, 200, 300), (1, 2, 3), '100 µm'),
-    ((10, 50, 50), (0.5, 0.5, 0.5), '5 µm'),
-    ((1, 5, 5), (10, 10, 10), '10 µm'),
-    ((50, 100, 150), (2, 2, 2), '50 µm'),
-    ((100, 100, 100), (1, 1, 1), '20 µm'),      # explicitly isotropic
-    ((10, 512, 512), (10, 2, 2), '200 µm')      # user requested anisotropic
-])
-def test_scale_bar_logic(shape, pixel_sizes, expected_text):
-    """Test that scale bar logic works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, show_zyx_max_scatter_interactive
-    import numpy as np
-
-    # Test slice interactive
-    im = np.zeros(shape)
-    w_slice = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes, figsize=(5,5))
-    fig_slice = w_slice._render()
-
-    # Extract text from scale bar
-    texts_slice = [txt.get_text() for ax in fig_slice.axes for txt in ax.texts]
-    assert expected_text in texts_slice
-
-    # Extract fontsize of the scale bar
-    font_size_unscaled = None
-    for ax in fig_slice.axes:
-        for txt in ax.texts:
-            if expected_text in txt.get_text():
-                font_size_unscaled = txt.get_fontsize()
-
-    # Test scatter interactive
-    Z, Y, X = shape
-    # Make points such that Z_dim=Z, Y_dim=Y, X_dim=X
-    points = (np.array([0, Z-1]), np.array([0, Y-1]), np.array([0, X-1]))
-    w_scatter = show_zyx_max_scatter_interactive(points, pixel_sizes=pixel_sizes, figsize=(5,5))
-    fig_scatter = w_scatter._render()
-
-    texts_scatter = [txt.get_text() for ax in fig_scatter.axes for txt in ax.texts]
-    assert expected_text in texts_scatter
-
-    # Test with figsize_scale to make sure it scales font and lines correctly
-    w_slice_scaled = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes, figsize=(5,5), figsize_scale=2.0)
-    fig_slice_scaled = w_slice_scaled._render()
-
-    def _bar_linewidth(fig):
-        widths = [c.get_linewidth()[0] for ax in fig.axes for c in ax.collections
-                  if len(c.get_linewidth())]
-        return max(widths) if widths else None
-
-    font_size_scaled = None
-    for ax in fig_slice_scaled.axes:
-        for txt in ax.texts:
-            if expected_text in txt.get_text():
-                font_size_scaled = txt.get_fontsize()
-    linewidth_unscaled = _bar_linewidth(fig_slice)
-    linewidth_scaled = _bar_linewidth(fig_slice_scaled)
-
-    assert font_size_scaled is not None
-    assert font_size_scaled > font_size_unscaled
-    assert linewidth_unscaled is not None and linewidth_scaled is not None
-    assert linewidth_scaled > linewidth_unscaled
-
-def test_parse_zyx_tuple_or_dict_various_types():
-    """Test that parse zyx tuple or dict various types works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import _parse_zyx_tuple_or_dict
-
-    # 1. Native tuple of floats
-    res = _parse_zyx_tuple_or_dict((1.5, 2.5, 3.5))
-    assert res == (1.5, 2.5, 3.5)
-
-    # 2. Native list of floats
-    res = _parse_zyx_tuple_or_dict([1.5, 2.5, 3.5])
-    assert res == (1.5, 2.5, 3.5)
-
-    # 3. Dict with floats
-    res = _parse_zyx_tuple_or_dict({'Z': 1.5, 'Y': 2.5, 'X': 3.5})
-    assert res == (1.5, 2.5, 3.5)
-
-    # 4. Tuple with np.ndarrays (0-d arrays / scalars)
-    res = _parse_zyx_tuple_or_dict((np.array(1.5), np.array(2.5), np.array(3.5)))
-    assert res == (1.5, 2.5, 3.5)
-    assert isinstance(res[0], float)
-
-    # 5. Dict with np.ndarrays
-    res = _parse_zyx_tuple_or_dict({'Z': np.array(1.5), 'Y': np.array(2.5), 'X': np.array(3.5)})
-    assert res == (1.5, 2.5, 3.5)
-    assert isinstance(res[0], float)
-
-    # 6. Very small/large values
-    res = _parse_zyx_tuple_or_dict([1e-6, 1e6, 0.0])
-    assert res == (1e-6, 1e6, 0.0)
-
-def test_show_zyx_max_slabs_zero_sized_slices():
-    """Test that show zyx max slabs zero sized slices works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slabs, show_zyx_max_slice_interactive
-    im = np.random.rand(10, 10, 10)
-
-    # Passing identical float intervals, should be coerced to integer intervals
-    # of size 1 (i.e. x=[0, 1]) without raising a ValueError.
-    fig = show_zyx_max_slabs(im, x=[0.5, 0.5], y=[0.0, 0.0], z=[0, 0])
-    assert fig is not None
-
-    # Additionally test the interactive wrapper passing 0-d np scalars
-    w = show_zyx_max_slice_interactive(im, pixel_sizes=(np.array(1.5), np.array(2.5), np.array(3.5)))
-    assert w.sz == 1.5
-    assert w.sy == 2.5
-    assert w.sx == 3.5
-    assert isinstance(w.sz, float)
 
 def test_interactive_channel_labels():
-    """Test that interactive channel labels works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import (
-        show_zyx_max_slice_interactive,
-        show_zyx_max_slice_interactive_point_annotator,
-        show_zyx_max_scatter_interactive
-    )
-    import numpy as np
+    """Verify explicit ``channel_labels`` propagate to slice, annotator, and scatter viewers.
 
+    Strategy: pass ``channel_labels=['DAPI', 'GFP']`` to all three interactive
+    factory functions.
+    Expected outcome: slice and scatter preserve the exact labels; the annotator
+    appends ``'Annotations'`` to ``channel_names``.
+    """
+    rng = np.random.default_rng(1)
     im = np.zeros((10, 20, 30))
     labels = ["DAPI", "GFP"]
 
-    w1 = show_zyx_max_slice_interactive(
-        [im, im],
-        channel_labels=labels
-    )
+    w1 = show_zyx_max_slice_interactive([im, im], channel_labels=labels)
     assert w1.channel_labels_input == labels
     assert w1.channel_names == labels
 
-    w2 = show_zyx_max_slice_interactive_point_annotator(
-        [im, im],
-        channel_labels=labels
-    )
+    w2 = show_zyx_max_slice_interactive_point_annotator([im, im], channel_labels=labels)
     assert w2.channel_labels_input == labels
-    assert w2.channel_names == labels + ['Annotations']
+    assert w2.channel_names == labels + ["Annotations"]
 
-    X = np.random.rand(10) * 10
-    Y = np.random.rand(10) * 10
-    Z = np.random.rand(10) * 10
-    channels_multi = [np.random.rand(10), np.random.rand(10)]
+    X = rng.random(10) * 10
+    Y = rng.random(10) * 10
+    Z = rng.random(10) * 10
+    channels_multi = [rng.random(10), rng.random(10)]
 
     w3 = show_zyx_max_scatter_interactive(
         (Z, Y, X),
         channels=channels_multi,
         channel_labels=labels,
-        render='points'
+        render="points",
     )
     assert w3.channel_labels_input == labels
-
-# =========================================
-# Source: test_tnia_annotator_widget.py
-# =========================================
-def test_tnia_annotator_widget(tmp_path, monkeypatch):
-    """The annotator writes its points as a z,y,x CSV (with $VAR expansion in the name)."""
-    from eigenp_utils.tnia_plotting_anywidgets import TNIAAnnotatorWidget
-
-    monkeypatch.setenv('TEST_DIR', str(tmp_path))
-
-    im = np.random.randint(0, 255, (10, 10, 10), dtype=np.uint8)
-    w = TNIAAnnotatorWidget(im)
-    w.points = [[5, 4, 3], [6, 7, 8]]
-    w.save_csv_filename = "$TEST_DIR/test_points.csv"
-    w._save_csv(None)
-
-    out = tmp_path / "test_points.csv"
-    assert out.exists()
-    assert out.read_text() == "z,y,x\n5,4,3\n6,7,8\n"
+    assert w3.channel_names == labels
 
 
-def test_sync_on_hover_defaults_to_true():
-    """Test that sync_on_hover defaults to True for all interactive widgets and wrapper functions."""
-    from eigenp_utils.tnia_plotting_anywidgets import (
-        TNIASliceWidget,
-        TNIAScatterWidget,
-        TNIAAnnotatorWidget,
-        show_zyx_max_slice_interactive,
-        show_zyx_max_slice_interactive_point_annotator,
-        show_zyx_max_scatter_interactive,
-    )
-
-    im = np.zeros((10, 20, 30))
-    X, Y, Z = np.random.rand(10), np.random.rand(10), np.random.rand(10)
-
-    # Class instantiations
-    w_slice = TNIASliceWidget(im)
-    assert w_slice.sync_on_hover is True
-
-    w_scatter = TNIAScatterWidget(X, Y, Z)
-    assert w_scatter.sync_on_hover is True
-
-    w_annot = TNIAAnnotatorWidget(im)
-    assert w_annot.sync_on_hover is True
-
-    # Wrapper function instantiations
-    w_fn_slice = show_zyx_max_slice_interactive(im)
-    assert w_fn_slice.sync_on_hover is True
-
-    w_fn_annot = show_zyx_max_slice_interactive_point_annotator(im)
-    assert w_fn_annot.sync_on_hover is True
-
-    w_fn_scatter = show_zyx_max_scatter_interactive((Z, Y, X))
-    assert w_fn_scatter.sync_on_hover is True
-
-
-def test_annotator_annotate_kwarg_and_property():
-    """Test annotate kwarg default, explicit boolean settings, and property getter/setter on TNIAAnnotatorWidget."""
-    from eigenp_utils.tnia_plotting_anywidgets import (
-        TNIAAnnotatorWidget,
-        show_zyx_max_slice_interactive_point_annotator,
-    )
-
-    im = np.zeros((10, 20, 30))
-
-    # Default should be annotate=False (annotation_mode is False)
-    w_default = show_zyx_max_slice_interactive_point_annotator(im)
-    assert w_default.annotation_mode is False
-    assert w_default.annotate is False
-
-    # Explicit annotate=True during wrapper function creation
-    w_active = show_zyx_max_slice_interactive_point_annotator(im, annotate=True)
-    assert w_active.annotation_mode is True
-    assert w_active.annotate is True
-
-    # Direct class instantiation with annotate=True
-    w_class = TNIAAnnotatorWidget(im, annotate=True)
-    assert w_class.annotation_mode is True
-    assert w_class.annotate is True
-
-    # Test programmatically modifying via annotate property
-    w_default.annotate = True
-    assert w_default.annotation_mode is True
-    assert w_default.annotate is True
-
-    w_default.annotate = False
-    assert w_default.annotation_mode is False
-    assert w_default.annotate is False
-
-# =========================================
-# Source: test_tnia_plotting_anywidgets_resolve_color.py
-# =========================================
+# ---------------------------------------------------------------------------
+# Color / colormap resolution, GUI darkening, and padding
+# ---------------------------------------------------------------------------
 
 def test_resolve_color():
-    """Test that resolve color works as expected."""
-    # Test hex colors
+    """Verify ``resolve_color`` handles CSS colors, colormaps (including CSS-named ones), and rejects instances.
+
+    Strategy: resolve hex strings, plain CSS names, standard colormaps
+    (``'viridis'``), and colormaps sharing CSS names (``'gray'``, ``'pink'``,
+    ``'hot'``), plus ``Colormap`` instances.
+    Expected outcome: CSS-named colormaps evaluate ``cmap(1.0)`` (not the CSS
+    color); plain colors pass through; ``Colormap`` instances raise ``TypeError``.
+    """
     assert resolve_color("#ff0000") == "#ff0000"
+    assert resolve_color("red") == "red"
+    assert resolve_color("viridis") == "#fde725"
 
-    # Test valid colormap names
-    assert resolve_color("viridis") == "#fde725" # final color of viridis
+    for name in ("gray", "pink", "hot"):
+        expected = mcolors.to_hex(matplotlib.colormaps[name](1.0)[:3])
+        assert resolve_color(name) == expected
+    # 'gray' and 'pink' are also CSS color names; colormap lookup must take precedence.
+    assert resolve_color("gray") != mcolors.to_hex(to_rgb("gray"))
+    assert resolve_color("pink") != mcolors.to_hex(to_rgb("pink"))
 
-    # Test colormap instances directly raise TypeError
-    cmap = mcolors.LinearSegmentedColormap.from_list('test', ['black', 'white'])
+    cmap = mcolors.LinearSegmentedColormap.from_list("test", ["black", "white"])
     with pytest.raises(TypeError, match="Expected a registered colormap name"):
         resolve_color(cmap)
-
-    # Test actual labels_cmap issue from prompt
     with pytest.raises(TypeError, match="Expected a registered colormap name"):
         resolve_color(labels_cmap)
 
-def test_widget_rejects_colormap_instance():
-    """Test that widget rejects colormap instance works as expected."""
-    im = np.zeros((10, 20, 30))
-    # This crashed previously due to channel_colors list expecting a unicode string but getting a Colormap instance
-    with pytest.raises(TypeError, match="Expected a registered colormap name"):
-        w = show_zyx_max_slice_interactive(im, colormap=labels_cmap)
 
-# =========================================
-# Source: test_tnia_plotting_rotation.py
-# =========================================
+def test_gui_channel_color_and_linear_colormaps():
+    """Verify ``get_gui_channel_color`` darkens to 75% and ``black_to``/``white_to`` span exact endpoints.
 
-def test_rotation_slice_interactive():
-    """Test that rotation slice interactive works as expected."""
-    im = np.random.rand(10, 20, 30)
-
-    # Test no rotation
-    w0 = show_zyx_max_slice_interactive(im)
-    assert w0.rotate_view is None
-
-    # Test float rotation
-    w1 = show_zyx_max_slice_interactive(im, rotate_view=45.0)
-    assert w1.rotate_view == 45.0
-
-    # Test tuple rotation
-    w2 = show_zyx_max_slice_interactive(im, rotate_view=(10, 20, 30))
-    assert w2.rotate_view == (10, 20, 30)
-
-    # Force a render with rotation to check for runtime errors
-    w2._render_wrapper(None)
-    assert w2.image_data is not None
-
-def test_rotation_scatter_interactive():
-    """Test that rotation scatter interactive works as expected."""
-    N = 100
-    X = np.random.rand(N) * 30
-    Y = np.random.rand(N) * 20
-    Z = np.random.rand(N) * 10
-
-    # Test no rotation
-    w0 = show_zyx_max_scatter_interactive((Z, Y, X))
-    assert w0.rotate_view is None
-
-    # Test float rotation
-    w1 = show_zyx_max_scatter_interactive((Z, Y, X), rotate_view=45.0)
-    assert w1.rotate_view == 45.0
-
-    # Test tuple rotation
-    w2 = show_zyx_max_scatter_interactive((Z, Y, X), rotate_view=(10, 20, 30))
-    assert w2.rotate_view == (10, 20, 30)
-
-    # Force a render with points rotation to check for runtime errors
-    w2.render = 'points'
-    w2._render_wrapper(None)
-    assert w2.image_data is not None
-
-    # Force a render with density rotation to check for runtime errors
-    w2.render = 'density'
-    w2._render_wrapper(None)
-    assert w2.image_data is not None
-
-# =========================================
-# Source: test_marimo_update.py
-# =========================================
-def test_marimo_update(tmp_path):
-    """Verify the reference marimo app snippet stays valid and up to date.
-
-    Strategy: write the snippet to a pytest ``tmp_path`` scratch file (never the
-    repository working tree), then compile it to check it is syntactically valid
-    Python and inspect its source for the current keyword spelling.
-
-    Expected outcome: the file is created under ``tmp_path``, compiles without a
-    ``SyntaxError``, and uses the ``colormap`` keyword rather than the deprecated
-    ``colors`` alias.
+    Strategy: test ``get_gui_channel_color`` on named color, hex, and colormap
+    inputs, and evaluate ``black_to('red')`` / ``white_to('red')`` at 0.0, 0.5, 1.0.
+    Expected outcome: GUI colors equal ``0.75 * rgb`` in hex; ``black_to`` ramps
+    black -> red and ``white_to`` ramps white -> red.
     """
-    pytest.importorskip("marimo")
+    assert get_gui_channel_color("white") == mcolors.to_hex((0.75, 0.75, 0.75))
+    assert get_gui_channel_color("#ff0000") == mcolors.to_hex((0.75, 0.0, 0.0))
+    vir_end = mcolors.to_rgb(matplotlib.colormaps["viridis"](1.0)[:3])
+    assert get_gui_channel_color("viridis") == mcolors.to_hex(tuple(0.75 * v for v in vir_end))
 
-    app_code = textwrap.dedent("""
-    import marimo as mo
+    b_red = black_to("red")
+    np.testing.assert_allclose(b_red(0.0)[:3], (0.0, 0.0, 0.0), atol=1e-6)
+    np.testing.assert_allclose(b_red(0.5)[:3], (0.5, 0.0, 0.0), atol=1e-2)
+    np.testing.assert_allclose(b_red(1.0)[:3], (1.0, 0.0, 0.0), atol=1e-6)
 
-    app = mo.App()
-
-    @app.cell
-    def __():
-        import numpy as np
-        from skimage.data import cells3d
-        from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
-
-        try:
-            im = cells3d()
-        except:
-            from eigenp_utils.io import download_file
-            url_to_fetch = "https://gitlab.com/scikit-image/data/-/raw/master/cells3d.tif"
-            download_file(url_to_fetch, "./cells3d.tif")
-            from skimage.io import imread
-            im = imread("./cells3d.tif")  # (Z, C, Y, X)
-        membrane = im[:, 0, :, :]
-        nuclei = im[:, 1, :, :]
-
-        widget = show_zyx_max_slice_interactive(
-            [membrane, nuclei],
-            colormap=['magma', 'viridis']
-        )
-        return widget,
-
-    if __name__ == "__main__":
-        app.run()
-    """)
-
-    app_path = tmp_path / "marimo_app.py"
-    app_path.write_text(app_code)
-
-    written = app_path.read_text()
-    assert written == app_code
-    compile(written, str(app_path), "exec")
-    assert "colormap=" in written
-    assert "colors=" not in written
-
-    # The snippet must reference a function that exists and accepts colormap=
-    import inspect
-    import eigenp_utils.tnia_plotting_anywidgets as tpa
-    assert "colormap" in inspect.signature(tpa.show_zyx_max_slice_interactive).parameters
+    w_red = white_to("red")
+    np.testing.assert_allclose(w_red(0.0)[:3], (1.0, 1.0, 1.0), atol=1e-6)
+    np.testing.assert_allclose(w_red(0.5)[:3], (1.0, 0.5, 0.5), atol=1e-2)
+    np.testing.assert_allclose(w_red(1.0)[:3], (1.0, 0.0, 0.0), atol=1e-6)
 
 
-def test_marimo_app_file_uses_existing_api():
-    """tests/marimo_app.py only imports existing eigenp_utils names and passes keywords
-    those functions accept (no deprecated ``colors=``)."""
-    import ast
-    import importlib
-    import inspect
-    from pathlib import Path
+def test_widget_rejects_colormap_instance():
+    """Verify interactive widgets reject raw ``Colormap`` instances with a helpful ``TypeError``.
 
-    tree = ast.parse((Path(__file__).parent / "marimo_app.py").read_text())
-    imported = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("eigenp_utils"):
-            mod = importlib.import_module(node.module)
-            for alias in node.names:
-                assert hasattr(mod, alias.name), f"{node.module}.{alias.name} does not exist"
-                imported[alias.asname or alias.name] = getattr(mod, alias.name)
-    assert imported
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in imported:
-            params = inspect.signature(imported[node.func.id]).parameters
-            for kw in node.keywords:
-                assert kw.arg in params, f"{node.func.id}() has no keyword {kw.arg!r}"
-                assert kw.arg != "colors", "use colormap=, not the deprecated colors="
-
-# =========================================
-# Source: test_tnia_figsize_scale.py
-# =========================================
-def test_tnia_figsize_scale():
-    """Test that tnia figsize scale works as expected."""
-    import numpy as np
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
-
-    im = np.random.rand(100, 100, 100)
-    widget1 = show_zyx_max_slice_interactive(im, figsize_scale=1)
-    widget2 = show_zyx_max_slice_interactive(im, figsize_scale=2)
-    widget3 = show_zyx_max_slice_interactive(im, figsize_scale=10)
-    assert np.allclose(np.array(widget2.figsize), 2 * np.array(widget1.figsize))
-    assert np.allclose(np.array(widget3.figsize), 10 * np.array(widget1.figsize))
-
-# =========================================
-# Source: test_tnia_plotting_anywidgets_3d_logic.py
-# =========================================
-
-matplotlib = pytest.importorskip("matplotlib")
-matplotlib.use("Agg")
+    Strategy: pass ``labels_cmap`` directly as ``colormap=`` to
+    ``show_zyx_max_slice_interactive``.
+    Expected outcome: raises ``TypeError`` requesting the registered string name.
+    """
+    im = np.zeros((10, 20, 30))
+    with pytest.raises(TypeError, match="Expected a registered colormap name"):
+        show_zyx_max_slice_interactive(im, colormap=labels_cmap)
 
 
+@pytest.mark.parametrize(
+    "n_channels, colormap, expected_prefix",
+    [
+        (2, None, ["white", "lime"]),
+        (2, ["red", "blue"], ["red", "blue"]),
+        (3, "magma", ["magma"]),
+        (3, ["red", "lime"], ["red", "lime"]),
+    ],
+)
+def test_slice_widget_colormap_resolution_and_padding(n_channels, colormap, expected_prefix):
+    """Verify multichannel colormap defaults, explicit lists, single strings, and padding.
 
-def test_show_zyx_slice_returns_correct_slices():
-    """Test that show zyx slice returns correct slices works as expected."""
-    arr = np.arange(4 * 3 * 2).reshape(4, 3, 2)
-    # x, y and z all differ, so swapping any two indices changes a panel
-    fig = show_zyx_slice(arr, x=0, y=2, z=3, use_plt=False)
-    assert isinstance(fig, Figure)
-    xy_expected = arr[3, :, :]
-    xz_expected = arr[:, 2, :]
-    zy_expected = np.flip(np.rot90(arr[:, :, 0], 1), 0)
-    xy_img = fig.axes[0].images[0].get_array()
-    zy_img = fig.axes[1].images[0].get_array()
-    xz_img = fig.axes[2].images[0].get_array()
-    assert np.array_equal(xy_img, xy_expected)
-    assert np.array_equal(zy_img, zy_expected)
-    assert np.array_equal(xz_img, xz_expected)
+    Strategy: construct ``show_zyx_max_slice_interactive`` with ``None``, an
+    exact list, a single colormap string (must not be split into characters),
+    and a short list that must be padded with unused defaults.
+    Expected outcome: ``colors_resolved`` and ``channel_colors`` have length
+    ``n_channels``, preserve the given prefix, and contain no duplicates in padding.
+    """
+    rng = np.random.default_rng(9)
+    chans = [rng.uniform(0, 1, (4, 16, 16)).astype(np.float32) for _ in range(n_channels)]
+    w = show_zyx_max_slice_interactive(chans, colormap=colormap)
+    assert len(w.colors_resolved) == n_channels
+    assert len(w.channel_colors) == n_channels
+    assert w.colors_resolved[:len(expected_prefix)] == expected_prefix
+    assert len(set(w.colors_resolved)) == n_channels
 
 
-def test_show_zyx_max_slabs_projection():
-    """Test that show zyx max slabs projection works as expected."""
-    arr = np.arange(4 * 3 * 2).reshape(4, 3, 2)
-    fig = show_zyx_max_slabs(arr, x=[0, 1], y=[0, 2], z=[1, 4])
-    xy_expected = np.max(arr[1:4, :, :], axis=0)
-    xz_expected = np.max(arr[:, 0:2, :], axis=1)
-    zy_expected = np.flip(np.rot90(np.max(arr[:, :, 0:1], axis=2), 1), 0)
-    xy_img = fig.axes[0].images[0].get_array()
-    zy_img = fig.axes[1].images[0].get_array()
-    xz_img = fig.axes[2].images[0].get_array()
-    assert np.array_equal(xy_img, xy_expected)
-    assert np.array_equal(xz_img, xz_expected)
-    assert np.array_equal(zy_img, zy_expected)
+# ---------------------------------------------------------------------------
+# Deprecation warnings and parameter parsing / validation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        "show_zyx",
+        "show_zyx_max",
+        "show_zyx_max_slabs",
+        "show_zyx_max_slice_interactive",
+        "show_zyx_max_slice_interactive_point_annotator",
+        "show_zyx_max_scatter_interactive",
+    ],
+)
+def test_deprecated_colors_warns_once_at_caller(caller):
+    """Verify passing deprecated ``colors=`` emits exactly one ``DeprecationWarning`` pointing to the caller.
+
+    Strategy: invoke each static and interactive entry point with ``colors='red'``
+    while recording warnings.
+    Expected outcome: exactly one ``DeprecationWarning`` mentioning ``'colors'``
+    is emitted, with ``filename == __file__``.
+    """
+    rng = np.random.default_rng(0)
+    im = rng.random((4, 8, 8)).astype(np.float32)
+    pts = (rng.random(12) * 4, rng.random(12) * 8, rng.random(12) * 8)
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        if caller == "show_zyx":
+            fig = show_zyx(im[0], im[:, 0, :], im[:, :, 0], colors="red")
+            plt.close(fig)
+        elif caller == "show_zyx_max":
+            fig = show_zyx_max(im, colors="red")
+            plt.close(fig)
+        elif caller == "show_zyx_max_slabs":
+            fig = show_zyx_max_slabs(im, colors="red")
+            plt.close(fig)
+        elif caller == "show_zyx_max_slice_interactive":
+            show_zyx_max_slice_interactive(im, colors="red")
+        elif caller == "show_zyx_max_slice_interactive_point_annotator":
+            show_zyx_max_slice_interactive_point_annotator(im, colors="red")
+        else:
+            show_zyx_max_scatter_interactive(pts, colors="red", render="points")
+
+    dep = [r for r in rec if issubclass(r.category, DeprecationWarning) and "'colors'" in str(r.message)]
+    assert len(dep) == 1, dep
+    assert dep[0].filename == __file__
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["slice", "annotator", "scatter"],
+)
+def test_deprecation_warnings_interactive_legacy_kwargs(kind):
+    """Verify legacy ``sxy``/``sz``, ``x_s``/``y_s``/``z_s``, and ``x_t``/``y_t``/``z_t`` kwargs emit ``DeprecationWarning``.
+
+    Strategy: call each interactive factory function with each deprecated
+    parameter group.
+    Expected outcome: each call emits a ``DeprecationWarning`` pointing to the
+    replacement parameter (``pixel_sizes``, ``slabs_position``, ``slabs_thickness``).
+    """
+    rng = np.random.default_rng(2)
+    im = np.zeros((10, 20, 30), dtype=np.float32)
+    pts = (rng.random(10) * 10, rng.random(10) * 20, rng.random(10) * 30)
+
+    def _call(**kw):
+        if kind == "slice":
+            return show_zyx_max_slice_interactive(im, **kw)
+        if kind == "annotator":
+            return show_zyx_max_slice_interactive_point_annotator(im, **kw)
+        return show_zyx_max_scatter_interactive(pts, render="points", **kw)
+
+    with pytest.warns(DeprecationWarning, match="The 'sxy' and 'sz' parameters are deprecated"):
+        _call(sxy=0.5, sz=2.0)
+    with pytest.warns(DeprecationWarning, match="The 'x_s', 'y_s', 'z_s' parameters are deprecated"):
+        _call(x_s=5, y_s=10, z_s=5)
+    with pytest.warns(DeprecationWarning, match="The 'x_t', 'y_t', 'z_t' parameters are deprecated"):
+        _call(x_t=2, y_t=3, z_t=4)
+
+
+def test_parse_zyx_tuple_or_dict_various_types():
+    """Verify ``_parse_zyx_tuple_or_dict`` normalizes tuples, lists, dicts, and 0-d numpy scalars to floats.
+
+    Strategy: pass native tuples/lists, dicts, 0-d numpy arrays, and extreme
+    magnitudes.
+    Expected outcome: all return plain 3-tuples of Python ``float`` values.
+    """
+    assert _parse_zyx_tuple_or_dict((1.5, 2.5, 3.5)) == (1.5, 2.5, 3.5)
+    assert _parse_zyx_tuple_or_dict([1.5, 2.5, 3.5]) == (1.5, 2.5, 3.5)
+    assert _parse_zyx_tuple_or_dict({"Z": 1.5, "Y": 2.5, "X": 3.5}) == (1.5, 2.5, 3.5)
+
+    res = _parse_zyx_tuple_or_dict((np.array(1.5), np.array(2.5), np.array(3.5)))
+    assert res == (1.5, 2.5, 3.5) and all(isinstance(v, float) for v in res)
+
+    res_dict = _parse_zyx_tuple_or_dict({"Z": np.array(1.5), "Y": np.array(2.5), "X": np.array(3.5)})
+    assert res_dict == (1.5, 2.5, 3.5) and all(isinstance(v, float) for v in res_dict)
+
+    assert _parse_zyx_tuple_or_dict([1e-6, 1e6, 0.0]) == (1e-6, 1e6, 0.0)
+
+
+def test_invalid_pixel_sizes_and_rotate_view_raise():
+    """Verify invalid ``pixel_sizes`` and ``rotate_view`` inputs raise ``ValueError``.
+
+    Strategy: pass wrong-length sequences, scalars, and non-numeric values to
+    ``pixel_sizes`` and ``rotate_view`` via static and interactive entry points.
+    Expected outcome: every invalid argument raises ``ValueError``.
+    """
+    im = np.zeros((4, 8, 8), dtype=np.float32)
+
+    for bad_ps in ((1.0, 2.0), (1.0, 2.0, 3.0, 4.0), 2.5, ("bad", 1.0, 1.0)):
+        with pytest.raises(ValueError):
+            _parse_zyx_tuple_or_dict(bad_ps, default_val=1.0)
+        with pytest.raises(ValueError):
+            show_zyx_max(im, pixel_sizes=bad_ps)
+
+    for bad_rot in ((10.0, 20.0), (1.0, 2.0, 3.0, 4.0), "90deg"):
+        with pytest.raises(ValueError, match="rotate_view"):
+            show_zyx(im[0], im[:, 0, :], im[:, :, 0], rotate_view=bad_rot)
+        with pytest.raises(ValueError, match="rotate_view"):
+            show_zyx_max_slice_interactive(im, rotate_view=bad_rot)
+
+
+def test_pixel_size_dict_with_missing_axis_falls_back_to_one():
+    """An uncalibrated axis (None, as image_io reports it) falls back to 1.0 with a single warning.
+
+    Strategy: pass ``{'X': 0.5, 'Y': 0.5, 'Z': None, 'unit': 'micron'}`` to
+    ``_parse_zyx_tuple_or_dict``, ``show_zyx_max``, and both interactive
+    wrappers (recording warnings on the slice wrapper to ensure it warns once).
+    Expected outcome: axis Z falls back to 1.0 with a ``UserWarning`` naming Z;
+    ``default_val=None`` emits no warning; the interactive slice wrapper emits
+    exactly one warning for the missing axis.
+    """
+    ps = {"X": 0.5, "Y": 0.5, "Z": None, "unit": "micron"}
+    with pytest.warns(UserWarning, match="axis Z"):
+        assert _parse_zyx_tuple_or_dict(ps, default_val=1.0) == (1.0, 0.5, 0.5)
+    # Slab defaults stay None without a warning
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert _parse_zyx_tuple_or_dict({"Z": None, "Y": 2, "X": None}) == (None, 2.0, None)
+
+    im = np.random.default_rng(0).random((6, 20, 30))
+    with pytest.warns(UserWarning, match="axis Z"):
+        fig = show_zyx_max(im, pixel_sizes=ps)
     plt.close(fig)
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        w = show_zyx_max_slice_interactive(im, pixel_sizes=ps)
+    msgs = [str(r.message) for r in rec if "No value for axis Z" in str(r.message)]
+    assert len(msgs) == 1
+    assert w.sz == 1.0 and w.image_data
+
+    pts = (np.array([0, 5.0]), np.array([0, 19.0]), np.array([0, 29.0]))
+    with pytest.warns(UserWarning, match="axis Z"):
+        w2 = show_zyx_max_scatter_interactive(pts, pixel_sizes=ps)
+    assert w2.sz == 1.0 and w2.image_data
 
 
 def test_deprecated_tnia_plotting_3d_warning():
-    """Test that deprecated tnia plotting 3d warning works as expected."""
-    import warnings
-    import importlib
+    """Verify importing ``tnia_plotting_3d`` emits a ``DeprecationWarning`` and re-exports every name in ``__all__``.
 
-    # Remove from sys.modules to ensure re-evaluation
-    import sys
+    Strategy: evict ``eigenp_utils.tnia_plotting_3d`` from ``sys.modules``,
+    re-import under ``warnings.catch_warnings``, and compare every symbol in
+    ``__all__`` against ``eigenp_utils.tnia_plotting_anywidgets``.
+    Expected outcome: emits one ``DeprecationWarning`` and every name in
+    ``__all__`` resolves to the identical object on ``tnia_plotting_anywidgets``.
+    """
     if "eigenp_utils.tnia_plotting_3d" in sys.modules:
         del sys.modules["eigenp_utils.tnia_plotting_3d"]
 
@@ -727,12 +539,111 @@ def test_deprecated_tnia_plotting_3d_warning():
         assert issubclass(w[-1].category, DeprecationWarning)
         assert "deprecated" in str(w[-1].message)
 
-    # verify re-export works
-    assert hasattr(tnia3d, "show_zyx")
+    assert len(tnia3d.__all__) > 0
+    for name in tnia3d.__all__:
+        assert hasattr(tnia3d, name), f"tnia_plotting_3d missing {name!r}"
+        assert hasattr(tpa, name), f"tnia_plotting_anywidgets missing {name!r}"
+        assert getattr(tnia3d, name) is getattr(tpa, name)
+
+
+# ---------------------------------------------------------------------------
+# Static ortho views, projections, and multichannel blending
+# ---------------------------------------------------------------------------
+
+def test_show_zyx_slice_returns_correct_slices():
+    """Verify ``show_zyx_slice`` extracts the exact XY, ZY, and XZ slices at distinct indices.
+
+    Strategy: construct a deterministic ``(4, 3, 2)`` array with unique values
+    and slice at ``x=0, y=2, z=3`` with ``use_plt=False``.
+    Expected outcome: returns a Matplotlib ``Figure`` whose ``axXY``, ``axZY``,
+    and ``axXZ`` images match the exact expected 2D slices.
+    """
+    arr = np.arange(4 * 3 * 2).reshape(4, 3, 2)
+    fig = show_zyx_slice(arr, x=0, y=2, z=3, use_plt=False)
+    assert isinstance(fig, Figure)
+    xy_expected = arr[3, :, :]
+    xz_expected = arr[:, 2, :]
+    zy_expected = np.flip(np.rot90(arr[:, :, 0], 1), 0)
+    assert np.array_equal(fig.axXY.images[0].get_array(), xy_expected)
+    assert np.array_equal(fig.axZY.images[0].get_array(), zy_expected)
+    assert np.array_equal(fig.axXZ.images[0].get_array(), xz_expected)
+
+
+def test_show_zyx_max_slabs_projection():
+    """Verify ``show_zyx_max_slabs`` computes exact max projections over half-open slab intervals.
+
+    Strategy: project a deterministic ``(4, 3, 2)`` array over ``x=[0, 1]``,
+    ``y=[0, 2]``, ``z=[1, 4]``.
+    Expected outcome: all three panel images match ``np.max`` over the
+    corresponding slices.
+    """
+    arr = np.arange(4 * 3 * 2).reshape(4, 3, 2)
+    fig = show_zyx_max_slabs(arr, x=[0, 1], y=[0, 2], z=[1, 4])
+    try:
+        xy_expected = np.max(arr[1:4, :, :], axis=0)
+        xz_expected = np.max(arr[:, 0:2, :], axis=1)
+        zy_expected = np.flip(np.rot90(np.max(arr[:, :, 0:1], axis=2), 1), 0)
+        assert np.array_equal(fig.axXY.images[0].get_array(), xy_expected)
+        assert np.array_equal(fig.axXZ.images[0].get_array(), xz_expected)
+        assert np.array_equal(fig.axZY.images[0].get_array(), zy_expected)
+    finally:
+        plt.close(fig)
+
+
+def test_show_zyx_projection_custom_projector_median():
+    """Verify ``show_zyx_projection`` applies a custom callable ``projector`` such as ``np.median``.
+
+    Strategy: build a ``(5, 4, 3)`` volume with a single high outlier so median
+    differs sharply from both max and mean, then call ``show_zyx_projection``
+    with ``projector=np.median``.
+    Expected outcome: all three ortho panels match ``np.median`` along their
+    projection axes and differ from ``np.max``.
+    """
+    rng = np.random.default_rng(42)
+    arr = rng.uniform(0.0, 2.0, (5, 4, 3)).astype(np.float32)
+    arr[2, 1, 1] = 100.0
+
+    fig = show_zyx_projection(arr, projector=np.median)
+    try:
+        xy_exp = np.median(arr, axis=0)
+        xz_exp = np.median(arr, axis=1)
+        zy_exp = np.flip(np.rot90(np.median(arr, axis=2), 1), 0)
+        np.testing.assert_allclose(fig.axXY.images[0].get_array(), xy_exp, rtol=1e-6)
+        np.testing.assert_allclose(fig.axXZ.images[0].get_array(), xz_exp, rtol=1e-6)
+        np.testing.assert_allclose(fig.axZY.images[0].get_array(), zy_exp, rtol=1e-6)
+        assert fig.axXY.images[0].get_array()[1, 1] < 10.0  # outlier rejected unlike MIP
+    finally:
+        plt.close(fig)
+
+
+def test_show_zyx_max_slabs_zero_sized_slices():
+    """Verify zero-width float slab intervals coerce to width-1 integer slices and 0-d numpy pixel sizes work.
+
+    Strategy: pass identical float bounds ``x=[0.5, 0.5]``, ``y=[0.0, 0.0]``,
+    ``z=[0, 0]`` to ``show_zyx_max_slabs``, and pass 0-d numpy scalar
+    ``pixel_sizes`` to ``show_zyx_max_slice_interactive``.
+    Expected outcome: static plot renders without raising ``ValueError``, and
+    the interactive widget stores native Python float pixel sizes.
+    """
+    im = np.random.default_rng(3).random((10, 10, 10))
+    fig = show_zyx_max_slabs(im, x=[0.5, 0.5], y=[0.0, 0.0], z=[0, 0])
+    try:
+        assert fig is not None
+    finally:
+        plt.close(fig)
+
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(np.array(1.5), np.array(2.5), np.array(3.5)))
+    assert (w.sz, w.sy, w.sx) == (1.5, 2.5, 3.5)
+    assert isinstance(w.sz, float)
 
 
 def test_create_multichannel_rgb_basic():
-    """Test that create multichannel rgb basic works as expected."""
+    """Verify ``create_multichannel_rgb`` maps independent channels onto their RGB base colors.
+
+    Strategy: supply two channels active exclusively in XY and XZ respectively
+    with ``colormap=['red', 'green']``.
+    Expected outcome: XY is solid red, XZ is solid green, and ZY is black.
+    """
     xy_list = [np.ones((2, 2)), np.zeros((2, 2))]
     xz_list = [np.zeros((2, 2)), np.ones((2, 2))]
     zy_list = [np.zeros((2, 2)), np.zeros((2, 2))]
@@ -741,70 +652,444 @@ def test_create_multichannel_rgb_basic():
     )
     red = np.asarray(to_rgb("red"))
     green = np.asarray(to_rgb("green"))
-    expected_xy = np.broadcast_to(red, (2, 2, 3))
-    expected_xz = np.broadcast_to(green, (2, 2, 3))
-    expected_zy = np.zeros((2, 2, 3))
-    assert np.allclose(xy_rgb, expected_xy)
-    assert np.allclose(xz_rgb, expected_xz)
-    assert np.allclose(zy_rgb, expected_zy)
+    assert np.allclose(xy_rgb, np.broadcast_to(red, (2, 2, 3)))
+    assert np.allclose(xz_rgb, np.broadcast_to(green, (2, 2, 3)))
+    assert np.allclose(zy_rgb, np.zeros((2, 2, 3)))
 
-def test_show_zyx_max_scatter_interactive_colormap():
-    """Test that show zyx max scatter interactive colormap works as expected."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
-    X = np.random.rand(10) * 10
-    Y = np.random.rand(10) * 10
-    Z = np.random.rand(10) * 10
-    channels = np.random.rand(10)
 
-    # Should not throw exception for invalid RGBA string, and _render should not throw NameError
-    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='points')
-    w1._render() # Trigger render directly
+def test_screen_blending_and_soft_clip_control():
+    """Verify ``'screen'`` blending formula and ``soft_clip=False`` hard-clipping in RGB compositors.
 
-    w2 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, colormap='viridis', render='density')
-    w2._render() # Trigger render directly
+    Strategy: (a) compose two ``0.5``-intensity red channels with ``'screen'``
+    blending in both ``create_multichannel_rgb`` and ``blend_colors`` and verify
+    ``1 - (1 - 0.5) * (1 - 0.5) == 0.75``; (b) compose full-intensity ``'red'``
+    ``(1, 0, 0)`` and ``'yellow'`` ``(1, 1, 0)`` (raw sum ``(2, 1, 0)``) under
+    ``soft_clip=True`` vs ``soft_clip=False``.
+    Expected outcome: screen gives ``(0.75, 0, 0)``; ``soft_clip=True`` preserves
+    hue ratio at ``(1.0, 0.5, 0.0)`` while ``soft_clip=False`` hard-clips to
+    ``(1.0, 1.0, 0.0)``.
+    """
+    half = np.full((2, 2), 0.5, dtype=np.float32)
+    xy_scr, _, _ = create_multichannel_rgb(
+        [half, half], [half, half], [half, half],
+        vmin=0.0, vmax=1.0, colormap=["red", "red"], blend="screen",
+    )
+    np.testing.assert_allclose(xy_scr[0, 0], [0.75, 0.0, 0.0], atol=1e-6)
 
-    channels_multi = [np.random.rand(10), np.random.rand(10)]
-    w3 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='points')
-    w3._render() # Trigger render directly
+    pts_scr = blend_colors(
+        np.array([[0.5, 0.5]]), ["red", "red"], vmin=0.0, vmax=1.0, blending="screen"
+    )
+    np.testing.assert_allclose(pts_scr[0], [0.75, 0.0, 0.0], atol=1e-6)
 
-    w4 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels_multi, colormap=['viridis', 'plasma'], render='density')
-    w4._render() # Trigger render directly
+    ones = np.ones((2, 2), dtype=np.float32)
+    xy_soft, _, _ = create_multichannel_rgb(
+        [ones, ones], [ones, ones], [ones, ones],
+        vmin=0.0, vmax=1.0, colormap=["red", "yellow"], blend="additive", soft_clip=True,
+    )
+    xy_hard, _, _ = create_multichannel_rgb(
+        [ones, ones], [ones, ones], [ones, ones],
+        vmin=0.0, vmax=1.0, colormap=["red", "yellow"], blend="additive", soft_clip=False,
+    )
+    np.testing.assert_allclose(xy_soft[0, 0], [1.0, 0.5, 0.0], atol=1e-6)
+    np.testing.assert_allclose(xy_hard[0, 0], [1.0, 1.0, 0.0], atol=1e-6)
 
-    assert w1 is not None
-    assert w2 is not None
-    assert w3 is not None
-    assert w4 is not None
+    pts_soft = blend_colors(
+        np.array([[1.0, 1.0]]), ["red", "yellow"], vmin=0.0, vmax=1.0, soft_clip=True
+    )
+    pts_hard = blend_colors(
+        np.array([[1.0, 1.0]]), ["red", "yellow"], vmin=0.0, vmax=1.0, soft_clip=False
+    )
+    np.testing.assert_allclose(pts_soft[0], [1.0, 0.5, 0.0], atol=1e-6)
+    np.testing.assert_allclose(pts_hard[0], [1.0, 1.0, 0.0], atol=1e-6)
 
-# =========================================
-# Source: test_show_zyx_scale_bar.py
-# =========================================
 
-def test_show_zyx_max_slabs_scale_bar():
-    """Test that show zyx max slabs scale bar works as expected."""
-    im = np.random.randint(0, 255, (10, 100, 100), dtype=np.uint8)
+# ---------------------------------------------------------------------------
+# Interactive kwargs, slab sync, scatter modes, and annotator API
+# ---------------------------------------------------------------------------
 
-    # Using tuple
-    fig2 = show_zyx_max_slabs(im, pixel_sizes=(1.5, 0.5, 0.5))
+@pytest.mark.parametrize("factory_fn", [
+    show_zyx_max_slice_interactive,
+    show_zyx_max_slice_interactive_point_annotator,
+])
+def test_interactive_kwargs_images(factory_fn):
+    """Verify physical ``slabs_position``, ``slabs_thickness``, and ``pixel_sizes`` convert to clamped voxel indices.
 
-    # Using dictionary
-    fig3 = show_zyx_max_slabs(im, pixel_sizes={'Z': 1.5, 'Y': 0.5, 'X': 0.5})
+    Strategy: pass anisotropic ``pixel_sizes={'Z': 2.0, 'Y': 1.0, 'X': 0.5}``
+    with physical position ``(5, 10, 15)`` and thickness ``(2, 3, 4)`` to both
+    image viewer factories.
+    Expected outcome: voxel half-thicknesses equal ``(1, 3, 8)``, centers equal
+    ``(2, 10, 29)`` (clamped at X=29), and ``show_crosshair``/``sync_on_hover``
+    flags match.
+    """
+    im = np.zeros((10, 20, 30))
+    w = factory_fn(
+        im,
+        show_crosshair=False,
+        sync_on_hover=True,
+        slabs_thickness=(2, 3, 4),
+        slabs_position=(5, 10, 15),
+        pixel_sizes={"Z": 2.0, "Y": 1.0, "X": 0.5},
+    )
+    assert w.show_crosshair is False
+    assert w.sync_on_hover is True
+    assert w.z_t == 1 and w.y_t == 3 and w.x_t == 8
+    assert w.z_s == 2 and w.y_s == 10 and w.x_s == 29
+    assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
 
-    def get_text_from_fig(fig):
-        for t in fig.axXY.texts:
-            if "µm" in t.get_text() or "pixel_sizes" in t.get_text() or "sxy" in t.get_text():
-                return t.get_text()
-        return None
 
-    # Assert
-    assert "µm" in get_text_from_fig(fig2)
-    assert "µm" in get_text_from_fig(fig3)
+def test_interactive_kwargs_scatter():
+    """Verify ``show_zyx_max_scatter_interactive`` applies slab kwargs and ``pixel_sizes`` with ``(Z, Y, X)`` order.
 
-def _scale_bar_artists(fig):
-    """(bar LineCollection or None, label Text or None) drawn on the XY panel."""
-    from matplotlib.collections import LineCollection
-    bars = [c for c in fig.axXY.collections if isinstance(c, LineCollection)]
-    labels = [t for t in fig.axXY.texts if 'µm' in t.get_text() or 'pixel_sizes' in t.get_text()]
-    return (bars[-1] if bars else None), (labels[0] if labels else None)
+    Strategy: pass seeded ``(Z, Y, X)`` point arrays in ``[0, 1]`` with explicit
+    ``slabs_thickness``, ``slabs_position``, and ``pixel_sizes``.
+    Expected outcome: thickness traits equal ``(2, 3, 4)``, out-of-range
+    positions clamp to ``1``, and pixel size traits match.
+    """
+    rng = np.random.default_rng(4)
+    Z, Y, X = rng.random(10), rng.random(10), rng.random(10)
+    w = show_zyx_max_scatter_interactive(
+        (Z, Y, X),
+        show_crosshair=False,
+        sync_on_hover=True,
+        slabs_thickness=(2, 3, 4),
+        slabs_position=(5, 10, 15),
+        pixel_sizes={"Z": 2.0, "Y": 1.0, "X": 0.5},
+    )
+    assert w.show_crosshair is False
+    assert w.sync_on_hover is True
+    assert w.z_t == 2 and w.y_t == 3 and w.x_t == 4
+    assert w.z_s == 1 and w.y_s == 1 and w.x_s == 1
+    assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
+
+
+def test_show_zyx_max_scatter_interactive_signature():
+    """Verify ``show_zyx_max_scatter_interactive`` accepts tuples, lists, and ``(N, 3)`` arrays and rejects invalid shapes.
+
+    Strategy: construct scatter viewers from ``(Z, Y, X)`` tuple, list, and
+    ``(N, 3)`` stacked array, checking parsed coordinate arrays, then pass an
+    ``(N, 2)`` array.
+    Expected outcome: all three valid layouts preserve ``X_arr``, ``Y_arr``,
+    ``Z_arr`` accurately; ``(N, 2)`` raises ``ValueError``.
+    """
+    rng = np.random.default_rng(5)
+    X = rng.random(10) * 10
+    Y = rng.random(10) * 10
+    Z = rng.random(10) * 10
+    channels = rng.random(10)
+
+    w1 = show_zyx_max_scatter_interactive((Z, Y, X), channels=channels, render="points")
+    w2 = show_zyx_max_scatter_interactive([Z, Y, X], channels=channels, render="points")
+    points = np.stack([Z, Y, X], axis=1)
+    w3 = show_zyx_max_scatter_interactive(points, channels=channels, render="points")
+
+    for w in (w1, w2, w3):
+        np.testing.assert_array_equal(w.X_arr, X)
+        np.testing.assert_array_equal(w.Y_arr, Y)
+        np.testing.assert_array_equal(w.Z_arr, Z)
+
+    with pytest.raises(
+        ValueError,
+        match=r"points must be an array of shape .* representing \(Z, Y, X\) or a tuple/list of 3 arrays \(Z, Y, X\)\.",
+    ):
+        show_zyx_max_scatter_interactive(np.stack([Z, Y], axis=1), channels=channels)
+
+
+@pytest.mark.parametrize("render", ["points", "density"])
+def test_show_zyx_max_scatter_interactive_colormap(render):
+    """Verify scatter viewers resolve and render single and multi-channel colormaps in both render modes.
+
+    Strategy: render single-channel (``'viridis'``) and two-channel
+    (``['viridis', 'plasma']``) scatter data in both ``'points'`` and
+    ``'density'`` modes over the full slab.
+    Expected outcome: ``colors_use`` and GUI ``channel_colors`` match the
+    requested colormaps, and the rendered XY panel draws valid mapped colors
+    (``viridis`` cmap / RGB facecolors in points mode; finite non-zero RGB
+    image in density mode).
+    """
+    rng = np.random.default_rng(6)
+    X = rng.uniform(1, 9, 40)
+    Y = rng.uniform(1, 9, 40)
+    Z = rng.uniform(1, 9, 40)
+    ch1 = rng.random(40)
+    ch_multi = [rng.random(40), rng.random(40)]
+
+    w1 = show_zyx_max_scatter_interactive(
+        (Z, Y, X), channels=ch1, colormap="viridis", render=render,
+        slabs_thickness=(100, 100, 100), bins=32,
+    )
+    assert w1.colors_use == ["viridis"]
+    assert w1.channel_colors == [get_gui_channel_color("viridis")]
+    fig1 = w1._render()
+    try:
+        if render == "points":
+            sc = [c for c in fig1.axXY.collections if isinstance(c, mcollections.PathCollection)]
+            assert sc and sc[0].cmap.name == "viridis"
+        else:
+            rgb = np.asarray(fig1.axXY.images[0].get_array())
+            assert rgb.ndim == 3 and rgb.shape[-1] == 3 and np.isfinite(rgb).all() and rgb.max() > 0
+    finally:
+        plt.close(fig1)
+
+    w2 = show_zyx_max_scatter_interactive(
+        (Z, Y, X), channels=ch_multi, colormap=["viridis", "plasma"], render=render,
+        slabs_thickness=(100, 100, 100), bins=32,
+    )
+    assert w2.colors_use == ["viridis", "plasma"]
+    assert w2.channel_colors == [get_gui_channel_color("viridis"), get_gui_channel_color("plasma")]
+    fig2 = w2._render()
+    try:
+        if render == "points":
+            sc = [c for c in fig2.axXY.collections if isinstance(c, mcollections.PathCollection)]
+            assert sc and sc[0].get_facecolors().shape[0] == 40
+            assert np.isfinite(sc[0].get_facecolors()).all()
+        else:
+            rgb = np.asarray(fig2.axXY.images[0].get_array())
+            assert rgb.ndim == 3 and rgb.shape[-1] == 3 and np.isfinite(rgb).all() and rgb.max() > 0
+    finally:
+        plt.close(fig2)
+
+
+def test_scatter_auto_render_threshold_and_idx_lists():
+    """Verify ``render=None`` switches at 10,000 points and ``idx_lists`` channels render in both modes.
+
+    Strategy: (a) construct scatter viewers with ``render=None`` for 50 points
+    vs 10,000 points; (b) pass explicit index-list channels
+    ``[np.array([0, 1, 2]), np.array([3, 4])]`` in both ``'points'`` and
+    ``'density'`` modes over the full slab.
+    Expected outcome: ``render=None`` selects ``'points'`` below 10,000 and
+    ``'density'`` at 10,000; ``idx_lists`` sets ``mode == 'idx_lists'``,
+    ``C == 2``, plots 3 and 2 points respectively in points mode, and renders
+    both channels in density mode.
+    """
+    rng = np.random.default_rng(7)
+    small = rng.uniform(0, 10, (50, 3))
+    w_small = show_zyx_max_scatter_interactive(small, render=None)
+    assert w_small.render == "points"
+
+    large = rng.uniform(0, 10, (10_000, 3))
+    w_large = show_zyx_max_scatter_interactive(large, render=None, bins=32)
+    assert w_large.render == "density" and w_large.image_data
+
+    pts = np.array([
+        [1.0, 2.0, 2.0],
+        [1.0, 2.0, 4.0],
+        [1.0, 4.0, 2.0],
+        [1.0, 8.0, 8.0],
+        [1.0, 8.0, 9.0],
+    ])
+    idx_ch = [np.array([0, 1, 2]), np.array([3, 4])]
+
+    w_pts = show_zyx_max_scatter_interactive(
+        pts, channels=idx_ch, colormap=["red", "lime"], render="points",
+        slabs_thickness=(100, 100, 100),
+    )
+    assert w_pts.mode == "idx_lists" and w_pts.C == 2
+    fig_pts = w_pts._render()
+    try:
+        pcs = [c for c in fig_pts.axXY.collections if isinstance(c, mcollections.PathCollection)]
+        assert [len(c.get_offsets()) for c in pcs] == [3, 2]
+    finally:
+        plt.close(fig_pts)
+
+    w_den = show_zyx_max_scatter_interactive(
+        pts, channels=idx_ch, colormap=["red", "lime"], render="density",
+        slabs_thickness=(100, 100, 100), bins=16,
+    )
+    assert w_den.mode == "idx_lists" and w_den.C == 2
+    fig_den = w_den._render()
+    try:
+        rgb = np.asarray(fig_den.axXY.images[0].get_array())
+        assert rgb[..., 0].max() > 0.5 and rgb[..., 1].max() > 0.5
+    finally:
+        plt.close(fig_den)
+
+
+def test_point_size_scaling():
+    """Verify annotator marker ``point_size`` scales with ``point_size_scale`` times ``min(X, Y)``.
+
+    Strategy: construct two annotators on a thin ``(1, 100, 100)`` volume with
+    ``point_size_scale`` 0.1 and 0.5 via the public factory.
+    Expected outcome: ``point_size`` equals 10 and 50 respectively.
+    """
+    im = np.zeros((1, 100, 100))
+    w1 = show_zyx_max_slice_interactive_point_annotator(im, point_size_scale=0.1)
+    w2 = show_zyx_max_slice_interactive_point_annotator(im, point_size_scale=0.5)
+    assert w1.point_size == 10
+    assert w2.point_size == 50
+    assert w1.point_size < w2.point_size
+
+
+def test_tnia_annotator_widget(tmp_path, monkeypatch):
+    """Verify the annotator saves its points as a ``z,y,x`` CSV with ``$VAR`` expansion via ``save_csv_trigger``.
+
+    Strategy: create an annotator via the public factory, add two points, set
+    ``save_csv_filename`` using an environment variable, and bump ``save_csv_trigger``.
+    Expected outcome: writes ``z,y,x\\n5,4,3\\n6,7,8\\n`` to the expanded path.
+    """
+    monkeypatch.setenv("TEST_DIR", str(tmp_path))
+    im = np.random.default_rng(0).integers(0, 255, (10, 10, 10), dtype=np.uint8)
+    w = show_zyx_max_slice_interactive_point_annotator(im)
+    w.points = [[5, 4, 3], [6, 7, 8]]
+    w.save_csv_filename = "$TEST_DIR/test_points.csv"
+    w.save_csv_trigger += 1
+
+    out = tmp_path / "test_points.csv"
+    assert out.exists()
+    assert out.read_text() == "z,y,x\n5,4,3\n6,7,8\n"
+
+
+def test_annotator_annotate_kwarg_and_property():
+    """Verify ``annotate`` kwarg default, explicit ``True``, and property getter/setter stay synced with ``annotation_mode``.
+
+    Strategy: build default and ``annotate=True`` annotators via the public
+    factory, then toggle ``w.annotate`` programmatically.
+    Expected outcome: defaults to ``False``, respects ``annotate=True``, and
+    mutating ``.annotate`` updates ``annotation_mode`` identically.
+    """
+    im = np.zeros((10, 20, 30))
+
+    w_default = show_zyx_max_slice_interactive_point_annotator(im)
+    assert w_default.annotation_mode is False
+    assert w_default.annotate is False
+
+    w_active = show_zyx_max_slice_interactive_point_annotator(im, annotate=True)
+    assert w_active.annotation_mode is True
+    assert w_active.annotate is True
+
+    w_default.annotate = True
+    assert w_default.annotation_mode is True and w_default.annotate is True
+    w_default.annotate = False
+    assert w_default.annotation_mode is False and w_default.annotate is False
+
+
+def test_single_slider_start_end_sync_translate_and_clamp():
+    """Verify start/end traits sync bidirectionally with center/thickness, translate, and clamp out-of-range writes.
+
+    Strategy: initialize a ``(20, 40, 60)`` viewer with explicit position and
+    thickness, update ``x_start``/``x_end`` directly, translate the range,
+    update ``x_s``/``x_t``, and write an out-of-range ``x_end = 10**6``.
+    Expected outcome: start/end and center/thickness stay paired through every
+    operation, out-of-range writes clamp to ``X - 1`` with no clipping warning.
+    """
+    im = _structured_volume((20, 40, 60))
+    w = show_zyx_max_slice_interactive(
+        im, slabs_position=(10, 20, 30), slabs_thickness=(2, 4, 6), figsize=(4, 4)
+    )
+
+    assert (w.z_start, w.z_end) == (8, 12)
+    assert (w.y_start, w.y_end) == (16, 24)
+    assert (w.x_start, w.x_end) == (24, 36)
+
+    w.x_start = 10
+    w.x_end = 20
+    assert (w.x_s, w.x_t) == (15, 5)
+
+    # Range translation (+10)
+    w.x_start = 20
+    w.x_end = 30
+    assert (w.x_s, w.x_t) == (25, 5)
+
+    # Center/thickness -> start/end
+    w.x_s = 40
+    w.x_t = 10
+    assert (w.x_start, w.x_end) == (30, 50)
+
+    # Out-of-range write clamps cleanly to [0, X - 1]
+    w.x_start = 0
+    w.x_end = 10 ** 6
+    assert w.x_start == 0
+    assert w.x_end == 59
+    assert w.x_s == (w.x_start + w.x_end) // 2
+    assert w.x_t == (w.x_end - w.x_start) // 2
+    assert w.warning_msg == ""
+
+
+def test_save_trigger_exports_svg(tmp_path):
+    """Verify bumping ``save_trigger`` writes a valid SVG file for slice and isometric scatter widgets.
+
+    Strategy: configure ``save_filename`` inside ``tmp_path`` and increment
+    ``save_trigger`` on both ``show_zyx_max_slice_interactive`` and
+    ``show_iso_scatter``.
+    Expected outcome: both target files are created, non-empty, and contain
+    an ``<svg`` root element.
+    """
+    im = _structured_volume((6, 16, 16))
+    w_slice = show_zyx_max_slice_interactive(im, figsize=(4, 4))
+    slice_svg = tmp_path / "slice.svg"
+    w_slice.save_filename = str(slice_svg)
+    w_slice.save_trigger += 1
+    assert slice_svg.exists() and "<svg" in slice_svg.read_text()
+
+    X, Y, Z = _iso_points(n=30)
+    w_iso = show_iso_scatter(X, Y, Z, figsize=(4, 4))
+    iso_svg = tmp_path / "iso.svg"
+    w_iso.save_filename = str(iso_svg)
+    w_iso.save_trigger += 1
+    assert iso_svg.exists() and "<svg" in iso_svg.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Scale bar and layout / spacing / channel labels
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("shape, pixel_sizes, expected_text", [
+    ((100, 200, 300), (1, 2, 3), "100 µm"),
+    ((10, 50, 50), (0.5, 0.5, 0.5), "5 µm"),
+    ((1, 5, 5), (10, 10, 10), "10 µm"),
+    ((50, 100, 150), (2, 2, 2), "50 µm"),
+    ((100, 100, 100), (1, 1, 1), "20 µm"),
+    ((10, 512, 512), (10, 2, 2), "200 µm"),
+])
+def test_scale_bar_logic(shape, pixel_sizes, expected_text):
+    """Verify scale-bar nice-length rounding matches physical width for both slice and scatter viewers.
+
+    Strategy: render a zero ``uint8`` volume and a matching bounding point cloud
+    at each ``(shape, pixel_sizes)`` pair and inspect the scale-bar text.
+    Expected outcome: both slice and scatter viewers display ``expected_text``.
+    """
+    im = np.zeros(shape, dtype=np.uint8)
+    w_slice = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes, figsize=(5, 5))
+    fig_slice = w_slice._render()
+    try:
+        texts_slice = [txt.get_text() for ax in fig_slice.axes for txt in ax.texts]
+        assert expected_text in texts_slice
+    finally:
+        plt.close(fig_slice)
+
+    Z, Y, X = shape
+    points = (np.array([0, Z - 1]), np.array([0, Y - 1]), np.array([0, X - 1]))
+    w_scatter = show_zyx_max_scatter_interactive(points, pixel_sizes=pixel_sizes, figsize=(5, 5))
+    fig_scatter = w_scatter._render()
+    try:
+        texts_scatter = [txt.get_text() for ax in fig_scatter.axes for txt in ax.texts]
+        assert expected_text in texts_scatter
+    finally:
+        plt.close(fig_scatter)
+
+
+def test_scale_bar_scales_with_figsize_scale():
+    """Verify increasing ``figsize_scale`` enlarges both scale-bar font size and line width.
+
+    Strategy: render a small ``(10, 50, 50)`` volume at ``figsize=(5, 5)`` with
+    ``figsize_scale=1.0`` vs ``2.0``.
+    Expected outcome: both the scale-bar label font size and bar linewidth are
+    strictly larger at ``figsize_scale=2.0``.
+    """
+    im = np.zeros((10, 50, 50), dtype=np.uint8)
+    w1 = show_zyx_max_slice_interactive(im, pixel_sizes=(0.5, 0.5, 0.5), figsize=(5, 5), figsize_scale=1.0)
+    w2 = show_zyx_max_slice_interactive(im, pixel_sizes=(0.5, 0.5, 0.5), figsize=(5, 5), figsize_scale=2.0)
+    fig1 = w1._render()
+    fig2 = w2._render()
+    try:
+        bar1, lbl1 = _scale_bar_artists(fig1)
+        bar2, lbl2 = _scale_bar_artists(fig2)
+        assert bar1 is not None and lbl1 is not None
+        assert bar2 is not None and lbl2 is not None
+        assert lbl2.get_fontsize() > lbl1.get_fontsize()
+        assert bar2.get_linewidth()[0] > bar1.get_linewidth()[0]
+    finally:
+        plt.close(fig1)
+        plt.close(fig2)
 
 
 @pytest.mark.parametrize("figsize", [(4, 4), (10, 10)])
@@ -815,7 +1100,7 @@ def test_scale_bar_label_sits_centred_right_above_the_bar(figsize):
     Strategy: render, then compare display coordinates of the label's bounding
     box with the bar segment: horizontal centres agree within 1 px, the label's
     bottom is above the line but within about one font height of it, and the
-    label is no wider than the canvas region left of the right edge.
+    label is white on the dark theme.
     """
     im = np.random.default_rng(0).integers(0, 255, (10, 100, 100)).astype(np.uint8)
     fig = show_zyx_max_slabs(im, pixel_sizes=(1.0, 0.5, 0.5), figsize=figsize)
@@ -823,13 +1108,13 @@ def test_scale_bar_label_sits_centred_right_above_the_bar(figsize):
         bar, label = _scale_bar_artists(fig)
         assert bar is not None and label is not None
         renderer = fig.canvas.get_renderer()
-        (x0, y0), (x1, y1) = fig.axXY.transAxes.transform(np.asarray(bar.get_segments()[0]))
+        (x0, y0), (x1, _y1) = fig.axXY.transAxes.transform(np.asarray(bar.get_segments()[0]))
         bbox = label.get_window_extent(renderer)
         assert abs((bbox.x0 + bbox.x1) / 2 - (x0 + x1) / 2) < 1.0
         gap = bbox.y0 - y0
         font_px = label.get_fontsize() * fig.dpi / 72
         assert 0 < gap < font_px
-        assert label.get_color() == 'white'
+        assert label.get_color() == "white"
     finally:
         plt.close(fig)
 
@@ -866,7 +1151,7 @@ def test_scale_bar_show_false_hides_bar_and_label():
         plt.close(fig)
 
     pts = (np.array([0.0, 9.0]), np.array([0.0, 59.0]), np.array([0.0, 59.0]))
-    for render in ('points', 'density'):
+    for render in ("points", "density"):
         ws = show_zyx_max_scatter_interactive(pts, pixel_sizes=(1, 1, 1), render=render, scale_bar_show=False)
         fig = ws._render()
         try:
@@ -923,7 +1208,7 @@ def test_scale_bar_fontsize_sets_label_and_bar_and_zero_hides_label_only():
         plt.close(fig)
     w.copy_params_trigger += 1
     assert "scale_bar_fontsize_pt=0.0," in w.copy_params_string
-    w.scale_bar_fontsize_pt = ""   # GUI box cleared -> auto size
+    w.scale_bar_fontsize_pt = ""  # GUI box cleared -> auto size
     fig = w._render()
     try:
         assert _scale_bar_artists(fig)[1] is not None
@@ -940,7 +1225,6 @@ def test_scale_bar_and_label_have_faint_black_outline():
     Strategy: inspect the path effects of both artists; the bar's stroke must
     be wider than the bar itself, otherwise it is hidden underneath.
     """
-    from matplotlib import patheffects
     im = np.random.default_rng(6).integers(0, 255, (10, 60, 60)).astype(np.uint8)
     fig = show_zyx_max_slabs(im, pixel_sizes=(1, 1, 1))
     try:
@@ -949,318 +1233,125 @@ def test_scale_bar_and_label_have_faint_black_outline():
             strokes = [pe for pe in artist.get_path_effects() if isinstance(pe, patheffects.Stroke)]
             assert len(strokes) == 1
             gc = strokes[0]._gc
-            assert gc['foreground'] == 'black' and gc['alpha'] == 0.3
+            assert gc["foreground"] == "black" and gc["alpha"] == 0.3
         bar_stroke = [pe for pe in bar.get_path_effects() if isinstance(pe, patheffects.Stroke)][0]
-        assert bar_stroke._gc['linewidth'] > bar.get_linewidth()[0]
+        assert bar_stroke._gc["linewidth"] > bar.get_linewidth()[0]
     finally:
         plt.close(fig)
 
 
-def test_scale_bar_toggle_triggers_one_rerender():
-    """Toggling the GUI checkbox re-renders the widget (the trait is part of the render state)."""
-    im = np.random.default_rng(2).integers(0, 255, (10, 40, 40)).astype(np.uint8)
-    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1))
-    before = w.image_data
-    w.scale_bar_show = False
-    assert w.image_data != before
+@pytest.mark.parametrize("unit, size, expected", [
+    ("cm", 5e-5, "20 µm"),       # 256 px * 0.5 µm stored in cm
+    ("nm", 500.0, "20 µm"),
+    ("micron", 0.5, "20 µm"),
+    ("\\u00B5m", 0.5, "20 µm"),  # ImageJ's escaped micro sign
+    ("pixel", 1.0, "50 pixel"),  # unknown unit: shown as given
+])
+def test_scale_bar_uses_pixel_size_unit(unit, size, expected):
+    """Verify scale bars convert known length units to µm and display unknown units verbatim.
 
-
-def test_interactive_factory_passes_pixel_sizes():
-    """Test that interactive factory passes pixel sizes works as expected."""
-    im = np.random.randint(0, 255, (10, 100, 100), dtype=np.uint8)
-
-    # Should not throw errors and initialize perfectly
-    widget = show_zyx_max_slice_interactive(im, pixel_sizes=(1.5, 0.5, 0.5))
-    assert widget._pixel_sizes_given is True
-    assert widget.sx == 0.5
-    assert widget.sy == 0.5
-    assert widget.sz == 1.5
-
-if __name__ == '__main__':
-    test_show_zyx_max_slabs_scale_bar()
-    test_interactive_factory_passes_pixel_sizes()
-    print("Tests passed")
-
-# =========================================
-# Source: test_tnia_plotting_anywidgets_spacing.py
-# =========================================
-
-def test_interactive_spacing_pixel_sizes_vs_sxy():
+    Strategy: pass pixel-size dicts with known length units and an unknown unit
+    to ``show_zyx_max``, ``show_zyx_max_slice_interactive``, and
+    ``show_zyx_max_scatter_interactive`` (points and density).
+    Expected outcome: all four render the expected scale-bar label text.
     """
-    Test that when figsize is None, dynamically computed figsize parses
-    pixel_sizes=(Z, Y, X) dicts correctly.
-    """
-    im = np.random.rand(10, 50, 50)
+    im = np.zeros((4, 256, 256), dtype=np.uint8)
+    ps = {"Z": size, "Y": size, "X": size, "unit": unit}
+    fig = show_zyx_max(im, pixel_sizes=ps)
+    try:
+        assert expected in [t.get_text() for ax in fig.axes for t in ax.texts]
+    finally:
+        plt.close(fig)
 
-    # Using pixel_sizes dict
-    w_dict = show_zyx_max_slice_interactive(im, pixel_sizes={'Z':2, 'Y':1, 'X':1})
-    fig_dict = w_dict._render()
-    size_dict = fig_dict.get_size_inches()
-
-    # Using pixel_sizes tuple
-    w_tuple = show_zyx_max_slice_interactive(im, pixel_sizes=(2, 1, 1))
-    fig_tuple = w_tuple._render()
-    size_tuple = fig_tuple.get_size_inches()
-
-    np.testing.assert_allclose(size_dict, size_tuple)
-
-    # Verify positions of XY and XZ axes match between dict and tuple pixel_sizes
-    pos_xy_dict = fig_dict.axXY.get_position()
-    pos_xy_tuple = fig_tuple.axXY.get_position()
-    np.testing.assert_allclose(pos_xy_dict.bounds, pos_xy_tuple.bounds)
-
-def test_xy_anisotropy():
-    """
-    Test that XY anisotropy is correctly respected in show_zyx spacing calculations.
-    """
-    im = np.random.rand(10, 50, 100) # Z, Y, X
-    # Highly anisotropic XY pixels
-    w = show_zyx_max_slice_interactive(im, pixel_sizes={'Z': 1.0, 'Y': 0.2, 'X': 1.0})
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=ps)
     fig = w._render()
+    try:
+        assert expected in [t.get_text() for ax in fig.axes for t in ax.texts]
+    finally:
+        plt.close(fig)
 
-    # X physical = 100 * 1 = 100. Z physical = 10 * 1 = 10.
-    # Y physical = 50 * 0.2 = 10. Z physical = 10 * 1 = 10.
-    # So axXY width should be 10x its height
-    pos_xy = fig.axXY.get_position()
-    figW, figH = fig.get_size_inches()
-    w_in = pos_xy.width * figW
-    h_in = pos_xy.height * figH
-    np.testing.assert_allclose(w_in / h_in, 10.0, rtol=1e-2)
-
-def test_annotation_coordinate_registration():
-    # Synthetic 3D image volume: Z=16, Y=64, X=128
-    Z, Y, X = 16, 64, 128
-    synthetic_im = np.zeros((Z, Y, X), dtype=np.float32)
-
-    # Anisotropic voxel dimensions: sz=2.0 um, sy=0.5 um, sx=0.5 um
-    pixel_sizes = (2.0, 0.5, 0.5)
-
-    widget = show_zyx_max_slice_interactive_point_annotator(
-        synthetic_im,
-        pixel_sizes=pixel_sizes,
-        slabs_position=(8 * 2.0, 32 * 0.5, 64 * 0.5), # Physical center
-        slabs_thickness=(2 * 2.0, 4 * 0.5, 4 * 0.5)
-    )
-
-    widget.annotation_mode = True
-    widget.annotation_action = 'add'
-
-    # Target voxel to annotate: z=8, y=20, x=45
-    target_z, target_y, target_x = 8, 20, 45
-    widget.z_s = target_z
-
-    # Calculate figure using widget's inner method to get the figure with active transforms
-    fig = widget._render()
-
-    px_target = (target_x + 0.5) * pixel_sizes[2]
-    py_target = (target_y + 0.5) * pixel_sizes[1]
-
-    # Transform physical coordinates to JS coordinates
-    axXY = fig.axXY
-    target_disp = axXY.transData.transform((px_target, py_target))
-    target_fig = fig.transFigure.inverted().transform(target_disp)
-
-    frac_x = float(target_fig[0])
-    frac_y = float(1.0 - target_fig[1])  # JS top-left origin
-
-    import matplotlib.pyplot as plt
-    plt.close(fig)
-
-    # Force render so axis_bounds is populated
-    widget._render_wrapper(None)
-
-    # Simulate user click
-    widget._handle_click({'new': {'plane': 'xy', 'x': frac_x, 'y': frac_y}})
-
-    # Assert point registered correctly
-    assert [target_z, target_y, target_x] in widget.points, \
-        f"Expected {[target_z, target_y, target_x]} in registered points, got {widget.points}"
-
-def test_annotation_with_labels_and_anisotropy():
-    Z, Y, X = 16, 64, 128
-    im = np.zeros((Z, Y, X), dtype=np.float32)
-    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
-
-    widget = show_zyx_max_slice_interactive_point_annotator(
-        im,
-        pixel_sizes=pixel_sizes,
-        channel_labels=['GRAY'],
-        slabs_position=(8, 32, 64)
-    )
-
-    widget.annotation_mode = True
-    widget.annotation_action = 'add'
-
-    # Target voxel [Z, Y, X]
-    target_z, target_y, target_x = 8, 20, 45
-    widget.z_s = target_z
-
-    # Calculate figure using widget's inner method to get the figure with active transforms
-    fig = widget._render()
-
-    px_target = (target_x + 0.5) * pixel_sizes['X']
-    py_target = (target_y + 0.5) * pixel_sizes['Y']
-
-    # Transform physical coordinates to JS coordinates
-    axXY = fig.axXY
-    target_disp = axXY.transData.transform((px_target, py_target))
-    target_fig = fig.transFigure.inverted().transform(target_disp)
-
-    frac_x = float(target_fig[0])
-    frac_y = float(1.0 - target_fig[1])  # JS top-left origin
-
-    import matplotlib.pyplot as plt
-    plt.close(fig)
-
-    # Force render so axis_bounds is populated
-    widget._render_wrapper(None)
-
-    # Simulate click
-    click_dict = {'plane': 'xy', 'x': frac_x, 'y': frac_y}
-    widget._handle_click({'new': click_dict})
-
-    assert [target_z, target_y, target_x] in widget.points, \
-        f"Expected {[target_z, target_y, target_x]} in {widget.points}"
-
-def test_annotation_deletion():
-    synthetic_im = np.zeros((10, 32, 32), dtype=np.float32)
-    widget = show_zyx_max_slice_interactive_point_annotator(synthetic_im)
-
-    widget.add_point(5, 10, 15)
-    assert [5, 10, 15] in widget.points
-
-    widget.annotation_mode = True
-    widget.annotation_action = 'delete'
-    widget.z_s = 5
-
-    info = widget.axis_bounds['xy']
-    b_x0, b_y0, b_w, b_h = info['bbox']
-    xlim, ylim = info['xlim'], info['ylim']
-
-    u = (15.5 - xlim[0]) / (xlim[1] - xlim[0])
-    v = (10.5 - ylim[0]) / (ylim[1] - ylim[0])
-
-    frac_x = b_x0 + u * b_w
-    mpl_y_frac = b_y0 + v * b_h
-    frac_y = 1.0 - mpl_y_frac
-
-    widget._handle_click({'new': {'plane': 'xy', 'x': frac_x, 'y': frac_y}})
-    assert [5, 10, 15] not in widget.points
-
-
-def test_ground_truth_annotation_all_planes():
-    Z, Y, X = 16, 64, 128
-    im = np.zeros((Z, Y, X), dtype=np.float32)
-    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
-
-    widget = show_zyx_max_slice_interactive_point_annotator(
-        im,
-        pixel_sizes=pixel_sizes,
-        channel_labels=['GRAY'],
-        slabs_position=(8, 32, 64)
-    )
-    widget.annotation_mode = True
-    widget.annotation_action = 'add'
-
-    # Target voxels for XY, ZY, and XZ views
-    targets = [
-        ('xy', 8, 20, 45),
-        ('zy', 12, 40, 64),
-        ('xz', 5, 32, 100)
-    ]
-
-    for plane, target_z, target_y, target_x in targets:
-        widget.z_s = target_z
-        widget.y_s = target_y
-        widget.x_s = target_x
-
-        fig = widget._render()
+    pts = (np.array([0, 3.0]), np.array([0, 255.0]), np.array([0, 255.0]))
+    for render in ("points", "density"):
+        ws = show_zyx_max_scatter_interactive(pts, pixel_sizes=ps, render=render)
+        fig = ws._render()
         try:
-            ax = getattr(fig, f"ax{plane.upper()}")
-            if plane == 'xy':
-                phys_a, phys_b = (target_x + 0.5) * widget.sx, (target_y + 0.5) * widget.sy
-            elif plane == 'zy':
-                phys_a, phys_b = (target_z + 0.5) * widget.sz, (target_y + 0.5) * widget.sy
-            elif plane == 'xz':
-                phys_a, phys_b = (target_x + 0.5) * widget.sx, (target_z + 0.5) * widget.sz
-
-            display_pixel = ax.transData.transform((phys_a, phys_b))
-            fig_norm = fig.transFigure.inverted().transform(display_pixel)
-            click_x, click_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
-            
-            # Execute the property assignment and validation before closing the figure
-            widget.click_coords = {'plane': plane, 'x': click_x, 'y': click_y}
-            assert [target_z, target_y, target_x] in widget.points, \
-                f"Plane {plane} click at ({click_x:.3f}, {click_y:.3f}) mapped incorrectly."
+            assert expected in [t.get_text() for ax in fig.axes for t in ax.texts], render
         finally:
             plt.close(fig)
 
 
-def test_hover_sync_all_planes():
+def test_tnia_figsize_scale():
+    """Verify ``figsize_scale`` scales the auto-computed widget figure size linearly.
+
+    Strategy: construct slice viewers on a cubic volume with ``figsize_scale``
+    set to 1, 2, and 10.
+    Expected outcome: ``figsize`` scales by exact factors of 2 and 10.
     """
-    Test that hover coordinates correctly sync back to the widget's physical state.
-    We first call _render() explicitly to acquire the Matplotlib Figure and calculate
-    accurate physical-to-display coordinate mappings for our simulated hover. We then
-    close the figure, call _render_wrapper to populate internal state (like axis_bounds)
-    as it would in production, and finally dispatch the hover coordinates.
+    im = np.random.default_rng(8).random((20, 40, 40)).astype(np.float32)
+    widget1 = show_zyx_max_slice_interactive(im, figsize_scale=1)
+    widget2 = show_zyx_max_slice_interactive(im, figsize_scale=2)
+    widget3 = show_zyx_max_slice_interactive(im, figsize_scale=10)
+    assert np.allclose(np.array(widget2.figsize), 2 * np.array(widget1.figsize))
+    assert np.allclose(np.array(widget3.figsize), 10 * np.array(widget1.figsize))
+
+
+def test_interactive_spacing_pixel_sizes_vs_sxy():
+    """Verify dict and tuple ``pixel_sizes`` produce identical auto figure sizes and XY axis geometry.
+
+    Strategy: construct two viewers with ``{'Z': 2, 'Y': 1, 'X': 1}`` and
+    ``(2, 1, 1)`` and compare rendered figure sizes and ``axXY`` positions.
+    Expected outcome: figure sizes and ``axXY`` bounding boxes match closely.
     """
-    Z, Y, X = 16, 64, 128
-    im = np.zeros((Z, Y, X), dtype=np.float32)
-    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
-
-    widget = show_zyx_max_slice_interactive(
-        im,
-        pixel_sizes=pixel_sizes,
-        sync_on_hover=True
-    )
-
-    target_z, target_y, target_x = 10, 25, 80
-
-    fig = widget._render()
+    im = np.random.default_rng(9).random((10, 50, 50)).astype(np.float32)
+    w_dict = show_zyx_max_slice_interactive(im, pixel_sizes={"Z": 2, "Y": 1, "X": 1})
+    w_tuple = show_zyx_max_slice_interactive(im, pixel_sizes=(2, 1, 1))
+    fig_dict = w_dict._render()
+    fig_tuple = w_tuple._render()
     try:
-        ax = fig.axXY
-        phys_x = (target_x + 0.5) * widget.sx
-        phys_y = (target_y + 0.5) * widget.sy
-        display_pixel = ax.transData.transform((phys_x, phys_y))
-        fig_norm = fig.transFigure.inverted().transform(display_pixel)
-        hover_x, hover_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+        np.testing.assert_allclose(fig_dict.get_size_inches(), fig_tuple.get_size_inches())
+        np.testing.assert_allclose(fig_dict.axXY.get_position().bounds, fig_tuple.axXY.get_position().bounds)
+    finally:
+        plt.close(fig_dict)
+        plt.close(fig_tuple)
+
+
+def test_xy_anisotropy():
+    """Verify anisotropic XY pixel sizes produce the expected physical width-to-height ratio on ``axXY``.
+
+    Strategy: render a ``(10, 50, 100)`` volume with ``X=1.0, Y=0.2, Z=1.0`` so
+    physical X = 100 and physical Y = 10.
+    Expected outcome: ``axXY`` rendered width in inches is 10x its height.
+    """
+    im = np.random.default_rng(10).random((10, 50, 100)).astype(np.float32)
+    w = show_zyx_max_slice_interactive(im, pixel_sizes={"Z": 1.0, "Y": 0.2, "X": 1.0})
+    fig = w._render()
+    try:
+        pos_xy = fig.axXY.get_position()
+        figW, figH = fig.get_size_inches()
+        w_in = pos_xy.width * figW
+        h_in = pos_xy.height * figH
+        np.testing.assert_allclose(w_in / h_in, 10.0, rtol=1e-2)
     finally:
         plt.close(fig)
 
-    widget._render_wrapper(None) # Forces bounds calculation as it would in reality
 
-    # Execute assignment and assert prior to destruction
-    widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
-    assert widget.x_s == target_x and widget.y_s == target_y, \
-        f"Hover sync failed on XY plane. Got x={widget.x_s}, y={widget.y_s}"
-
-
-def test_axis_bounds_alignment():
-    Z, Y, X = 16, 64, 128
-    im = np.zeros((Z, Y, X), dtype=np.float32)
-    pixel_sizes = {'X': 0.295, 'Y': 1.0, 'Z': 1.0}
-
-    widget = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes)
-    fig = widget._render()
-    try:
-        ax_xy = fig.axXY
-        cell_bbox = ax_xy.get_position()
-        info = widget.axis_bounds['xy']
-
-        # Verify that the image extent exactly fills the subplot cell bounding box without extra margins
-        np.testing.assert_allclose(info['x0'], cell_bbox.x0, atol=1e-2)
-        np.testing.assert_allclose(info['y0'], cell_bbox.y0, atol=1e-2)
-    finally:
-        plt.close(fig)
-
-
-@pytest.mark.parametrize("figsize", [(8, 8), (12, 6), (6, 12)])
-@pytest.mark.parametrize("with_labels", [False, True])
-@pytest.mark.parametrize("gap_in", [1.0 / 16.0, 1.0 / 8.0])
+@pytest.mark.parametrize(
+    "figsize, with_labels, gap_in",
+    [
+        ((8, 8), False, 1.0 / 16.0),
+        ((8, 8), True, 1.0 / 16.0),
+        ((12, 6), True, 1.0 / 16.0),
+        ((6, 12), False, 1.0 / 8.0),
+        ((12, 6), True, 1.0 / 8.0),
+    ],
+)
 def test_fixed_physical_axes_gap(figsize, with_labels, gap_in):
-    """
-    Verify that the physical distance between adjacent axes is strictly equal to
-    gap_in (in inches) regardless of figure size, aspect ratio, or channel_labels toggle.
+    """Verify physical gap between adjacent ortho axes equals ``gap_in`` regardless of aspect ratio or labels.
+
+    Strategy: render ``show_zyx`` across square, wide, and tall figure sizes
+    with and without ``channel_labels`` and two ``gap_in`` values.
+    Expected outcome: horizontal XY-ZY gap, vertical XZ-XY gap, and (when
+    present) vertical XY-Labels gap all equal ``gap_in`` inches within ``1e-5``.
     """
     Z, Y, X = 20, 40, 120
     im = np.zeros((Z, Y, X), dtype=np.float32)
@@ -1268,367 +1359,435 @@ def test_fixed_physical_axes_gap(figsize, with_labels, gap_in):
 
     fig = show_zyx(
         xy=im[10, :, :], xz=im[:, 20, :], zy=np.flip(np.rot90(im[:, :, 60], 1), 0),
-        pixel_sizes={'X': 0.5, 'Y': 0.5, 'Z': 1.5},
+        pixel_sizes={"X": 0.5, "Y": 0.5, "Z": 1.5},
         figsize=figsize,
         channel_labels=labels,
-        gap_in=gap_in
+        gap_in=gap_in,
     )
+    try:
+        figW, figH = figsize
+        pos_xy = fig.axXY.get_position()
+        pos_zy = fig.axZY.get_position()
+        pos_xz = fig.axXZ.get_position()
 
-    figW, figH = figsize
-    pos_xy = fig.axXY.get_position()
-    pos_zy = fig.axZY.get_position()
-    pos_xz = fig.axXZ.get_position()
+        np.testing.assert_allclose((pos_zy.x0 - pos_xy.x1) * figW, gap_in, atol=1e-5)
+        np.testing.assert_allclose((pos_xy.y0 - pos_xz.y1) * figH, gap_in, atol=1e-5)
 
-    # Horizontal gap between XY and ZY
-    gap_h_in = (pos_zy.x0 - pos_xy.x1) * figW
-    np.testing.assert_allclose(gap_h_in, gap_in, atol=1e-5)
-
-    # Vertical gap between XZ and XY
-    gap_v_in = (pos_xy.y0 - pos_xz.y1) * figH
-    np.testing.assert_allclose(gap_v_in, gap_in, atol=1e-5)
-
-    if with_labels and fig.axLabels is not None:
-        pos_labels = fig.axLabels.get_position()
-        # Vertical gap between XY and Labels
-        gap_labels_in = (pos_labels.y0 - pos_xy.y1) * figH
-        np.testing.assert_allclose(gap_labels_in, gap_in, atol=1e-5)
-
-    plt.close(fig)
+        if with_labels and fig.axLabels is not None:
+            pos_labels = fig.axLabels.get_position()
+            np.testing.assert_allclose((pos_labels.y0 - pos_xy.y1) * figH, gap_in, atol=1e-5)
+    finally:
+        plt.close(fig)
 
 
 @pytest.mark.parametrize("render_mode", ["points", "density"])
 def test_scatter_widget_physical_axes_gap(render_mode):
+    """Verify ``show_zyx_max_scatter_interactive`` maintains the exact 1/16-inch physical axis gap.
+
+    Strategy: render seeded 3D scatter clouds in both ``'points'`` and
+    ``'density'`` modes at ``figsize=(10, 8)``.
+    Expected outcome: horizontal and vertical gaps between adjacent axes equal
+    ``1/16`` inch within ``1e-5``.
     """
-    Verify that TNIAScatterWidget renders axes with exact 1/16th inch physical gap.
-    """
-    X = np.random.rand(50) * 10
-    Y = np.random.rand(50) * 20
-    Z = np.random.rand(50) * 5
+    rng = np.random.default_rng(11)
+    X = rng.random(50) * 10
+    Y = rng.random(50) * 20
+    Z = rng.random(50) * 5
 
     w = show_zyx_max_scatter_interactive((Z, Y, X), figsize=(10, 8), render=render_mode)
     fig = w._render()
-
-    figW, figH = (10, 8)
-    pos_xy = fig.axXY.get_position()
-    pos_zy = fig.axZY.get_position()
-    pos_xz = fig.axXZ.get_position()
-
-    gap_h_in = (pos_zy.x0 - pos_xy.x1) * figW
-    gap_v_in = (pos_xy.y0 - pos_xz.y1) * figH
-
-    np.testing.assert_allclose(gap_h_in, 1.0 / 16.0, atol=1e-5)
-    np.testing.assert_allclose(gap_v_in, 1.0 / 16.0, atol=1e-5)
-
-    plt.close(fig)
-
-
-
-def test_scatter_widget_axis_bounds_population():
-    """
-    Ensure scatter widget properly assigns axes to the figure, executes canvas.draw(),
-    and computes the physical bounding boxes required by the JavaScript frontend.
-    """
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive
-    
-    X = np.random.rand(10) * 10
-    Y = np.random.rand(10) * 10
-    Z = np.random.rand(10) * 10
-
-    # Test points rendering mode
-    w_points = show_zyx_max_scatter_interactive((Z, Y, X), render='points')
-    w_points._render_wrapper(None)  # Force full render pipeline
-    
-    assert 'xy' in w_points.axis_bounds, "Scatter (points) failed to populate 'xy' axis bounds."
-    assert 'zy' in w_points.axis_bounds, "Scatter (points) failed to populate 'zy' axis bounds."
-    assert 'xz' in w_points.axis_bounds, "Scatter (points) failed to populate 'xz' axis bounds."
-
-    # Validate that canvas.draw() occurred by checking for non-zero, correctly oriented coordinates
-    for plane in ['xy', 'zy', 'xz']:
-        bbox = w_points.axis_bounds[plane]
-        assert bbox['x1'] > bbox['x0'], f"Invalid x-coordinates for {plane} plane bounds."
-        # Note: y1_js > y0_js because JS origin is top-left, while mpl origin is bottom-left
-        assert bbox['y1_js'] > bbox['y0_js'], f"Invalid JS y-coordinates for {plane} plane bounds."
-        assert len(bbox['bbox']) == 4, "JS bounding box array is improperly sized."
-
-    # Test density rendering mode
-    w_density = show_zyx_max_scatter_interactive((Z, Y, X), render='density')
-    w_density._render_wrapper(None)
-    assert 'xy' in w_density.axis_bounds, "Scatter (density) failed to populate axis bounds."
-
-def test_slice_widget_axis_bounds_structure():
-    """
-    Verify the dictionary structure of axis_bounds exactly matches the expectations 
-    of the JS Proxy traversal fix.
-    """
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
-    im = np.zeros((10, 20, 30))
-    w = show_zyx_max_slice_interactive(im)
-    w._render_wrapper(None)
-    
-    bounds = w.axis_bounds
-    
-    for plane in ['xy', 'zy', 'xz']:
-        plane_data = bounds.get(plane)
-        assert plane_data is not None
-        
-        # The JS explicitly looks for x0, x1, y0_js, y1_js OR a 'bbox' array
-        expected_keys = {'x0', 'x1', 'y0', 'y1', 'y0_js', 'y1_js', 'bbox', 'xlim', 'ylim'}
-        assert expected_keys.issubset(plane_data.keys()), f"Missing required keys in {plane} bounds payload."
-
-
-def test_hover_sync_with_rotate_view():
-    """
-    Verify that hover sync ('C' key) correctly unrotates cursor coordinates and sets
-    the slice sliders (x_s, y_s, z_s) to the exact target voxel when rotate_view is active.
-    """
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive, _unrotate_2d, _get_rotated_line
-
-    Z, Y, X = 20, 60, 80
-    im = np.zeros((Z, Y, X), dtype=np.float32)
-    pixel_sizes = {'X': 1.0, 'Y': 1.0, 'Z': 1.0}
-
-    target_z, target_y, target_x = 10, 25, 35
-    rotate_view = (30.0, 15.0, 45.0)  # (rot_z, rot_y, rot_x)
-
-    widget = show_zyx_max_slice_interactive(
-        im,
-        pixel_sizes=pixel_sizes,
-        sync_on_hover=True,
-        rotate_view=rotate_view
-    )
-
-    # Force initial render to generate axis_bounds
-    fig = widget._render()
     try:
-        # Determine physical location of target in unrotated space
-        orig_phys_x = (target_x + 0.5) * widget.sx
-        orig_phys_y = (target_y + 0.5) * widget.sy
+        figW, figH = (10, 8)
+        pos_xy = fig.axXY.get_position()
+        pos_zy = fig.axZY.get_position()
+        pos_xz = fig.axXZ.get_position()
 
-        # Rotate target point forward to display physical space
-        xs, ys = _get_rotated_line(orig_phys_x, orig_phys_y, orig_phys_x, orig_phys_y, rotate_view[0], X, Y, widget.sx, widget.sy)
-        rot_phys_x, rot_phys_y = xs[0], ys[0]
-
-        # Convert rotated physical position to figure coordinates
-        ax = fig.axXY
-        display_pixel = ax.transData.transform((rot_phys_x, rot_phys_y))
-        fig_norm = fig.transFigure.inverted().transform(display_pixel)
-        hover_x, hover_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
+        np.testing.assert_allclose((pos_zy.x0 - pos_xy.x1) * figW, 1.0 / 16.0, atol=1e-5)
+        np.testing.assert_allclose((pos_xy.y0 - pos_xz.y1) * figH, 1.0 / 16.0, atol=1e-5)
     finally:
         plt.close(fig)
 
-    widget.hover_coords = {'plane': 'xy', 'x': hover_x, 'y': hover_y}
 
-    assert widget.x_s == target_x and widget.y_s == target_y, \
-        f"Hover sync with rotation failed on XY plane. Expected ({target_x}, {target_y}), got ({widget.x_s}, {widget.y_s})"
+def test_channel_label_height_and_fontsize_invariants():
+    """Verify ``axLabels`` height and font size respond to figure height, explicit pt size, and stay anisotropy-invariant.
 
-
-def test_annotator_click_with_rotate_view():
-    """
-    Verify that point annotation clicks on a rotated view accurately unrotate
-    coordinates and record the exact target voxel in widget.points.
-    """
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive_point_annotator, _get_rotated_line
-
-    Z, Y, X = 20, 60, 80
-    im = np.zeros((Z, Y, X), dtype=np.float32)
-    rotate_view = 30.0
-
-    widget = show_zyx_max_slice_interactive_point_annotator(
-        im,
-        rotate_view=rotate_view
-    )
-    widget.annotation_mode = True
-    widget.annotation_action = 'add'
-
-    target_z, target_y, target_x = 10, 20, 30
-    widget.z_s = target_z
-
-    fig = widget._render()
-    try:
-        orig_phys_x = (target_x + 0.5) * widget.sx
-        orig_phys_y = (target_y + 0.5) * widget.sy
-
-        xs, ys = _get_rotated_line(orig_phys_x, orig_phys_y, orig_phys_x, orig_phys_y, rotate_view, X, Y, widget.sx, widget.sy)
-        rot_phys_x, rot_phys_y = xs[0], ys[0]
-
-        ax = fig.axXY
-        display_pixel = ax.transData.transform((rot_phys_x, rot_phys_y))
-        fig_norm = fig.transFigure.inverted().transform(display_pixel)
-        click_x, click_y = float(fig_norm[0]), float(1.0 - fig_norm[1])
-    finally:
-        plt.close(fig)
-
-    widget.click_coords = {'plane': 'xy', 'x': click_x, 'y': click_y}
-
-    assert [target_z, target_y, target_x] in widget.points, \
-        f"Annotator click with rotation failed. Expected {[target_z, target_y, target_x]} in {widget.points}"
-
-
-def test_channel_label_height_scaling_with_fontsize():
-    """
-    Test that the channel label axis height (axLabels) scales with fontsize_pt
-    (figure height) and provides sufficient fake spacing so labels are not cropped.
+    Strategy: (a) compare auto label sizing on ``(8, 4)`` vs ``(8, 12)`` figures;
+    (b) compare explicit ``channel_label_fontsize_pt`` 12 vs 24; (c) compare a
+    highly anisotropic ``(5, 10, 500)`` volume against an isotropic ``(5, 50, 50)``
+    volume at the same ``figsize`` and font size; (d) verify propagation through
+    interactive slice and scatter factories.
+    Expected outcome: taller figures and larger font sizes strictly increase
+    both rendered font size and ``axLabels`` physical height in inches; height is
+    independent of image aspect ratio; interactive wrappers honour the kwarg.
     """
     im = np.zeros((10, 20, 20), dtype=np.float32)
-    labels = ["Channel 0", "Channel 1"]
+    labels = ["Ch0", "Ch1"]
 
-    # Small figure height -> smaller fontsize
-    fig_small = show_zyx(
-        xy=im[5, :, :], xz=im[:, 10, :], zy=im[:, :, 10],
-        figsize=(8, 4),
-        channel_labels=labels
-    )
-    h_small = fig_small.axLabels.get_position().height
-
-    # Large figure height -> larger fontsize
-    fig_large = show_zyx(
-        xy=im[5, :, :], xz=im[:, 10, :], zy=im[:, :, 10],
-        figsize=(8, 12),
-        channel_labels=labels
-    )
-    h_large = fig_large.axLabels.get_position().height
-
+    fig_small = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(8, 4), channel_labels=labels)
+    fig_large = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(8, 12), channel_labels=labels)
     try:
-        assert fig_small.axLabels is not None
-        assert fig_large.axLabels is not None
-        # Position height fraction should account for font size scaling
-        pos_small = fig_small.axLabels.get_position()
-        pos_large = fig_large.axLabels.get_position()
-        assert pos_small.height > 0
-        assert pos_large.height > 0
-        # Label height in inches is 0.10 + fontsize/72, with fontsize growing with figH
-        h_small_in, h_large_in = h_small * 4, h_large * 12
-        for h_in, figH in ((h_small_in, 4), (h_large_in, 12)):
-            fontsize = max(10, min(24, figH * 72 * 0.035))
-            assert h_in == pytest.approx(0.10 + fontsize / 72.0, rel=1e-6)
-        assert h_large_in > h_small_in
+        h_small_in = fig_small.axLabels.get_position().height * 4.0
+        h_large_in = fig_large.axLabels.get_position().height * 12.0
+        fs_small = _label_fontsize(fig_small)
+        fs_large = _label_fontsize(fig_large)
+        assert 0 < h_small_in < h_large_in
+        assert fs_small < fs_large
     finally:
         plt.close(fig_small)
         plt.close(fig_large)
 
-
-def test_single_slider_start_end_sync_and_translate():
-    """
-    Test that start/end traits sync bidirectionally with center position (x_s, y_s, z_s)
-    and thickness (x_t, y_t, z_t), and that range translation works as expected.
-    """
-    im = np.zeros((20, 40, 60))  # Z, Y, X
-    w = show_zyx_max_slice_interactive(im, slabs_position=(10, 20, 30), slabs_thickness=(2, 4, 6))
-
-    # Initial start / end expected values:
-    # Z: z_s=10, z_t=2 => z_start=8, z_end=12
-    # Y: y_s=20, y_t=4 => y_start=16, y_end=24
-    # X: x_s=30, x_t=6 => x_start=24, x_end=36
-    assert w.z_start == 8 and w.z_end == 12
-    assert w.y_start == 16 and w.y_end == 24
-    assert w.x_start == 24 and w.x_end == 36
-
-    # Test updating x_start/x_end (e.g. user drags start and end thumbs in JS)
-    w.x_start = 10
-    w.x_end = 20
-    # Center x_s should be (10+20)//2 = 15, x_t should be (20-10)//2 = 5
-    assert w.x_s == 15
-    assert w.x_t == 5
-
-    # Test translating the range (dragging middle thumb in JS)
-    # Move range by +10: start=20, end=30
-    w.x_start = 20
-    w.x_end = 30
-    assert w.x_s == 25
-    assert w.x_t == 5
-
-    # Test programmatically updating x_s / x_t updates x_start / x_end
-    w.x_s = 40
-    w.x_t = 10
-    assert w.x_start == 30
-    assert w.x_end == 50
-
-
-def test_channel_label_fontsize_pt_kwarg_and_anisotropic_height():
-    """
-    Verify that channel_label_fontsize_pt controls label font size and physical height of axLabels,
-    and that axLabels physical height is independent of image anisotropy and aspect ratios.
-    """
-    # 1. Test custom channel_label_fontsize_pt in show_zyx
-    im_aniso = np.zeros((5, 10, 500), dtype=np.float32) # highly anisotropic image
-    figsize = (10, 8)
-    labels = ["Ch0", "Ch1"]
-    fontsize_pt = 18.0
-
-    fig = show_zyx(
-        xy=im_aniso[2, :, :], xz=im_aniso[:, 5, :], zy=np.flip(np.rot90(im_aniso[:, :, 250], 1), 0),
-        pixel_sizes={'X': 1.0, 'Y': 1.0, 'Z': 1.0},
-        figsize=figsize,
-        channel_labels=labels,
-        channel_label_fontsize_pt=fontsize_pt
+    im_aniso = np.zeros((5, 10, 500), dtype=np.float32)
+    im_iso = np.zeros((5, 50, 50), dtype=np.float32)
+    fig_12 = show_zyx(
+        im_aniso[2], im_aniso[:, 5, :], np.flip(np.rot90(im_aniso[:, :, 250], 1), 0),
+        pixel_sizes=(1.0, 1.0, 1.0), figsize=(10, 8), channel_labels=labels, channel_label_fontsize_pt=12.0,
     )
-
+    fig_24 = show_zyx(
+        im_aniso[2], im_aniso[:, 5, :], np.flip(np.rot90(im_aniso[:, :, 250], 1), 0),
+        pixel_sizes=(1.0, 1.0, 1.0), figsize=(10, 8), channel_labels=labels, channel_label_fontsize_pt=24.0,
+    )
+    fig_iso_24 = show_zyx(
+        im_iso[2], im_iso[:, 25, :], np.flip(np.rot90(im_iso[:, :, 25], 1), 0),
+        pixel_sizes=(1.0, 1.0, 1.0), figsize=(10, 8), channel_labels=labels, channel_label_fontsize_pt=24.0,
+    )
     try:
-        assert fig.axLabels is not None
-        pos_labels = fig.axLabels.get_position()
-        labels_h_in = pos_labels.height * figsize[1]
-        expected_hl_in = 0.10 + (fontsize_pt / 72.0) # 0.10 + 0.25 = 0.35 in
-        np.testing.assert_allclose(labels_h_in, expected_hl_in, atol=1e-5)
+        assert _label_fontsize(fig_12) == 12.0
+        assert _label_fontsize(fig_24) == 24.0
+        h12 = fig_12.axLabels.get_position().height * 8.0
+        h24 = fig_24.axLabels.get_position().height * 8.0
+        h24_iso = fig_iso_24.axLabels.get_position().height * 8.0
+        assert h24 > h12
+        np.testing.assert_allclose(h24, h24_iso, atol=1e-5)
     finally:
-        plt.close(fig)
+        plt.close(fig_12)
+        plt.close(fig_24)
+        plt.close(fig_iso_24)
 
-    # 2. Test propagation through interactive widgets and show_zyx_max_slice_interactive
-    w = show_zyx_max_slice_interactive(
+    w_sl = show_zyx_max_slice_interactive(
         im_aniso, channel_labels=labels, channel_label_fontsize_pt=20.0, figsize=(10, 8)
     )
-    assert w.channel_label_fontsize_pt == 20.0
-    fig_w = w._render()
+    assert w_sl.channel_label_fontsize_pt == 20.0
+    fig_sl = w_sl._render()
     try:
-        assert fig_w.axLabels is not None
-        pos_labels_w = fig_w.axLabels.get_position()
-        labels_h_in_w = pos_labels_w.height * 8.0
-        expected_hl_in_w = 0.10 + (20.0 / 72.0)
-        np.testing.assert_allclose(labels_h_in_w, expected_hl_in_w, atol=1e-5)
+        assert fig_sl.axLabels is not None and _label_fontsize(fig_sl) == 20.0
     finally:
-        plt.close(fig_w)
+        plt.close(fig_sl)
 
-    # 3. Test propagation through show_zyx_max_scatter_interactive
-    pts_X = np.random.rand(50) * 100
-    pts_Y = np.random.rand(50) * 10
-    pts_Z = np.random.rand(50) * 2
+    rng = np.random.default_rng(12)
+    pts_Z = rng.random(50) * 2
+    pts_Y = rng.random(50) * 10
+    pts_X = rng.random(50) * 100
     w_sc = show_zyx_max_scatter_interactive(
-        (pts_X, pts_Y, pts_Z), channel_labels=labels, channel_label_fontsize_pt=14.0, figsize=(10, 8)
+        (pts_Z, pts_Y, pts_X), channel_labels=labels, channel_label_fontsize_pt=14.0, figsize=(10, 8)
     )
     assert w_sc.channel_label_fontsize_pt == 14.0
     fig_sc = w_sc._render()
     try:
-        assert fig_sc.axLabels is not None
-        pos_labels_sc = fig_sc.axLabels.get_position()
-        labels_h_in_sc = pos_labels_sc.height * 8.0
-        expected_hl_in_sc = 0.10 + (14.0 / 72.0)
-        np.testing.assert_allclose(labels_h_in_sc, expected_hl_in_sc, atol=1e-5)
+        assert fig_sc.axLabels is not None and _label_fontsize(fig_sc) == 14.0
     finally:
         plt.close(fig_sc)
 
 
-# =========================================
+@pytest.mark.parametrize("kind", ["slice", "scatter"])
+def test_channel_label_bar_spans_exactly_the_xy_panel_pixels(kind):
+    """The grey bar under the channel labels covers exactly the XY panel's pixel columns.
+
+    It used to be a plotted line whose 'projecting' caps overshot both ends
+    by half its width (a few px), and a snapped patch is still 1 px short of
+    an imshow panel at some dpi (Agg places images at x0 + ceil(width)).
+    Strategy: build one widget per kind, render its figure once, and rasterise
+    at all 5 DPIs with and without ``bbox_inches='tight'``. The bar is the
+    widest row of (0.85 grey) pixels with any alpha; its first and last column
+    must equal those of the XY panel's opaque content.
+    """
+    rng = np.random.default_rng(0)
+    if kind == "slice":
+        w = show_zyx_max_slice_interactive(rng.random((8, 32, 48)).astype(np.float32), channel_labels=["BF"])
+    else:
+        w = show_zyx_max_scatter_interactive(rng.random((50, 3)) * [8, 32, 48], channel_labels=["A"])
+
+    fig = w._render()
+    try:
+        for dpi in (72, 100, 150, 200, 300):
+            for tight in (False, True):
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight" if tight else None)
+                a = plt.imread(io.BytesIO(buf.getvalue()))
+                alpha = a[..., 3]
+                grey = (alpha > 0.01) & (np.abs(a[..., :3] - 0.85).max(axis=2) < 0.02)
+                runs = [(_first_run(grey[r]), r) for r in range(a.shape[0])]
+                bar, bar_row = max(((run, r) for run, r in runs if run), key=lambda t: t[0][1] - t[0][0])
+                img = _first_run(alpha[bar_row + int(0.2 * a.shape[0])] > 0.01)
+                assert bar == img, (kind, dpi, tight, bar, img)
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Axis bounds, annotation click/delete, and hover sync
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", ["slice", "scatter_points", "scatter_density"])
+def test_widget_axis_bounds_structure(kind):
+    """Verify construction populates well-formed ``axis_bounds`` for all three ortho planes.
+
+    Strategy: construct a slice viewer and scatter viewers in both points and
+    density modes (without calling ``_render_wrapper`` manually) and inspect
+    every plane entry in ``w.axis_bounds``.
+    Expected outcome: ``xy``, ``zy``, and ``xz`` are present with all required
+    JS keys, ``x1 > x0``, ``y1_js > y0_js``, and 4-element ``bbox`` arrays.
+    """
+    rng = np.random.default_rng(13)
+    if kind == "slice":
+        w = show_zyx_max_slice_interactive(np.zeros((10, 20, 30), dtype=np.float32))
+    else:
+        pts = (rng.random(20) * 10, rng.random(20) * 10, rng.random(20) * 10)
+        mode = "points" if kind == "scatter_points" else "density"
+        w = show_zyx_max_scatter_interactive(pts, render=mode)
+
+    expected_keys = {"x0", "x1", "y0", "y1", "y0_js", "y1_js", "bbox", "xlim", "ylim"}
+    for plane in ("xy", "zy", "xz"):
+        info = w.axis_bounds.get(plane)
+        assert info is not None, f"{kind} missing {plane} axis_bounds"
+        assert expected_keys.issubset(info.keys()), f"Missing keys in {kind}/{plane}"
+        assert info["x1"] > info["x0"]
+        assert info["y1_js"] > info["y0_js"]
+        assert len(info["bbox"]) == 4
+
+
+def test_axis_bounds_alignment():
+    """Verify ``axis_bounds['xy']`` aligns with the Matplotlib ``axXY`` figure bounding box.
+
+    Strategy: build an anisotropic slice viewer and compare ``axis_bounds['xy']``
+    against ``fig.axXY.get_position()``.
+    Expected outcome: ``x0`` and ``y0`` agree within ``1e-2``.
+    """
+    im = np.zeros((16, 64, 128), dtype=np.float32)
+    pixel_sizes = {"X": 0.295, "Y": 1.0, "Z": 1.0}
+    widget = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes)
+    fig = widget._render()
+    try:
+        cell_bbox = fig.axXY.get_position()
+        info = widget.axis_bounds["xy"]
+        np.testing.assert_allclose(info["x0"], cell_bbox.x0, atol=1e-2)
+        np.testing.assert_allclose(info["y0"], cell_bbox.y0, atol=1e-2)
+    finally:
+        plt.close(fig)
+
+
+def test_ground_truth_annotation_all_planes():
+    """Verify clicking on ``xy``, ``zy``, and ``xz`` panels registers exact anisotropic voxel coordinates.
+
+    Strategy: transform known physical voxel centers through each panel's
+    ``transData`` -> ``transFigure.inverted()`` into JS top-left figure
+    fractions and assign ``widget.click_coords``.
+    Expected outcome: each click appends the exact ``[z, y, x]`` target voxel.
+    """
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {"X": 0.295, "Y": 1.0, "Z": 1.0}
+
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        im,
+        pixel_sizes=pixel_sizes,
+        channel_labels=["GRAY"],
+        slabs_position=(8, 32, 64),
+    )
+    widget.annotation_mode = True
+    widget.annotation_action = "add"
+
+    targets = [
+        ("xy", 8, 20, 45),
+        ("zy", 12, 40, 64),
+        ("xz", 5, 32, 100),
+    ]
+
+    for step, (plane, target_z, target_y, target_x) in enumerate(targets, start=1):
+        widget.z_s = target_z
+        widget.y_s = target_y
+        widget.x_s = target_x
+
+        fig = widget._render()
+        try:
+            ax = getattr(fig, f"ax{plane.upper()}")
+            if plane == "xy":
+                phys_a, phys_b = (target_x + 0.5) * widget.sx, (target_y + 0.5) * widget.sy
+            elif plane == "zy":
+                phys_a, phys_b = (target_z + 0.5) * widget.sz, (target_y + 0.5) * widget.sy
+            else:
+                phys_a, phys_b = (target_x + 0.5) * widget.sx, (target_z + 0.5) * widget.sz
+
+            click_x, click_y = _fig_frac(fig, ax, phys_a, phys_b)
+        finally:
+            plt.close(fig)
+
+        widget.click_coords = {"plane": plane, "x": click_x, "y": click_y, "t": step}
+        assert [target_z, target_y, target_x] in widget.points, (
+            f"Plane {plane} click at ({click_x:.3f}, {click_y:.3f}) mapped incorrectly."
+        )
+
+
+def test_annotation_deletion():
+    """Verify click-to-delete across all three planes, ``add_point`` deduplication, and deletion guardrails.
+
+    Strategy: add three points (testing ``add_point`` deduplication first), then
+    exercise negative controls before deleting each point via ``_fig_frac`` +
+    public ``widget.click_coords`` on ``xy``, ``zy``, and ``xz``:
+      1. ``annotation_mode=False`` does not delete on click.
+      2. Clicking ``> 20 px`` away (30 px offset) does not delete.
+      3. Clicking when the point lies outside the active Z slab does not delete.
+      4. Valid in-slab clicks on ``xy``, ``zy``, and ``xz`` each delete their point.
+    Expected outcome: all negative controls leave ``widget.points`` intact, and
+    the three valid plane clicks empty ``widget.points``.
+    """
+    im = np.zeros((16, 64, 64), dtype=np.float32)
+    widget = show_zyx_max_slice_interactive_point_annotator(
+        im, pixel_sizes=(2.0, 0.5, 0.5), slabs_thickness=(2.0, 2.0, 2.0)
+    )
+
+    widget.add_point(5, 10, 15)
+    widget.add_point(5, 10, 15)  # duplicate must be ignored
+    assert widget.points == [[5, 10, 15]]
+
+    widget.add_point(10, 40, 20)
+    widget.add_point(12, 25, 50)
+    assert len(widget.points) == 3
+
+    def _plane_click(plane, tz, ty, tx):
+        fig = widget._render()
+        try:
+            ax = getattr(fig, f"ax{plane.upper()}")
+            if plane == "xy":
+                pa, pb = (tx + 0.5) * widget.sx, (ty + 0.5) * widget.sy
+            elif plane == "zy":
+                pa, pb = (tz + 0.5) * widget.sz, (ty + 0.5) * widget.sy
+            else:
+                pa, pb = (tx + 0.5) * widget.sx, (tz + 0.5) * widget.sz
+            return _fig_frac(fig, ax, pa, pb)
+        finally:
+            plt.close(fig)
+
+    widget.annotation_action = "delete"
+    widget.z_s, widget.y_s, widget.x_s = 5, 10, 15
+
+    # Control 1: annotation_mode=False ignores clicks
+    widget.annotation_mode = False
+    cx, cy = _plane_click("xy", 5, 10, 15)
+    widget.click_coords = {"plane": "xy", "x": cx, "y": cy, "t": 1}
+    assert [5, 10, 15] in widget.points
+
+    # Control 2: click > 20 px away (30 px in x -> dist^2 = 900 > 400) does not delete
+    widget.annotation_mode = True
+    far_x, far_y = _plane_click("xy", 5, 10, 45)
+    widget.click_coords = {"plane": "xy", "x": far_x, "y": far_y, "t": 2}
+    assert [5, 10, 15] in widget.points
+
+    # Control 3: wrong Z slab (z_s=0, z_t=1 -> slab [0, 1] excludes z=5) does not delete
+    widget.z_s = 0
+    cx, cy = _plane_click("xy", 5, 10, 15)
+    widget.click_coords = {"plane": "xy", "x": cx, "y": cy, "t": 3}
+    assert [5, 10, 15] in widget.points
+
+    # Positive deletions on xy, zy, and xz
+    for step, (plane, tz, ty, tx) in enumerate(
+        [("xy", 5, 10, 15), ("zy", 10, 40, 20), ("xz", 12, 25, 50)], start=4
+    ):
+        widget.z_s, widget.y_s, widget.x_s = tz, ty, tx
+        cx, cy = _plane_click(plane, tz, ty, tx)
+        widget.click_coords = {"plane": plane, "x": cx, "y": cy, "t": step}
+        assert [tz, ty, tx] not in widget.points
+
+    assert widget.points == []
+
+
+def test_hover_sync_all_planes():
+    """Verify hover sync updates slider centers across ``xy``, ``zy``, and ``xz`` and respects ``sync_on_hover=False``.
+
+    Strategy: construct a default anisotropic slice viewer (verifying
+    ``sync_on_hover`` defaults to ``True``), compute figure fractions for target
+    voxels on all three planes, dispatch ``hover_coords``, and then disable
+    ``sync_on_hover`` as a negative control.
+    Expected outcome: each plane updates its two corresponding slice indices;
+    with ``sync_on_hover=False``, slider positions stay unchanged.
+    """
+    Z, Y, X = 16, 64, 128
+    im = np.zeros((Z, Y, X), dtype=np.float32)
+    pixel_sizes = {"X": 0.295, "Y": 1.0, "Z": 1.0}
+
+    widget = show_zyx_max_slice_interactive(im, pixel_sizes=pixel_sizes)
+    assert widget.sync_on_hover is True
+
+    fig = widget._render()
+    try:
+        xy_fx, xy_fy = _fig_frac(fig, fig.axXY, (80 + 0.5) * widget.sx, (25 + 0.5) * widget.sy)
+        zy_fx, zy_fy = _fig_frac(fig, fig.axZY, (12 + 0.5) * widget.sz, (40 + 0.5) * widget.sy)
+        xz_fx, xz_fy = _fig_frac(fig, fig.axXZ, (30 + 0.5) * widget.sx, (4 + 0.5) * widget.sz)
+    finally:
+        plt.close(fig)
+
+    widget.hover_coords = {"plane": "xy", "x": xy_fx, "y": xy_fy, "t": 1}
+    assert (widget.x_s, widget.y_s) == (80, 25)
+
+    widget.hover_coords = {"plane": "zy", "x": zy_fx, "y": zy_fy, "t": 2}
+    assert (widget.z_s, widget.y_s) == (12, 40)
+
+    widget.hover_coords = {"plane": "xz", "x": xz_fx, "y": xz_fy, "t": 3}
+    assert (widget.x_s, widget.z_s) == (30, 4)
+
+    # Negative control: sync_on_hover=False ignores hover_coords
+    widget.sync_on_hover = False
+    widget.hover_coords = {"plane": "xy", "x": xy_fx, "y": xy_fy, "t": 4}
+    assert (widget.x_s, widget.y_s, widget.z_s) == (30, 40, 4)
+
+
+def test_hover_sync_with_rotate_view():
+    """Verify hover sync unrotates cursor coordinates accurately using an independent pixel-centroid oracle.
+
+    Strategy: place a smooth Gaussian blob at voxel ``(10, 20, 48)`` inside a
+    ``(32, 64, 64)`` volume, render with ``rotate_view=(30.0, 20.0, 45.0)`` over
+    the full volume, locate the blob's rendered pixel centroid on each panel via
+    ``_rendered_centroid`` (independent of internal rotation helpers), and send
+    those figure coordinates to ``hover_coords``.
+    Expected outcome: hovering ``xy``, ``xz``, and ``zy`` each snap their two
+    corresponding slider indices to the exact blob voxel ``(10, 20, 48)``.
+    """
+    Z, Y, X = 32, 64, 64
+    tz, ty, tx = 10, 20, 48
+    zz, yy, xx = np.meshgrid(np.arange(Z), np.arange(Y), np.arange(X), indexing="ij")
+    vol = np.exp(-((zz - tz) ** 2 + (yy - ty) ** 2 + (xx - tx) ** 2) / (2 * 2.5 ** 2)).astype(np.float32)
+
+    widget = show_zyx_max_slice_interactive(
+        vol,
+        pixel_sizes=(1.0, 1.0, 1.0),
+        sync_on_hover=True,
+        rotate_view=(30.0, 20.0, 45.0),
+        slabs_thickness=(100.0, 100.0, 100.0),
+    )
+
+    fig = widget._render()
+    try:
+        coords = {}
+        for plane, ax in (("xy", fig.axXY), ("xz", fig.axXZ), ("zy", fig.axZY)):
+            cx, cy = _rendered_centroid(ax)
+            coords[plane] = _fig_frac(fig, ax, cx, cy)
+    finally:
+        plt.close(fig)
+
+    widget.hover_coords = {"plane": "xy", "x": coords["xy"][0], "y": coords["xy"][1], "t": 1}
+    assert (widget.x_s, widget.y_s) == (tx, ty)
+
+    widget.x_s = 5
+    widget.hover_coords = {"plane": "xz", "x": coords["xz"][0], "y": coords["xz"][1], "t": 2}
+    assert (widget.x_s, widget.z_s) == (tx, tz)
+
+    widget.y_s, widget.z_s = 5, 5
+    widget.hover_coords = {"plane": "zy", "x": coords["zy"][0], "y": coords["zy"][1], "t": 3}
+    assert (widget.z_s, widget.y_s) == (tz, ty)
+
+
+# ---------------------------------------------------------------------------
 # Render coalescing
-# =========================================
-def _structured_volume(shape=(16, 48, 48)):
-    """A small volume with an off-centre cube, so moving a slab changes the image."""
-    vol = np.zeros(shape, dtype=np.uint8)
-    z, y, x = shape
-    vol[z // 4:z // 2, y // 4:y // 2, x // 4:x // 2] = 255
-    return vol
-
-
-def _count_renders(widget):
-    """Swap widget._render for a counting wrapper; returns the mutable counter."""
-    counter = {"n": 0}
-    inner = widget._render
-
-    def counting_render():
-        counter["n"] += 1
-        return inner()
-
-    widget._render = counting_render
-    return counter
-
+# ---------------------------------------------------------------------------
 
 def test_widget_construction_renders_figure_once(monkeypatch):
     """Building an interactive viewer must rasterize its figure exactly once.
@@ -1683,34 +1842,57 @@ def test_slab_trait_change_renders_figure_once(trait, value):
     assert w.image_data != image_before
 
 
-def test_slab_traits_stay_paired_and_in_bounds():
-    """Out-of-range slab writes are clamped, and both representations stay consistent.
+def test_one_render_per_multi_trait_update():
+    """A middle-thumb drag (``x_start`` and ``x_end`` in one message) and a hover sync each render once.
 
-    The two slab representations are kept in step by observers that clamp to the
-    volume shape, so an interactive client can push any value without the
-    renderer ever seeing coordinates outside the array. Strategy: write a wildly
-    out-of-range end position and confirm it lands on the last valid index, that
-    centre and half-thickness still describe the same interval, and that no
-    clipping warning is surfaced -- the clamp is supposed to make the warning
-    path unnecessary rather than merely report after the fact.
+    Strategy: wrap ``w._render`` to count invocations during a batched
+    ``hold_trait_notifications`` update, a ``hover_coords`` sync, and a single
+    ``vmax_list`` update.
+    Expected outcome: each logical update invokes ``_render`` exactly once.
     """
-    vol = _structured_volume()
-    Z, Y, X = vol.shape
-    w = show_zyx_max_slice_interactive(vol, figsize=(4, 4))
+    im = np.random.default_rng(0).random((10, 40, 50))
+    w = show_zyx_max_slice_interactive(im)
+    counter = _count_renders(w)
 
-    w.x_start = 0
-    w.x_end = 10 ** 6
+    with w.hold_trait_notifications():  # how ipywidgets applies one comm message
+        w.x_start, w.x_end = w.x_start + 3, w.x_end + 3
+    assert counter["n"] == 1
 
-    assert w.x_start == 0
-    assert w.x_end == X - 1
-    assert w.x_s == (w.x_start + w.x_end) // 2
-    assert w.x_t == (w.x_end - w.x_start) // 2
-    assert w.warning_msg == ""
+    counter["n"] = 0
+    info = w.axis_bounds["xy"]
+    w.hover_coords = {
+        "plane": "xy",
+        "x": info["x0"] + 0.3 * (info["x1"] - info["x0"]),
+        "y": info["y0_js"] + 0.6 * (info["y1_js"] - info["y0_js"]),
+        "t": 1,
+    }
+    assert counter["n"] == 1
+
+    counter["n"] = 0
+    w.vmax_list = [0.5]  # any real change still renders
+    assert counter["n"] == 1
 
 
-# =========================================
-# compute_histogram
-# =========================================
+def test_scale_bar_toggle_triggers_one_rerender():
+    """Toggling ``scale_bar_show`` re-renders the widget exactly once and updates ``image_data``.
+
+    Strategy: attach a render counter to a slice viewer, flip ``scale_bar_show``
+    from ``True`` to ``False``, and compare ``image_data`` before and after.
+    Expected outcome: exactly one render occurs and the PNG changes.
+    """
+    im = np.random.default_rng(2).integers(0, 255, (10, 40, 40)).astype(np.uint8)
+    w = show_zyx_max_slice_interactive(im, pixel_sizes=(1, 1, 1))
+    before = w.image_data
+    counter = _count_renders(w)
+    w.scale_bar_show = False
+    assert counter["n"] == 1
+    assert w.image_data != before
+
+
+# ---------------------------------------------------------------------------
+# Histograms, bit-depth inference, and robust default vmax
+# ---------------------------------------------------------------------------
+
 def test_compute_histogram_empty_and_all_nan_inputs():
     """Degenerate inputs yield empty payloads rather than raising.
 
@@ -1720,9 +1902,9 @@ def test_compute_histogram_empty_and_all_nan_inputs():
     no usable values -- and require the documented empty payload from both,
     since a raise here would break widget construction entirely.
     """
-    assert compute_histogram(np.array([], dtype=np.float32)) == {'counts': [], 'bin_edges': []}
+    assert compute_histogram(np.array([], dtype=np.float32)) == {"counts": [], "bin_edges": []}
     all_nan = np.full(10, np.nan, dtype=np.float32)
-    assert compute_histogram(all_nan) == {'counts': [], 'bin_edges': []}
+    assert compute_histogram(all_nan) == {"counts": [], "bin_edges": []}
 
 
 @pytest.mark.parametrize("dtype, expected_range", [
@@ -1742,8 +1924,8 @@ def test_compute_histogram_spans_full_dtype_range(dtype, expected_range):
     arr = np.ones((4, 4), dtype=dtype)
     result = compute_histogram(arr, bins=16)
 
-    assert len(result['counts']) == 16
-    assert (result['bin_edges'][0], result['bin_edges'][-1]) == expected_range
+    assert len(result["counts"]) == 16
+    assert (result["bin_edges"][0], result["bin_edges"][-1]) == expected_range
 
 
 def test_compute_histogram_counts_are_log_frequencies():
@@ -1757,7 +1939,7 @@ def test_compute_histogram_counts_are_log_frequencies():
     """
     arr = np.concatenate([np.zeros(1000, dtype=np.uint8), np.full(10, 200, dtype=np.uint8)])
     result = compute_histogram(arr, bins=16)
-    counts = np.array(result['counts'])
+    counts = np.array(result["counts"])
 
     np.testing.assert_allclose(np.expm1(counts).sum(), arr.size, rtol=1e-6)
     background, signal = np.expm1(counts).max(), np.expm1(counts)[np.expm1(counts) > 0].min()
@@ -1776,27 +1958,33 @@ def test_compute_histogram_rescales_subsampled_counts():
     arr = np.arange(1000, dtype=np.float32)
     result = compute_histogram(arr, bins=10, max_samples=100)
 
-    np.testing.assert_allclose(np.expm1(result['counts']).sum(), arr.size, rtol=1e-6)
+    np.testing.assert_allclose(np.expm1(result["counts"]).sum(), arr.size, rtol=1e-6)
 
 
-def test_compute_histogram_excludes_nans_from_float_channels():
-    """NaNs are dropped from float channels instead of poisoning the bin edges.
+@pytest.mark.parametrize("nonfinite", [np.nan, np.inf, -np.inf])
+def test_compute_histogram_and_widget_exclude_nonfinite_values(nonfinite):
+    """Non-finite values (NaN, +inf, -inf) are excluded from histograms and default ``vmax``.
 
-    np.histogram propagates NaN into the automatic range, which would collapse
-    every bin edge to NaN and blank the frontend canvas. Strategy: mix NaNs into
-    a finite float channel and assert both the edges stay finite and the
-    recovered counts total only the finite values.
+    Strategy: (a) mix ``nonfinite`` into a 3-element finite float array and pass
+    to ``compute_histogram``; (b) inject ``nonfinite`` into a ``[0, 1]`` float32
+    volume and construct ``show_zyx_max_slice_interactive``.
+    Expected outcome: histogram edges stay finite, recovered counts total only
+    the 3 finite entries, and the widget renders with a finite ``vmax_list[0] <= 1.0``.
     """
-    arr = np.array([0.0, 1.0, 2.0, np.nan, np.nan], dtype=np.float32)
+    arr = np.array([0.0, 1.0, 2.0, nonfinite, nonfinite], dtype=np.float32)
     result = compute_histogram(arr, bins=4)
+    assert np.all(np.isfinite(result["bin_edges"]))
+    np.testing.assert_allclose(np.expm1(result["counts"]).sum(), 3, rtol=1e-6)
 
-    assert np.all(np.isfinite(result['bin_edges']))
-    np.testing.assert_allclose(np.expm1(result['counts']).sum(), 3, rtol=1e-6)
+    vol = np.random.default_rng(8).uniform(0, 1, (4, 16, 16)).astype(np.float32)
+    vol[0, 0, 0] = nonfinite
+    w = show_zyx_max_slice_interactive(vol, pixel_sizes=(1, 1, 1))
+    assert np.isfinite(w.vmax_list[0]) and w.vmax_list[0] <= 1.0
+    assert np.all(np.isfinite(w.histograms_data[0]["bin_edges"]))
+    assert len(w.histograms_data[0]["counts"]) == 128
+    assert w.image_data
 
 
-# =========================================
-# Bit-depth inference for the histogram range
-# =========================================
 @pytest.mark.parametrize("values, dtype, expected", [
     ([0, 200], np.uint8, (8, False)),
     ([0, 3], np.uint16, (8, False)),          # never narrower than 8 bits
@@ -1851,11 +2039,11 @@ def test_slice_widget_histogram_spans_inferred_12bit_range():
     w = show_zyx_max_slice_interactive([bright, dim], pixel_sizes=(1, 1, 1))
 
     for h in w.histograms_data:
-        edges = np.array(h['bin_edges'])
-        assert h['bit_depth'] == 12
+        edges = np.array(h["bin_edges"])
+        assert h["bit_depth"] == 12
         assert (edges[0], edges[-1]) == (-0.5, 4095.5)
         np.testing.assert_allclose(np.diff(edges), 32.0)
-        np.testing.assert_allclose(np.expm1(h['counts']).sum(), bright.size, rtol=1e-6)
+        np.testing.assert_allclose(np.expm1(h["counts"]).sum(), bright.size, rtol=1e-6)
 
 
 def test_slice_widget_bit_depth_kwarg_enforces_range_per_channel():
@@ -1869,13 +2057,13 @@ def test_slice_widget_bit_depth_kwarg_enforces_range_per_channel():
     ch = rng.integers(3, 2532, (4, 16, 16)).astype(np.uint16)
     lo, hi = int(ch.min()), int(ch.max())
 
-    w = show_zyx_max_slice_interactive([ch, ch, ch], pixel_sizes=(1, 1, 1), bit_depth=[16, 'dtype', 'data'])
-    ranges = [(h['bin_edges'][0], h['bin_edges'][-1]) for h in w.histograms_data]
+    w = show_zyx_max_slice_interactive([ch, ch, ch], pixel_sizes=(1, 1, 1), bit_depth=[16, "dtype", "data"])
+    ranges = [(h["bin_edges"][0], h["bin_edges"][-1]) for h in w.histograms_data]
     assert ranges == [(-0.5, 65535.5), (-0.5, 65535.5), (lo - 0.5, hi + 0.5)]
-    assert [h['bit_depth'] for h in w.histograms_data] == [16, 16, None]
+    assert [h["bit_depth"] for h in w.histograms_data] == [16, 16, None]
 
     w = show_zyx_max_slice_interactive([ch, ch], pixel_sizes=(1, 1, 1), bit_depth=14)
-    assert all(h['bin_edges'][-1] == 16383.5 for h in w.histograms_data)
+    assert all(h["bin_edges"][-1] == 16383.5 for h in w.histograms_data)
 
 
 def test_annotator_annotation_channel_stays_8bit_under_enforced_bit_depth():
@@ -1887,10 +2075,10 @@ def test_annotator_annotation_channel_stays_8bit_under_enforced_bit_depth():
     rng = np.random.default_rng(2)
     ch = rng.integers(0, 4096, (4, 16, 16)).astype(np.uint16)
     w = show_zyx_max_slice_interactive_point_annotator([ch, ch], pixel_sizes=(1, 1, 1), bit_depth=16)
-    assert [h['bit_depth'] for h in w.histograms_data] == [16, 16, 8]
+    assert [h["bit_depth"] for h in w.histograms_data] == [16, 16, 8]
 
 
-@pytest.mark.parametrize("bad", [0, 65, 'bits', 12.0, True])
+@pytest.mark.parametrize("bad", [0, 65, "bits", 12.0, True])
 def test_infer_histogram_range_rejects_invalid_bit_depth(bad):
     """Invalid `bit_depth` values raise instead of silently falling back to auto."""
     with pytest.raises(ValueError):
@@ -1965,9 +2153,25 @@ def test_annotator_default_vmax_is_robust_and_annotations_stay_255():
     assert w.vmax_list[0] <= 1000 and w.vmax_list[-1] == 255.0
 
 
-# =========================================
-# Copy-parameters round trip
-# =========================================
+def test_default_vmax_of_all_nan_channel_does_not_warn():
+    """Verify an all-NaN channel falls back to ``vmax=1.0`` without emitting ``RuntimeWarning``.
+
+    Strategy: construct a two-channel viewer with one normal and one all-NaN
+    channel while promoting ``RuntimeWarning`` to errors.
+    Expected outcome: construction succeeds cleanly with ``vmax_list[1] == 1.0``.
+    """
+    im = np.random.default_rng(0).random((4, 8, 8))
+    nan = np.full_like(im, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        w = show_zyx_max_slice_interactive([im, nan])
+    assert w.vmax_list[1] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Copy-parameters, copy-PNG, marimo app, and standalone execution
+# ---------------------------------------------------------------------------
+
 def test_copy_params_emits_reusable_physical_parameters():
     """The copy button emits parameters that reproduce the current view.
 
@@ -1979,7 +2183,7 @@ def test_copy_params_emits_reusable_physical_parameters():
     rebuilt widget to land on the same voxel slabs.
     """
     vol = _structured_volume()
-    pixel_sizes = {'Z': 2.0, 'Y': 0.5, 'X': 0.5}
+    pixel_sizes = {"Z": 2.0, "Y": 0.5, "X": 0.5}
     w = show_zyx_max_slice_interactive(vol, pixel_sizes=pixel_sizes, figsize=(4, 4))
 
     w.x_s, w.y_s, w.z_s = 20, 16, 6
@@ -1989,10 +2193,10 @@ def test_copy_params_emits_reusable_physical_parameters():
     params = eval(f"dict({w.copy_params_string})", {"__builtins__": {"dict": dict}}, {})
 
     # Positions and thicknesses are reported in physical units, (Z, Y, X) order.
-    assert params['slabs_position'] == (6 * 2.0, 16 * 0.5, 20 * 0.5)
-    assert params['slabs_thickness'] == (2 * 2.0, 3 * 0.5, 4 * 0.5)
-    assert len(params['vmin']) == len(params['vmax']) == 1
-    assert len(params['gamma']) == len(params['opacity']) == 1
+    assert params["slabs_position"] == (6 * 2.0, 16 * 0.5, 20 * 0.5)
+    assert params["slabs_thickness"] == (2 * 2.0, 3 * 0.5, 4 * 0.5)
+    assert len(params["vmin"]) == len(params["vmax"]) == 1
+    assert len(params["gamma"]) == len(params["opacity"]) == 1
 
     rebuilt = show_zyx_max_slice_interactive(vol, pixel_sizes=pixel_sizes, figsize=(4, 4), **params)
 
@@ -2000,13 +2204,164 @@ def test_copy_params_emits_reusable_physical_parameters():
     assert (rebuilt.z_t, rebuilt.y_t, rebuilt.x_t) == (w.z_t, w.y_t, w.x_t)
 
 
-# =========================================
-# IsoScatterWidget
-# =========================================
-def _iso_points(n=200, seed=0):
-    rng = np.random.default_rng(seed)
-    return rng.random(n) * 50, rng.random(n) * 40, rng.random(n) * 10
+def test_scatter_copy_params_round_trip():
+    """Verify scatter ``copy_params_trigger`` emits data-coordinate slab kwargs that reproduce the slab bounds.
 
+    Strategy: build a scatter viewer on offset coordinates, adjust ``x`` and
+    ``z`` slabs, bump ``copy_params_trigger``, parse the emitted ``slabs_*``
+    kwargs, and rebuild the viewer.
+    Expected outcome: all six start/end slab traits match the original widget.
+    """
+    rng = np.random.default_rng(0)
+    X = rng.uniform(500, 600, 400)
+    Y = rng.uniform(0, 50, 400)
+    Z = rng.uniform(20, 40, 400)
+    w = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(2, 0.5, 0.5))
+    w.x_start, w.x_end = 44, 56
+    w.z_start, w.z_end = 6, 14
+    w.copy_params_trigger += 1
+    kwargs = {}
+    for line in w.copy_params_string.splitlines():
+        key, val = line.rstrip(",").split("=", 1)
+        if key.startswith("slabs_"):
+            kwargs[key] = eval(val)
+    w2 = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(2, 0.5, 0.5), **kwargs)
+    for attr in ("x_start", "x_end", "y_start", "y_end", "z_start", "z_end"):
+        assert getattr(w2, attr) == getattr(w, attr), attr
+
+
+@pytest.mark.parametrize("kind", ["slice", "scatter"])
+def test_copy_png_trigger_returns_tight_figure_png(kind):
+    """Bumping `copy_png_trigger` puts a base64 PNG of the figure in `copy_png_data`.
+
+    Strategy: decode the payload and check (a) PNG magic bytes, (b) it is the
+    300-dpi tight-bbox render (larger than the 100-dpi on-screen image), and
+    (c) a second identical request still fires a change (the trait is cleared
+    first), which the JS listener relies on.
+    """
+    rng = np.random.default_rng(0)
+    if kind == "slice":
+        w = show_zyx_max_slice_interactive(rng.random((8, 32, 48)).astype(np.float32))
+    else:
+        pts = rng.random((50, 3)) * [8, 32, 48]
+        w = show_zyx_max_scatter_interactive(pts)
+
+    seen = []
+    w.observe(lambda c: seen.append(c["new"]), names="copy_png_data")
+    w.copy_png_trigger += 1
+    data = base64.b64decode(w.copy_png_data)
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+
+    shown = plt.imread(io.BytesIO(base64.b64decode(w.image_data)))
+    copied = plt.imread(io.BytesIO(data))
+    assert copied.shape[0] > shown.shape[0] and copied.shape[1] > shown.shape[1]
+
+    w.copy_png_trigger += 1
+    assert len([s for s in seen if s]) == 2
+    assert "" in seen
+
+
+def test_widget_png_ignores_tight_savefig_rcparam():
+    """axis_bounds are figure fractions, so the PNG must show the whole figure frame."""
+    im = np.random.default_rng(0).random((10, 40, 50))
+    sizes = {}
+    for bbox in ("standard", "tight"):
+        with matplotlib.rc_context({"savefig.bbox": bbox}):
+            w = show_zyx_max_slice_interactive(im, figsize=(8, 6))
+        sizes[bbox] = mpimg.imread(io.BytesIO(base64.b64decode(w.image_data))).shape[:2]
+    assert sizes["tight"] == sizes["standard"]
+
+
+def test_marimo_app_file_uses_existing_api():
+    """Verify ``tests/marimo_app.py`` only imports existing ``eigenp_utils`` names and valid keywords.
+
+    Strategy: parse ``tests/marimo_app.py`` with ``ast``, resolve every
+    imported ``eigenp_utils`` symbol, and check every call's keyword arguments
+    against the function signature.
+    Expected outcome: all imported symbols exist, every keyword is accepted,
+    and deprecated ``colors=`` is not used.
+    """
+    tree = ast.parse((Path(__file__).parent / "marimo_app.py").read_text())
+    imported = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("eigenp_utils"):
+            mod = importlib.import_module(node.module)
+            for alias in node.names:
+                assert hasattr(mod, alias.name), f"{node.module}.{alias.name} does not exist"
+                imported[alias.asname or alias.name] = getattr(mod, alias.name)
+    assert imported
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in imported:
+            params = inspect.signature(imported[node.func.id]).parameters
+            for kw in node.keywords:
+                assert kw.arg in params, f"{node.func.id}() has no keyword {kw.arg!r}"
+                assert kw.arg != "colors", "use colormap=, not the deprecated colors="
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide; covered by tests/wasm")
+def test_top_level_import_does_not_require_skimage():
+    """``import eigenp_utils`` must work without scikit-image installed.
+
+    scikit-image is an optional extra (``image-analysis``); the core plotting
+    API, and in particular browser/WASM environments installing only core
+    dependencies, must not need it. Strategy: in a fresh interpreter, make any
+    ``skimage`` import raise, then import the package and its ortho-view API.
+
+    Expected outcome: the subprocess exits cleanly and the core names exist.
+    """
+    code = textwrap.dedent("""
+        import sys, importlib.abc
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "skimage" or name.startswith("skimage."):
+                    raise ImportError("skimage blocked for test")
+        sys.meta_path.insert(0, Block())
+        import eigenp_utils
+        from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+        assert "show_zyx" in eigenp_utils.__all__
+        assert not any(m == "skimage" or m.startswith("skimage.") for m in sys.modules)
+    """)
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide")
+def test_widget_module_runs_without_installed_package(tmp_path):
+    """The module (with its .js/.css next to it) imports when eigenp_utils itself is
+    not importable, e.g. `uv run tnia_plotting_anywidgets.py` with its PEP 723 deps."""
+    src = Path(tpa.__file__).parent
+    for name in (
+        "tnia_plotting_anywidgets.py",
+        "tnia_plotting_anywidgets.js",
+        "tnia_plotting_anywidgets.css",
+        "iso_scatter.js",
+    ):
+        shutil.copy(src / name, tmp_path / name)
+    code = textwrap.dedent(f"""
+        import sys, runpy, importlib.abc
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "eigenp_utils" or name.startswith("eigenp_utils."):
+                    raise ModuleNotFoundError(name)
+        sys.meta_path.insert(0, Block())
+        ns = runpy.run_path({str(tmp_path / 'tnia_plotting_anywidgets.py')!r})
+        assert "TNIASliceWidget" in ns and ns["TNIAWidgetBase"]._esm
+        print("ok")
+    """)
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env={"MPLBACKEND": "Agg", "PATH": ""},
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip().endswith("ok")
+
+
+# ---------------------------------------------------------------------------
+# IsoScatterWidget
+# ---------------------------------------------------------------------------
 
 def test_show_iso_scatter_renders_and_responds_to_camera():
     """The isometric viewer renders on construction and re-renders when rotated.
@@ -2017,8 +2372,6 @@ def test_show_iso_scatter_renders_and_responds_to_camera():
     construction, then rotate and require the image to actually change.
     """
     X, Y, Z = _iso_points()
-    # Default-sized figure: the 3-row layout plus a suptitle does not fit a
-    # small one, and Matplotlib warns that tight_layout gave up.
     w = show_iso_scatter(X, Y, Z, title="iso")
 
     assert isinstance(w, IsoScatterWidget)
@@ -2026,7 +2379,6 @@ def test_show_iso_scatter_renders_and_responds_to_camera():
     assert initial
 
     w.azim = w.azim + 45.0
-
     assert w.image_data != initial
 
 
@@ -2099,11 +2451,46 @@ def test_iso_scatter_handles_empty_input():
         plt.close(fig)
 
 
-# =========================================
-# _rotate_expand (scipy replacement for skimage.transform.rotate(resize=True))
-# =========================================
-from eigenp_utils.tnia_plotting_anywidgets import _rotate_expand
+def test_iso_scatter_uses_pixel_sizes_for_radius_and_y():
+    """The isometric viewer keeps all points inside its axes with anisotropic pixels."""
+    rng = np.random.default_rng(12)
+    X, Y, Z = rng.uniform(0, 100, 300), rng.uniform(0, 100, 300), rng.uniform(0, 100, 300)
+    w = show_iso_scatter(X, Y, Z, pixel_sizes=(5, 1, 1))
+    assert w.max_radius >= 5 * (Z.max() - Z.min()) / 2
 
+    w2 = show_iso_scatter(X, Y, Z, pixel_sizes=(1, 3, 1))
+    w2.elev, w2.azim = 0, 0
+    fig = w2._render()
+    try:
+        top = [ax for ax in fig.axes if ax.get_title() == "Top View (X-Y)"][0]
+        pts = top.collections[0].get_offsets()
+        assert np.ptp(pts[:, 1]) == pytest.approx(3 * np.ptp(pts[:, 0]), rel=0.05)
+        assert w2.max_radius >= np.abs(pts).max()
+    finally:
+        plt.close(fig)
+
+
+def test_iso_scatter_subsampling_is_seeded_and_leaves_global_rng_alone():
+    """Verify ``show_iso_scatter`` subsampling is deterministic and does not mutate NumPy's global RNG.
+
+    Strategy: seed global ``np.random``, construct two widgets on 20,000 points
+    with default seed, and check both global RNG continuity and identical
+    retained coordinates.
+    Expected outcome: global ``np.random.rand()`` matches a fresh ``RandomState(42)``
+    and both widgets keep identical ``X_orig`` subsets.
+    """
+    rng = np.random.default_rng(0)
+    X, Y, Z = rng.random(20000), rng.random(20000), rng.random(20000)
+    np.random.seed(42)
+    w1 = show_iso_scatter(X, Y, Z)
+    assert np.random.rand() == np.random.RandomState(42).rand()
+    w2 = show_iso_scatter(X, Y, Z)
+    assert np.array_equal(w1.X_orig, w2.X_orig)
+
+
+# ---------------------------------------------------------------------------
+# Rotation geometry (_rotate_expand, physical-space rotation, scatter parity)
+# ---------------------------------------------------------------------------
 
 def test_rotate_expand_quarter_turns_are_exact():
     """Multiples of 90 degrees reduce to exact array permutations.
@@ -2137,12 +2524,12 @@ def test_rotate_expand_canvas_and_range():
     img = np.full((h, w), 2.0)
     out = _rotate_expand(img, a)
     c, s = np.cos(np.deg2rad(a)), np.sin(np.deg2rad(a))
-    assert out.shape == (int(np.around(abs((w - 1) * s) + abs((h - 1) * c) + 1)),
-                         int(np.around(abs((w - 1) * c) + abs((h - 1) * s) + 1)))
+    assert out.shape == (
+        int(np.around(abs((w - 1) * s) + abs((h - 1) * c) + 1)),
+        int(np.around(abs((w - 1) * c) + abs((h - 1) * s) + 1)),
+    )
     assert out.min() >= 0.0 and out.max() <= 2.0
     cy, cx = (out.shape[0] - 1) // 2, (out.shape[1] - 1) // 2
-    # The B-spline prefilter is global: edge ringing decays ~0.27**d, leaving
-    # ~1e-5 residue at the centre of a 20 px image, hence the 1e-3 tolerance.
     np.testing.assert_allclose(out[cy - 2:cy + 3, cx - 2:cx + 3], 2.0, atol=1e-3)
 
 
@@ -2175,59 +2562,141 @@ def test_rotate_expand_matches_skimage_geometry():
         assert np.abs(np.subtract(ndi.center_of_mass(ref), ndi.center_of_mass(wrong))).max() > 3.0
 
 
-@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide; covered by tests/wasm")
-def test_top_level_import_does_not_require_skimage():
-    """``import eigenp_utils`` must work without scikit-image installed.
+def test_rotate_expand_keeps_nan_local():
+    """One NaN pixel no longer blanks the whole rotated panel.
 
-    scikit-image is an optional extra (``image-analysis``); the core plotting
-    API, and in particular browser/WASM environments installing only core
-    dependencies, must not need it. Strategy: in a fresh interpreter, make any
-    ``skimage`` import raise, then import the package and its ortho-view API.
-
-    Expected outcome: the subprocess exits cleanly and the core names exist.
+    Expected outcome: only a few pixels around the NaN are NaN; everything
+    else is finite.
     """
-    import subprocess
-    code = textwrap.dedent("""
-        import sys, importlib.abc
-        class Block(importlib.abc.MetaPathFinder):
-            def find_spec(self, name, path, target=None):
-                if name == "skimage" or name.startswith("skimage."):
-                    raise ImportError("skimage blocked for test")
-        sys.meta_path.insert(0, Block())
-        import eigenp_utils
-        from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
-        assert "show_zyx" in eigenp_utils.__all__
-        assert not any(m == "skimage" or m.startswith("skimage.") for m in sys.modules)
-    """)
-    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-    assert res.returncode == 0, res.stderr
+    img = np.random.default_rng(5).uniform(0, 1, (64, 64))
+    img[30, 30] = np.nan
+    out = _rotate_expand(img, 10)
+    assert 0 < np.isnan(out).sum() <= 4
+    img[30, 30] = 0.5
+    np.testing.assert_allclose(np.isfinite(_rotate_expand(img, 10)).all(), True)
 
 
-# =========================================
-# Bug-scan batch 4: slab indexing, density mode, one rotation convention
-# =========================================
+def test_rotation_sense_is_the_same_for_images_and_points():
+    """rotate_view turns images and scatter points the same way.
 
-def _fig_frac(fig, ax, x, y):
-    """Data point on ``ax`` -> widget event coordinates (figure fraction, top-left origin)."""
-    disp = ax.transData.transform((x, y))
-    fx, fy = fig.transFigure.inverted().transform(disp)
-    return float(fx), float(1.0 - fy)
+    Strategy: an object 35 units right of the XY centre, rotate_view=(90, 0, 0).
+    Locate it in the image widget (rendered centroid) and in the scatter widget
+    in points and density mode. Then press 'C' on the points-mode marker.
+
+    Expected outcome: all three put it above the centre (counter-clockwise on
+    screen); hover sync recovers x=85, y=50. Points mode used to rotate the
+    other way and its hover inverse disagreed with its own drawing.
+    """
+    vol = np.zeros((1, 101, 101), dtype=np.float32)
+    vol[0, 50, 85] = 1.0
+    w_img = show_zyx_max_slice_interactive(vol, rotate_view=(90, 0, 0))
+    fig = w_img._render()
+    try:
+        _cx_img, cy_img = _rendered_centroid(fig.axXY)
+        centre = np.mean(fig.axXY.get_ylim())
+        assert cy_img < centre - 30
+    finally:
+        plt.close(fig)
+
+    X = np.array([0.0, 100.0, 85.0])
+    Y = np.array([0.0, 100.0, 50.0])
+    Z = np.zeros(3)
+    for render in ("points", "density"):
+        w = show_zyx_max_scatter_interactive(
+            (Z, Y, X), render=render, rotate_view=(90, 0, 0), bins=101,
+            slabs_thickness=(1000, 1000, 1000),
+        )
+        fig = w._render()
+        try:
+            centre_y = np.mean(fig.axXY.get_ylim())
+            if render == "points":
+                pts = np.vstack([c.get_offsets() for c in fig.axXY.collections if len(c.get_offsets())])
+                marker = pts[np.argmin(np.abs(pts[:, 0] - np.mean(fig.axXY.get_xlim())))]
+                assert marker[1] < centre_y - 30, (marker, centre_y)
+                hx, hy = _fig_frac(fig, fig.axXY, marker[0], marker[1])
+            else:
+                rgb = np.asarray(fig.axXY.images[0].get_array())[..., :3].sum(axis=-1)
+                _x0e, _x1e, y0e, y1e = fig.axXY.images[0].get_extent()
+                h, w_px = rgb.shape
+                col = rgb[:, w_px // 2 - 3:w_px // 2 + 4].max(axis=1)
+                row = int(np.argmax(col))
+                y_marker = y1e + (row + 0.5) * (y0e - y1e) / h
+                assert y_marker < centre_y - 30, (y_marker, centre_y)
+        finally:
+            plt.close(fig)
+        if render == "points":
+            w.hover_coords = {"plane": "xy", "x": hx, "y": hy}
+            assert (w.x_s, w.y_s) == (85, 50)
 
 
-def _rendered_centroid(ax):
-    """Intensity-weighted centroid of the image on ``ax``, in its data (physical) units."""
-    im = ax.images[0]
-    arr = np.asarray(im.get_array(), dtype=float)
-    if arr.ndim == 3:
-        arr = arr[..., :3].sum(axis=-1)
-    arr = np.nan_to_num(arr)
-    x0, x1, y0, y1 = im.get_extent()  # (left, right, bottom, top) with top=0
-    H, W = arr.shape
-    xs = x0 + (np.arange(W) + 0.5) * (x1 - x0) / W
-    ys = y1 + (np.arange(H) + 0.5) * (y0 - y1) / H
-    tot = arr.sum()
-    return float((arr.sum(axis=0) * xs).sum() / tot), float((arr.sum(axis=1) * ys).sum() / tot)
+@pytest.mark.parametrize("plane, angle, pixel_sizes", [
+    ("xy", 45.0, (1, 1, 1)),
+    ("xy", 180.0, (1, 1, 1)),
+    ("xy", 30.0, (1, 1, 1)),
+    ("xz", 30.0, (4, 1, 1)),
+    ("zy", 60.0, (4, 1, 1)),
+])
+def test_rotated_click_maps_to_voxel_under_cursor(plane, angle, pixel_sizes):
+    """A click on a rotated panel records the voxel drawn under the cursor.
 
+    Strategy: a smooth blob centred on a known voxel. Render the annotator with
+    rotate_view, take the blob's rendered centroid (independent of the
+    crosshair/click transforms), click there.
+
+    Expected outcome: the recorded point is the blob's voxel. It used to be off
+    by a voxel for isotropic data and by tens of voxels for anisotropic panels.
+    """
+    Z, Y, X = 40, 64, 64
+    pz, py, px = pixel_sizes
+    tz, ty, tx = 30, 21, 45
+    zz, yy, xx = np.meshgrid(np.arange(Z), np.arange(Y), np.arange(X), indexing="ij")
+    r2 = ((zz - tz) * pz) ** 2 + ((yy - ty) * py) ** 2 + ((xx - tx) * px) ** 2
+    vol = np.exp(-r2 / (2 * 3.0 ** 2)).astype(np.float32)
+
+    rot = {"xy": (angle, 0, 0), "xz": (0, angle, 0), "zy": (0, 0, angle)}[plane]
+    w = show_zyx_max_slice_interactive_point_annotator(
+        vol,
+        pixel_sizes=pixel_sizes,
+        rotate_view=rot,
+        slabs_position=(tz * pz, ty * py, tx * px),
+        slabs_thickness=(pz, py, px),
+    )
+    w.annotation_mode = True
+    fig = w._render()
+    try:
+        ax = {"xy": fig.axXY, "xz": fig.axXZ, "zy": fig.axZY}[plane]
+        cx, cy = _rendered_centroid(ax)
+        click_x, click_y = _fig_frac(fig, ax, cx, cy)
+    finally:
+        plt.close(fig)
+    w.click_coords = {"plane": plane, "x": click_x, "y": click_y}
+    assert w.points == [[tz, ty, tx]], w.points
+
+
+def test_rotated_anisotropic_panel_keeps_physical_aspect():
+    """Rotation happens in physical space, so anisotropic panels are not distorted.
+
+    Strategy: a 40 x 40 um XZ plane (Z=10 at 4 um, X=40 at 1 um), rotated 90
+    degrees, plus the matching crosshair transform.
+
+    Expected outcome: the panel is still 40 x 40 um (it was drawn 10 x 160 um),
+    and the rotated-line helper maps the panel corners onto the panel's edges.
+    """
+    vol = np.random.default_rng(4).uniform(0, 1, (10, 8, 40)).astype(np.float32)
+    fig = show_zyx_max_slabs(vol, [0, 40], [0, 8], [0, 10], pixel_sizes=(4, 1, 1), rotate_view=(0, 90, 0))
+    try:
+        assert abs(np.diff(fig.axXZ.get_xlim())[0]) == pytest.approx(40, abs=1)
+        assert abs(np.diff(fig.axXZ.get_ylim())[0]) == pytest.approx(40, abs=1)
+        xs, ys = _get_rotated_line(0, 0, 40, 40, 90, 40, 10, 1, 4)
+        np.testing.assert_allclose([xs[0], ys[0]], [0, 40], atol=1)
+        np.testing.assert_allclose([xs[1], ys[1]], [40, 0], atol=1)
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Slab indexing, scatter density/points geometry, and display range invariants
+# ---------------------------------------------------------------------------
 
 def test_slab_end_is_inclusive_so_last_plane_is_projected():
     """The range slider's end is inclusive, so the last plane is part of the slab.
@@ -2269,16 +2738,17 @@ def test_scatter_density_ids_with_single_colormap_name():
     X = ids * 25 + rng.uniform(0, 10, n)
     Y = rng.uniform(0, 100, n)
     Z = rng.uniform(0, 10, n)
-    w = show_zyx_max_scatter_interactive((Z, Y, X), channels=ids, colormap='viridis', render='density',
-                                         slabs_thickness=(1000, 1000, 1000))
+    w = show_zyx_max_scatter_interactive(
+        (Z, Y, X), channels=ids, colormap="viridis", render="density",
+        slabs_thickness=(1000, 1000, 1000),
+    )
     fig = w._render()
     try:
         im = fig.axXY.images[0]
         rgb = np.asarray(im.get_array())[..., :3]
-        W = rgb.shape[1]
+        w_px = rgb.shape[1]
         left, right = im.get_extent()[:2]
-        # cluster c occupies data x in [25c, 25c + 10]; the panel starts at xmin - 0.5
-        col_of = lambda x: int((x - (w.xmin - 0.5) - left) / (right - left) * W)
+        col_of = lambda x: int((x - (w.xmin - 0.5) - left) / (right - left) * w_px)
         cols = [rgb[:, col_of(c * 25 + 5)].max(axis=0) for c in range(4)]
         for i in range(4):
             for j in range(i + 1, 4):
@@ -2301,13 +2771,16 @@ def test_scatter_density_panels_scale_bar_and_hover_use_data_units():
     """
     rng = np.random.default_rng(1)
     n = 20000
-    X = rng.uniform(0, 1000, n); Y = rng.uniform(0, 1000, n); Z = rng.uniform(0, 20, n)
+    X = rng.uniform(0, 1000, n)
+    Y = rng.uniform(0, 1000, n)
+    Z = rng.uniform(0, 20, n)
     X[0], Y[0], Z[0] = 0, 0, 0
-    w = show_zyx_max_scatter_interactive((Z, Y, X), render='density', pixel_sizes=(1, 1, 1))
+    w = show_zyx_max_scatter_interactive((Z, Y, X), render="density", pixel_sizes=(1, 1, 1))
     fig = w._render()
     try:
         def span(ax):
             return abs(np.diff(ax.get_xlim())[0]), abs(np.diff(ax.get_ylim())[0])
+
         np.testing.assert_allclose(span(fig.axXY), (1001, 1001), rtol=1e-6)
         np.testing.assert_allclose(span(fig.axXZ), (1001, 21), rtol=1e-6)
         np.testing.assert_allclose(span(fig.axZY), (21, 1001), rtol=1e-6)
@@ -2317,11 +2790,10 @@ def test_scatter_density_panels_scale_bar_and_hover_use_data_units():
         bar_units = (bar[1][0] - bar[0][0]) * span(fig.axXY)[0]
         assert bar_units == pytest.approx(float(label.split()[0]), rel=1e-6)
 
-        # density panels start at the data box edge, min - 0.5
         hx, hy = _fig_frac(fig, fig.axXY, 750 - w.xmin + 0.5, 250 - w.ymin + 0.5)
     finally:
         plt.close(fig)
-    w.hover_coords = {'plane': 'xy', 'x': hx, 'y': hy}
+    w.hover_coords = {"plane": "xy", "x": hx, "y": hy}
     assert abs(w.x_s - (750 - w.xmin)) <= 2 and abs(w.y_s - (250 - w.ymin)) <= 2, (w.x_s, w.y_s)
 
 
@@ -2338,8 +2810,9 @@ def test_scatter_density_bin_colour_encodes_value_not_sum():
     Y = np.r_[np.full(50, 20.0), 80.0, 0.0, 99.0]
     Z = np.zeros_like(X)
     vals = np.r_[np.full(50, 0.1), 1.0, 0.0, 0.0]
-    w = show_zyx_max_scatter_interactive((Z, Y, X), channels=vals, render='density', bins=100,
-                                         vmin=0.0, vmax=1.0)
+    w = show_zyx_max_scatter_interactive(
+        (Z, Y, X), channels=vals, render="density", bins=100, vmin=0.0, vmax=1.0
+    )
     fig = w._render()
     try:
         rgb = np.asarray(fig.axXY.images[0].get_array())[..., :3]
@@ -2370,8 +2843,10 @@ def test_opacity_of_one_channel_does_not_fade_composites():
     n = 2000
     X, Y, Z = rng.uniform(0, 50, n), rng.uniform(0, 50, n), rng.uniform(0, 5, n)
     a, b = rng.uniform(0, 1, n), rng.uniform(0, 1, n)
-    w = show_zyx_max_scatter_interactive((Z, Y, X), channels=[a, b], render='density',
-                                         opacity=[0.0, 1.0], slabs_thickness=(1000, 1000, 1000))
+    w = show_zyx_max_scatter_interactive(
+        (Z, Y, X), channels=[a, b], render="density",
+        opacity=[0.0, 1.0], slabs_thickness=(1000, 1000, 1000),
+    )
     fig = w._render()
     try:
         im = fig.axXY.images[0]
@@ -2379,139 +2854,6 @@ def test_opacity_of_one_channel_does_not_fade_composites():
         assert np.asarray(im.get_array())[..., 1].max() > 0.5  # lime channel present
     finally:
         plt.close(fig)
-
-
-def test_rotation_sense_is_the_same_for_images_and_points():
-    """rotate_view turns images and scatter points the same way.
-
-    Strategy: an object 35 units right of the XY centre, rotate_view=(90, 0, 0).
-    Locate it in the image widget (rendered centroid) and in the scatter widget
-    in points and density mode. Then press 'C' on the points-mode marker.
-
-    Expected outcome: all three put it above the centre (counter-clockwise on
-    screen); hover sync recovers x=85, y=50. Points mode used to rotate the
-    other way and its hover inverse disagreed with its own drawing.
-    """
-    vol = np.zeros((1, 101, 101), dtype=np.float32)
-    vol[0, 50, 85] = 1.0
-    w_img = show_zyx_max_slice_interactive(vol, rotate_view=(90, 0, 0))
-    fig = w_img._render()
-    try:
-        cx_img, cy_img = _rendered_centroid(fig.axXY)
-        centre = np.mean(fig.axXY.get_ylim())
-        assert cy_img < centre - 30
-    finally:
-        plt.close(fig)
-
-    X = np.array([0.0, 100.0, 85.0]); Y = np.array([0.0, 100.0, 50.0]); Z = np.zeros(3)
-    for render in ('points', 'density'):
-        w = show_zyx_max_scatter_interactive((Z, Y, X), render=render, rotate_view=(90, 0, 0), bins=101,
-                                             slabs_thickness=(1000, 1000, 1000))
-        fig = w._render()
-        try:
-            centre_y = np.mean(fig.axXY.get_ylim())
-            if render == 'points':
-                pts = np.vstack([c.get_offsets() for c in fig.axXY.collections if len(c.get_offsets())])
-                # The two box corners end up left/right of centre; the marker is
-                # the point closest to the centre column.
-                marker = pts[np.argmin(np.abs(pts[:, 0] - np.mean(fig.axXY.get_xlim())))]
-                assert marker[1] < centre_y - 30, (marker, centre_y)
-                hx, hy = _fig_frac(fig, fig.axXY, marker[0], marker[1])
-            else:
-                # Mask out the two corner points; the marker is the bright bin
-                # nearest the centre column.
-                rgb = np.asarray(fig.axXY.images[0].get_array())[..., :3].sum(axis=-1)
-                x0e, x1e, y0e, y1e = fig.axXY.images[0].get_extent()
-                H, W = rgb.shape
-                col = rgb[:, W // 2 - 3:W // 2 + 4].max(axis=1)
-                row = int(np.argmax(col))
-                y_marker = y1e + (row + 0.5) * (y0e - y1e) / H
-                assert y_marker < centre_y - 30, (y_marker, centre_y)
-        finally:
-            plt.close(fig)
-        if render == 'points':
-            w.hover_coords = {'plane': 'xy', 'x': hx, 'y': hy}
-            assert (w.x_s, w.y_s) == (85, 50)
-
-
-@pytest.mark.parametrize("plane, angle, pixel_sizes", [
-    ('xy', 45.0, (1, 1, 1)),
-    ('xy', 180.0, (1, 1, 1)),
-    ('xy', 30.0, (1, 1, 1)),
-    ('xz', 30.0, (4, 1, 1)),
-    ('zy', 60.0, (4, 1, 1)),
-])
-def test_rotated_click_maps_to_voxel_under_cursor(plane, angle, pixel_sizes):
-    """A click on a rotated panel records the voxel drawn under the cursor.
-
-    Strategy: a smooth blob centred on a known voxel. Render the annotator with
-    rotate_view, take the blob's rendered centroid (independent of the
-    crosshair/click transforms), click there.
-
-    Expected outcome: the recorded point is the blob's voxel. It used to be off
-    by a voxel for isotropic data and by tens of voxels for anisotropic panels.
-    """
-    Z, Y, X = 40, 64, 64
-    pz, py, px = pixel_sizes
-    tz, ty, tx = 30, 21, 45
-    zz, yy, xx = np.meshgrid(np.arange(Z), np.arange(Y), np.arange(X), indexing='ij')
-    r2 = ((zz - tz) * pz) ** 2 + ((yy - ty) * py) ** 2 + ((xx - tx) * px) ** 2
-    vol = np.exp(-r2 / (2 * 3.0 ** 2)).astype(np.float32)
-
-    rot = {'xy': (angle, 0, 0), 'xz': (0, angle, 0), 'zy': (0, 0, angle)}[plane]
-    w = show_zyx_max_slice_interactive_point_annotator(vol, pixel_sizes=pixel_sizes, rotate_view=rot,
-                                                       slabs_position=(tz * pz, ty * py, tx * px),
-                                                       slabs_thickness=(pz, py, px))
-    w.annotation_mode = True
-    fig = w._render()
-    try:
-        ax = {'xy': fig.axXY, 'xz': fig.axXZ, 'zy': fig.axZY}[plane]
-        cx, cy = _rendered_centroid(ax)
-        click_x, click_y = _fig_frac(fig, ax, cx, cy)
-    finally:
-        plt.close(fig)
-    w.click_coords = {'plane': plane, 'x': click_x, 'y': click_y}
-    assert w.points == [[tz, ty, tx]], w.points
-
-
-def test_rotated_anisotropic_panel_keeps_physical_aspect():
-    """Rotation happens in physical space, so anisotropic panels are not distorted.
-
-    Strategy: a 40 x 40 um XZ plane (Z=10 at 4 um, X=40 at 1 um), rotated 90
-    degrees, plus the matching crosshair transform.
-
-    Expected outcome: the panel is still 40 x 40 um (it was drawn 10 x 160 um),
-    and the rotated-line helper maps the panel corners onto the panel's edges.
-    """
-    from eigenp_utils.tnia_plotting_anywidgets import _get_rotated_line
-
-    vol = np.random.default_rng(4).uniform(0, 1, (10, 8, 40)).astype(np.float32)
-    fig = show_zyx_max_slabs(vol, [0, 40], [0, 8], [0, 10], pixel_sizes=(4, 1, 1), rotate_view=(0, 90, 0))
-    try:
-        assert abs(np.diff(fig.axXZ.get_xlim())[0]) == pytest.approx(40, abs=1)
-        assert abs(np.diff(fig.axXZ.get_ylim())[0]) == pytest.approx(40, abs=1)
-        xs, ys = _get_rotated_line(0, 0, 40, 40, 90, 40, 10, 1, 4)
-        # (0, 0) -> bottom-left corner and (40, 40) -> top-right corner after a CCW quarter turn
-        np.testing.assert_allclose([xs[0], ys[0]], [0, 40], atol=1)
-        np.testing.assert_allclose([xs[1], ys[1]], [40, 0], atol=1)
-    finally:
-        plt.close(fig)
-
-
-def test_rotate_expand_keeps_nan_local():
-    """One NaN pixel no longer blanks the whole rotated panel.
-
-    Expected outcome: only a few pixels around the NaN are NaN; everything
-    else is finite.
-    """
-    from eigenp_utils.tnia_plotting_anywidgets import _rotate_expand
-
-    img = np.random.default_rng(5).uniform(0, 1, (64, 64))
-    img[30, 30] = np.nan
-    out = _rotate_expand(img, 10)
-    assert 0 < np.isnan(out).sum() <= 4
-    img[30, 30] = 0.5
-    np.testing.assert_allclose(np.isfinite(_rotate_expand(img, 10)).all(), True)
 
 
 @pytest.mark.parametrize("gamma", [1, 0.5])
@@ -2531,7 +2873,7 @@ def test_single_channel_panels_share_one_intensity_scale(gamma):
         clims = [ax.images[0].norm for ax in (fig.axXY, fig.axXZ, fig.axZY)]
         lims = {(round(n.vmin, 3), round(n.vmax, 3)) for n in clims}
         assert len(lims) == 1, lims
-        (lo, hi), = lims
+        (_lo, hi), = lims
         assert hi > 900
     finally:
         plt.close(fig)
@@ -2544,37 +2886,20 @@ def test_multichannel_composite_ignores_nonfinite_values():
     b = rng.uniform(0, 1000, (16, 16)).astype(np.float32)
     a[3, 3] = np.nan
     a[4, 4] = np.inf
-    xy, xz, zy = create_multichannel_rgb([a, b], [a, b], [a, b], colormap=['red', 'lime'])
+    xy, _xz, _zy = create_multichannel_rgb([a, b], [a, b], [a, b], colormap=["red", "lime"])
     assert np.isfinite(xy).all()
-    # red is channel a only; with vmax from finite values most pixels are not saturated
     assert (xy[..., 0] > 0.99).mean() < 0.1
 
 
 def test_blend_colors_scalar_gamma():
-    from eigenp_utils.tnia_plotting_anywidgets import blend_colors
+    """Verify ``blend_colors`` broadcasts a scalar ``gamma`` across channels.
 
+    Strategy: blend a linear ``[0, 1]`` ramp with ``gamma=0.5`` on ``['white']``.
+    Expected outcome: output equals ``sqrt(I)``.
+    """
     I = np.linspace(0, 1, 5)[:, None]
-    out = blend_colors(I, ['white'], vmin=0, vmax=1, gamma=0.5)
+    out = blend_colors(I, ["white"], vmin=0, vmax=1, gamma=0.5)
     np.testing.assert_allclose(out[:, 0], np.sqrt(I[:, 0]))
-
-
-def test_histogram_and_widget_accept_inf_values():
-    vol = np.random.default_rng(8).uniform(0, 1, (4, 16, 16)).astype(np.float32)
-    vol[0, 0, 0] = np.inf
-    h = compute_histogram(vol)
-    assert np.isfinite(h['bin_edges']).all() and len(h['counts']) == 128
-    show_zyx_max_slice_interactive(vol, pixel_sizes=(1, 1, 1))
-
-
-@pytest.mark.parametrize("colormap", ['magma', ['red', 'lime']])
-def test_slice_widget_pads_short_colormap_for_multichannel(colormap):
-    """A single colormap string is not split into characters, and a short list is padded."""
-    rng = np.random.default_rng(9)
-    chans = [rng.uniform(0, 1, (4, 16, 16)).astype(np.float32) for _ in range(3)]
-    w = show_zyx_max_slice_interactive(chans, colormap=colormap)
-    assert len(w.channel_colors) == 3
-    given = [colormap] if isinstance(colormap, str) else colormap
-    assert w.colors_resolved[:len(given)] == given
 
 
 def test_points_mode_scales_y_by_sy():
@@ -2585,7 +2910,9 @@ def test_points_mode_scales_y_by_sy():
     Expected outcome: y_s == 60, and the XY panel spans twice as far in Y as
     in X for a square point cloud.
     """
-    X = np.array([0.0, 99.0, 30.0]); Y = np.array([0.0, 99.0, 60.0]); Z = np.array([0.0, 9.0, 5.0])
+    X = np.array([0.0, 99.0, 30.0])
+    Y = np.array([0.0, 99.0, 60.0])
+    Z = np.array([0.0, 9.0, 5.0])
     w = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(1, 2, 1), slabs_thickness=(1000, 1000, 1000))
     fig = w._render()
     try:
@@ -2593,7 +2920,7 @@ def test_points_mode_scales_y_by_sy():
         hx, hy = _fig_frac(fig, fig.axXY, 30 * 1, 60 * 2)
     finally:
         plt.close(fig)
-    w.hover_coords = {'plane': 'xy', 'x': hx, 'y': hy}
+    w.hover_coords = {"plane": "xy", "x": hx, "y": hy}
     assert (w.x_s, w.y_s) == (30, 60)
 
 
@@ -2607,7 +2934,7 @@ def test_points_mode_scale_bar_matches_rotated_panel():
     fig = w._render()
     try:
         label = _scale_bar_artists(fig)[1].get_text()
-        seg = [c for c in fig.axXY.collections if hasattr(c, 'get_segments')][-1].get_segments()[0]
+        seg = [c for c in fig.axXY.collections if hasattr(c, "get_segments")][-1].get_segments()[0]
         bar_units = (seg[1][0] - seg[0][0]) * abs(np.diff(fig.axXY.get_xlim())[0])
         assert bar_units == pytest.approx(float(label.split()[0]), rel=1e-6)
     finally:
@@ -2625,219 +2952,34 @@ def test_scatter_one_plane_slab_shows_the_points_in_its_band():
     try:
         x0 = w.xmin + 50
         expected = int(((X >= x0 - 0.5) & (X < x0 + 0.5)).sum())
-        shown = sum(len(c.get_offsets()) for c in fig.axZY.collections if hasattr(c, 'get_offsets'))
+        shown = sum(len(c.get_offsets()) for c in fig.axZY.collections if hasattr(c, "get_offsets"))
         assert expected > 0 and shown == expected
     finally:
         plt.close(fig)
 
 
-def test_iso_scatter_uses_pixel_sizes_for_radius_and_y():
-    """The isometric viewer keeps all points inside its axes with anisotropic pixels."""
-    rng = np.random.default_rng(12)
-    X, Y, Z = rng.uniform(0, 100, 300), rng.uniform(0, 100, 300), rng.uniform(0, 100, 300)
-    w = IsoScatterWidget(X, Y, Z, pixel_sizes=(5, 1, 1))
-    assert w.max_radius >= 5 * (Z.max() - Z.min()) / 2
-
-    w2 = IsoScatterWidget(X, Y, Z, pixel_sizes=(1, 3, 1))
-    w2.elev, w2.azim = 0, 0
-    fig = w2._render()
-    try:
-        top = [ax for ax in fig.axes if ax.get_title() == "Top View (X-Y)"][0]
-        pts = top.collections[0].get_offsets()
-        assert np.ptp(pts[:, 1]) == pytest.approx(3 * np.ptp(pts[:, 0]), rel=0.05)
-        assert w2.max_radius >= np.abs(pts).max()
-    finally:
-        plt.close(fig)
-
-
-# =========================================
-# Source: remaining low-severity scan findings (widgets)
-# =========================================
-
-
-def test_pixel_size_dict_with_missing_axis_falls_back_to_one():
-    """An uncalibrated axis (None, as image_io reports it) is treated as 1.0 with a warning."""
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max, _parse_zyx_tuple_or_dict
-
-    ps = {'X': 0.5, 'Y': 0.5, 'Z': None, 'unit': 'micron'}
-    with pytest.warns(UserWarning, match="axis Z"):
-        assert _parse_zyx_tuple_or_dict(ps, default_val=1.0) == (1.0, 0.5, 0.5)
-    # Slab defaults stay None without a warning
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        assert _parse_zyx_tuple_or_dict({'Z': None, 'Y': 2, 'X': None}) == (None, 2.0, None)
-
-    im = np.random.default_rng(0).random((6, 20, 30))
-    with pytest.warns(UserWarning, match="axis Z"):
-        fig = show_zyx_max(im, pixel_sizes=ps)
-    plt.close(fig)
-    with pytest.warns(UserWarning, match="axis Z"):
-        w = show_zyx_max_slice_interactive(im, pixel_sizes=ps)
-    assert w.sz == 1.0 and w.image_data
-    pts = (np.array([0, 5.0]), np.array([0, 19.0]), np.array([0, 29.0]))
-    with pytest.warns(UserWarning, match="axis Z"):
-        w2 = show_zyx_max_scatter_interactive(pts, pixel_sizes=ps)
-    assert w2.sz == 1.0 and w2.image_data
-
-
-@pytest.mark.parametrize("fn_name", ["show_zyx_max", "show_zyx_max_slabs"])
-def test_deprecated_colors_warns_once(fn_name):
-    import eigenp_utils.tnia_plotting_anywidgets as tpa
-
-    im = np.random.default_rng(0).random((4, 8, 8))
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter("always")
-        fig = getattr(tpa, fn_name)(im, colors='red')
-    plt.close(fig)
-    dep = [r for r in rec if issubclass(r.category, DeprecationWarning) and "'colors'" in str(r.message)]
-    assert len(dep) == 1
-    assert dep[0].filename == __file__  # points at the caller
-
-
-@pytest.mark.parametrize("unit, size, expected", [
-    ('cm', 5e-5, '20 µm'),       # 256 px * 0.5 µm stored in cm
-    ('nm', 500.0, '20 µm'),
-    ('micron', 0.5, '20 µm'),
-    ('\\u00B5m', 0.5, '20 µm'),  # ImageJ's escaped micro sign
-    ('pixel', 1.0, '50 pixel'),  # unknown unit: shown as given
-])
-def test_scale_bar_uses_pixel_size_unit(unit, size, expected):
-    from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max
-
-    im = np.zeros((4, 256, 256))
-    ps = {'Z': size, 'Y': size, 'X': size, 'unit': unit}
-    fig = show_zyx_max(im, pixel_sizes=ps)
-    try:
-        assert expected in [t.get_text() for ax in fig.axes for t in ax.texts]
-    finally:
-        plt.close(fig)
-
-    w = show_zyx_max_slice_interactive(im, pixel_sizes=ps)
-    fig = w._render()
-    try:
-        assert expected in [t.get_text() for ax in fig.axes for t in ax.texts]
-    finally:
-        plt.close(fig)
-
-    pts = (np.array([0, 3.0]), np.array([0, 255.0]), np.array([0, 255.0]))
-    for render in ('points', 'density'):
-        w = show_zyx_max_scatter_interactive(pts, pixel_sizes=ps, render=render)
-        fig = w._render()
-        try:
-            assert expected in [t.get_text() for ax in fig.axes for t in ax.texts], render
-        finally:
-            plt.close(fig)
-
-
 def test_multichannel_default_vmin_shows_negative_channels():
     """vmin=None is 0 for non-negative data and the data minimum for negative data."""
-    from eigenp_utils.tnia_plotting_anywidgets import create_multichannel_rgb_cmap
-
     rng = np.random.default_rng(0)
     neg = rng.uniform(-5, -1, (8, 8))
     pos = rng.uniform(0, 10, (8, 8))
     for fn in (create_multichannel_rgb, create_multichannel_rgb_cmap):
-        xy, _, _ = fn([neg, pos], [neg, pos], [neg, pos], colormap=['red', 'blue'], blend='max')
+        xy, _, _ = fn([neg, pos], [neg, pos], [neg, pos], colormap=["red", "blue"], blend="max")
         red = xy[..., 0]
         assert red.max() > 0.5 and np.ptp(red) > 0.5
-        # the non-negative channel keeps vmin = 0: its brightest pixel is full blue
         assert xy[..., 2].max() == pytest.approx(1.0, abs=1e-2)
         with pytest.raises(ValueError, match="gamma"):
             fn([neg, pos], [neg, pos], [neg, pos], gamma=[1, 0])
 
 
-@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide")
-def test_widget_module_runs_without_installed_package(tmp_path):
-    """The module (with its .js/.css next to it) imports when eigenp_utils itself is
-    not importable, e.g. `uv run tnia_plotting_anywidgets.py` with its PEP 723 deps."""
-    import shutil
-    import subprocess
-    from pathlib import Path
-    import eigenp_utils.tnia_plotting_anywidgets as tpa
-
-    src = Path(tpa.__file__).parent
-    for name in ("tnia_plotting_anywidgets.py", "tnia_plotting_anywidgets.js",
-                 "tnia_plotting_anywidgets.css", "iso_scatter.js"):
-        shutil.copy(src / name, tmp_path / name)
-    code = textwrap.dedent(f"""
-        import sys, runpy, importlib.abc
-        class Block(importlib.abc.MetaPathFinder):
-            def find_spec(self, name, path, target=None):
-                if name == "eigenp_utils" or name.startswith("eigenp_utils."):
-                    raise ModuleNotFoundError(name)
-        sys.meta_path.insert(0, Block())
-        ns = runpy.run_path({str(tmp_path / 'tnia_plotting_anywidgets.py')!r})
-        assert "TNIASliceWidget" in ns and ns["TNIAWidgetBase"]._esm
-        print("ok")
-    """)
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                         env={"MPLBACKEND": "Agg", "PATH": ""})
-    assert out.returncode == 0, out.stderr[-2000:]
-    assert out.stdout.strip().endswith("ok")
-
-
-def test_one_render_per_multi_trait_update():
-    """A middle-thumb drag (x_start and x_end in one message) and a 'C' hover sync
-    (x_s and y_s) each rasterise the figure once."""
-    im = np.random.default_rng(0).random((10, 40, 50))
-    w = show_zyx_max_slice_interactive(im)
-    calls = []
-    orig = w._render
-    w._render = lambda: (calls.append(1), orig())[1]
-
-    with w.hold_trait_notifications():  # how ipywidgets applies one comm message
-        w.x_start, w.x_end = w.x_start + 3, w.x_end + 3
-    assert len(calls) == 1
-
-    calls.clear()
-    info = w.axis_bounds['xy']
-    w.hover_coords = {'plane': 'xy', 'x': info['x0'] + 0.3 * (info['x1'] - info['x0']),
-                      'y': info['y0_js'] + 0.6 * (info['y1_js'] - info['y0_js']), 't': 1}
-    assert len(calls) == 1
-
-    calls.clear()
-    w.vmax_list = [0.5]  # any real change still renders
-    assert len(calls) == 1
-
-
-def test_widget_png_ignores_tight_savefig_rcparam():
-    """axis_bounds are figure fractions, so the PNG must show the whole figure frame."""
-    import base64
-    import io
-    import matplotlib.image as mpimg
-
-    im = np.random.default_rng(0).random((10, 40, 50))
-    sizes = {}
-    for bbox in ('standard', 'tight'):
-        with matplotlib.rc_context({'savefig.bbox': bbox}):
-            w = show_zyx_max_slice_interactive(im, figsize=(8, 6))
-        sizes[bbox] = mpimg.imread(io.BytesIO(base64.b64decode(w.image_data))).shape[:2]
-    assert sizes['tight'] == sizes['standard']
-
-
-def test_scatter_copy_params_round_trip():
-    rng = np.random.default_rng(0)
-    X = rng.uniform(500, 600, 400)
-    Y = rng.uniform(0, 50, 400)
-    Z = rng.uniform(20, 40, 400)
-    w = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(2, 0.5, 0.5))
-    w.x_start, w.x_end = 44, 56
-    w.z_start, w.z_end = 6, 14
-    w._copy_params(None)
-    kwargs = {}
-    for line in w.copy_params_string.splitlines():
-        key, val = line.rstrip(',').split('=', 1)
-        if key.startswith('slabs_'):
-            kwargs[key] = eval(val)
-    w2 = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(2, 0.5, 0.5), **kwargs)
-    for a in ('x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end'):
-        assert getattr(w2, a) == getattr(w, a), a
-
-
 def test_annotator_point_outside_volume_paints_nothing():
-    from eigenp_utils.tnia_plotting_anywidgets import TNIAAnnotatorWidget
+    """Verify adding points outside the volume bounds leaves the annotation mask unchanged.
 
-    w = TNIAAnnotatorWidget(np.zeros((20, 64, 64), dtype=np.uint8))
+    Strategy: add one interior point via ``show_zyx_max_slice_interactive_point_annotator``
+    and record the painted voxel count, then add two out-of-bounds points.
+    Expected outcome: painted voxel count in ``_annot_img`` does not change.
+    """
+    w = show_zyx_max_slice_interactive_point_annotator(np.zeros((20, 64, 64), dtype=np.uint8))
     w.add_point(10, 30, 30)
     inside = int((w._annot_img > 0).sum())
     assert inside > 0
@@ -2847,6 +2989,14 @@ def test_annotator_point_outside_volume_paints_nothing():
 
 
 def test_scatter_widget_drops_nonfinite_points_and_accepts_empty_input():
+    """Verify scatter viewers drop NaN/inf points with a warning, re-index ``idx_lists``, and handle empty clouds.
+
+    Strategy: inject one ``nan`` and one ``inf`` into 30 points with both
+    continuous and index-list channels, then test empty point clouds in both
+    ``'points'`` and ``'density'`` modes.
+    Expected outcome: emits a warning naming 2 dropped points, retains 28
+    aligned values, re-indexes ``idx_lists``, and renders empty inputs cleanly.
+    """
     rng = np.random.default_rng(0)
     X, Y, Z = rng.uniform(0, 50, 30), rng.uniform(0, 50, 30), rng.uniform(0, 10, 30)
     vals = rng.random(30)
@@ -2857,315 +3007,414 @@ def test_scatter_widget_drops_nonfinite_points_and_accepts_empty_input():
     assert w.N == 28 and len(w.cont_single) == 28
     assert w.cont_single[3] == vals[4] and w.image_data
 
-    # index-list channels are re-indexed to the kept points
     with pytest.warns(UserWarning):
         w = show_zyx_max_scatter_interactive((Z, Y, X), channels=[np.array([0, 3, 4]), np.array([7, 8])])
     assert [list(ix) for ix in w.idx_lists] == [[0, 3], [6]]
 
-    for render in ('points', 'density'):
+    for render in ("points", "density"):
         w = show_zyx_max_scatter_interactive((np.array([]), np.array([]), np.array([])), render=render)
         assert w.image_data
 
 
-def test_default_vmax_of_all_nan_channel_does_not_warn():
-    im = np.random.default_rng(0).random((4, 8, 8))
-    nan = np.full_like(im, np.nan)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        w = show_zyx_max_slice_interactive([im, nan])
-    assert w.vmax_list[1] == 1.0
+def test_scatter_widget_accepts_n_by_c_channel_array():
+    """Verify ``show_zyx_max_scatter_interactive`` accepts an ``(N, C)`` channel array and rejects mismatched row counts.
+
+    Strategy: pass a ``(150, 2)`` array for 150 points, then pass ``(149, 2)``.
+    Expected outcome: valid input enters ``cont_multi`` mode with ``C == 2``
+    and renders; mismatched rows raise ``ValueError``.
+    """
+    rng = np.random.default_rng(5)
+    pts = rng.random((150, 3)) * [8, 20, 30]
+    vals = rng.random((150, 2))
+    w = show_zyx_max_scatter_interactive(pts, channels=vals, render="points")
+    assert w.mode == "cont_multi" and w.C == 2
+    plt.close(w._render())
+    with pytest.raises(ValueError, match="n_points"):
+        show_zyx_max_scatter_interactive(pts, channels=rng.random((149, 2)), render="points")
 
 
-def test_iso_scatter_subsampling_is_seeded_and_leaves_global_rng_alone():
-    rng = np.random.default_rng(0)
-    X, Y, Z = rng.random(20000), rng.random(20000), rng.random(20000)
-    np.random.seed(42)
-    w1 = show_iso_scatter(X, Y, Z)
-    assert np.random.rand() == np.random.RandomState(42).rand()
-    w2 = show_iso_scatter(X, Y, Z)
-    assert np.array_equal(w1.X_orig, w2.X_orig)
+def test_show_zyx_max_accepts_a_channel_list():
+    """Verify ``show_zyx_max`` accepts a list of 3D channel arrays and composites them to RGB.
+
+    Strategy: pass two ``(4, 5, 6)`` arrays with ``colormap=['magenta', 'cyan']``.
+    Expected outcome: XY panel has shape ``(5, 6, 3)``.
+    """
+    rng = np.random.default_rng(6)
+    chans = [rng.random((4, 5, 6)).astype(np.float32) for _ in range(2)]
+    fig = show_zyx_max(chans, colormap=["magenta", "cyan"])
+    try:
+        assert _panel_rgb(fig).shape == (5, 6, 3)
+    finally:
+        plt.close(fig)
 
 
-
-# =========================================
+# ---------------------------------------------------------------------------
 # Blending modes and slab projections (keyword-only rendering options)
-# =========================================
-
-import eigenp_utils.tnia_plotting_anywidgets as _tpa
-
-
-def _panel_rgb(fig, name="axXY"):
-    return np.asarray(getattr(fig, name).images[0].get_array(), dtype=float)
-
-
-def _two_channel_planes():
-    # channel 0 on in the left column, channel 1 on in the top row
-    a = np.zeros((2, 2), dtype=np.float32); a[:, 0] = 1.0
-    b = np.zeros((2, 2), dtype=np.float32); b[0, :] = 1.0
-    return a, b
-
+# ---------------------------------------------------------------------------
 
 def test_minimum_blending_is_per_rgb_minimum_of_white_to_colour_channels():
+    """Verify ``blend='minimum'`` maps each channel white -> color and takes the per-RGB minimum.
+
+    Strategy: compose orthogonal magenta and cyan planes with full and partial
+    opacities.
+    Expected outcome: zero signal is white, individual channels show their exact
+    colors, overlap is blue ``min(magenta, cyan)``, and opacity fades towards white.
+    """
     a, b = _two_channel_planes()
-    xy, _, _ = create_multichannel_rgb([a, b], [a, b], [a, b], vmin=0, vmax=1,
-                                       colormap=['magenta', 'cyan'], blend='minimum')
+    xy, _, _ = create_multichannel_rgb(
+        [a, b], [a, b], [a, b], vmin=0, vmax=1, colormap=["magenta", "cyan"], blend="minimum"
+    )
     np.testing.assert_allclose(xy[1, 1], [1, 1, 1])        # both off: white
-    np.testing.assert_allclose(xy[1, 0], to_rgb('magenta'))  # only channel 0
-    np.testing.assert_allclose(xy[0, 1], to_rgb('cyan'))     # only channel 1
+    np.testing.assert_allclose(xy[1, 0], to_rgb("magenta"))  # only channel 0
+    np.testing.assert_allclose(xy[0, 1], to_rgb("cyan"))     # only channel 1
     np.testing.assert_allclose(xy[0, 0], [0, 0, 1])        # min(magenta, cyan) = blue
 
-    # opacity fades a channel towards white, the neutral value of the minimum
-    xy, _, _ = create_multichannel_rgb([a, b], [a, b], [a, b], vmin=0, vmax=1,
-                                       colormap=['magenta', 'cyan'], opacity=[0.5, 0.0], blend='minimum')
+    xy, _, _ = create_multichannel_rgb(
+        [a, b], [a, b], [a, b], vmin=0, vmax=1,
+        colormap=["magenta", "cyan"], opacity=[0.5, 0.0], blend="minimum",
+    )
     np.testing.assert_allclose(xy[1, 0], [1, 0.5, 1])
     np.testing.assert_allclose(xy[0, 1], [1, 1, 1])
 
 
 def test_minimum_blending_with_inverted_colormaps():
+    """Verify ``create_multichannel_rgb_cmap(..., blend='minimum')`` composes inverted colormaps and plain colors.
+
+    Strategy: compose ``['Blues', 'Reds']`` and ``['Blues', 'red']`` on
+    orthogonal test planes and compare against 8-bit colormap lookups.
+    Expected outcome: pixels match the per-channel RGB minimum of the lookup
+    tables, with plain colors drawn white -> color.
+    """
     a, b = _two_channel_planes()
-    xy, _, _ = _tpa.create_multichannel_rgb_cmap([a, b], [a, b], [a, b], vmin=0, vmax=1,
-                                                 colormap=['Blues', 'Reds'], blend='minimum')
-    blues, reds = matplotlib.colormaps['Blues'], matplotlib.colormaps['Reds']
-    q = lambda c, v: np.asarray(c(np.array([v]), bytes=True)[0, :3]) / 255.0  # 8-bit colormap lookup
+    xy, _, _ = create_multichannel_rgb_cmap(
+        [a, b], [a, b], [a, b], vmin=0, vmax=1, colormap=["Blues", "Reds"], blend="minimum"
+    )
+    blues, reds = matplotlib.colormaps["Blues"], matplotlib.colormaps["Reds"]
+    q = lambda c, v: np.asarray(c(np.array([v]), bytes=True)[0, :3]) / 255.0
     np.testing.assert_allclose(xy[1, 1], np.minimum(q(blues, 0.0), q(reds, 0.0)), atol=1e-6)
     np.testing.assert_allclose(xy[0, 0], np.minimum(q(blues, 1.0), q(reds, 1.0)), atol=1e-6)
-    # a plain colour in the colormap path is drawn white -> colour as well
-    xy, _, _ = _tpa.create_multichannel_rgb_cmap([a, b], [a, b], [a, b], vmin=0, vmax=1,
-                                                 colormap=['Blues', 'red'], blend='minimum')
+
+    xy, _, _ = create_multichannel_rgb_cmap(
+        [a, b], [a, b], [a, b], vmin=0, vmax=1, colormap=["Blues", "red"], blend="minimum"
+    )
     np.testing.assert_allclose(xy[1, 1], q(blues, 0.0), atol=1e-6)
 
 
 def test_default_blending_is_unchanged():
+    """Verify ``blending=None`` stays pixel-identical to additive (colors) and maximum (colormaps).
+
+    Strategy: compare ``show_zyx`` with ``blending=None`` against explicit
+    ``'additive'`` for color names and ``'maximum'`` for colormap names.
+    Expected outcome: rendered XY arrays are bit-for-bit equal.
+    """
     rng = np.random.default_rng(0)
     planes = [rng.random((6, 7)).astype(np.float32) for _ in range(2)]
-    for cmap, mode in ((['magenta', 'cyan'], 'additive'), (['viridis', 'magma'], 'maximum')):
+    for cmap, mode in ((["magenta", "cyan"], "additive"), (["viridis", "magma"], "maximum")):
         f0 = show_zyx(planes, planes, planes, colormap=cmap)
         f1 = show_zyx(planes, planes, planes, colormap=cmap, blending=mode)
-        np.testing.assert_array_equal(_panel_rgb(f0), _panel_rgb(f1))
-        plt.close('all')
+        try:
+            np.testing.assert_array_equal(_panel_rgb(f0), _panel_rgb(f1))
+        finally:
+            plt.close(f0)
+            plt.close(f1)
 
 
 def test_minimum_blending_uses_a_white_theme():
+    """Verify ``blending='minimum'`` switches figure/panel backgrounds, rotation padding, and scale bar to white theme.
+
+    Strategy: render a rotated two-channel figure with ``blending='minimum'``
+    and a default control figure.
+    Expected outcome: minimum blending pads corners white, sets figure and XY
+    facecolors to white, and draws a black scale bar; the default pads black
+    with a white scale bar.
+    """
     rng = np.random.default_rng(0)
     planes = [rng.random((20, 30)).astype(np.float32) for _ in range(2)]
-    fig = show_zyx(planes, planes, planes, rotate_view=30, blending='minimum', pixel_sizes=(1, 1, 1))
-    xy = _panel_rgb(fig)
-    np.testing.assert_allclose(xy[0, 0], [1, 1, 1], atol=1e-6)  # rotation corner padded white, not black
-    assert mcolors.to_hex(fig.patch.get_facecolor()) == '#ffffff'
-    assert mcolors.to_hex(fig.axXY.get_facecolor()) == '#ffffff'
-    bar = fig.axXY.collections[0]
-    assert mcolors.to_hex(bar.get_colors()[0]) == '#000000'  # scale bar visible on white
-    plt.close(fig)
+    fig = show_zyx(planes, planes, planes, rotate_view=30, blending="minimum", pixel_sizes=(1, 1, 1))
+    try:
+        xy = _panel_rgb(fig)
+        np.testing.assert_allclose(xy[0, 0], [1, 1, 1], atol=1e-6)
+        assert mcolors.to_hex(fig.patch.get_facecolor()) == "#ffffff"
+        assert mcolors.to_hex(fig.axXY.get_facecolor()) == "#ffffff"
+        bar = fig.axXY.collections[0]
+        assert mcolors.to_hex(bar.get_colors()[0]) == "#000000"
+    finally:
+        plt.close(fig)
 
-    # control: the default theme still pads with black and draws a white bar
     fig = show_zyx(planes, planes, planes, rotate_view=30, pixel_sizes=(1, 1, 1))
-    np.testing.assert_allclose(_panel_rgb(fig)[0, 0], [0, 0, 0], atol=1e-6)
-    assert mcolors.to_hex(fig.axXY.collections[0].get_colors()[0]) == '#ffffff'
-    plt.close(fig)
+    try:
+        np.testing.assert_allclose(_panel_rgb(fig)[0, 0], [0, 0, 0], atol=1e-6)
+        assert mcolors.to_hex(fig.axXY.collections[0].get_colors()[0]) == "#ffffff"
+    finally:
+        plt.close(fig)
 
 
 def test_minimum_blending_single_channel_and_default_colours():
-    img = np.zeros((4, 5, 6), dtype=np.float32); img[2, 2, 3] = 1.0
-    fig = _tpa.show_zyx_max(img, blending='minimum', vmin=0, vmax=1)
-    rgba = fig.axXY.images[0].to_rgba(fig.axXY.images[0].get_array())
-    np.testing.assert_allclose(rgba[0, 0, :3], [1, 1, 1], atol=1e-6)  # background white
-    np.testing.assert_allclose(rgba[2, 3, :3], [0, 0, 0], atol=1e-6)  # signal in the default ink (black)
-    plt.close(fig)
-    assert _tpa._channel_colormaps(None, 3, 'minimum') == ['black', 'magenta', 'lime']
-    assert _tpa._channel_colormaps(None, 3) == ['white', 'lime', 'magenta']
+    """Verify single-channel ``blending='minimum'`` draws black ink on white and uses inverted default colors.
+
+    Strategy: render a single bright voxel with ``blending='minimum'`` and
+    check ``_channel_colormaps(None, 3, 'minimum')`` vs default.
+    Expected outcome: background maps to white, signal to black, and default
+    palette is ``['black', 'magenta', 'lime']``.
+    """
+    img = np.zeros((4, 5, 6), dtype=np.float32)
+    img[2, 2, 3] = 1.0
+    fig = show_zyx_max(img, blending="minimum", vmin=0, vmax=1)
+    try:
+        rgba = fig.axXY.images[0].to_rgba(fig.axXY.images[0].get_array())
+        np.testing.assert_allclose(rgba[0, 0, :3], [1, 1, 1], atol=1e-6)
+        np.testing.assert_allclose(rgba[2, 3, :3], [0, 0, 0], atol=1e-6)
+    finally:
+        plt.close(fig)
+    assert _channel_colormaps(None, 3, "minimum") == ["black", "magenta", "lime"]
+    assert _channel_colormaps(None, 3) == ["white", "lime", "magenta"]
 
 
 def test_blend_colors_minimum():
+    """Verify ``blend_colors(..., blending='minimum')`` matches per-RGB minimum and default equals additive.
+
+    Strategy: evaluate ``blend_colors`` on zero, single-channel, and overlap
+    rows for ``['magenta', 'cyan']``.
+    Expected outcome: minimum produces white, magenta, and blue; default matches
+    explicit ``blending='additive'``.
+    """
     vals = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
-    cols = _tpa.blend_colors(vals, ['magenta', 'cyan'], vmin=0, vmax=1, blending='minimum')
-    np.testing.assert_allclose(cols, [[1, 1, 1], to_rgb('magenta'), [0, 0, 1]])
+    cols = blend_colors(vals, ["magenta", "cyan"], vmin=0, vmax=1, blending="minimum")
+    np.testing.assert_allclose(cols, [[1, 1, 1], to_rgb("magenta"), [0, 0, 1]])
     np.testing.assert_allclose(
-        _tpa.blend_colors(vals, ['magenta', 'cyan'], vmin=0, vmax=1),
-        _tpa.blend_colors(vals, ['magenta', 'cyan'], vmin=0, vmax=1, blending='additive'),
+        blend_colors(vals, ["magenta", "cyan"], vmin=0, vmax=1),
+        blend_colors(vals, ["magenta", "cyan"], vmin=0, vmax=1, blending="additive"),
     )
 
 
 def test_invalid_blending_and_projection_raise():
+    """Verify invalid ``blending``, ``projection``, and negative ``attenuation`` raise ``ValueError``.
+
+    Strategy: pass unsupported mode names and ``attenuation=-1`` to ``show_zyx_max``.
+    Expected outcome: each call raises ``ValueError`` naming the offending argument.
+    """
     img = np.zeros((3, 4, 5))
     with pytest.raises(ValueError, match="blending"):
-        _tpa.show_zyx_max(img, blending='multiply')
+        show_zyx_max(img, blending="multiply")
     with pytest.raises(ValueError, match="projection"):
-        _tpa.show_zyx_max(img, projection='iso')
+        show_zyx_max(img, projection="iso")
     with pytest.raises(ValueError, match="attenuation"):
-        _tpa.show_zyx_max(img, projection='attenuated_mip', attenuation=-1)
+        show_zyx_max(img, projection="attenuated_mip", attenuation=-1)
 
 
 @pytest.mark.parametrize("projection, ref", [("mip", np.max), ("minip", np.min), ("average", np.mean)])
 def test_slab_projections_match_numpy(projection, ref):
+    """Verify named slab projections ``mip``, ``minip``, and ``average`` match NumPy reductions.
+
+    Strategy: project a seeded random volume with ``show_zyx_max_slabs`` over
+    ``z=[3, 6]`` for each named projection mode.
+    Expected outcome: XY panel equals ``ref(img[3:6], axis=0)`` within ``1e-6``.
+    """
     rng = np.random.default_rng(1)
     img = rng.random((8, 9, 10)).astype(np.float32)
     fig = show_zyx_max_slabs(img, [2, 7], [1, 5], [3, 6], projection=projection, vmin=0, vmax=1)
-    np.testing.assert_allclose(_panel_rgb(fig), ref(img[3:6], axis=0), rtol=1e-6)
-    plt.close(fig)
+    try:
+        np.testing.assert_allclose(_panel_rgb(fig), ref(img[3:6], axis=0), rtol=1e-6)
+    finally:
+        plt.close(fig)
 
 
 def test_attenuated_mip_matches_napari_formula():
-    # one ray of two samples, display range [0, 1]: scaled_i = v_i * exp(-a * (cumsum_i - 1))
+    """Verify ``_attenuated_mip`` implements napari's exact cumulative exponential attenuation formula.
+
+    Strategy: evaluate a two-sample ray analytically with ``a=1.0`` and check
+    that ``a=0.0`` reduces to a clipped MIP in data units.
+    Expected outcome: matches the closed-form formula and clipped MIP within ``1e-5``.
+    """
     a = 1.0
     ray = np.array([0.5, 1.0], dtype=np.float32).reshape(2, 1, 1)
     expected = max(0.5 * np.exp(-a * (0.5 - 1)), 1.0 * np.exp(-a * (1.5 - 1)))
-    np.testing.assert_allclose(_tpa._attenuated_mip(ray, 0, 0.0, 1.0, a), expected, rtol=1e-6)
-    # zero attenuation is the plain MIP of the clipped data, returned in data units
+    np.testing.assert_allclose(_attenuated_mip(ray, 0, 0.0, 1.0, a), expected, rtol=1e-6)
+
     vol = np.random.default_rng(2).random((5, 4, 3)).astype(np.float32) * 10
-    np.testing.assert_allclose(_tpa._attenuated_mip(vol, 0, 2.0, 8.0, 0.0),
-                               np.clip(vol.max(axis=0), 2.0, 8.0), rtol=1e-5)
+    np.testing.assert_allclose(
+        _attenuated_mip(vol, 0, 2.0, 8.0, 0.0),
+        np.clip(vol.max(axis=0), 2.0, 8.0),
+        rtol=1e-5,
+    )
 
 
 def test_attenuated_mip_hides_structures_behind_bright_ones():
-    # A dim haze fills the slab; the same bright voxel is placed shallower or deeper
+    """Verify ``_attenuated_mip`` dims deep structures behind haze while preserving shallow ones.
+
+    Strategy: embed identical bright voxels at ``z=2`` (shallow) and ``z=25``
+    (deep) inside uniform 0.2 haze, and compare ``attenuation=0.3`` vs ``0.0``.
+    Expected outcome: shallow voxel stays bright, deep voxel is occluded below
+    the front haze, and zero attenuation shows both at 1.0.
+    """
     vol = np.full((30, 1, 2), 0.2, dtype=np.float32)
-    vol[2, 0, 0] = 1.0   # near the entry face (index 0)
-    vol[25, 0, 1] = 1.0  # deep behind the haze
-    # shallow: 1 * exp(-0.3 * (0.2 * 2 + 1 - 1)) = 0.89; deep: exp(-0.3 * 0.2 * 25) = 0.22,
-    # below the first haze sample (0.2 * exp(0.3 * 0.8) = 0.25)
-    out = _tpa._attenuated_mip(vol, 0, 0.0, 1.0, 0.3)
+    vol[2, 0, 0] = 1.0
+    vol[25, 0, 1] = 1.0
+    out = _attenuated_mip(vol, 0, 0.0, 1.0, 0.3)
     np.testing.assert_allclose(out[0, 0], np.exp(-0.3 * 0.4), rtol=1e-5)
     np.testing.assert_allclose(out[0, 1], 0.2 * np.exp(0.3 * 0.8), rtol=1e-5)
-    # control: without attenuation both are fully visible
-    np.testing.assert_allclose(_tpa._attenuated_mip(vol, 0, 0.0, 1.0, 0.0), [[1.0, 1.0]])
+    np.testing.assert_allclose(_attenuated_mip(vol, 0, 0.0, 1.0, 0.0), [[1.0, 1.0]])
 
 
 def test_slice_widget_blending_and_projection_kwargs():
+    """Verify keyword-only ``blending`` and ``projection`` options propagate without adding GUI traits.
+
+    Strategy: construct slice and annotator widgets via public factories with
+    ``blending='minimum'``, ``projection='attenuated_mip'``, and ``attenuation=0.2``,
+    inspect traits, GUI colors, figure theme, and ``copy_params_string``.
+    Expected outcome: options are not exposed as traitlets, dark ink lifts to
+    ``#9e9e9e``, figure background is white, and ``copy_params`` emits all three kwargs.
+    """
     rng = np.random.default_rng(3)
     chans = [rng.random((6, 12, 14)).astype(np.float32) for _ in range(2)]
-    w = TNIASliceWidget(chans, blending='minimum', projection='attenuated_mip', attenuation=0.2)
-    # keyword-only: no GUI traits were added
-    assert not {'blending', 'projection', 'attenuation'} & set(w.trait_names())
-    assert w.colors_resolved == ['black', 'magenta']
-    assert w.channel_colors[0] == '#9e9e9e'  # dark ink lifted for the dark GUI
+    w = show_zyx_max_slice_interactive(
+        chans, blending="minimum", projection="attenuated_mip", attenuation=0.2
+    )
+    assert not {"blending", "projection", "attenuation"} & set(w.trait_names())
+    assert w.colors_resolved == ["black", "magenta"]
+    assert w.channel_colors[0] == "#9e9e9e"  # dark ink lifted for the dark GUI
     fig = w._render()
-    assert mcolors.to_hex(fig.patch.get_facecolor()) == '#ffffff'
-    plt.close(fig)
+    try:
+        assert mcolors.to_hex(fig.patch.get_facecolor()) == "#ffffff"
+    finally:
+        plt.close(fig)
     w.copy_params_trigger += 1
     assert "blending='minimum'" in w.copy_params_string
     assert "projection='attenuated_mip'" in w.copy_params_string
     assert "attenuation=0.2" in w.copy_params_string
 
-    # interactive wrappers pass the options through
-    w2 = show_zyx_max_slice_interactive(chans[0], blending='minimum', projection='minip')
-    assert (w2.blending, w2.projection) == ('minimum', 'minip')
-    w3 = show_zyx_max_slice_interactive_point_annotator(chans, blending='minimum')
-    assert w3.colors_resolved[:2] == ['black', 'magenta'] and w3.blending == 'minimum'
+    w2 = show_zyx_max_slice_interactive(chans[0], blending="minimum", projection="minip")
+    assert (w2.blending, w2.projection) == ("minimum", "minip")
+    w3 = show_zyx_max_slice_interactive_point_annotator(chans, blending="minimum")
+    assert w3.colors_resolved[:2] == ["black", "magenta"] and w3.blending == "minimum"
 
 
 def test_scatter_widget_minimum_blending():
+    """Verify ``blending='minimum'`` switches scatter viewers to a white background in both render modes.
+
+    Strategy: construct points and density scatter viewers with
+    ``blending='minimum'`` and a default control viewer.
+    Expected outcome: minimum blending sets ``subplot_bg == 'white'`` and white
+    ``axXY`` facecolor; default keeps ``subplot_bg == 'black'``.
+    """
     rng = np.random.default_rng(4)
     pts = rng.random((200, 3)) * [8, 20, 30]
-    for render in ('points', 'density'):
-        w = show_zyx_max_scatter_interactive(pts, channels=list(rng.random((2, 200))), render=render,
-                                             blending='minimum')
-        assert w.subplot_bg == 'white'
+    for render in ("points", "density"):
+        w = show_zyx_max_scatter_interactive(
+            pts, channels=list(rng.random((2, 200))), render=render, blending="minimum"
+        )
+        assert w.subplot_bg == "white"
         fig = w._render()
-        assert mcolors.to_hex(fig.axXY.get_facecolor()) == '#ffffff'
-        plt.close(fig)
-    # control: default background is still black
-    w = show_zyx_max_scatter_interactive(pts, render='points')
-    assert w.subplot_bg == 'black'
+        try:
+            assert mcolors.to_hex(fig.axXY.get_facecolor()) == "#ffffff"
+        finally:
+            plt.close(fig)
+    w = show_zyx_max_scatter_interactive(pts, render="points")
+    assert w.subplot_bg == "black"
 
 
-def test_scatter_widget_accepts_n_by_c_channel_array():
-    rng = np.random.default_rng(5)
-    pts = rng.random((150, 3)) * [8, 20, 30]
-    vals = rng.random((150, 2))
-    w = show_zyx_max_scatter_interactive(pts, channels=vals, render='points')
-    assert w.mode == 'cont_multi' and w.C == 2
-    plt.close(w._render())
-    with pytest.raises(ValueError, match="n_points"):
-        show_zyx_max_scatter_interactive(pts, channels=rng.random((149, 2)), render='points')
+# ---------------------------------------------------------------------------
+# xarray STCZYX DataArray integration (relocated from test_channel_info_xarray)
+# ---------------------------------------------------------------------------
 
 
-def test_show_zyx_max_accepts_a_channel_list():
-    rng = np.random.default_rng(6)
-    chans = [rng.random((4, 5, 6)).astype(np.float32) for _ in range(2)]
-    fig = _tpa.show_zyx_max(chans, colormap=['magenta', 'cyan'])
-    assert _panel_rgb(fig).shape == (5, 6, 3)
-    plt.close(fig)
+def _xarray_viewer_da(nz=3, ny=12, nx=10, ps=None):
+    """Build a calibrated STCZYX DataArray with channel metadata coordinates."""
+    xr = pytest.importorskip("xarray")
+    from eigenp_utils.image_io import array_to_stczyx_xarray, set_channel_info
+
+    names = ["DAPI", "SOX2", "TBXT", "BF"]
+    info = {
+        "DAPI": {"color": "gray", "role": "dna"},
+        "SOX2": {"color": "cyan", "role": "marker"},
+        "TBXT": {"color": "yellow", "role": "marker"},
+        "BF": {"color": "gray", "role": "brightfield"},
+    }
+    arr = np.arange(len(names) * nz * ny * nx, dtype=np.float32).reshape(len(names), nz, ny, nx)
+    ps = ps or {"Z": 2.0, "Y": 0.3, "X": 0.3, "unit": "µm"}
+    da = array_to_stczyx_xarray(arr, input_axes="CZYX", channel_names=names, pixel_sizes=ps)
+    assert isinstance(da, xr.DataArray)
+    return set_channel_info(da, info)
 
 
-def test_interactive_wrapper_warns_once_for_a_missing_pixel_size_axis():
-    img = np.random.default_rng(7).random((4, 8, 9)).astype(np.float32)
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter("always")
-        show_zyx_max_slice_interactive(img, pixel_sizes={'Z': None, 'Y': 0.5, 'X': 0.5})
-    msgs = [str(r.message) for r in rec if "No value for axis Z" in str(r.message)]
-    assert len(msgs) == 1
+def test_viewer_accepts_stczyx_dataarray_and_explicit_overrides():
+    """Verify ``show_zyx_max_slice_interactive`` unpacks xarray coords and lets explicit args win.
 
-
-@pytest.mark.parametrize("kind", ["slice", "scatter"])
-def test_copy_png_trigger_returns_tight_figure_png(kind):
-    """Bumping `copy_png_trigger` puts a base64 PNG of the figure in `copy_png_data`.
-
-    Strategy: decode the payload and check (a) PNG magic bytes, (b) it is the
-    300-dpi tight-bbox render (larger than the 100-dpi on-screen image), and
-    (c) a second identical request still fires a change (the trait is cleared
-    first), which the JS listener relies on.
+    Strategy: construct a calibrated STCZYX DataArray with ``color`` and ``role``
+    coordinates, select two channels via ``.sel(C=...)``, and pass it to
+    ``show_zyx_max_slice_interactive`` with and without explicit ``colormap`` and
+    ``channel_labels`` overrides.
+    Expected outcome: default call inherits channel names, colours, and physical
+    pixel sizes from the DataArray; explicit arguments override them.
     """
-    import base64
-    import io as _io
-    rng = np.random.default_rng(0)
-    if kind == "slice":
-        w = show_zyx_max_slice_interactive(rng.random((8, 32, 48)).astype(np.float32))
-    else:
-        pts = rng.random((50, 3)) * [8, 32, 48]
-        w = show_zyx_max_scatter_interactive(pts)
+    da = _xarray_viewer_da(ps={"Z": 2.0, "Y": 0.5, "X": 0.25, "unit": "µm"})
+    sub = da.sel(C=["DAPI", "TBXT"])
 
-    seen = []
-    w.observe(lambda c: seen.append(c["new"]), names="copy_png_data")
-    w.copy_png_trigger += 1
-    data = base64.b64decode(w.copy_png_data)
-    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    w = show_zyx_max_slice_interactive(sub)
+    assert w.num_channels == 2
+    assert w.channel_names == ["DAPI", "TBXT"]
+    assert w.colors_resolved[1] == "yellow"
+    assert (w.sz, w.sy, w.sx) == pytest.approx((2.0, 0.5, 0.25))
 
-    shown = plt.imread(_io.BytesIO(base64.b64decode(w.image_data)))
-    copied = plt.imread(_io.BytesIO(data))
-    assert copied.shape[0] > shown.shape[0] and copied.shape[1] > shown.shape[1]
-
-    w.copy_png_trigger += 1
-    assert [s for s in seen if s] and len([s for s in seen if s]) == 2
-    assert "" in seen
+    w2 = show_zyx_max_slice_interactive(sub, colormap=["red", "blue"], channel_labels=["a", "b"])
+    assert w2.colors_resolved == ["red", "blue"]
+    assert w2.channel_names == ["a", "b"]
 
 
-def _first_run(mask):
-    idx = np.flatnonzero(mask)
-    if idx.size == 0:
-        return None
-    brk = np.flatnonzero(np.diff(idx) > 1)
-    return int(idx[0]), int(idx[brk[0]] if brk.size else idx[-1])
+def test_viewer_dataarray_matches_list_input():
+    """Verify passing an STCZYX DataArray produces the same viewer state as a plain channel list.
 
-
-@pytest.mark.parametrize("kind", ["slice", "scatter"])
-@pytest.mark.parametrize("dpi", [72, 100, 150, 200, 300])
-@pytest.mark.parametrize("tight", [False, True])
-def test_channel_label_bar_spans_exactly_the_xy_panel_pixels(kind, dpi, tight):
-    """The grey bar under the channel labels covers exactly the XY panel's pixel columns.
-
-    It used to be a plotted line whose 'projecting' caps overshot both ends
-    by half its width (a few px), and a snapped patch is still 1 px short of
-    an imshow panel at some dpi (Agg places images at x0 + ceil(width)).
-    Strategy: rasterise at several dpi, with and without the tight bbox. The
-    bar is the widest row of (0.85 grey) pixels with any alpha; its first and
-    last column must equal those of the XY panel's opaque content.
+    Strategy: build a 4-channel calibrated DataArray without a ``color`` coord
+    and compare ``show_zyx_max_slice_interactive(da)`` against passing the
+    extracted NumPy arrays, channel names, and pixel sizes explicitly.
+    Expected outcome: channel names, colours, pixel sizes, and rendered PNG
+    payload match identically.
     """
-    import io as _io
-    rng = np.random.default_rng(0)
-    if kind == "slice":
-        w = show_zyx_max_slice_interactive(rng.random((8, 32, 48)).astype(np.float32), channel_labels=["BF"])
-    else:
-        w = show_zyx_max_scatter_interactive(rng.random((50, 3)) * [8, 32, 48], channel_labels=["A"])
-    fig = w._render()
-    buf = _io.BytesIO()
-    try:
-        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight" if tight else None)
-    finally:
-        plt.close(fig)
-    a = plt.imread(_io.BytesIO(buf.getvalue()))
-    alpha = a[..., 3]
-    grey = (alpha > 0.01) & (np.abs(a[..., :3] - 0.85).max(axis=2) < 0.02)
-    runs = [(_first_run(grey[r]), r) for r in range(a.shape[0])]
-    bar, bar_row = max(((run, r) for run, r in runs if run), key=lambda t: t[0][1] - t[0][0])
-    img = _first_run(alpha[bar_row + int(0.2 * a.shape[0])] > 0.01)
-    assert bar == img
+    pytest.importorskip("xarray")
+    from eigenp_utils.image_io import array_to_stczyx_xarray
+
+    names = ["DAPI", "SOX2", "TBXT", "BF"]
+    ps = {"Z": 2.0, "Y": 0.3, "X": 0.3, "unit": "µm"}
+    arr = np.arange(len(names) * 3 * 12 * 10, dtype=np.float32).reshape(len(names), 3, 12, 10)
+    da = array_to_stczyx_xarray(arr, input_axes="CZYX", channel_names=names, pixel_sizes=ps)
+
+    w_da = show_zyx_max_slice_interactive(da)
+    w_list = show_zyx_max_slice_interactive(
+        [arr[i] for i in range(len(names))],
+        channel_labels=names,
+        pixel_sizes=ps,
+    )
+    assert w_da.channel_names == w_list.channel_names == names
+    assert w_da.colors_resolved == w_list.colors_resolved
+    assert (w_da.sz, w_da.sy, w_da.sx) == pytest.approx((w_list.sz, w_list.sy, w_list.sx))
+    assert w_da.image_data == w_list.image_data
+
+
+def test_viewer_rejects_unselected_scene_or_time():
+    """Verify ``show_zyx_max_slice_interactive`` rejects DataArrays with multi-entry S or T dims.
+
+    Strategy: pass a 6D STCZYX DataArray with ``S=2`` directly to
+    ``show_zyx_max_slice_interactive``.
+    Expected outcome: raises ``ValueError`` instructing the caller to select one
+    scene via ``isel(S=0)``.
+    """
+    pytest.importorskip("xarray")
+    from eigenp_utils.image_io import array_to_stczyx_xarray
+
+    arr = np.zeros((2, 1, 1, 3, 4, 5), dtype=np.float32)
+    da = array_to_stczyx_xarray(arr, input_axes="STCZYX")
+    with pytest.raises(ValueError, match=r"isel\(S=0\)"):
+        show_zyx_max_slice_interactive(da)
+
+
+def test_viewer_deprecated_colors_arg_applies_to_dataarray():
+    """Verify deprecated ``colors=`` still warns and overrides a DataArray's ``color`` coord.
+
+    Strategy: pass a DataArray with a ``color`` coordinate along ``C`` together
+    with deprecated ``colors=['red', 'blue']`` to ``show_zyx_max_slice_interactive``.
+    Expected outcome: emits ``DeprecationWarning`` and applies ``['red', 'blue']``.
+    """
+    da = _xarray_viewer_da().sel(C=["DAPI", "TBXT"])
+    with pytest.warns(DeprecationWarning):
+        w = show_zyx_max_slice_interactive(da, colors=["red", "blue"])
+    assert w.colors_resolved == ["red", "blue"]

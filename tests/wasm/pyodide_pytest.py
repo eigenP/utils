@@ -65,8 +65,7 @@ rc = pytest.main([
     # test_single_cell needs scanpy/numba (no WASM build); frontend tests drive
     # Chromium via Playwright, which cannot run inside Pyodide.
     "--ignore=/repo/tests/test_single_cell.py",
-    "--ignore=/repo/tests/test_frontend_isolated.py",
-    "--ignore=/repo/tests/test_frontend_rangeslider.py",
+    "--ignore=/repo/tests/test_frontend_tnia_plotting_anywidgets.py",
     "--ignore=/repo/tests/test_frontend_label_annotator.py",
     "--ignore=/repo/tests/wasm",
 ])
