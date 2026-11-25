@@ -13,34 +13,41 @@ from scipy.interpolate import RegularGridInterpolator
 from skimage import filters, feature, segmentation
 from skimage.segmentation import expand_labels
 
+from ._conventions import UM, resolve_pixel_sizes
+
 
 def _pixel_sizes_to_spacing(pixel_sizes, ndim: int, stacklevel: int = 2) -> tuple[float, ...]:
     """
-    Per-axis spacing (the last `ndim` of Z, Y, X) from a dict or a sequence.
+    Per-axis spacing in µm (the last `ndim` of Z, Y, X) from a dict, a sequence or a scalar.
 
-    Readers return None for axes without calibration (e.g. {'Z': None} for an
-    ImageJ stack without spacing); those fall back to 1.0 with a UserWarning
-    naming the axis. Non-finite or non-positive sizes raise ValueError.
+    Parsed by the package's shared parser (`_conventions.resolve_pixel_sizes`):
+    dict keys are case-insensitive and a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm; a (Z, Y, X) sequence also works for 2D. A missing Z with
+    known Y and X takes the finest of them (isotropic voxels assumed); other
+    missing or None axes (e.g. from uncalibrated readers) fall back to 1.0.
+    Both warn, naming the axis. A unit that is not a length unit warns and the
+    values are used as µm. Non-finite or non-positive sizes raise ValueError.
     `stacklevel` is the one the calling function would use for its own warnings.
+
+    Changed (D01, 2026-11): units are converted to µm (the 'unit' key used to
+    be ignored, so nm sizes were read as µm); a missing Z takes the finest of
+    Y/X instead of 1.0; a missing dict key warns like a None entry (it used to
+    fall back to 1.0 silently).
     """
     keys = ('Z', 'Y', 'X')[-ndim:]
-    if isinstance(pixel_sizes, dict):
-        values = [pixel_sizes.get(k, 1.0) for k in keys]
-    else:
-        values = list(pixel_sizes)
-        if len(values) != ndim:
-            raise ValueError(f"pixel_sizes has {len(values)} entries, expected {ndim} ({', '.join(keys)}).")
-
+    values, _, unit = resolve_pixel_sizes(pixel_sizes, ndim, stacklevel=stacklevel + 1)
+    if unit != UM:
+        warnings.warn(
+            f"pixel_sizes unit {unit!r} is not a length unit; its values are used as µm.",
+            UserWarning, stacklevel=stacklevel + 1
+        )
     missing = [k for k, v in zip(keys, values) if v is None]
     if missing:
         warnings.warn(
             f"pixel_sizes has no value for axis {', '.join(missing)}; using 1.0 for it.",
             UserWarning, stacklevel=stacklevel + 1
         )
-    spacing = tuple(1.0 if v is None else float(v) for v in values)
-    if not all(np.isfinite(s) and s > 0 for s in spacing):
-        raise ValueError(f"pixel_sizes must be finite and positive, got {dict(zip(keys, spacing))}.")
-    return spacing
+    return tuple(1.0 if v is None else float(v) for v in values)
 
 
 def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pixel_sizes=None):
@@ -63,6 +70,13 @@ def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pi
 
     Returns:
     - labels: Segmented labeled mask.
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     if spacing is not None:
         warnings.warn("The 'spacing' parameter is deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
@@ -149,6 +163,13 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
 
     Returns:
         np.ndarray: An image array with the thick z-slice operation applied.
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     if operation not in ('max', 'average'):
         raise ValueError(f"operation must be 'max' or 'average', got {operation!r}.")
@@ -222,6 +243,13 @@ def optimized_entire_labels_touching_mask(labels_data, mask, distance=10, pixel_
 
     Returns:
         np.ndarray: A filtered label array where only entire labels touching the mask are retained.
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     if pixel_sizes is None:
         warnings.warn("pixel_sizes not provided; defaulting to isotropic pixel size of 1.0.", UserWarning, stacklevel=2)
@@ -268,6 +296,13 @@ def sample_intensity_around_points(image_3d, points_3d, diameter=5, pixel_sizes=
 
     Returns:
         list: A list of sampled mean intensities for each point. Out-of-bounds points will have NaN.
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     points_3d = np.asarray(points_3d, dtype=np.float64)
     if points_3d.ndim == 1 and points_3d.size in (0, image_3d.ndim):
@@ -369,6 +404,13 @@ def sample_intensity_along_surface_normals(
     --------
     sampled_3d : ndarray
         A 3D array of shape (U, V, num_steps) containing the sampled intensities.
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     spacing = _ensure_pixel_size_array(pixel_sizes)
 
@@ -447,6 +489,13 @@ def create_ellipsoid_struct(
 
     3D (Z, Y, X) by default; ``ndim=2`` gives a (Y, X) ellipse, with pixel sizes
     for those axes.
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     if ndim not in (2, 3):
         raise ValueError(f"ndim must be 2 (Y, X) or 3 (Z, Y, X), got {ndim}.")
@@ -478,6 +527,13 @@ def generate_morphological_surface_mask(
     Computes a continuous morphological envelope and extracts the physical surface layer.
 
     `binary_mask` is 2D (Y, X) or 3D (Z, Y, X); `pixel_sizes` gives the same axes.
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     if binary_mask.ndim not in (2, 3):
         raise ValueError(f"binary_mask must be 2D (Y, X) or 3D (Z, Y, X), got {binary_mask.ndim}D.")
@@ -577,6 +633,13 @@ def estimate_inter_label_distance(
 
     Distances are from up to `sample_size` randomly chosen labels (`seed` makes the
     choice reproducible) to their nearest neighbours among *all* labels.
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     sp = _resolve_spacing(spacing, pixel_sizes, ndim=labels.ndim)
 
@@ -641,6 +704,13 @@ def fit_plane_ransac(
         points_zyx: (N, 3) array of point coordinates in voxel indices.
         pixel_sizes: Optional dict mapping dimension to pixel size, e.g., {'Z': 1.0, 'Y': 0.5, 'X': 0.5}.
         inlier_threshold_um: Distance threshold for inliers in physical units (microns).
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     pixel_size = _ensure_pixel_size_array(pixel_sizes)
     points_phys = points_zyx * pixel_size
@@ -723,6 +793,16 @@ def sample_volume_plane(
     Returns the sampled plane(s), shape (u_res, v_res) or (2*num_offsets+1, u_res, v_res),
     and their pixel sizes under the ZYX convention: {'Z': offset step, 'Y': u step,
     'X': v step}. method='cubic' interpolates (spline prefiltered); 'linear' is trilinear.
+
+    Changed (D01, 2026-11): for a single plane (``num_offsets=0``) 'Z' is None
+    (no step), not 0.0, which every pixel-size parser rejects.
+
+    Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
+    (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
+    converted to µm (it used to be ignored), a missing Z next to known Y/X takes
+    the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
+    count as unknown, strings / booleans raise ValueError, and a scalar means
+    isotropic voxels.
     """
     if p0_phys is None or normal_phys is None:
         raise ValueError("p0_phys and normal_phys must be provided.")
@@ -840,7 +920,9 @@ def sample_volume_plane(
     # 5. Calculate new pixel spacings
     spacing_u = (u_range_um[1] - u_range_um[0]) / max(1, u_res - 1)
     spacing_v = (v_range_um[1] - v_range_um[0]) / max(1, v_res - 1)
-    spacing_n = offset_step_um if num_offsets > 0 else 0.0
+    # A single plane has no Z step: None (unknown / not applicable), the
+    # package's convention, so the dict can be passed back as pixel_sizes=
+    spacing_n = offset_step_um if num_offsets > 0 else None
 
     # Axis 0 of each plane is u, axis 1 is v; under the ZYX convention that is Y, X
     output_pixel_sizes = {'Z': spacing_n, 'Y': spacing_u, 'X': spacing_v}

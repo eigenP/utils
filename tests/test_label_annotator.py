@@ -411,6 +411,42 @@ def test_input_validation_and_degenerate_channels():
     assert len(w_nan.image_to_js) == _IMG_HDR.size + 6 * 7
 
 
+def test_display_range_and_palette_follow_the_shared_conventions():
+    """Verify LabelAnnotator uses the package display range and palette (D02, D03; R4-07, R8-20).
+
+    Strategy: (1) sparse beads (0.002% of voxels) on zeros; (2) a signed
+    channel; (3) explicit ``percentiles=(0.1, 99.99)`` on the sparse beads;
+    (4) nine channels without colours, and two given colours for three
+    channels including an RGB tuple.
+    Expected outcome: (1) limits (0, bead max) as in the ortho viewers (the
+    old p0.1/p99.99 default gave (0, 1): every bead saturated); (2) vmin is
+    the data minimum; (3) explicit percentiles fall back to the maximum with
+    a warning instead of lo + 1; (4) the palette cycles (white, lime,
+    magenta, ...; it raised above 8 channels) and short lists are padded
+    with unused palette colours.
+    """
+    from eigenp_utils._conventions import default_display_range
+
+    beads = np.zeros((10, 100, 100), np.uint16)
+    beads[5, 10, 10] = 3000
+    beads[2, 50, 70] = 1200
+    w = LabelAnnotator(beads, axes="ZYX")
+    assert w._limits[0] == (0.0, 3000.0) == default_display_range(beads)
+
+    signed = np.random.default_rng(0).normal(0, 1, (4, 20, 20)).astype(np.float32)
+    assert LabelAnnotator(signed, axes="ZYX")._limits[0][0] == pytest.approx(float(signed.min()))
+
+    with pytest.warns(UserWarning, match="percentiles"):
+        w_pct = LabelAnnotator(beads, axes="ZYX", percentiles=(0.1, 99.99))
+    assert w_pct._limits[0] == (0.0, 3000.0)
+
+    w9 = LabelAnnotator(np.random.default_rng(1).random((9, 8, 8)), axes="CYX")
+    assert w9.channel_colors[:3] == ["#ffffff", "#00ff00", "#ff00ff"]
+    assert w9.channel_colors[7:] == w9.channel_colors[:2]
+    w3 = LabelAnnotator(np.zeros((3, 8, 8)), axes="CYX", channel_colors=["lime", (1.0, 0.0, 0.0)])
+    assert w3.channel_colors == ["#00ff00", "#ff0000", "#ffffff"]
+
+
 def test_xarray_stczyx_input():
     """Verify ``LabelAnnotator`` unpacks an STCZYX ``xarray.DataArray`` with singleton S and T.
 

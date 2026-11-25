@@ -382,6 +382,36 @@ def test_clahe_u8_small_int_conversion_matches_float_reference():
         assert np.abs(out.astype(int) - ref.astype(int)).max() <= 1, dt
 
 
+def test_clahe_u8_sparse_signal_and_column_patterns():
+    """Verify sparse signal is not blanked (R6-02) and the percentile sample does not alias with columns (R6-13).
+
+    Strategy: (+) 15 bright spots on zeros in float32 and uint16 (degenerate
+    (0.1, 99.9) range); (+) a 64x512x512 float volume whose every 4th column is
+    offset by -50 (a strided sample with step 4 sees one column phase only);
+    (-) dense data keep the previous mapping (no warning).
+    Expected outcome: spots map to 255 with a UserWarning instead of 0; the
+    sampled percentiles match the exact ones within 0.5% of the range.
+    """
+    from eigenp_utils.clahe_equalize_adapthist import _to_uint8
+
+    img = np.zeros((200, 200), np.float32)
+    img[::50, ::15][:3, :5] = 1000.0
+    for arr in (img, img.astype(np.uint16)):
+        with pytest.warns(UserWarning, match="percentiles"):
+            out = _to_uint8(arr, (0.1, 99.9))
+        assert out.max() == 255 and out[1, 1] == 0
+
+    rng = np.random.default_rng(0)
+    vol = rng.normal(300, 20, (64, 512, 512)).astype(np.float32)
+    vol[..., ::4] -= 50
+    exact = np.percentile(vol, (0.1, 99.9))
+    out = _to_uint8(vol, (0.1, 99.9))
+    # the value that maps to grey level 0 / 255 is within 0.5% of the exact percentile range
+    span = exact[1] - exact[0]
+    assert abs(vol[out == 0].max() - exact[0]) < 0.005 * span
+    assert abs(vol[out == 255].min() - exact[1]) < 0.005 * span
+
+
 def test_clahe_u8_identity_and_edge_cases():
     """Low clip ~ identity; constant images, 1D, oversized kernels, and size-1 axes do not fail."""
     image = _camera()
@@ -436,3 +466,37 @@ def test_clahe_u8_empty_input_returns_empty_uint8(backend):
     out = clahe_u8(image, kernel_size=8, backend=backend)
     assert out.shape == image.shape and np.ptp(out) > 0
     np.testing.assert_array_equal(out, clahe_u8(image, kernel_size=8, backend="numpy"))
+
+
+def test_clahe_module_runs_standalone_with_sibling_conventions(tmp_path):
+    """The module keeps its PEP 723 standalone use (D09-A): copied next to
+    ``_conventions.py`` and loaded by file path with ``eigenp_utils`` not
+    importable, ``clahe_u8`` still works."""
+    import shutil
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+
+    import eigenp_utils.clahe_equalize_adapthist as mod
+
+    src = Path(mod.__file__).parent
+    for name in ("clahe_equalize_adapthist.py", "_conventions.py"):
+        shutil.copy(src / name, tmp_path / name)
+    code = textwrap.dedent(f"""
+        import sys, runpy, importlib.abc
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "eigenp_utils" or name.startswith("eigenp_utils."):
+                    raise ModuleNotFoundError(name)
+        sys.meta_path.insert(0, Block())
+        ns = runpy.run_path({str(tmp_path / 'clahe_equalize_adapthist.py')!r})
+        out = ns["clahe_u8"](np.random.default_rng(0).random((64, 64)).astype("float32"))
+        assert out.dtype == np.uint8
+        print("ok")
+    """)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env={"MPLBACKEND": "Agg", "PATH": ""})
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip().endswith("ok")

@@ -107,7 +107,8 @@ def _rendered_centroid(ax):
 def _scale_bar_artists(fig):
     """(bar LineCollection or None, label Text or None) drawn on the XY panel."""
     bars = [c for c in fig.axXY.collections if isinstance(c, mcollections.LineCollection)]
-    labels = [t for t in fig.axXY.texts if "µm" in t.get_text() or "pixel_sizes" in t.get_text()]
+    labels = [t for t in fig.axXY.texts
+              if t.get_text().split(" ")[-1] in ("nm", "µm", "mm", "px") or "pixel_sizes" in t.get_text()]
     return (bars[-1] if bars else None), (labels[0] if labels else None)
 
 
@@ -272,13 +273,15 @@ def test_interactive_channel_labels():
 # ---------------------------------------------------------------------------
 
 def test_resolve_color():
-    """Verify ``resolve_color`` handles CSS colors, colormaps (including CSS-named ones), and rejects instances.
+    """Verify ``resolve_color`` handles CSS colors, colormaps (including CSS-named ones), and Colormap instances.
 
     Strategy: resolve hex strings, plain CSS names, standard colormaps
     (``'viridis'``), and colormaps sharing CSS names (``'gray'``, ``'pink'``,
-    ``'hot'``), plus ``Colormap`` instances.
+    ``'hot'``), plus registered and unregistered ``Colormap`` instances.
     Expected outcome: CSS-named colormaps evaluate ``cmap(1.0)`` (not the CSS
-    color); plain colors pass through; ``Colormap`` instances raise ``TypeError``.
+    color; 'pink' warns); plain colors pass through; registered instances
+    (``labels_cmap``) resolve like their name; unregistered ones raise
+    ``TypeError``. (Changed by D03: registered instances used to raise too.)
     """
     assert resolve_color("#ff0000") == "#ff0000"
     assert resolve_color("red") == "red"
@@ -286,16 +289,18 @@ def test_resolve_color():
 
     for name in ("gray", "pink", "hot"):
         expected = mcolors.to_hex(matplotlib.colormaps[name](1.0)[:3])
-        assert resolve_color(name) == expected
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)  # 'pink' warns
+            assert resolve_color(name) == expected
     # 'gray' and 'pink' are also CSS color names; colormap lookup must take precedence.
     assert resolve_color("gray") != mcolors.to_hex(to_rgb("gray"))
-    assert resolve_color("pink") != mcolors.to_hex(to_rgb("pink"))
+    with pytest.warns(UserWarning, match="'pink' is both a colormap"):
+        assert resolve_color("pink") != mcolors.to_hex(to_rgb("pink"))
 
     cmap = mcolors.LinearSegmentedColormap.from_list("test", ["black", "white"])
     with pytest.raises(TypeError, match="Expected a registered colormap name"):
         resolve_color(cmap)
-    with pytest.raises(TypeError, match="Expected a registered colormap name"):
-        resolve_color(labels_cmap)
+    assert resolve_color(labels_cmap) == resolve_color("labels_cmap")
 
 
 def test_gui_channel_color_and_linear_colormaps():
@@ -323,15 +328,29 @@ def test_gui_channel_color_and_linear_colormaps():
 
 
 def test_widget_rejects_colormap_instance():
-    """Verify interactive widgets reject raw ``Colormap`` instances with a helpful ``TypeError``.
+    """Verify widgets accept registered ``Colormap`` instances and reject unregistered ones.
 
-    Strategy: pass ``labels_cmap`` directly as ``colormap=`` to
-    ``show_zyx_max_slice_interactive``.
-    Expected outcome: raises ``TypeError`` requesting the registered string name.
+    Strategy: pass ``labels_cmap`` (registered) and an unregistered
+    ``LinearSegmentedColormap`` as ``colormap=`` to
+    ``show_zyx_max_slice_interactive``, single channel and in a list, and the
+    exported I-series instances to ``show_zyx_max``.
+    Expected outcome: registered instances work and are stored by name (the
+    colour trait is a string); an unregistered one raises ``TypeError``
+    asking for registration. (Changed by D03: registered instances used to
+    be rejected too.)
     """
+    from eigenp_utils import i_blue, i_rose
+
     im = np.zeros((10, 20, 30))
+    w = show_zyx_max_slice_interactive(im, colormap=labels_cmap)
+    assert w.colors_resolved == ["labels_cmap"] and w.image_data
+    w2 = show_zyx_max_slice_interactive([im, im], colormap=[labels_cmap, "lime"])
+    assert w2.colors_resolved == ["labels_cmap", "lime"]
+    plt.close(show_zyx_max([im, im], colormap=[i_blue, i_rose]))
+
+    unregistered = mcolors.LinearSegmentedColormap.from_list("not_registered_xyz", ["black", "red"])
     with pytest.raises(TypeError, match="Expected a registered colormap name"):
-        show_zyx_max_slice_interactive(im, colormap=labels_cmap)
+        show_zyx_max_slice_interactive(im, colormap=unregistered)
 
 
 @pytest.mark.parametrize(
@@ -485,14 +504,17 @@ def test_invalid_pixel_sizes_and_rotate_view_raise():
 
 
 def test_pixel_size_dict_with_missing_axis_falls_back_to_one():
-    """An uncalibrated axis (None, as image_io reports it) falls back to 1.0 with a single warning.
+    """A missing Z with known X/Y takes the finest X/Y size (D01), with a single warning.
 
     Strategy: pass ``{'X': 0.5, 'Y': 0.5, 'Z': None, 'unit': 'micron'}`` to
-    ``_parse_zyx_tuple_or_dict``, ``show_zyx_max``, and both interactive
-    wrappers (recording warnings on the slice wrapper to ensure it warns once).
-    Expected outcome: axis Z falls back to 1.0 with a ``UserWarning`` naming Z;
-    ``default_val=None`` emits no warning; the interactive slice wrapper emits
-    exactly one warning for the missing axis.
+    ``_parse_zyx_tuple_or_dict`` (the slab parser), ``show_zyx_max``, and both
+    interactive wrappers (recording warnings on the slice wrapper to ensure it
+    warns once).
+    Expected outcome: the generic slab parser still fills ``default_val``;
+    the viewers use Z = 0.5 (the finest X/Y size, isotropic voxels assumed)
+    with a ``UserWarning`` naming Z; the interactive slice wrapper emits
+    exactly one warning for the missing axis. (Changed by D01: Z used to
+    become 1.0, i.e. one pixel next to µm-sized X/Y.)
     """
     ps = {"X": 0.5, "Y": 0.5, "Z": None, "unit": "micron"}
     with pytest.warns(UserWarning, match="axis Z"):
@@ -505,6 +527,7 @@ def test_pixel_size_dict_with_missing_axis_falls_back_to_one():
     im = np.random.default_rng(0).random((6, 20, 30))
     with pytest.warns(UserWarning, match="axis Z"):
         fig = show_zyx_max(im, pixel_sizes=ps)
+    assert abs(np.diff(fig.axXZ.get_ylim())[0]) == pytest.approx(6 * 0.5)
     plt.close(fig)
 
     with warnings.catch_warnings(record=True) as rec:
@@ -512,12 +535,12 @@ def test_pixel_size_dict_with_missing_axis_falls_back_to_one():
         w = show_zyx_max_slice_interactive(im, pixel_sizes=ps)
     msgs = [str(r.message) for r in rec if "No value for axis Z" in str(r.message)]
     assert len(msgs) == 1
-    assert w.sz == 1.0 and w.image_data
+    assert w.sz == 0.5 and w.image_data
 
     pts = (np.array([0, 5.0]), np.array([0, 19.0]), np.array([0, 29.0]))
     with pytest.warns(UserWarning, match="axis Z"):
         w2 = show_zyx_max_scatter_interactive(pts, pixel_sizes=ps)
-    assert w2.sz == 1.0 and w2.image_data
+    assert w2.sz == 0.5 and w2.image_data
 
 
 def test_deprecated_tnia_plotting_3d_warning():
@@ -1246,10 +1269,14 @@ def test_scale_bar_and_label_have_faint_black_outline():
     ("nm", 500.0, "20 µm"),
     ("micron", 0.5, "20 µm"),
     ("\\u00B5m", 0.5, "20 µm"),  # ImageJ's escaped micro sign
-    ("pixel", 1.0, "50 pixel"),  # unknown unit: shown as given
+    ("a.u.", 1.0, "50 a.u."),    # unknown unit: shown as given
+    ("pixel", 1.0, "50 px"),     # ImageJ's uncalibrated unit: a pixel bar (D01 review fix)
 ])
 def test_scale_bar_uses_pixel_size_unit(unit, size, expected):
     """Verify scale bars convert known length units to µm and display unknown units verbatim.
+
+    A pixel unit ('pixel') means uncalibrated and gives the 'px' bar (it used to
+    be shown verbatim as an unknown unit, '50 pixel').
 
     Strategy: pass pixel-size dicts with known length units and an unknown unit
     to ``show_zyx_max``, ``show_zyx_max_slice_interactive``, and
@@ -1291,7 +1318,7 @@ def test_scale_bar_uses_pixel_size_unit(unit, size, expected):
     (None, False),  # control: the uncalibrated label itself
 ])
 def test_scale_bar_is_labelled_physically_only_with_x_and_y_pixel_sizes(pixel_sizes, physical):
-    """The scale bar reads 'N µm' only when the X and Y pixel sizes were given.
+    """The scale bar reads 'N µm' only when the X and Y pixel sizes were given, else 'N px'.
 
     Strategy: render a (10, 50, 50) volume with pixel sizes whose X and/or Y
     entry is None (as uncalibrated readers report them) through
@@ -1299,23 +1326,27 @@ def test_scale_bar_is_labelled_physically_only_with_x_and_y_pixel_sizes(pixel_si
     density). The None-axis fallback warnings are expected at construction;
     widget re-renders run with warnings as errors.
 
-    Expected outcome: without X and Y the label is the one used for
-    ``pixel_sizes=None`` ('`pixel_sizes`'), not 'N µm', while the steps that
+    Expected outcome: without X and Y the label is in pixels ('10 px', the
+    same as for ``pixel_sizes=None``), not 'N µm', while the steps that
     were given still set the panel geometry (a Z step of 2 doubles the XZ
     panel height, a Y step of 0.5 halves the XY panel height), in the widget
     as in ``show_zyx_max``; re-rendering a widget does not repeat the
-    warnings. With X and Y given the label stays in µm.
+    warnings. With X and Y given the label stays in µm, and a missing Z takes
+    the finest X/Y size. (Changed by D01: the uncalibrated label used to be
+    '`pixel_sizes`', and a missing Z next to known X/Y used to be 1.0.)
     """
     expect_warning = pixel_sizes is not None and any(
         v is None for v in (pixel_sizes.values() if isinstance(pixel_sizes, dict) else pixel_sizes))
     raw = ((pixel_sizes.get("Z"), pixel_sizes.get("Y"), pixel_sizes.get("X")) if isinstance(pixel_sizes, dict)
            else (pixel_sizes or (None, None, None)))
     pz, py, px = (1.0 if v is None else v for v in raw)
+    if raw[0] is None and raw[1] is not None and raw[2] is not None:
+        pz = min(raw[1], raw[2])  # D01: missing Z with known X/Y
 
     def check(fig, geometry=False):
         try:
             label = _scale_bar_artists(fig)[1].get_text()
-            assert ("µm" in label) if physical else (label == "`pixel_sizes`"), label
+            assert ("µm" in label) if physical else label.endswith(" px"), label
             if geometry:
                 for ax, size in ((fig.axXZ, 10 * pz), (fig.axXY, 50 * py)):
                     assert abs(np.diff(ax.get_ylim())[0]) == pytest.approx(size, rel=1e-6)
@@ -2347,21 +2378,21 @@ def test_default_vmax_of_all_nan_channel_does_not_warn():
 def test_bool_mask_channels_open_in_slice_viewers():
     """Boolean masks (e.g. from ``extract_surface``) open in the slice viewer and the annotator.
 
-    ``_robust_vmax`` used to call ``np.percentile`` on the bool sample, which
+    ``_robust_vmax`` (now ``_conventions._robust_max``) used to call ``np.percentile`` on the bool sample, which
     raises NumPy's "boolean subtract" TypeError, and every viewer computes it
     per channel at construction. Strategy: build the single-channel viewer, a
     two-channel viewer with a mask channel and the point annotator on a mask.
     Expected outcome: each renders; the mask channel's default vmax is 1.0,
     its dtype stays ``bool`` and its histogram keeps the 1-bit (0/1) range.
-    Negative control: ``_robust_vmax`` of the mask equals that of the same
+    Negative control: ``_robust_max`` of the mask equals that of the same
     mask as uint8, and an all-False mask gives 0.0 instead of raising.
     """
     mask = np.zeros((8, 32, 32), dtype=bool)
     mask[2:5, 10:20, 10:20] = True
     vol = np.random.default_rng(0).integers(0, 4000, mask.shape).astype(np.uint16)
 
-    assert tpa._robust_vmax(mask) == tpa._robust_vmax(mask.astype(np.uint8)) == 1.0
-    assert tpa._robust_vmax(np.zeros_like(mask)) == 0.0
+    assert tpa._robust_max(mask) == tpa._robust_max(mask.astype(np.uint8)) == 1.0
+    assert tpa._robust_max(np.zeros_like(mask)) == 0.0
 
     single = show_zyx_max_slice_interactive(mask, figsize=(4, 4))
     multi = show_zyx_max_slice_interactive([vol, mask], figsize=(4, 4))
@@ -2563,14 +2594,17 @@ def test_top_level_import_does_not_require_skimage():
 
 @pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide")
 def test_widget_module_runs_without_installed_package(tmp_path):
-    """The module (with its .js/.css next to it) imports when eigenp_utils itself is
-    not importable, e.g. `uv run tnia_plotting_anywidgets.py` with its PEP 723 deps."""
+    """The module (with its .js/.css and _conventions.py next to it) imports when eigenp_utils
+    itself is not importable, e.g. `uv run tnia_plotting_anywidgets.py` with its PEP 723 deps.
+
+    (D01-D04: the shared ``_conventions.py`` is now one of the sibling files.)"""
     src = Path(tpa.__file__).parent
     for name in (
         "tnia_plotting_anywidgets.py",
         "tnia_plotting_anywidgets.js",
         "tnia_plotting_anywidgets.css",
         "iso_scatter.js",
+        "_conventions.py",
     ):
         shutil.copy(src / name, tmp_path / name)
     code = textwrap.dedent(f"""
@@ -4008,3 +4042,439 @@ def test_viewer_deprecated_colors_arg_applies_to_dataarray():
     with pytest.warns(DeprecationWarning):
         w = show_zyx_max_slice_interactive(da, colors=["red", "blue"])
     assert w.colors_resolved == ["red", "blue"]
+
+
+# ---------------------------------------------------------------------------
+# Shared conventions (D01-D04): units, display range, colours, compositing
+# ---------------------------------------------------------------------------
+
+def _hot_pixel_volume():
+    """uint16 Poisson(100) background, a +300 blob, and one 4000 hot pixel (fraction 1e-5)."""
+    rng = np.random.default_rng(0)
+    vol = rng.poisson(100, (10, 100, 100)).astype(np.uint16)
+    vol[4:6, 40:60, 40:60] += 300
+    vol[0, 0, 0] = 4000
+    return vol
+
+
+def _xy_clim(fig):
+    return tuple(float(v) for v in fig.axXY.images[0].get_clim())
+
+
+def test_same_data_gets_same_range_colours_and_label_in_every_viewer():
+    """WP4 invariance: static single, static list, TNIASliceWidget and LabelAnnotator agree.
+
+    Strategy: pass one calibrated uint16 volume (hot pixel, blob) through
+    ``show_zyx_max(vol)``, ``show_zyx_max([vol])``, ``TNIASliceWidget(vol)`` and
+    ``LabelAnnotator(vol)``; compare (vmin, vmax), channel colours and the
+    scale-bar label (the annotator has no scale bar).
+    Expected outcome: one (vmin, vmax) everywhere (the default display range
+    of the volume); one grey/white channel colour; the same '10 µm' label in
+    the three ortho viewers. Before, the four entry points used four ranges
+    (panel min/max, 0/max, 0/p99.99, p0.1/p99.99) and the static single
+    channel was viridis with a black label.
+    """
+    from eigenp_utils._conventions import default_display_range
+    from eigenp_utils.label_annotator import LabelAnnotator
+
+    vol = _hot_pixel_volume()
+    ps = {"Z": 1.0, "Y": 0.5, "X": 0.5, "unit": "µm"}
+    expected = default_display_range(vol)
+    assert expected[0] == 0.0 and expected[1] < 1000  # the hot pixel does not set vmax
+
+    single = show_zyx_max(vol, pixel_sizes=ps)
+    lst = show_zyx_max([vol], pixel_sizes=ps)
+    w = TNIASliceWidget(vol, pixel_sizes=ps)
+    la = LabelAnnotator(vol, axes="ZYX")
+    try:
+        assert _xy_clim(single) == pytest.approx(expected)
+        # the list composite equals the single channel through the same range
+        grey = mcolors.to_rgb(single.axXY.images[0].to_rgba(np.asarray(single.axXY.images[0].get_array()))[5, 5])
+        np.testing.assert_allclose(_panel_rgb(lst)[5, 5], grey, atol=1 / 255)
+        assert (w.vmin_list[0], w.vmax_list[0]) == pytest.approx(expected)
+        assert la._limits[0] == pytest.approx(expected)
+
+        assert single.axXY.images[0].get_cmap()(1.0)[:3] == pytest.approx((1.0, 1.0, 1.0))
+        assert w.colors_resolved == ["white"] and la.channel_colors == ["#ffffff"]
+
+        wfig = w._render()
+        labels = {_scale_bar_artists(f)[1].get_text() for f in (single, lst, wfig)}
+        assert labels == {"10 µm"}
+        plt.close(wfig)
+    finally:
+        plt.close(single)
+        plt.close(lst)
+
+
+def test_hot_pixel_does_not_change_the_blob_contrast_between_static_and_widget():
+    """D02 (+) control: the blob's fraction of the display range is the same in the static and widget views.
+
+    Strategy: the hot-pixel volume (hot pixel on 1e-5 of the voxels) through
+    ``show_zyx_max`` and the slice widget; read the blob's normalised value.
+    Expected outcome: equal to within 1% (both use the source volume's
+    robust range), and the blob is shown bright (> 0.6), not at the ~7%
+    the panel max (the hot pixel) gave.
+    """
+    vol = _hot_pixel_volume()
+    fig = show_zyx_max(vol)
+    w = show_zyx_max_slice_interactive(vol)
+    try:
+        lo, hi = _xy_clim(fig)
+        static = (float(np.asarray(fig.axXY.images[0].get_array())[50, 50]) - lo) / (hi - lo)
+        wlo, whi = w.vmin_list[0], w.vmax_list[0]
+        widget = (float(vol[4:6, 50, 50].max()) - wlo) / (whi - wlo)
+        assert abs(static - widget) <= 0.01 and static > 0.6
+    finally:
+        plt.close(fig)
+
+
+def test_signed_data_are_not_clipped_at_zero():
+    """D02 (+) control: signed data get vmin = data minimum in the widget and static views.
+
+    Strategy: a float32 N(0, 1) volume through the slice widget, the
+    multichannel widget, ``show_zyx_max`` and a cleared GUI vmin box.
+    Expected outcome: vmin equals the data minimum (< -3), not 0.0; clearing
+    the box restores that cached value (not the minimum of the current slab).
+    """
+    vol = np.random.default_rng(1).normal(0, 1, (8, 30, 30)).astype(np.float32)
+    lo = float(vol.min())
+    w = show_zyx_max_slice_interactive(vol)
+    assert w.vmin_list[0] == pytest.approx(lo) and lo < -3
+    wm = show_zyx_max_slice_interactive([vol, vol + 5])
+    assert wm.vmin_list == pytest.approx([lo, 0.0])
+    fig = show_zyx_max(vol)
+    try:
+        assert _xy_clim(fig)[0] == pytest.approx(lo)
+    finally:
+        plt.close(fig)
+
+    seen = {}
+    orig = tpa.show_zyx_max_slabs
+
+    def spy(*args, **kwargs):
+        seen.update(vmin=kwargs["vmin"])
+        return orig(*args, **kwargs)
+
+    tpa.show_zyx_max_slabs = spy
+    try:
+        w.vmin_list = [""]
+        assert seen["vmin"] == pytest.approx(lo)
+        wm.vmin_list = ["", 1.0]
+        assert seen["vmin"] == pytest.approx([lo, 1.0])
+    finally:
+        tpa.show_zyx_max_slabs = orig
+
+
+def test_outlier_free_data_keep_vmax_within_one_grey_level_of_the_max():
+    """D02 (-) control: without outliers the robust vmax is the data maximum to within one grey level.
+
+    Strategy: a uint8 ramp and a 12-bit ramp volume through ``show_zyx_max``
+    and the slice widget.
+    Expected outcome: |vmax - max| <= 1 in both.
+    """
+    for vol in (np.arange(16 * 16 * 16, dtype=np.uint16).reshape(16, 16, 16),
+                (np.arange(20 * 20 * 20) % 256).astype(np.uint8).reshape(20, 20, 20)):
+        fig = show_zyx_max(vol)
+        try:
+            assert abs(_xy_clim(fig)[1] - vol.max()) <= 1
+        finally:
+            plt.close(fig)
+        assert abs(show_zyx_max_slice_interactive(vol).vmax_list[0] - vol.max()) <= 1
+
+
+def test_attenuated_mip_uses_the_display_range():
+    """R1-06: 'attenuated_mip' is normalised with the same (volume) range that is displayed.
+
+    Strategy: render ``projection='attenuated_mip'`` and record the range the
+    projector receives.
+    Expected outcome: the projector's (lo, hi) equals the XY panel's clim.
+    """
+    vol = _hot_pixel_volume().astype(np.float32)
+    seen = []
+    orig = tpa._projector_for
+
+    def spy(projection, attenuation, lo=None, hi=None):
+        seen.append((lo, hi))
+        return orig(projection, attenuation, lo, hi)
+
+    tpa._projector_for = spy
+    try:
+        fig = show_zyx_max(vol, projection="attenuated_mip")
+    finally:
+        tpa._projector_for = orig
+    try:
+        assert seen and seen[0] == pytest.approx(_xy_clim(fig))
+    finally:
+        plt.close(fig)
+
+
+def test_um_calibrated_output_is_identical_to_the_base_commit():
+    """D01 (-) control: µm-calibrated renders are unchanged by the shared conventions.
+
+    Strategy: render the fixture's figures (``tests/_tnia_um_reference.py``:
+    single channel, two channels, slice widget; explicit display settings so
+    only pixel-size handling can matter) and compare with
+    ``tnia_um_reference.npz``, generated on the base commit af8d252.
+    Expected outcome: identical panel arrays, extents, axes positions, clims
+    and scale-bar labels; with the same matplotlib version also the same PNG
+    bytes.
+    """
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        import _tnia_um_reference as ref
+    finally:
+        sys.path.pop(0)
+    expected = np.load(ref.FIXTURE)
+    got = ref.render_um_reference()
+    same_mpl = str(expected["matplotlib_version"]) == matplotlib.__version__
+    for key in expected.files:
+        if key == "matplotlib_version" or (key.endswith("png_sha256") and not same_mpl):
+            continue
+        np.testing.assert_array_equal(got[key], expected[key], err_msg=key)
+
+
+def test_cm_calibrated_tiff_round_trip_gives_um_and_the_right_aspect(tmp_path):
+    """D01 (+) control (C-01): a TIFF calibrated in cm shows µm sizes and a correctly proportioned XY panel.
+
+    Strategy: write a (20, 64, 64) stack with 1 µm pixels stored as cm
+    resolution tags and no Z step; load it with ``load_image`` and view it
+    with ``show_zyx_max`` and the slice widget.
+    Expected outcome: pixel sizes 1 µm (Z filled from X/Y with a warning),
+    the XY panel spans 64 x 64 µm and is as tall as the XZ panel is wide x 20/64
+    (it used to collapse to a dot next to 1-cm slices), and the scale bar reads µm.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    pytest.importorskip("xarray")
+    from eigenp_utils.image_io import load_image
+
+    p = tmp_path / "cm.tif"
+    tifffile.imwrite(p, np.random.default_rng(0).integers(0, 1000, (20, 64, 64)).astype(np.uint16),
+                     resolution=(1e4, 1e4), resolutionunit="CENTIMETER")
+    da = load_image(p, input_axes="ZYX")
+    with pytest.warns(UserWarning, match="axis Z"):
+        fig = show_zyx_max(da.isel(S=0, T=0, C=0).values, pixel_sizes=tpa._viewer_input_from_xarray(da, None, None, None)[3])
+    try:
+        assert abs(np.diff(fig.axXY.get_xlim())[0]) == pytest.approx(64.0)
+        assert abs(np.diff(fig.axXZ.get_ylim())[0]) == pytest.approx(20.0)
+        h_xy = fig.axXY.get_position().height
+        h_xz = fig.axXZ.get_position().height
+        assert h_xz / h_xy == pytest.approx(20 / 64, rel=1e-3)
+        assert _scale_bar_artists(fig)[1].get_text().endswith("µm")
+    finally:
+        plt.close(fig)
+    with pytest.warns(UserWarning, match="axis Z"):
+        w = show_zyx_max_slice_interactive(da)
+    assert (w.sz, w.sy, w.sx) == pytest.approx((1.0, 1.0, 1.0))
+
+
+def test_uncalibrated_tiff_gets_a_pixel_scale_bar(tmp_path):
+    """D01 (+) control (R8-01): an uncalibrated TIFF read by either reader shows a 'px' scale bar.
+
+    Strategy: write a TIFF without calibration; view the
+    ``get_tiff_voxel_size`` dict and the ``load_image`` DataArray.
+    Expected outcome: labels end with ' px' (it was '20 µm' for the
+    ``get_tiff_voxel_size`` dict, a physical bar on an uncalibrated image).
+    """
+    tifffile = pytest.importorskip("tifffile")
+    pytest.importorskip("xarray")
+    from eigenp_utils.image_io import get_tiff_voxel_size, load_image
+
+    p = tmp_path / "plain.tif"
+    vol = np.random.default_rng(0).integers(0, 255, (5, 40, 60)).astype(np.uint8)
+    tifffile.imwrite(p, vol)
+    with pytest.warns(UserWarning, match="No value for axis"):
+        fig = show_zyx_max(vol, pixel_sizes=get_tiff_voxel_size(p))
+    try:
+        assert _scale_bar_artists(fig)[1].get_text() == "10 px"
+    finally:
+        plt.close(fig)
+    w = show_zyx_max_slice_interactive(load_image(p, input_axes="ZYX"))
+    fig = w._render()
+    try:
+        assert _scale_bar_artists(fig)[1].get_text() == "10 px"
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("size, unit, expected", [
+    (0.002, "µm", "100 nm"),   # 256 px * 2 nm: EM scale
+    (500.0, "nm", "20 µm"),
+    (10.0, "µm", "500 µm"),
+    (40.0, "µm", "2 mm"),      # 256 px * 40 µm: mm-scale tissue
+    (0.04, "mm", "2 mm"),
+])
+def test_scale_bar_picks_nm_um_mm(size, unit, expected):
+    """D01 (user override): the scale bar label picks nm / µm / mm by the bar's length.
+
+    Strategy: render a 256-px-wide volume at EM, light-microscopy and
+    tissue scales.
+    Expected outcome: '100 nm', '20 µm', '500 µm', '2 mm' (it used to be
+    '0.1 µm' and '2000 µm').
+    """
+    im = np.zeros((4, 256, 256), dtype=np.uint8)
+    fig = show_zyx_max(im, pixel_sizes={"Z": size, "Y": size, "X": size, "unit": unit})
+    try:
+        assert _scale_bar_artists(fig)[1].get_text() == expected
+    finally:
+        plt.close(fig)
+
+
+def test_static_single_channel_defaults_to_grey():
+    """D03 (R1-02): a single channel defaults to the grey (white) ramp, as a one-channel list and the widgets.
+
+    Strategy: render ``show_zyx_max(vol)`` with channel labels.
+    Expected outcome: the colormap runs black -> white (not viridis) and the
+    label is drawn in the GUI grey of 'white' (it used to be black).
+    """
+    vol = _structured_volume()
+    fig = show_zyx_max_slabs(vol, [0, 48], [0, 48], [0, 16], channel_labels=["dna"])
+    try:
+        cmap = fig.axXY.images[0].get_cmap()
+        assert cmap(0.0)[:3] == pytest.approx((0, 0, 0)) and cmap(1.0)[:3] == pytest.approx((1, 1, 1))
+        texts = [c for c in fig.axLabels.findobj(matplotlib.text.Text) if c.get_text() == "dna"]
+        assert mcolors.to_hex(texts[0].get_color()) == get_gui_channel_color("white")
+    finally:
+        plt.close(fig)
+
+
+def test_white_start_colormaps_blend_with_minimum_by_default():
+    """D04 (R5-13): channels coloured with the white-start I-series use 'minimum' blending by default.
+
+    Strategy: two channels with squares, ``colormap=['I Blue', 'I Bordeaux']``
+    and ``blending=None``, compared with explicit 'minimum'; a mix of a
+    white-start and a dark-start colormap; dark colormaps (-).
+    Expected outcome: identical to 'minimum' (objects coloured on white; the
+    old default 'maximum' was white everywhere); the mix warns and keeps
+    'maximum'; ['viridis', 'magma'] still equals 'maximum'.
+    """
+    a = np.zeros((4, 20, 20), np.float32)
+    b = np.zeros((4, 20, 20), np.float32)
+    a[:, 2:8, 2:8] = 1.0
+    b[:, 12:18, 12:18] = 1.0
+    f0 = show_zyx_max([a, b], colormap=["I Blue", "I Bordeaux"])
+    f1 = show_zyx_max([a, b], colormap=["I Blue", "I Bordeaux"], blending="minimum")
+    try:
+        np.testing.assert_array_equal(_panel_rgb(f0), _panel_rgb(f1))
+        assert _panel_rgb(f0)[5, 5].max() < 0.5  # the object is visible (dark ink on white)
+        assert mcolors.to_hex(f0.patch.get_facecolor()) == "#ffffff"
+    finally:
+        plt.close(f0)
+        plt.close(f1)
+    with pytest.warns(UserWarning, match="start at white"):
+        plt.close(show_zyx_max([a, b], colormap=["I Blue", "viridis"]))
+
+
+def test_scatter_follows_the_blending_rule():
+    """D04 (R1-12): the scatter viewer composites colormap channels like the slice viewer (maximum).
+
+    Strategy: two continuous point channels coloured ['viridis', 'magma'] in
+    points and density mode with ``blending=None`` vs explicit 'maximum';
+    plain colours vs explicit 'additive'.
+    Expected outcome: identical renders (density used to be additive with
+    colormap names).
+    """
+    rng = np.random.default_rng(0)
+    n = 300
+    pts = (rng.uniform(0, 10, n), rng.uniform(0, 40, n), rng.uniform(0, 40, n))
+    vals = rng.random((n, 2))
+    for cmap, mode in ((["viridis", "magma"], "maximum"), (["red", "lime"], "additive")):
+        for render in ("points", "density"):
+            w0 = show_zyx_max_scatter_interactive(pts, channels=vals, colormap=cmap, render=render)
+            w1 = show_zyx_max_scatter_interactive(pts, channels=vals, colormap=cmap, render=render, blending=mode)
+            assert w0._blend == mode
+            f0, f1 = w0._render(), w1._render()
+            try:
+                b0, b1 = io.BytesIO(), io.BytesIO()
+                f0.savefig(b0, format="png", dpi=40)
+                f1.savefig(b1, format="png", dpi=40)
+                assert b0.getvalue() == b1.getvalue(), (cmap, render)
+            finally:
+                plt.close(f0)
+                plt.close(f1)
+
+
+def test_compositors_share_one_implementation():
+    """D04 (R1-12): create_multichannel_rgb, create_multichannel_rgb_cmap and blend_colors agree.
+
+    Strategy: compose the same two channels with plain colours (and with a
+    colormap) through all three, with the same explicit range and blending.
+    Expected outcome: identical colours (plain colours used to differ by up
+    to 1/255 depending on whether another channel was a colormap name).
+    """
+    rng = np.random.default_rng(0)
+    a, b = rng.random((2, 6, 7)).astype(np.float32)
+    for cmap in (["red", "lime"], ["viridis", "lime"]):
+        for blend in ("additive", "maximum", "screen", "minimum"):
+            kw = dict(colormap=cmap, vmin=0, vmax=1, blend=blend)
+            x1 = create_multichannel_rgb([a, b], [a, b], [a, b], **kw)[0]
+            x2 = create_multichannel_rgb_cmap([a, b], [a, b], [a, b], **kw)[0]
+            pts = blend_colors(np.column_stack([a.ravel(), b.ravel()]), cmap, vmin=0, vmax=1, blending=blend)
+            np.testing.assert_array_equal(x1, x2)
+            np.testing.assert_allclose(pts, x1.reshape(-1, 3), atol=1e-6)
+
+
+def test_per_channel_lists_behave_the_same_in_every_viewer():
+    """D04 (R1-13): a per-channel list longer than the channels raises in the static and widget viewers.
+
+    Strategy: two channels with ``vmax=[1, 2, 3]`` (and ``gamma`` of 3
+    entries) through ``show_zyx_max``, the slice widget and the scatter
+    widget; then a short list with a None entry.
+    Expected outcome: ValueError naming the parameter everywhere (the widgets
+    used to drop the extra entry silently); the short list is padded with
+    the default in the widgets (negative control).
+    """
+    a = np.random.default_rng(0).random((4, 5, 6)).astype(np.float32)
+    pts = (np.array([0.0, 3.0]), np.array([0.0, 4.0]), np.array([0.0, 5.0]))
+    chans = np.array([[0.2, 0.5], [0.7, 0.1]])
+    for kw, msg in ((dict(vmax=[1, 2, 3]), "vmax has 3 entries"), (dict(gamma=[1, 1, 1]), "gamma has 3 entries")):
+        with pytest.raises(ValueError, match=msg):
+            plt.close(show_zyx_max([a, a], **kw))
+        with pytest.raises(ValueError, match=msg):
+            show_zyx_max_slice_interactive([a, a], **kw)
+        with pytest.raises(ValueError, match=msg):
+            show_zyx_max_scatter_interactive(pts, channels=chans, **kw)
+    w = show_zyx_max_slice_interactive([a, a], vmax=[2.0, None], gamma=[0.5])
+    assert w.vmax_list[0] == 2.0 and w.vmax_list[1] == w._auto_vmax[1] and w.gamma_list == [0.5, 1.0]
+
+
+def test_annotator_and_xarray_colours_use_the_shared_palette():
+    """D03 (R2-19, R8-07): the annotator pads like the slice viewer; tuple colours in a DataArray are used.
+
+    Strategy: (1) annotator with ``colormap='white'`` on three channels and
+    with six default channels (red is the 6th palette colour); (2) a
+    DataArray whose ``color`` coordinate holds RGB tuples and an empty entry.
+    Expected outcome: (1) image channels ['white', 'lime', 'magenta'] (it was
+    white, white, lime) and an annotation colour not used by an image
+    channel ('orange' when red is taken); (2) the tuples become hex colours,
+    the empty entry takes a palette colour.
+    """
+    vol = _structured_volume()
+    w = show_zyx_max_slice_interactive_point_annotator([vol] * 3, colormap="white")
+    assert w.colors_resolved[:3] == ["white", "lime", "magenta"] and w.colors_resolved[3] == "red"
+    w6 = show_zyx_max_slice_interactive_point_annotator([vol] * 6)
+    assert w6.colors_resolved[5] == "red" and w6.colors_resolved[6] == "orange"
+
+    cols = tpa._channel_colors_from_coord(np.array([(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), ""], dtype=object))
+    assert cols == ["#ff0000", "#00ff00", "white"]
+
+
+def test_histogram_sample_does_not_alias_and_int8_range_is_capped():
+    """R1-20: the histogram sample is random (no column aliasing); non-negative int8 spans 0..127.
+
+    Strategy: a 1000 x 2000 uint16 image whose every other column is 1000,
+    histogram with ``max_samples=1000``; a float image with 0.5 at every
+    20th index for ``_is_integer_valued``; int8 data in [0, 100].
+    Expected outcome: both value populations appear (a strided sample saw
+    only one); the float image is not integer-valued; int8 gives (7, False)
+    and a 0..127 range (it was 0..255).
+    """
+    img = np.zeros((1000, 2000), np.uint16)
+    img[:, ::2] = 1000
+    h = compute_histogram(img, max_samples=1000, value_range=(0, 1000))
+    counts = np.asarray(h["counts"])
+    assert counts[0] > 0 and counts[-1] > 0
+    f = np.zeros(10_000_000, np.float32)
+    f[1::20] = 0.5
+    assert not tpa._is_integer_valued(f)
+    assert infer_bit_depth(np.array([0, 100], np.int8)) == (7, False)
+    assert infer_histogram_range(np.array([0, 100], np.int8))[0] == (-0.5, 127.5)
