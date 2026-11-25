@@ -1076,6 +1076,9 @@ def _robust_vmax(arr, q=99.99, max_samples=1_000_000):
     Returns None if there is no finite value.
     """
     arr = np.asarray(arr)
+    if arr.dtype == bool:
+        # np.percentile cannot subtract booleans; masks are 0/1 levels
+        arr = arr.view(np.uint8)
     hi = _finite_max(arr)
     if hi is None:
         return None
@@ -1999,11 +2002,12 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         # Traits set in one message (a middle-thumb drag sets x_start and x_end;
         # hover sync sets x_s and y_s) notify one at a time after all of them
         # are set, so the second notification would render the same state again.
+        state = self._render_state()
         if change is not None and getattr(change, 'name', None) in self._RENDER_STATE_TRAITS:
-            if self._render_state() == getattr(self, '_last_render_state', None):
+            if state == getattr(self, '_last_render_state', None):
                 return
-        self._last_render_state = self._render_state()
 
+        open_before = set(plt.get_fignums())
         fig = None
         try:
             fig = self._render()
@@ -2046,6 +2050,19 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 with matplotlib.rc_context({'savefig.bbox': 'standard'}):
                     fig.savefig(buf, format='png')
                 self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+            # Recorded only after a successful render, so a state whose render
+            # failed is retried by the next notification.
+            self._last_render_state = state
+        except Exception as e:
+            # A figure opened by a render that failed half-way was never returned.
+            for num in set(plt.get_fignums()) - open_before:
+                plt.close(num)
+            if change is None:
+                raise  # building the widget: report to the caller
+            # From an interactive change the exception would only reach the
+            # kernel log while the image silently stays stale: keep the last
+            # frame and say why in the widget.
+            self.warning_msg = f"⚠️ Render failed: {type(e).__name__}: {e}"
         finally:
             if fig is not None:
                 plt.close(fig)
@@ -2059,6 +2076,15 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     def _render_state(self):
         return tuple(repr(getattr(self, name)) for name in self._RENDER_STATE_TRAITS)
+
+    def _warn_inverted_ranges(self, channels):
+        """Tell the GUI that these channels' vmin > vmax is drawn with vmax = vmin + 1."""
+        if not channels:
+            return
+        which = (f"channel {channels[0]}" if len(channels) == 1
+                 else "channels " + ", ".join(str(c) for c in channels))
+        msg = f"⚠️ vmin > vmax for {which}: using vmax = vmin + 1"
+        self.warning_msg = f"{self.warning_msg}  {msg}" if self.warning_msg else msg
 
     def _handle_hover_sync(self, change):
         if not self.sync_on_hover:
@@ -2179,6 +2205,14 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         self.copy_png_data = base64.b64encode(data).decode('utf-8') if data else "error"
 
     def _copy_params(self, change):
+        s = "\n".join(self._copy_params_lines())
+        # Clear first so an unchanged view still fires a change event in JS
+        # (which copies on change), and assign the final string only once.
+        self.copy_params_string = ""
+        self.copy_params_string = s
+
+    def _copy_params_lines(self):
+        """The current view as keyword-argument lines (one ``key=value,`` each)."""
         s = []
 
         x_s_phys = self.x_s * self.sx
@@ -2223,7 +2257,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
             if self.projection == 'attenuated_mip':
                 s.append(f"attenuation={self.attenuation},")
 
-        self.copy_params_string = "\n".join(s)
+        return s
 
 class TNIASliceWidget(TNIAWidgetBase):
     """
@@ -2459,6 +2493,9 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmax_curr = [vmax_resolved[i] for i in visible_indices]
             gamma_curr = [gamma_resolved[i] for i in visible_indices]
             opacity_curr = [opacity_resolved[i] for i in visible_indices]
+            # The compositor draws vmin > vmax with vmax = vmin + 1; say so in the GUI.
+            self._warn_inverted_ranges([i for i in visible_indices
+                                        if vmin_resolved[i] is not None and vmin_resolved[i] > vmax_resolved[i]])
             if self.channel_labels_input is not None:
                 channel_labels_curr = [self.channel_names[i] for i in visible_indices]
             else:
@@ -2474,6 +2511,12 @@ class TNIASliceWidget(TNIAWidgetBase):
             # Robust default if vmax is not explicitly set
             if vmax_val is None:
                 vmax_val = self._auto_vmax[0]
+
+            if vmin_val is not None and vmin_val > vmax_val:
+                # Matplotlib's norms raise for vmin > vmax; use the multichannel
+                # compositor's rule (create_multichannel_rgb) so both paths agree.
+                vmax_val = vmin_val + 1.0
+                self._warn_inverted_ranges([0])
 
             gamma_val = float(self.gamma_list[0])
             opacity_val = float(self.opacity_list[0])
@@ -2537,6 +2580,14 @@ class TNIASliceWidget(TNIAWidgetBase):
         return fig
 
 
+class _PointList(traitlets.List):
+    """List trait that also takes a tuple or an (N, 3) array of points."""
+    def validate(self, obj, value):
+        if isinstance(value, (tuple, np.ndarray)):
+            value = list(value)
+        return super().validate(obj, value)
+
+
 class TNIAAnnotatorWidget(TNIASliceWidget):
     """
     Subclass of TNIASliceWidget that supports interactive point annotation.
@@ -2553,7 +2604,36 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     click_coords = traitlets.Dict().tag(sync=True) # {'plane': 'xy', 'x': 0.5, 'y': 0.5, 't': 123}
 
     # Data
-    points = traitlets.List().tag(sync=True) # List of [z, y, x] lists
+    points = _PointList().tag(sync=True) # List of [z, y, x] lists
+
+    @traitlets.validate('points')
+    def _validate_points(self, proposal):
+        """
+        Store every point as a ``[z, y, x]`` list of ints, so tuples or integral
+        float rows (e.g. from ``np.loadtxt``) match the points that clicks,
+        ``add_point`` and ``remove_point`` build. Non-integral or malformed
+        points are refused; points outside the volume are dropped (never drawn).
+        """
+        dims = getattr(self, 'dims', None)
+        out = []
+        n_outside = 0
+        for p in proposal['value']:
+            try:
+                v = np.asarray(p, dtype=float).reshape(-1)
+            except (TypeError, ValueError):
+                v = None
+            if v is None or v.size != 3 or not np.all(np.isfinite(v)) or not np.all(v == np.round(v)):
+                raise traitlets.TraitError(
+                    f"each point must be three integer voxel indices (z, y, x), got {p!r}")
+            pt = [int(c) for c in v]
+            if dims is not None and not all(0 <= c < n for c, n in zip(pt, dims)):
+                n_outside += 1
+                continue
+            out.append(pt)
+        if n_outside:
+            warnings.warn(f"Dropped {n_outside} point(s) outside the volume (Z, Y, X) = {tuple(dims)}.",
+                          UserWarning, stacklevel=2)
+        return out
 
     @property
     def annotate(self):
@@ -2705,6 +2785,10 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         idx = self._phys_to_index(plane, phys_x, phys_y)
         if idx is None:
             return
+        # A click on the padding of a rotated panel maps outside the volume;
+        # it must not be clamped onto the border and added as a real point.
+        extent = {'x': X, 'y': Y, 'z': Z}
+        outside = any(not 0 <= i < extent[axis] for axis, i in idx.items())
         data_x = idx.get('x', self.x_s)
         data_y = idx.get('y', self.y_s)
         data_z = idx.get('z', self.z_s)
@@ -2714,7 +2798,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         data_z = max(0, min(Z - 1, data_z))
 
         if self.annotation_action == 'add':
-            self.add_point(data_z, data_y, data_x)
+            if not outside:
+                self.add_point(data_z, data_y, data_x)
         elif self.annotation_action == 'delete':
             if not self.points:
                 return
@@ -3089,18 +3174,17 @@ class TNIAScatterWidget(TNIAWidgetBase):
         # Initialize observers and render
         self._init_observers()
 
-    def _copy_params(self, change):
+    def _copy_params_lines(self):
         """
         Like the base class, but slabs in the units ``show_zyx_max_scatter_interactive``
         takes: positions in data coordinates (index + data minimum), thicknesses in
         data units (one index is one data unit).
         """
-        super()._copy_params(change)
-        lines = self.copy_params_string.split("\n")
+        lines = super()._copy_params_lines()
         lines[0] = (f"slabs_position=({self.z_s + self.zmin}, {self.y_s + self.ymin}, "
                     f"{self.x_s + self.xmin}),")
         lines[1] = f"slabs_thickness=({self.z_t}, {self.y_t}, {self.x_t}),"
-        self.copy_params_string = "\n".join(lines)
+        return lines
 
     def _label_colors(self):
         """Colour of each channel as drawn (used for the channel labels)."""
@@ -3456,6 +3540,10 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
                 vmin_c = np.nanmin(vals) if vmin_resolved[0] is None else vmin_resolved[0]
                 vmax_c = np.nanmax(vals) if vmax_resolved[0] is None else vmax_resolved[0]
+                if vmin_c > vmax_c:
+                    # Normalize raises for vmin > vmax (same rule as the slice viewer)
+                    vmax_c = vmin_c + 1.0
+                    self._warn_inverted_ranges([0])
                 norm = matplotlib.colors.Normalize(vmin=vmin_c, vmax=vmax_c)
                 _scatter_planes(self.X_arr, self.Y_arr, self.Z_arr, c=vals, cmap=cmap, norm=norm)
 
@@ -4037,11 +4125,22 @@ class IsoScatterWidget(anywidget.AnyWidget):
         self.is_continuous = False
         self.is_categorical = False
 
+        # A single colour (color='red', the matplotlib idiom) colours every point
+        self.fixed_color = None
+        if color is not None and np.ndim(color) == 0 and matplotlib.colors.is_color_like(color):
+            self.fixed_color = color
+            color = None
+
         # Ensure color is numpy array
         if color is not None:
              self.color = np.asarray(color)
         else:
              self.color = None
+
+        # Points with a non-finite coordinate cannot be placed (and would make
+        # the centroid and radius NaN); drop them with their colour values.
+        self.X_orig, self.Y_orig, self.Z_orig, self.color = _finite_points(
+            self.X_orig, self.Y_orig, self.Z_orig, self.color)
 
         # Handle empty data
         if len(self.X_orig) == 0:
@@ -4096,6 +4195,9 @@ class IsoScatterWidget(anywidget.AnyWidget):
         dz = (self.Z_orig - self.cz) * self.sz
         dists = np.sqrt(dx**2 + dy**2 + dz**2)
         self.max_radius = dists.max() * 1.05 # 5% buffer
+        if not self.max_radius > 0:
+            # One point (or identical points): avoid identical axis limits
+            self.max_radius = max(self.sx, self.sy, self.sz)
 
         # Analyze color types (after subsampling)
         if self.color is not None:
@@ -4123,10 +4225,12 @@ class IsoScatterWidget(anywidget.AnyWidget):
     def _render_wrapper(self, change):
         fig = self._render()
         if fig:
-            buf = io.BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-            self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
-            plt.close(fig)
+            try:
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+                self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+            finally:
+                plt.close(fig)
 
     def _save_svg(self, change):
         fig = self._render()
@@ -4208,7 +4312,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         elif self.is_categorical:
             scatter_kwargs['c'] = self.c_mapped
         else:
-            scatter_kwargs['c'] = 'gray'
+            scatter_kwargs['c'] = 'gray' if self.fixed_color is None else self.fixed_color
 
         # Global Limits
         lim = self.max_radius
@@ -4308,9 +4412,11 @@ def show_iso_scatter(
     Parameters
     ----------
     X, Y, Z : array-like
-        Coordinates of points.
-    color : array-like, optional
-        Color values (continuous or categorical).
+        Coordinates of points. Points with a non-finite coordinate are
+        dropped (with a warning), together with their ``color`` values.
+    color : array-like or color, optional
+        Color values (continuous or categorical), one per point, or a single
+        matplotlib colour (e.g. ``'red'``) for every point.
     sxy, sz : float
         Scaling factors for XY and Z dimensions (used when ``pixel_sizes`` is None).
     pixel_sizes : tuple or dict, optional

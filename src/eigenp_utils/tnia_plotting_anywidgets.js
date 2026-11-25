@@ -150,10 +150,14 @@ export default {
       container.appendChild(topRow);
       container.appendChild(trackContainer);
 
+      // Largest index; 0 for a dimension of size 1 (Z of a 2D image), which
+      // must not become 1 (`|| 1`) or the end could be set out of range.
+      const getMax = () => model.get(maxTrait) ?? 0;
+
       function getValFromX(clientX) {
         const rect = trackContainer.getBoundingClientRect();
         if (rect.width <= 0) return 0;
-        const maxVal = model.get(maxTrait) || 1;
+        const maxVal = getMax();
         const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
         return Math.round(frac * maxVal);
       }
@@ -161,13 +165,16 @@ export default {
       function update() {
         const startVal = model.get(startTrait) || 0;
         const endVal = model.get(endTrait) || 0;
-        const maxVal = model.get(maxTrait) || 1;
+        const maxVal = getMax();
         const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
 
-        const startPct = Math.max(0, Math.min(100, (startVal / maxVal) * 100));
-        const endPct = Math.max(0, Math.min(100, (endVal / maxVal) * 100));
+        // Nothing to choose along a dimension of size 1: hide its row.
+        container.style.display = maxVal > 0 ? "flex" : "none";
+        const denom = Math.max(maxVal, 1);
+        const startPct = Math.max(0, Math.min(100, (startVal / denom) * 100));
+        const endPct = Math.max(0, Math.min(100, (endVal / denom) * 100));
         const midVal = (startVal + endVal) / 2;
-        const midPct = Math.max(0, Math.min(100, (midVal / maxVal) * 100));
+        const midPct = Math.max(0, Math.min(100, (midVal / denom) * 100));
 
         startThumb.style.left = `${startPct}%`;
         endThumb.style.left = `${endPct}%`;
@@ -230,7 +237,7 @@ export default {
       });
 
       setupDrag(endThumb, (e) => {
-        const maxVal = model.get(maxTrait) || 1;
+        const maxVal = getMax();
         const startVal = model.get(startTrait) || 0;
         let newEnd = Math.max(startVal, Math.min(maxVal, getValFromX(e.clientX)));
         if (newEnd !== model.get(endTrait)) {
@@ -242,7 +249,7 @@ export default {
       setupDrag(
         middleThumb,
         (e) => {
-          const maxVal = model.get(maxTrait) || 1;
+          const maxVal = getMax();
           const startVal = model.get(startTrait) || 0;
           const endVal = model.get(endTrait) || 0;
           const span = endVal - startVal;
@@ -281,7 +288,7 @@ export default {
 
       endInput.addEventListener("change", () => {
         const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
-        const maxVal = model.get(maxTrait) || 1;
+        const maxVal = getMax();
         const startVal = model.get(startTrait) || 0;
         let val = Math.round(parseFloat(endInput.value) / scale);
         if (isNaN(val)) { update(); return; }
@@ -379,7 +386,7 @@ export default {
       navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })])
         .then(() => flashCopyPng("✅"))
         .catch(err => {
-          if (err && err.message === "superseded") return;
+          if (err && (err.message === "superseded" || err.message === "disposed")) return;
           console.error("Failed to copy PNG: ", err);
           flashCopyPng("❌");
         });
@@ -409,7 +416,33 @@ export default {
     copyParamsBtn.style.fontWeight = "bold";  // same look as the "💾 SVG" / "📋 PNG" buttons
     copyParamsBtn.addEventListener("mouseover", () => { copyParamsBtn.style.backgroundColor = "#ccc"; });
     copyParamsBtn.addEventListener("mouseout", () => { copyParamsBtn.style.backgroundColor = "#e0e0e0"; });
+    // Same pattern as the PNG button: the clipboard write starts inside the
+    // click (keeping its user activation) with a Promise that resolves when
+    // Python answers. Python clears the string before each answer, so every
+    // click gets a change event even when the view is unchanged.
+    let pendingKwargs = null;  // {resolve, reject, timer} while waiting on Python
+    function flashCopyParams(text) {
+      copyParamsBtn.textContent = text;
+      setTimeout(() => { copyParamsBtn.textContent = "📋 kwargs"; }, 1500);
+    }
     copyParamsBtn.addEventListener("click", () => {
+      if (navigator.clipboard && typeof ClipboardItem !== "undefined") {
+        if (pendingKwargs) pendingKwargs.reject(new Error("superseded"));
+        const blobPromise = new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            pendingKwargs = null;
+            reject(new Error("timed out waiting for the kwargs"));
+          }, 30000);
+          pendingKwargs = { resolve, reject, timer };
+        });
+        navigator.clipboard.write([new ClipboardItem({ "text/plain": blobPromise })])
+          .then(() => flashCopyParams("✅"))
+          .catch(err => {
+            if (err && (err.message === "superseded" || err.message === "disposed")) return;
+            console.error("Failed to copy kwargs: ", err);
+            flashCopyParams("❌");
+          });
+      }
       let current = model.get("copy_params_trigger") || 0;
       model.set("copy_params_trigger", current + 1);
       model.save_changes();
@@ -417,11 +450,23 @@ export default {
 
     model.on("change:copy_params_string", () => {
       const str = model.get("copy_params_string");
-      if (str && navigator.clipboard) {
-        navigator.clipboard.writeText(str).then(() => {
-          copyParamsBtn.textContent = "✅";
-          setTimeout(() => { copyParamsBtn.textContent = "📋 kwargs"; }, 1500);
-        }).catch(err => console.error("Failed to copy text: ", err));
+      if (!str) return;
+      if (pendingKwargs) {
+        const { resolve, timer } = pendingKwargs;
+        pendingKwargs = null;
+        clearTimeout(timer);
+        resolve(new Blob([str], { type: "text/plain" }));
+        return;
+      }
+      // No click waiting (ClipboardItem unavailable, or the copy was triggered
+      // from Python): plain text write.
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(str)
+          .then(() => flashCopyParams("✅"))
+          .catch(err => {
+            console.error("Failed to copy text: ", err);
+            flashCopyParams("❌");
+          });
       }
     });
 
@@ -533,7 +578,10 @@ export default {
         chHeader.style.width = "15px";
         chDiv.appendChild(chHeader);
 
-        const createNumberInput = (label, traitName, isFloat, minVal, maxVal, allowEmpty) => {
+        // `bound` = { trait, side }: keep this value at most ("max") or at least
+        // ("min") the same channel's value of `trait`, as the histogram slider
+        // keeps vmin <= vmax. An empty (auto) partner box does not bound it.
+        const createNumberInput = (label, traitName, isFloat, minVal, maxVal, allowEmpty, bound) => {
           const row = document.createElement("div");
           row.style.display = "flex";
           row.style.alignItems = "center";
@@ -570,6 +618,15 @@ export default {
               }
               if (minVal !== undefined && val < minVal) val = minVal;
               if (maxVal !== undefined && val > maxVal) val = maxVal;
+              if (bound) {
+                const other = model.get(bound.trait);
+                const raw = other ? other[index] : undefined;
+                const o = raw === "" || raw === null || raw === undefined ? NaN : parseFloat(raw);
+                if (!isNaN(o)) {
+                  if (bound.side === "max" && val > o) val = o;
+                  if (bound.side === "min" && val < o) val = o;
+                }
+              }
             }
 
             inp.value = val;
@@ -592,8 +649,10 @@ export default {
         // Only unsigned and boolean data cannot go below 0 (int16 etc. can).
         const dtypeMin = (dtype.startsWith("uint") || dtype === "bool") ? 0 : undefined;
 
-        chDiv.appendChild(createNumberInput("vmin", "vmin_list", isFloatDtype, dtypeMin, dtypeMax, true));
-        chDiv.appendChild(createNumberInput("vmax", "vmax_list", isFloatDtype, dtypeMin, dtypeMax, true));
+        chDiv.appendChild(createNumberInput("vmin", "vmin_list", isFloatDtype, dtypeMin, dtypeMax, true,
+                                            { trait: "vmax_list", side: "max" }));
+        chDiv.appendChild(createNumberInput("vmax", "vmax_list", isFloatDtype, dtypeMin, dtypeMax, true,
+                                            { trait: "vmin_list", side: "min" }));
         // gamma 0 maps every pixel to full intensity; keep it strictly positive.
         chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0.05, 2.0, false));
         chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
@@ -1123,11 +1182,10 @@ export default {
       }
     };
 
+    // Removed by the cleanup returned from render(): anywidget removes a
+    // view's model listeners before calling it, so a 'destroy' handler would
+    // never run, and the model outlives views of re-run cells.
     document.addEventListener("keydown", keydownListener);
-
-    model.on("destroy", () => {
-      document.removeEventListener("keydown", keydownListener);
-    });
 
     uiTogglesContainer.appendChild(warningSpan);
 
@@ -1147,5 +1205,21 @@ export default {
 
     model.on("change:image_data", updateImage);
     updateImage();
+
+    // View cleanup (anywidget calls it when the view is removed): release
+    // everything registered outside this view's element, which would
+    // otherwise keep the whole view (model, image, canvases) alive.
+    return () => {
+      document.removeEventListener("keydown", keydownListener);
+      for (const ro of histogramObservers) ro.disconnect();
+      histogramObservers.length = 0;
+      for (const pending of [pendingPng, pendingKwargs]) {
+        if (!pending) continue;
+        clearTimeout(pending.timer);
+        pending.reject(new Error("disposed"));
+      }
+      pendingPng = null;
+      pendingKwargs = null;
+    };
   }
 };
