@@ -1485,28 +1485,32 @@ def _attenuated_mip(volume, axis, lo, hi, attenuation):
     return float(lo) + m * span
 
 
-def _has_nan(vol):
-    """True for a float ndarray holding NaN (other inputs use the plain NumPy reductions)."""
-    return isinstance(vol, np.ndarray) and np.issubdtype(vol.dtype, np.floating) and bool(np.isnan(vol).any())
+def _is_float_ndarray(vol):
+    """True for a float ndarray (other inputs, which hold no NaN, use the plain NumPy reductions)."""
+    return isinstance(vol, np.ndarray) and np.issubdtype(vol.dtype, np.floating)
 
 
+# np.fmax/np.fmin.reduce equal np.max/np.min bit for bit on NaN-free data and
+# run as fast, so the default MIP needs no extra pass to look for NaN.
 def _nan_max_projection(vol, axis):
     """Maximum along ``axis`` ignoring NaN voxels; NaN only where the whole ray is NaN (no warning)."""
-    return np.fmax.reduce(vol, axis=axis) if _has_nan(vol) else np.max(vol, axis=axis)
+    return np.fmax.reduce(vol, axis=axis) if _is_float_ndarray(vol) else np.max(vol, axis=axis)
 
 
 def _nan_min_projection(vol, axis):
     """Minimum along ``axis`` ignoring NaN voxels; NaN only where the whole ray is NaN (no warning)."""
-    return np.fmin.reduce(vol, axis=axis) if _has_nan(vol) else np.min(vol, axis=axis)
+    return np.fmin.reduce(vol, axis=axis) if _is_float_ndarray(vol) else np.min(vol, axis=axis)
 
 
 def _nan_mean_projection(vol, axis):
     """Mean along ``axis`` of the non-NaN voxels; NaN only where the whole ray is NaN (no warning)."""
-    if not _has_nan(vol):
-        return np.mean(vol, axis=axis)
+    out = np.mean(vol, axis=axis)
+    if not _is_float_ndarray(vol) or not np.isnan(out).any():
+        return out  # a NaN voxel makes its ray's mean NaN, so only then is the mean redone
     nan = np.isnan(vol)
     count = vol.shape[axis] - nan.sum(axis=axis)
-    total = np.where(nan, 0, vol).sum(axis=axis)
+    # accumulate float16 in float32, as np.mean does
+    total = np.where(nan, 0, vol).sum(axis=axis, dtype=np.float32 if vol.dtype == np.float16 else None)
     out = np.full(total.shape, np.nan, dtype=vol.dtype)
     np.divide(total, count, out=out, where=count > 0)
     return out
@@ -2583,8 +2587,9 @@ class TNIASliceWidget(TNIAWidgetBase):
         if getattr(self, '_pixel_sizes_given', False):
             pass_pixel_sizes = {'Z': self.sz, 'Y': self.sy, 'X': self.sx,
                                 'unit': getattr(self, '_length_unit', None)}
-        elif getattr(self, 'sz', 1.0) != 1.0:
-            # Only the Z step is known: keep it, but label the bar as for pixel_sizes=None
+        elif (getattr(self, 'sz', 1.0), getattr(self, 'sy', 1.0), getattr(self, 'sx', 1.0)) != (1.0, 1.0, 1.0):
+            # X or Y is unknown: keep the steps that were given (e.g. the Z
+            # step), but label the bar as for pixel_sizes=None
             pass_pixel_sizes = _UncalibratedXYPixelSizes(Z=self.sz, Y=self.sy, X=self.sx)
 
         # show_zyx_max_slabs returns a Figure

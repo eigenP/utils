@@ -1284,6 +1284,7 @@ def test_scale_bar_uses_pixel_size_unit(unit, size, expected):
     ({"Z": None, "Y": None, "X": None, "unit": None}, False),  # uncalibrated image_io dict
     ({"Z": 2.0, "Y": None, "X": None, "unit": "micron"}, False),  # only the Z step is known
     ({"Z": 2.0, "Y": 0.5, "X": None}, False),  # X, the axis the bar measures, is unknown
+    ({"Z": None, "Y": 0.5, "X": None}, False),  # only the Y step is known
     ((2.0, None, None), False),
     ({"Z": None, "Y": 0.5, "X": 0.5, "unit": "micron"}, True),  # control: X and Y given
     (None, False),  # control: the uncalibrated label itself
@@ -1298,20 +1299,26 @@ def test_scale_bar_is_labelled_physically_only_with_x_and_y_pixel_sizes(pixel_si
     widget re-renders run with warnings as errors.
 
     Expected outcome: without X and Y the label is the one used for
-    ``pixel_sizes=None`` ('`pixel_sizes`'), not 'N µm', while a given Z step
-    still sets the XZ panel height (2 per plane); re-rendering a widget does
-    not repeat the warnings. With X and Y given the label stays in µm.
+    ``pixel_sizes=None`` ('`pixel_sizes`'), not 'N µm', while the steps that
+    were given still set the panel geometry (a Z step of 2 doubles the XZ
+    panel height, a Y step of 0.5 halves the XY panel height), in the widget
+    as in ``show_zyx_max``; re-rendering a widget does not repeat the
+    warnings. With X and Y given the label stays in µm.
     """
     expect_warning = pixel_sizes is not None and any(
         v is None for v in (pixel_sizes.values() if isinstance(pixel_sizes, dict) else pixel_sizes))
-    pz = 2.0 if (isinstance(pixel_sizes, dict) and pixel_sizes["Z"]) or isinstance(pixel_sizes, tuple) else 1.0
+    raw = ((pixel_sizes.get("Z"), pixel_sizes.get("Y"), pixel_sizes.get("X")) if isinstance(pixel_sizes, dict)
+           else (pixel_sizes or (None, None, None)))
+    pz, py, px = (1.0 if v is None else v for v in raw)
 
-    def check(fig, xz_height=None):
+    def check(fig, geometry=False):
         try:
             label = _scale_bar_artists(fig)[1].get_text()
             assert ("µm" in label) if physical else (label == "`pixel_sizes`"), label
-            if xz_height is not None:
-                assert abs(np.diff(fig.axXZ.get_ylim())[0]) == pytest.approx(xz_height, rel=1e-6)
+            if geometry:
+                for ax, size in ((fig.axXZ, 10 * pz), (fig.axXY, 50 * py)):
+                    assert abs(np.diff(ax.get_ylim())[0]) == pytest.approx(size, rel=1e-6)
+                assert abs(np.diff(fig.axXY.get_xlim())[0]) == pytest.approx(50 * px, rel=1e-6)
         finally:
             plt.close(fig)
 
@@ -1322,12 +1329,12 @@ def test_scale_bar_is_labelled_physically_only_with_x_and_y_pixel_sizes(pixel_si
             return fn(*args, **kwargs)
 
     im = np.random.default_rng(0).random((10, 50, 50)).astype(np.float32)
-    check(build(show_zyx_max, im, pixel_sizes=pixel_sizes), xz_height=10 * pz)
+    check(build(show_zyx_max, im, pixel_sizes=pixel_sizes), geometry=True)
 
     w = build(show_zyx_max_slice_interactive, im, pixel_sizes=pixel_sizes)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        check(w._render(), xz_height=10 * pz)
+        check(w._render(), geometry=True)
 
     pts = (np.array([0, 9.0]), np.array([0, 49.0]), np.array([0, 49.0]))
     for render in ("points", "density"):
@@ -3423,13 +3430,17 @@ def test_projections_ignore_nan_voxels():
     NaN plane. Project it with ``show_zyx_max`` (default MIP, alone and as a
     channel of a composite), with the named 'mip', 'minip', 'average' and
     'attenuated_mip' (attenuation 0) projections, and with ``np.max`` passed
-    explicitly as ``projector``. Warnings are errors.
+    explicitly as ``projector``. Project a NaN-free random volume the same way,
+    and average a float16 volume whose ray sum exceeds the float16 range.
+    Warnings are errors.
 
     Expected outcome: the MIP keeps the bead (100) and is 0 on the other rays;
     MinIP is 0; 'average' is the mean of the finite samples (100 / 9 on the
     bead's ray); only the all-NaN ray is NaN; the composite shows the bead
     (white) instead of black; attenuation 0 equals the MIP wherever the MIP is
     finite. An explicitly passed projector is used as given (NaN propagates).
+    Without NaN every projection equals ``np.max`` / ``np.min`` / ``np.mean``
+    exactly, and the float16 average is accumulated like ``np.mean`` (finite).
     """
     v = np.zeros((10, 20, 20), dtype=np.float32)
     v[0, :, :10] = np.nan
@@ -3461,6 +3472,14 @@ def test_projections_ignore_nan_voxels():
         assert finite.sum() == 399
         np.testing.assert_allclose(att[finite], mip[finite], rtol=1e-6)
         np.testing.assert_allclose(xy([v, 0 * v])[10, 5], [1, 1, 1], atol=1e-6)
+
+        clean = np.random.default_rng(0).standard_normal((10, 20, 20)).astype(np.float32)
+        for projection, ref in ((None, np.max), ("mip", np.max), ("minip", np.min), ("average", np.mean)):
+            np.testing.assert_array_equal(xy(clean, vmin=-1, vmax=1, projection=projection), ref(clean, axis=0))
+
+        v16 = np.full((10, 2, 2), 10000, dtype=np.float16)
+        v16[0, 0, 0] = np.nan
+        np.testing.assert_array_equal(tpa._nan_mean_projection(v16, axis=0), np.full((2, 2), 10000, np.float16))
 
     fig = show_zyx_projection(v, projector=np.max, vmin=0, vmax=100)
     try:
