@@ -671,11 +671,13 @@ def test_frontend_view_cleanup_releases_document_listener_and_observers(page, st
     listener (holding the model and image) that still sent ``hover_coords``
     when 'c' was typed, plus its histogram ResizeObservers. Strategy: in the
     instrumented harness, hover the XY panel and press 'c' (positive control:
-    ``hover_coords`` is sent), start a PNG and a kwargs copy, then call the
-    cleanup and press 'c' again.
-    Expected outcome: the cleanup is a function; afterwards no document
-    keydown listener, live ResizeObserver or pending 30 s copy timer is left,
-    and 'c' sends nothing.
+    ``hover_coords`` is sent), click the PNG and the kwargs buttons twice each
+    before Python answers, then call the cleanup and press 'c' again.
+    Expected outcome: a second click supersedes the first and drops its 30 s
+    timer (one pending timer per button, so the cleanup can clear it, and the
+    stale timer cannot later reset the newer pending copy); the cleanup is a
+    function; afterwards no document keydown listener, live ResizeObserver or
+    pending 30 s copy timer is left, and 'c' sends nothing.
     """
     page.context.grant_permissions(["clipboard-read", "clipboard-write"])
     page.goto(f"{static_widget_server}/dispose.html")
@@ -691,8 +693,9 @@ def test_frontend_view_cleanup_releases_document_listener_and_observers(page, st
     page.keyboard.press("c")
     assert page.evaluate("window.mockModel.get('hover_coords')")["plane"] == "xy"
 
-    page.get_by_role("button", name="📋 PNG", exact=True).click()
-    page.get_by_role("button", name="📋 kwargs", exact=True).click()
+    for _ in range(2):  # the second click supersedes the first
+        page.get_by_role("button", name="📋 PNG", exact=True).click()
+        page.get_by_role("button", name="📋 kwargs", exact=True).click()
     assert page.evaluate("window.pendingLongTimers()") == 2
 
     assert page.evaluate("typeof window.cleanup") == "function"

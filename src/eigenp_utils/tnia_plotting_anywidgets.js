@@ -375,7 +375,12 @@ export default {
         flashCopyPng("❌");
         return;
       }
-      if (pendingPng) pendingPng.reject(new Error("superseded"));
+      if (pendingPng) {
+        // Drop its timer too: it would otherwise reset the newer pendingPng
+        // to null when it fires (and outlive the view's cleanup).
+        clearTimeout(pendingPng.timer);
+        pendingPng.reject(new Error("superseded"));
+      }
       const blobPromise = new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pendingPng = null;
@@ -427,7 +432,10 @@ export default {
     }
     copyParamsBtn.addEventListener("click", () => {
       if (navigator.clipboard && typeof ClipboardItem !== "undefined") {
-        if (pendingKwargs) pendingKwargs.reject(new Error("superseded"));
+        if (pendingKwargs) {
+          clearTimeout(pendingKwargs.timer);  // see the PNG button
+          pendingKwargs.reject(new Error("superseded"));
+        }
         const blobPromise = new Promise((resolve, reject) => {
           const timer = setTimeout(() => {
             pendingKwargs = null;
