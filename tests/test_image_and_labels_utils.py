@@ -735,6 +735,28 @@ def test_none_pixel_size_falls_back_to_one_with_warning():
     assert np.all(sampled == 100.0)
 
 
+def test_pixel_size_units_are_converted_to_um_and_missing_z_uses_finest_xy():
+    """Verify processing functions read pixel sizes in µm whatever the dict's unit (C-02, D01).
+
+    Strategy: (+) build ``create_ellipsoid_struct(1.0)`` (radius 1 µm) with
+    the same 0.1 µm pixels given in nm, mm-free µm and as a plain tuple;
+    (+) a dict with Z missing and Y/X known; (-) a non-length unit warns.
+    Expected outcome: identical structuring elements (21 px across at 0.1 µm),
+    not the 3x3x3 element nm values used to give; the missing Z takes 0.1 µm
+    with a warning naming axis Z; the unit 'pixel' warns and is used as µm.
+    """
+    ref = create_ellipsoid_struct(1.0, pixel_sizes=(0.1, 0.1, 0.1))
+    assert ref.shape == (21, 21, 21)
+    nm = create_ellipsoid_struct(1.0, pixel_sizes={"Z": 100.0, "Y": 100.0, "X": 100.0, "unit": "nm"})
+    np.testing.assert_array_equal(nm, ref)
+    with pytest.warns(UserWarning, match="axis Z"):
+        no_z = create_ellipsoid_struct(1.0, pixel_sizes={"y": 0.1, "x": 0.1, "unit": "µm"})
+    np.testing.assert_array_equal(no_z, ref)
+    with pytest.warns(UserWarning, match="not a length unit"):
+        px = create_ellipsoid_struct(1.0, pixel_sizes={"Z": 0.1, "Y": 0.1, "X": 0.1, "unit": "pixel"})
+    np.testing.assert_array_equal(px, ref)
+
+
 @pytest.mark.parametrize(
     "normal",
     [
@@ -926,7 +948,11 @@ def test_sample_volume_plane_dynamic_bounds_uint8_clamping_oob_and_errors():
     )
     assert dyn_plane.shape == (10, 15)
     np.testing.assert_allclose(dyn_plane, 7.0)
-    assert dyn_ps == {"Z": 0.0, "Y": pytest.approx(0.5), "X": pytest.approx(0.5)}
+    # D01 (R8-23): a single plane has no Z step -> None, not 0.0, so the dict
+    # can be passed back as pixel_sizes= (0.0 is rejected by every parser)
+    assert dyn_ps == {"Z": None, "Y": pytest.approx(0.5), "X": pytest.approx(0.5)}
+    with pytest.warns(UserWarning, match="axis Z"):  # Z takes the finest of Y/X
+        assert create_ellipsoid_struct(1.0, pixel_sizes=dyn_ps).shape == (5, 5, 5)
 
     # 2. Integer dtype + cubic overshoot clamping (no uint8 underflow/overflow wraparound)
     step_u8 = np.zeros((10, 16, 16), dtype=np.uint8)

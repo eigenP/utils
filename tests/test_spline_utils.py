@@ -347,7 +347,8 @@ def test_calculate_spline_length_and_resolution_forms():
     dict, list, tuple, and NumPy array resolutions (including `None` entries in
     dicts and sequences), single-point curves, and invalid coordinate dimensions.
     Expected outcome: scaled Euclidean lengths match exact analytical formulas,
-    missing/`None` axis resolutions warn and default to 1.0, single-point curves
+    missing/`None` axis resolutions warn and default to 1.0 (a missing Z with
+    known Y and X takes the finest of them, D01; units convert to µm), single-point curves
     have length 0.0, and 0D/1D/4D inputs or wrong-length resolutions raise `ValueError`.
     """
     coords_2d = [np.array([0, 3]), np.array([0, 4])]  # [Y, X] -> length 5
@@ -377,9 +378,17 @@ def test_calculate_spline_length_and_resolution_forms():
         )
     assert length_dict_none == pytest.approx(5.0)
 
+    # D01: a missing Z with known Y/X takes the finest of them (0.5), not 1.0
     with pytest.warns(UserWarning, match="axis Z"):
         length_seq_none = calculate_spline_length(line_z, resolution=[None, 0.5, 0.5])
-    assert length_seq_none == pytest.approx(10.0)
+    assert length_seq_none == pytest.approx(5.0)
+    with pytest.warns(UserWarning, match="axis Z"):
+        assert calculate_spline_length(line_z, resolution=[None, 0.5, None]) == pytest.approx(10.0)
+
+    # D01: units are converted to µm; non-positive sizes raise
+    assert calculate_spline_length(line_z, resolution={"Z": 2000.0, "Y": 1, "X": 1, "unit": "nm"}) == pytest.approx(20.0)
+    with pytest.raises(ValueError, match="finite and positive"):
+        calculate_spline_length(line_z, resolution=[0.0, 1.0, 1.0])
 
     # Validation errors: wrong resolution length and unsupported coordinate dimensions (0D, 1D, 4D)
     with pytest.raises(ValueError, match="entries"):
