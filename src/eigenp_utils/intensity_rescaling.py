@@ -285,13 +285,18 @@ def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z
         FLIP_Z_AXIS (bool): Whether to flip the order of min/max arrays.
 
     Returns:
-        numpy.ndarray: A new 3D image array with adjusted intensities per slice.
+        numpy.ndarray: A new 3D image array with adjusted intensities per slice,
+        in [0, 1] for floats and [0, dtype max] for unsigned integers.
     """
     # Validate inputs
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
     if p_min_array is None and p_max_array is None:
         raise ValueError("p_min_array & p_max_array are None, no difference will be produced in the image")
+
+    # Floats always map to [0, 1]: out_range='dtype' gives [-1, 1] for a float
+    # slice whose lower bound is negative (as in contrast_stretching)
+    out_range = (0.0, 1.0) if np.issubdtype(image.dtype, np.floating) else 'dtype'
 
     # Get the number of slices
     num_slices = image.shape[0]
@@ -318,7 +323,7 @@ def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z
         # Construct in_range tuple
         current_in_range = (in_range_min, in_range_max)
 
-        adjusted_image[i, :, :] = rescale_intensity(image[i, :, :], in_range=current_in_range)
+        adjusted_image[i, :, :] = rescale_intensity(image[i, :, :], in_range=current_in_range, out_range=out_range)
 
     return adjusted_image
 

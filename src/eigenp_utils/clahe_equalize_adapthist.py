@@ -650,6 +650,10 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
     if img.ndim == 0:
         raise ValueError('`image` must have at least one dimension')
     ks = _parse_kernel_size(kernel_size, img.shape)
+    if img.size == 0:
+        # A size-0 axis gives a 0-wide tile (no tile grid); pass empty input
+        # through, as median_filter_fast does
+        return np.zeros(img.shape, np.uint8)
 
     if backend != 'numpy':
         kernels = _numba_kernels()

@@ -349,3 +349,39 @@ def test_solve_positions_drops_inconsistent_edge():
     np.testing.assert_allclose(positions[:, 1] - positions[0, 1], [0, 10, 20], atol=0.05)
     biased, kept_all = _solve_positions(prior, edges, prior_weight=1e-3, max_residual=100.0)
     assert len(kept_all) == 3 and abs(biased[2, 1] - biased[0, 1] - 20) > 1
+
+
+def test_stitch_tiles_keeps_channel_and_plane_aux_coords():
+    """Per-channel metadata (colour, role) and per-plane coordinates survive stitching.
+
+    Strategy: attach ``color`` / ``role`` along C with ``set_channel_info`` (the
+    per-channel metadata convention the viewers read colours from) plus aux
+    coordinates along T and Z, stitch, and stitch the same tiles without them.
+    The mosaic used to be rebuilt with only the C names, so colours were lost.
+    Expected outcome: the mosaic carries the same C/T/Z aux coordinates with the
+    same values and they follow ``sel`` along C. Negative control: pixel values
+    and positions equal those of the plain tiles, and the per-tile S coordinates
+    (``stage_y`` / ``stage_x``) are not copied onto the single mosaic S entry.
+    """
+    from eigenp_utils.image_io import set_channel_info
+
+    scene = _scene()
+    cuts, true, nominal = _tiles(scene)
+    data = np.stack([np.stack([cuts, cuts // 2], axis=1), np.stack([cuts // 3, cuts // 4], axis=1)], axis=1)
+    plain = array_to_stczyx_xarray(data, 'SCZYX', channel_names=['nuc', 'mem'], pixel_sizes=(2.0, 1.0, 1.0),
+                                   stage_positions={'Y': nominal[:, 0], 'X': nominal[:, 1]})
+    da = set_channel_info(plain, {'nuc': {'color': 'cyan', 'role': 'dna'},
+                                  'mem': {'color': 'magenta', 'role': 'membrane'}})
+    da = da.assign_coords(z_um=('Z', [10.0, 12.0]), t_s=('T', [3.5]))
+
+    mosaic = stitch_tiles(da)
+    for name, dim in (('color', 'C'), ('role', 'C'), ('z_um', 'Z'), ('t_s', 'T')):
+        assert mosaic.coords[name].dims == (dim,), name
+        np.testing.assert_array_equal(mosaic.coords[name].values, da.coords[name].values)
+    assert mosaic.sel(C='mem').coords['color'].item() == 'magenta'
+
+    reference = stitch_tiles(plain)
+    np.testing.assert_array_equal(mosaic.values, reference.values)
+    assert mosaic.attrs['stitching'] == reference.attrs['stitching']
+    np.testing.assert_array_equal(mosaic.attrs['stitching']['positions_px'], true - true.min(axis=0))
+    assert 'stage_y' not in mosaic.coords and 'stage_x' not in mosaic.coords

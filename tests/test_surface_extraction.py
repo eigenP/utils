@@ -454,6 +454,34 @@ def test_extract_surface_tissue_from_first_slice_and_sharp_step(noise_amp):
     assert np.all(np.abs(heights[:, 44:] - 40.0) <= 4.0)
 
 
+@pytest.mark.parametrize("gaussian_sigma", [4.0, 1.0])
+def test_extract_surface_tissue_from_first_slice_gets_height_zero(gaussian_sigma):
+    """Verify columns foreground from the first binned slice report height 0, not half a block.
+
+    Strategy: tissue starts at z=0 on the left half and at z=30 on the right
+    half of a `(96, 64, 64)` volume (default `downscale_factor=4`); the left
+    columns are foreground from the first binned slice. Their reduced height
+    used to be mapped like a block centre, `(0 + 0.5) * 4 - 0.5 = 1.5`, and the
+    rasterised surface landed at z=2. The tiled path must agree.
+    Expected outcome: away from the step the left half has height exactly 0
+    and its surface voxel at z=0, for both blur widths. Negative control: tissue
+    starting at z=4 (first binned slice background) keeps its height of 1.5.
+    """
+    vol = np.zeros((96, 64, 64), dtype=np.uint8)
+    vol[:, :, :32] = 200
+    vol[30:, :, 32:] = 200
+    mask, heights = extract_surface(vol, gaussian_sigma=gaussian_sigma, return_heightmap=True)
+    np.testing.assert_array_equal(heights[:, :20], 0.0)
+    assert np.all(mask[0, :, :20])
+    tiled = extract_surface_tiled(vol, gaussian_sigma=gaussian_sigma, tile_size=32, return_mask=False)
+    np.testing.assert_array_equal(tiled, heights)
+
+    below_top = np.zeros((96, 32, 32), dtype=np.uint8)
+    below_top[4:] = 200
+    _, h_below = extract_surface(below_top, gaussian_sigma=0.5, return_heightmap=True)
+    np.testing.assert_allclose(h_below, 1.5, atol=1e-5)
+
+
 def test_extract_surface_covers_outer_rim():
     """Verify full-image surface coverage extends all the way to the outer pixel rim.
 

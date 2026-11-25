@@ -409,3 +409,30 @@ def test_clahe_u8_rejects_bad_arguments():
     pytest.importorskip("numba")
     with pytest.raises(ValueError, match="3 dimensions"):
         clahe_u8(vol4, backend="numba")
+
+
+@pytest.mark.parametrize("backend", ["numpy", "numba"])
+def test_clahe_u8_empty_input_returns_empty_uint8(backend):
+    """Empty arrays (e.g. empty tiles of a tiled or dask pipeline) pass through instead of crashing.
+
+    Strategy: run ``clahe_u8`` on 1D/2D/3D arrays with a size-0 axis, in uint8,
+    uint16 and float32, on both backends. A size-0 axis made the tile size 0,
+    which raised ZeroDivisionError in the tile grid; ``median_filter_fast``
+    already returns empty input unchanged.
+    Expected outcome: an empty uint8 array of the input shape; a kernel_size of
+    the wrong length is still rejected. Negative control: a non-empty image is
+    still equalised (non-constant output, identical on both backends).
+    """
+    if backend == "numba":
+        pytest.importorskip("numba")
+    for shape in ((0,), (0, 16), (16, 0), (0, 16, 16), (4, 0, 16)):
+        for dtype in (np.uint8, np.uint16, np.float32):
+            out = clahe_u8(np.zeros(shape, dtype), backend=backend)
+            assert out.shape == shape and out.dtype == np.uint8, (shape, dtype)
+    with pytest.raises(ValueError, match="kernel_size"):
+        clahe_u8(np.zeros((0, 16), np.uint8), kernel_size=(4, 4, 4), backend=backend)
+
+    image = np.random.default_rng(3).integers(0, 255, (24, 32), dtype=np.uint8)
+    out = clahe_u8(image, kernel_size=8, backend=backend)
+    assert out.shape == image.shape and np.ptp(out) > 0
+    np.testing.assert_array_equal(out, clahe_u8(image, kernel_size=8, backend="numpy"))

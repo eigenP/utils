@@ -670,6 +670,36 @@ def test_contrast_stretch_per_slice_flip_z_axis_and_errors():
         contrast_stretch_per_slice(img)
 
 
+def test_contrast_stretch_per_slice_float_with_negative_lower_bound_maps_to_unit_range():
+    """Float slices whose lower bound is negative map to [0, 1], not [-1, 1].
+
+    Strategy: stretch a float32 ramp from -1 to 9 between explicit bounds
+    (-1, 9), and stack it with the same ramp shifted to 0..10; with only
+    p_max_array given, each slice's own minimum (-1 or 0) is the lower bound.
+    The sibling ``contrast_stretching`` already maps such data to [0, 1].
+    Expected outcome: every slice spans exactly [0, 1] and equals
+    (v - lower) / (upper - lower), so the shifted slices are identical whether
+    or not their lower bound is negative. Negative control: a uint16 stack
+    keeps its dtype and the full [0, 65535] output range.
+    """
+    ramp = np.linspace(-1.0, 9.0, 100, dtype=np.float32).reshape(10, 10)
+    expected = (ramp.astype(np.float64) + 1.0) / 10.0
+    img = np.stack([ramp, ramp + 1.0])
+
+    both = contrast_stretch_per_slice(img, p_min_array=np.array([-1.0, 0.0]), p_max_array=np.array([9.0, 10.0]))
+    only_max = contrast_stretch_per_slice(img, p_max_array=np.array([9.0, 10.0]))
+    for out in (both, only_max):
+        assert out.dtype == np.float32
+        for z in range(2):
+            assert out[z].min() == 0.0 and out[z].max() == 1.0
+            np.testing.assert_allclose(out[z], expected, atol=1e-6)
+
+    u16 = np.stack([np.linspace(100, 1000, 64).reshape(8, 8)] * 2).astype(np.uint16)
+    out_u16 = contrast_stretch_per_slice(u16, p_min_array=np.array([100, 100]), p_max_array=np.array([1000, 1000]))
+    assert out_u16.dtype == np.uint16
+    assert out_u16.min() == 0 and out_u16.max() == 65535
+
+
 def test_z_axis_orientation_uses_all_bottom_slices_and_channels():
     """Bottom half includes the last slice, channel selection discriminates per-channel brightness,
     and Z < 2 raises ValueError."""

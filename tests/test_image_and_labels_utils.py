@@ -1093,6 +1093,50 @@ def test_morphological_envelope_contains_input_when_downscaled():
         assert surface.shape == mask.shape and np.any(surface)
 
 
+def test_morphological_surface_mask_and_ellipsoid_struct_work_in_2d():
+    """Verify 2D masks with 2D pixel sizes work, and other ndims fail with a clear error.
+
+    Strategy: run `generate_morphological_surface_mask` on a `(40, 40)` mask of
+    two 20x9 / 20x10 px rectangles split by a 1 px gap, at 0.5 um pixels with a
+    1 um closing radius (2 px) and 1 um surface depth, with `downscale_factor`
+    1 and 2. It used to build a 3D structuring element and fail with
+    'pixel_sizes has 2 entries, expected 3'. `create_ellipsoid_struct(ndim=2)`
+    builds the 2D disk.
+    Expected outcome: the closing bridges the gap, the envelope contains the
+    mask, the surface is the 2 px (<= 1 um) rim of the envelope and excludes
+    its interior; the 2D struct of radius 1 um at 0.5 um is a 5x5 disk.
+    Negative controls: `create_ellipsoid_struct` still defaults to 3D (a 2-entry
+    pixel size raises), and a 4D mask raises a ValueError naming 2D and 3D.
+    """
+    ps = {"Y": 0.5, "X": 0.5}
+    mask = np.zeros((40, 40), dtype=bool)
+    mask[10:30, 10:19] = True
+    mask[10:30, 20:30] = True
+
+    surface, envelope = generate_morphological_surface_mask(
+        mask, pixel_sizes=ps, closing_radius_um=1.0, surface_depth_um=1.0, downscale_factor=1
+    )
+    assert surface.shape == mask.shape and envelope.shape == mask.shape
+    assert envelope[20, 19] and np.all(envelope[mask])
+    assert surface[10, 20] and surface[11, 20] and not surface[12, 20]
+    assert not surface[20, 19] and not np.any(surface & ~envelope)
+
+    surface_f2, envelope_f2 = generate_morphological_surface_mask(
+        mask, pixel_sizes=ps, closing_radius_um=1.0, surface_depth_um=1.0, downscale_factor=2
+    )
+    assert np.all(envelope_f2[mask]) and np.any(surface_f2) and not surface_f2[20, 20]
+
+    disk = create_ellipsoid_struct(1.0, pixel_sizes=ps, ndim=2)
+    assert disk.shape == (5, 5) and disk[2, 0] and disk[1, 1] and not disk[0, 0]
+    tiny = create_ellipsoid_struct(1e-8, pixel_sizes=ps, ndim=2)
+    assert tiny.shape == (3, 3) and tiny[1, 1] and tiny.sum() == 1
+
+    with pytest.raises(ValueError, match="expected 3"):
+        create_ellipsoid_struct(1.0, pixel_sizes=(0.5, 0.5))
+    with pytest.raises(ValueError, match="2D .* or 3D"):
+        generate_morphological_surface_mask(np.ones((2, 3, 4, 5), bool), pixel_sizes=(1.0, 1.0, 1.0, 1.0))
+
+
 def test_estimate_inter_label_distance():
     """Verify isotropic, anisotropic, few-label, and all-zero inter-label distance estimation.
 
