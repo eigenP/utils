@@ -85,10 +85,12 @@ function render({ model, el: root }) {
     lab: null, // {z,y,x,data}
     prev: null, next: null, // labels of slices z-1 / z+1 (onion skin) or null
     undo: [],
-    trackSeen: 0, // highest track-op serial already mirrored into undo
+    trackLive: new Set(), // track-op serials already mirrored into undo (Python's last track_undo_ids)
+    epoch: model.get("undo_epoch") ?? 0, // Python's undo_epoch the slice snapshots belong to
+    lastSent: null, // this view's last labels_from_js value (other views' messages are adopted)
     zoom: 1, panX: 0, panY: 0,
     painting: false, panning: false, spaceDown: false,
-    last: null, stroke: null, strokeStart: null,
+    last: null, stroke: null, strokeStart: null, strokeUndo: null,
     cursor: null, userView: false,
   };
 
@@ -507,14 +509,44 @@ function render({ model, el: root }) {
   }
 
   function pushUndo() {
-    state.undo.push({ z: state.lab.z, data: state.lab.data.slice() });
+    const entry = { z: state.lab.z, data: state.lab.data.slice() };
+    state.undo.push(entry);
     if (state.undo.length > UNDO_MAX) state.undo.shift();
+    return entry;
   }
 
   function send() {
     const lb = state.lab;
-    model.set("labels_from_js", encodeLabels(lb.z, lb.y, lb.x, lb.data));
+    state.lastSent = encodeLabels(lb.z, lb.y, lb.x, lb.data);
+    model.set("labels_from_js", state.lastSent);
     model.save_changes();
+  }
+
+  function onForeignLabels() {
+    // Another view of this model (JupyterLab "new view for output", the widget
+    // displayed twice, another browser tab) sent its edited slice. Adopt it, so
+    // this view's next stroke does not send back a stale copy that erases it.
+    // Pixels of a stroke in progress here keep this view's values.
+    const v = model.get("labels_from_js");
+    if (!v || v === state.lastSent || !state.lab) return;
+    const lb = decodeLabels(v);
+    if (!lb || lb.z !== state.lab.z || lb.x !== state.lab.x || lb.y !== state.lab.y) return;
+    const d = state.lab.data, s = state.painting ? state.stroke : null;
+    for (let p = 0; p < d.length; p++) if (!s || !s[p]) d[p] = lb.data[p];
+    drawLabels();
+  }
+
+  function cancelStroke(why) {
+    // The slice was replaced during a drag (Python changed z / stack / labels):
+    // the stroke so far belongs to the old slice, so it is dropped rather than
+    // split between two slices (or sent into another stack).
+    if (!state.painting) return;
+    state.painting = false;
+    state.stroke = null;
+    const i = state.undo.indexOf(state.strokeUndo);
+    if (i >= 0) state.undo.splice(i, 1);
+    state.strokeUndo = null;
+    setStatus(`stroke cancelled: ${why}`);
   }
 
   function trackRequest(req) {
@@ -528,16 +560,31 @@ function render({ model, el: root }) {
 
   function syncTrackUndo() {
     // mirror Python's track-operation undo stack as markers in state.undo;
-    // only serials newer than any seen are appended (in order), so a marker
-    // that fell off the bounded undo stack is not re-added on top of later
-    // strokes (which would undo that old op before them)
+    // serials are unique per widget (never reused, across stacks too), so only
+    // serials not mirrored yet are appended (in order), and a marker that fell
+    // off the bounded undo stack is not re-added on top of later strokes
+    // (which would undo that old op before them)
     const ids = model.get("track_undo_ids") || [];
     const live = new Set(ids);
     state.undo = state.undo.filter((u) => u.track === undefined || live.has(u.track));
-    for (const s of ids) {
-      if (s > state.trackSeen) { state.undo.push({ track: s }); state.trackSeen = s; }
-    }
+    for (const s of ids) if (!state.trackLive.has(s)) state.undo.push({ track: s });
+    state.trackLive = live;
     while (state.undo.length > UNDO_MAX) state.undo.shift();
+  }
+
+  function checkEpoch() {
+    // Python bumps undo_epoch on a stack switch or set_labels: the slice
+    // snapshots then belong to another stack or to replaced labels (ctrl+z
+    // would write them into the shown stack). Drop them and rebuild the
+    // track-op markers from the shown stack's track_undo_ids. Called from
+    // every handler the update can reach first (hosts order keys freely).
+    const ep = model.get("undo_epoch") ?? 0;
+    if (ep === state.epoch) return false;
+    state.epoch = ep;
+    state.undo = [];
+    state.trackLive = new Set();
+    syncTrackUndo();
+    return true;
   }
 
   function undo() {
@@ -613,7 +660,7 @@ function render({ model, el: root }) {
       if (floodFill(x, y)) { drawLabels(); send(); } else state.undo.pop();
       return;
     }
-    pushUndo();
+    state.strokeUndo = pushUndo();
     state.painting = true;
     state.stroke = new Uint8Array(state.lab.x * state.lab.y);
     state.last = [x, y];
@@ -670,9 +717,10 @@ function render({ model, el: root }) {
     if (k === " ") { state.spaceDown = true; ev.preventDefault(); return; }
     if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "z") { undo(); ev.preventDefault(); return; }
     if (ev.altKey && (k === "ArrowLeft" || k === "ArrowRight")) {
-      // Alt+Left/Right step z (and must not trigger browser back/forward)
+      // Alt+Left/Right step z (and must not trigger browser back/forward);
+      // z / stack keys do nothing during a stroke, which belongs to one slice
       ev.preventDefault(); ev.stopPropagation();
-      stepZ(k === "ArrowRight" ? 1 : -1);
+      if (!state.painting) stepZ(k === "ArrowRight" ? 1 : -1);
       return;
     }
     // letter keys only without modifiers: ctrl+s / ctrl+f / ctrl+p belong to the
@@ -694,9 +742,9 @@ function render({ model, el: root }) {
       if (id <= (model.get("class_names") || []).length) { model.set("active_label", id); model.save_changes(); }
       return;
     }
-    if (k === "PageUp" || k === "PageDown") { stepStack(k === "PageDown" ? 1 : -1); ev.preventDefault(); return; }
+    if (k === "PageUp" || k === "PageDown") { if (!state.painting) stepStack(k === "PageDown" ? 1 : -1); ev.preventDefault(); return; }
     if (k === "ArrowUp" || k === "ArrowDown") {
-      stepZ(k === "ArrowUp" ? 1 : -1);
+      if (!state.painting) stepZ(k === "ArrowUp" ? 1 : -1);
       ev.preventDefault();
     }
   });
@@ -759,12 +807,15 @@ function render({ model, el: root }) {
   function onImage() {
     const im = decodeImage(model.get("image_to_js"));
     if (!im) return;
+    if (state.lab && (im.z !== state.lab.z || im.x !== state.lab.x || im.y !== state.lab.y)) cancelStroke("the slice changed");
     state.img = im;
     compose();
   }
   function onLabels() {
     const lb = decodeLabels(model.get("labels_to_js"));
     if (!lb) return;
+    checkEpoch();
+    cancelStroke("the slice was reloaded from Python");
     if (!state.lab || state.lab.z !== lb.z) state.undo = state.undo.filter((u) => u.track !== undefined || u.z === lb.z);
     state.lab = lb;
     drawLabels();
@@ -783,7 +834,9 @@ function render({ model, el: root }) {
     ["change:labels_prev_to_js change:labels_next_to_js", onAdjacent],
     ["change:opacity change:outline_only change:display change:outline_px change:outline_border_px change:class_colors change:instance_palette change:mode change:background", () => { drawLabels(); drawAdjacent(); syncControls(); }],
     ["change:show_adjacent", () => { drawAdjacent(); syncControls(); }],
-    ["change:track_undo_ids", syncTrackUndo],
+    ["change:track_undo_ids", () => { if (!checkEpoch()) syncTrackUndo(); }],
+    ["change:undo_epoch", checkEpoch],
+    ["change:labels_from_js", onForeignLabels],
     ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:stack change:stack_names change:shape_zyx change:class_names change:status change:active_label_extent change:counts_text", () => { syncControls(); drawCursor(); }],
     ["change:channel_names", buildChannels],
   ];
@@ -796,8 +849,22 @@ function render({ model, el: root }) {
   onAdjacent();
   syncTrackUndo();
   requestAnimationFrame(fit);
+  // A view rendered after strokes (page reload, the widget displayed again, a
+  // second view) starts from labels_to_js, which Python does not update per
+  // stroke: ask Python to re-send the slice if it is stale. Without a kernel
+  // (static export) there is no comm to sync with.
+  try {
+    model.set("labels_resync", (model.get("labels_resync") || 0) + 1);
+    model.save_changes();
+  } catch (e) { /* no live kernel */ }
 
-  return () => { for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.off?.(e, fn); };
+  return () => {
+    for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.off?.(e, fn);
+    // a discarded view must not stay reachable (image, labels, undo snapshots)
+    window.removeEventListener("resize", refit);
+    ro?.disconnect();
+    state.undo = [];
+  };
 }
 
 export default { render };
