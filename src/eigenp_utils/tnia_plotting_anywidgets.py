@@ -78,6 +78,28 @@ def _length_unit(pixel_sizes):
             return unit.strip()
     return None
 
+
+class _UncalibratedXYPixelSizes(dict):
+    """Parsed pixel sizes whose X and Y fell back to 1.0 (a widget passes these on to keep a given Z step)."""
+
+
+def _xy_pixel_sizes_given(pixel_sizes):
+    """
+    Whether ``pixel_sizes`` gives the X and Y pixel sizes (not None), so the
+    scale bar can be labelled in physical units. Missing X/Y sizes (e.g. an
+    uncalibrated dict from ``image_io``) are drawn as 1.0, and the bar is
+    labelled as for ``pixel_sizes=None``.
+    """
+    if pixel_sizes is None or isinstance(pixel_sizes, _UncalibratedXYPixelSizes):
+        return False
+    if isinstance(pixel_sizes, dict):
+        return pixel_sizes.get('Y') is not None and pixel_sizes.get('X') is not None
+    try:
+        raw = tuple(pixel_sizes)
+    except TypeError:
+        return False  # not pixel sizes; _parse_zyx_tuple_or_dict reports it
+    return len(raw) == 3 and raw[1] is not None and raw[2] is not None
+
 import anywidget
 import traitlets
 import matplotlib
@@ -438,7 +460,7 @@ def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``.
+            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
         attenuation (float, optional): for 'attenuated_mip', the attenuation per
             voxel along the ray (napari's default 0.05). Rays enter each slab at
             its lowest index (z = start for XY, y = start for XZ, x = start for
@@ -451,24 +473,25 @@ def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None
         if colormap is None:
             colormap = colors
 
-    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
 
-def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
+def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Args:
         image_to_show (3d numpy array, or a list of them for channels): image to plot
         pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple): size of figure to
-        projector: function to project with
+        projector: function ``f(volume, axis)`` to project with; None (default)
+            is the maximum ignoring NaN voxels, like ``projection='mip'``.
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
         blending (str, optional): channel compositing mode, see `show_zyx`.
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``.
+            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
         attenuation (float, optional): for 'attenuated_mip', the attenuation per
             voxel along the ray (napari's default 0.05). Rays enter each slab at
             its lowest index (z = start for XY, y = start for XZ, x = start for
@@ -536,7 +559,8 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         channel_label_colors (list, optional): label colours, overriding the
             ones derived from ``colormap`` (for pre-composited RGB input).
         pixel_sizes_given (bool, optional): whether the scale bar shows physical
-            units; defaults to ``pixel_sizes is not None``.
+            units; defaults to whether ``pixel_sizes`` gives the X and Y sizes
+            (not None).
         blending (str, optional): how channels are composited (napari's names):
             'additive', 'maximum', 'screen' or 'minimum'. None (default) keeps
             the historical behaviour: additive for colour names, maximum when a
@@ -571,7 +595,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             colormap = colors
 
     pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
-    both_given = (pixel_sizes is not None) if pixel_sizes_given is None else bool(pixel_sizes_given)
+    both_given = _xy_pixel_sizes_given(pixel_sizes) if pixel_sizes_given is None else bool(pixel_sizes_given)
 
     if isinstance(xy, list):
         colormap = _channel_colormaps(colormap, len(xy), blending)
@@ -653,7 +677,16 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     g_xy = _PanelRotation(np.shape(xy)[:2], rot_z, py, px)
     g_xz = _PanelRotation(np.shape(xz)[:2], rot_y, pz, px)
     g_zy = _PanelRotation(np.shape(zy)[:2], rot_x, py, pz)
-    xy, xz, zy = g_xy.warp(xy, cval=pad_value), g_xz.warp(xz, cval=pad_value), g_zy.warp(zy, cval=pad_value)
+
+    def _warp(g, panel):
+        panel = np.asarray(panel)
+        if g.angle != 0.0 and panel.ndim == 3 and np.issubdtype(panel.dtype, np.integer):
+            # imshow reads integer RGB(A) on a 0..255 scale but the resampled
+            # (float) panel on a 0..1 scale
+            panel = panel.astype(np.float32) / 255.0
+        return g.warp(panel, cval=pad_value)
+
+    xy, xz, zy = _warp(g_xy, xy), _warp(g_xz, xz), _warp(g_zy, zy)
     (sxy_h, sxy_w), (sxz_h, sxz_w), (szy_h, szy_w) = g_xy.p_out, g_xz.p_out, g_zy.p_out
 
     if use_plt:
@@ -921,7 +954,7 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``.
+            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
         attenuation (float, optional): for 'attenuated_mip', the attenuation per
             voxel along the ray (napari's default 0.05). Rays enter each slab at
             its lowest index (z = start for XY, y = start for XZ, x = start for
@@ -947,11 +980,11 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
 
 ### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -960,14 +993,16 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
         image_to_show (3d numpy array): image to plot
         pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple): size of figure to
-        projector: function to project with (used when ``projection`` is None)
+        projector: function ``f(volume, axis)`` to project with (used when
+            ``projection`` is None); None (default) is the maximum ignoring NaN
+            voxels, like ``projection='mip'``.
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
         blending (str, optional): channel compositing mode, see `show_zyx`.
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``.
+            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
         attenuation (float, optional): for 'attenuated_mip', the attenuation per
             voxel along the ray (napari's default 0.05). Rays enter each slab at
             its lowest index (z = start for XY, y = start for XZ, x = start for
@@ -984,12 +1019,16 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
 
     def _projector(img, i):
         if projection is None:
-            return projector
+            return _nan_max_projection if projector is None else projector
         lo = hi = None
         if projection == 'attenuated_mip':
             # Samples are normalised with the channel's display range
-            lo = vmin[i] if isinstance(vmin, (list, tuple)) else vmin
-            hi = vmax[i] if isinstance(vmax, (list, tuple)) else vmax
+            if isinstance(image_to_show, list):
+                lo = _per_channel(vmin, len(image_to_show), None, 'vmin')[i]
+                hi = _per_channel(vmax, len(image_to_show), None, 'vmax')[i]
+            else:
+                lo = vmin[i] if isinstance(vmin, (list, tuple)) else vmin
+                hi = vmax[i] if isinstance(vmax, (list, tuple)) else vmax
             lo = _default_vmin(img) if lo is None else float(lo)
             hi = _finite_max(img) if hi is None else float(hi)
             if hi is None or not hi > lo:
@@ -1041,6 +1080,20 @@ def _check_gammas(gammas):
     for g in gammas:
         if g is not None and not float(g) > 0:
             raise ValueError(f"gamma must be > 0, got {g}")
+
+
+def _per_channel(val, n, default, name):
+    """
+    ``val`` as a list of one value per channel. A scalar (or None) applies to
+    every channel; a list or tuple shorter than ``n`` is padded with
+    ``default`` (as the widgets do) and its None entries take the default. A
+    longer one raises ValueError.
+    """
+    if not isinstance(val, (list, tuple)):
+        return [default if val is None else val] * n
+    if len(val) > n:
+        raise ValueError(f"{name} has {len(val)} entries for {n} channels")
+    return [default if v is None else v for v in val] + [default] * (n - len(val))
 
 
 def _finite_max(*arrays):
@@ -1115,10 +1168,15 @@ def create_multichannel_rgb(
         Per-channel input range. If None, computed per channel across XY/XZ/ZY:
         vmin is 0, or the data minimum when the channel has negative values;
         vmax is the largest finite value. Scalars are broadcast to all channels.
+        (For vmin, vmax, gamma and opacity, a list shorter than the number of
+        channels is padded with the default; a longer one raises ValueError.)
     gamma : float | list[float]
         Power gamma applied AFTER linear [0,1] normalization (1 = linear).
-    colors : list[str | tuple]
-        One color per channel (default: ['magenta','cyan','yellow','green'][:n]).
+    colormap : str | tuple | list[str | tuple]
+        One color per channel (``colors`` is the deprecated name). Missing
+        entries take the unused default colours 'white', 'lime', 'magenta',
+        'yellow', 'cyan', 'red', 'blue' ('black', 'magenta', 'lime', 'blue',
+        'red', 'cyan', 'yellow' with ``blend='minimum'``).
     opacity : float | list[float] | None
         Opacity multiplier per channel (1 = full opacity).
     blend : str
@@ -1150,24 +1208,17 @@ def create_multichannel_rgb(
     zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
 
     # Broadcast params
-    gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+    gammas = _per_channel(gamma, n, 1, 'gamma')
     _check_gammas(gammas)
-    opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
+    opacities = _per_channel(opacity, n, 1.0, 'opacity')
 
-    colormap = _channel_colormaps(colormap, n)
+    colormap = _channel_colormaps(colormap, n, blend)
     color_map = [np.asarray(to_rgb(resolve_color(c)), dtype=np.float32) for c in colormap]
 
     # Determine per-channel vmin/vmax if not provided
     # vmin/vmax can be None, or a list containing floats and/or Nones
-    if vmin is None:
-        vmins = [None] * n
-    else:
-        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
-
-    if vmax is None:
-        vmaxs = [None] * n
-    else:
-        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
+    vmins = _per_channel(vmin, n, None, 'vmin')
+    vmaxs = _per_channel(vmax, n, None, 'vmax')
 
     for i in range(n):
         if vmins[i] is None:
@@ -1299,11 +1350,11 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
     xz_rgb = np.zeros((Hxz, Wxz, 3), dtype=np.float32)
     zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
 
-    gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+    gammas = _per_channel(gamma, n, 1, 'gamma')
     _check_gammas(gammas)
-    opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
+    opacities = _per_channel(opacity, n, 1.0, 'opacity')
 
-    colormap = _channel_colormaps(colormap, n)
+    colormap = _channel_colormaps(colormap, n, blend)
 
     cmap_list = []
     for c in colormap:
@@ -1314,15 +1365,8 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
         else:
             cmap_list.append(black_to(resolve_color(c)))
 
-    if vmin is None:
-        vmins = [None] * n
-    else:
-        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
-
-    if vmax is None:
-        vmaxs = [None] * n
-    else:
-        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
+    vmins = _per_channel(vmin, n, None, 'vmin')
+    vmaxs = _per_channel(vmax, n, None, 'vmax')
 
     for i in range(n):
         if vmins[i] is None:
@@ -1444,14 +1488,45 @@ def _attenuated_mip(volume, axis, lo, hi, attenuation):
     return float(lo) + m * span
 
 
+def _is_float_ndarray(vol):
+    """True for a float ndarray (other inputs, which hold no NaN, use the plain NumPy reductions)."""
+    return isinstance(vol, np.ndarray) and np.issubdtype(vol.dtype, np.floating)
+
+
+# np.fmax/np.fmin.reduce equal np.max/np.min bit for bit on NaN-free data and
+# run as fast, so the default MIP needs no extra pass to look for NaN.
+def _nan_max_projection(vol, axis):
+    """Maximum along ``axis`` ignoring NaN voxels; NaN only where the whole ray is NaN (no warning)."""
+    return np.fmax.reduce(vol, axis=axis) if _is_float_ndarray(vol) else np.max(vol, axis=axis)
+
+
+def _nan_min_projection(vol, axis):
+    """Minimum along ``axis`` ignoring NaN voxels; NaN only where the whole ray is NaN (no warning)."""
+    return np.fmin.reduce(vol, axis=axis) if _is_float_ndarray(vol) else np.min(vol, axis=axis)
+
+
+def _nan_mean_projection(vol, axis):
+    """Mean along ``axis`` of the non-NaN voxels; NaN only where the whole ray is NaN (no warning)."""
+    out = np.mean(vol, axis=axis)
+    if not _is_float_ndarray(vol) or not np.isnan(out).any():
+        return out  # a NaN voxel makes its ray's mean NaN, so only then is the mean redone
+    nan = np.isnan(vol)
+    count = vol.shape[axis] - nan.sum(axis=axis)
+    # accumulate float16 in float32, as np.mean does
+    total = np.where(nan, 0, vol).sum(axis=axis, dtype=np.float32 if vol.dtype == np.float16 else None)
+    out = np.full(total.shape, np.nan, dtype=vol.dtype)
+    np.divide(total, count, out=out, where=count > 0)
+    return out
+
+
 def _projector_for(projection, attenuation, lo=None, hi=None):
-    """A ``f(volume, axis)`` projector for a canonical projection name."""
+    """A ``f(volume, axis)`` projector for a canonical projection name (NaN voxels are ignored)."""
     if projection == 'mip':
-        return np.max
+        return _nan_max_projection
     if projection == 'minip':
-        return np.min
+        return _nan_min_projection
     if projection == 'average':
-        return np.mean
+        return _nan_mean_projection
     return lambda vol, axis: _attenuated_mip(vol, axis, lo, hi, attenuation)
 
 
@@ -1460,9 +1535,12 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     Blend multiple channels of intensities into RGB.
 
     intensities : (N, C) array
-        Values per point per channel.
+        Values per point per channel. NaN means no signal in that channel.
     base_colors : list of str or rgb tuples
         Colors per channel.
+    gamma : float or list of float
+        Per-channel gamma; a list shorter than C is padded with 1 (a longer
+        one raises ValueError).
     blending : str, optional
         'additive' (default; ``soft_clip`` applies), 'maximum', 'screen' or
         'minimum' (each channel from white to its colour, per-RGB minimum).
@@ -1494,14 +1572,19 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     if not isinstance(vmax, (list, tuple)): vmax = [vmax]*C
     elif len(vmax) == 1: vmax = [vmax[0]]*C
     elif len(vmax) < C: vmax = list(vmax) + [None]*(C-len(vmax))
-    gammas = np.full(C, float(gamma)) if np.isscalar(gamma) else np.asarray(gamma, dtype=float)
+    gamma = gamma.tolist() if isinstance(gamma, np.ndarray) else gamma
+    gammas = [float(g) for g in _per_channel(gamma, C, 1.0, 'gamma')]
 
     for c in range(C):
         arr = intensities[:, c].astype(float)
-        vmin_c = np.nanmin(arr) if vmin[c] is None else vmin[c]
-        vmax_c = np.nanmax(arr) if vmax[c] is None else vmax[c]
+        # Default range: the channel's min/max ignoring NaN (an all-NaN channel shows nothing)
+        valid = arr[~np.isnan(arr)]
+        vmin_c = (valid.min() if valid.size else 0.0) if vmin[c] is None else vmin[c]
+        vmax_c = (valid.max() if valid.size else 1.0) if vmax[c] is None else vmax[c]
         norm = (arr - vmin_c) / max(1e-9, vmax_c - vmin_c)
-        norm = np.clip(norm, 0, 1)
+        # A NaN value is no signal (as in the image compositors), so the
+        # point keeps the other channels' colours instead of turning NaN.
+        norm = np.nan_to_num(np.clip(norm, 0, 1), nan=0.0)
         if gammas[c] != 1:
             norm = norm**gammas[c]
 
@@ -2319,7 +2402,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 
         self.im_orig = im
 
-        self._pixel_sizes_given = pixel_sizes is not None
+        self._pixel_sizes_given = _xy_pixel_sizes_given(pixel_sizes)
         self._length_unit = _length_unit(pixel_sizes)
 
         self.figsize = figsize
@@ -2547,6 +2630,10 @@ class TNIASliceWidget(TNIAWidgetBase):
         if getattr(self, '_pixel_sizes_given', False):
             pass_pixel_sizes = {'Z': self.sz, 'Y': self.sy, 'X': self.sx,
                                 'unit': getattr(self, '_length_unit', None)}
+        elif (getattr(self, 'sz', 1.0), getattr(self, 'sy', 1.0), getattr(self, 'sx', 1.0)) != (1.0, 1.0, 1.0):
+            # X or Y is unknown: keep the steps that were given (e.g. the Z
+            # step), but label the bar as for pixel_sizes=None
+            pass_pixel_sizes = _UncalibratedXYPixelSizes(Z=self.sz, Y=self.sy, X=self.sx)
 
         # show_zyx_max_slabs returns a Figure
         fig = show_zyx_max_slabs(
@@ -2962,7 +3049,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         super().__init__(X_dim, Y_dim, Z_dim, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
         self.channels = channels
-        self._pixel_sizes_given = pixel_sizes is not None
+        self._pixel_sizes_given = _xy_pixel_sizes_given(pixel_sizes)
         self._length_unit = _length_unit(pixel_sizes)
         pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
         self.sx = px
