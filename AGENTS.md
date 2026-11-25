@@ -7,4 +7,4 @@ Please refer to:
 - **`docs/MEMORIES.md`** - The active context, lessons learned, and behavioral rules.
 - **`docs/matth.md`**, **`docs/testr.md`**, **`docs/bolt.md`** - Specialized agent personas and their operating procedures.
 
-**Important**: Any new rules, learnings, or guidelines should be added directly to the appropriate files in the `docs/` folder (such as `docs/AGENTS.md` or `docs/MEMORIES.md`), **not** this root `AGENTS.md` file.
+**Important**: Record new rules and learnings in `docs/`, **not** in this root `AGENTS.md` file: repo-wide rules go in `docs/MEMORIES.md`; derivations and learnings specific to one persona go in that persona's journal (`docs/matth.md`, `docs/testr.md`, `docs/bolt.md`).

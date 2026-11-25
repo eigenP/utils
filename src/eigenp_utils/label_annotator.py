@@ -49,6 +49,9 @@ from __future__ import annotations
 import colorsys
 import re
 import struct
+import warnings
+from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 
 import anywidget
@@ -136,6 +139,8 @@ def _robust_limits(arr: np.ndarray, lo: float, hi: float, max_samples: int = 2_0
     if flat.size > max_samples:
         rng = np.random.default_rng(seed)
         flat = flat[rng.integers(0, flat.size, max_samples)]
+    if flat.dtype == np.bool_:  # e.g. a mask from extract_surface; np.percentile cannot interpolate bool
+        flat = flat.astype(np.uint8)
     flat = flat[np.isfinite(flat)]
     if flat.size == 0:
         return 0.0, 1.0
@@ -149,12 +154,21 @@ def _coerce_label_values(lab: np.ndarray, background: bool) -> np.ndarray:
     """Validate label values and return them as ``uint32`` (a copy).
 
     Accepts unsigned ids in ``[0, 65535]``; with ``background`` also negative
-    values (signed convention), which become ``BACKGROUND_ID``.
+    values (signed convention), which become ``BACKGROUND_ID``. Float arrays
+    must hold finite integer values (NaN would become id 2**31, and 0.999
+    would be floored to 0).
     """
+    if lab.size and lab.dtype.kind == "f":
+        if not np.isfinite(lab).all():
+            raise ValueError("labels must be finite integer ids; got NaN or inf")
+        if (lab != np.round(lab)).any():
+            raise ValueError("labels must be integer ids; got non-integer float values")
     if lab.size:
         lo, hi = lab.min(), lab.max()
         if hi > _MAX_WIRE_LABEL or (lo < 0 and not background):
             hint = " (negative values mean annotated background: pass background=True)" if lo < 0 else ""
+            if hi > _MAX_WIRE_LABEL:
+                hint += " (relabel sparse ids first, e.g. skimage.segmentation.relabel_sequential)"
             raise ValueError(f"labels must be in [0, {_MAX_WIRE_LABEL}]{hint}")
         if lo < 0:
             return np.where(lab < 0, BACKGROUND_ID, lab).astype(np.uint32)
@@ -303,8 +317,16 @@ class LabelAnnotator(anywidget.AnyWidget):
     # the last labels_to_js (track ops, set_labels): the browser then reloads
     # labels_to_js even if its bytes did not change (hosts drop equal values)
     labels_rev = traitlets.Int(0).tag(sync=True)
-    # edits (JS -> Python); Any because buffers may arrive as memoryview
+    # bumped when the browser's per-slice undo snapshots stop matching the shown
+    # labels (stack switch, set_labels; not track ops, which keep their markers):
+    # the browser then drops them and rebuilds its track-op markers
+    undo_epoch = traitlets.Int(0).tag(sync=True)
+    # edits (JS -> Python); Any because buffers may arrive as memoryview. Reset to
+    # None once applied, so a byte-identical next message still notifies
     labels_from_js = traitlets.Any(None, allow_none=True).tag(sync=True)
+    # bumped by every newly rendered view (JS -> Python): Python then re-sends the
+    # current slice if labels_to_js is stale (strokes are never echoed)
+    labels_resync = traitlets.Int(0).tag(sync=True)
 
     # display (client-side only)
     channel_names = traitlets.List(traitlets.Unicode()).tag(sync=True)
@@ -387,7 +409,17 @@ class LabelAnnotator(anywidget.AnyWidget):
             if not image:
                 raise ValueError("image: empty list of stacks")
             imgs = list(image)
-            labs = list(labels) if isinstance(labels, (list, tuple)) else [None] * len(imgs)
+            if labels is None:
+                labs = [None] * len(imgs)
+            elif isinstance(labels, np.ndarray) or (
+                isinstance(labels, Sequence) and not isinstance(labels, (str, bytes))
+            ):
+                labs = list(labels)  # a sequence, or an array with one entry per stack along axis 0
+            else:
+                raise TypeError(
+                    "labels for a list of stacks must be a list (one array or None per stack) or an array "
+                    f"stacked along axis 0, not {type(labels).__name__}"
+                )
             if len(labs) != len(imgs):
                 raise ValueError(f"{len(imgs)} stacks but {len(labs)} label arrays")
             if stack_names is not None and len(stack_names) != len(imgs):
@@ -425,6 +457,8 @@ class LabelAnnotator(anywidget.AnyWidget):
         self._slice_hist: list[tuple[np.ndarray, np.ndarray] | None] = [None] * nz
         # (serial, flat idx, old values, value written, what)
         self._track_undo: list[tuple[int, np.ndarray, np.ndarray, int, str]] = []
+        # one counter for the whole widget (not per stack): serials never repeat, so
+        # the browser can tell a new op from one it has mirrored already
         self._track_serial = 0
 
         # inactive stacks are parked here; the active one lives in self._image & co
@@ -442,7 +476,7 @@ class LabelAnnotator(anywidget.AnyWidget):
                 el = _coerce_label_values(el, background)
             self._parked[k] = dict(
                 image=e_img, labels=el, limits=[_robust_limits(e_img[i], *percentiles) for i in range(c)],
-                hist=[None] * ez, undo=[], serial=0, z=ez // 2,
+                hist=[None] * ez, undo=[], z=ez // 2,
             )
 
         super().__init__(**kwargs)
@@ -475,6 +509,8 @@ class LabelAnnotator(anywidget.AnyWidget):
         out = np.empty(self._image.shape[:1] + self._image.shape[2:], dtype=np.uint8)
         for i, (lo, hi) in enumerate(self._limits):
             s = (np.asarray(self._image[i, z], dtype=np.float32) - lo) * (255.0 / (hi - lo))
+            # NaN survives the clip and would warn in the uint8 cast: show it as 0
+            np.nan_to_num(s, copy=False, nan=0.0, posinf=255.0, neginf=0.0)
             np.clip(s, 0, 255, out=s)
             out[i] = s.astype(np.uint8)
         return out
@@ -517,7 +553,7 @@ class LabelAnnotator(anywidget.AnyWidget):
     def _park(self) -> dict:
         return dict(
             image=self._image, labels=self._labels, limits=self._limits, hist=self._slice_hist,
-            undo=self._track_undo, serial=self._track_serial, z=int(self.z),
+            undo=self._track_undo, z=int(self.z),
         )
 
     @traitlets.validate("stack")
@@ -534,7 +570,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         st = self._parked[new]
         self._parked[new] = None
         self._image, self._labels, self._limits = st["image"], st["labels"], st["limits"]
-        self._slice_hist, self._track_undo, self._track_serial = st["hist"], st["undo"], st["serial"]
+        self._slice_hist, self._track_undo = st["hist"], st["undo"]
         with self.hold_sync():
             nz, ny, nx = self._labels.shape
             self.shape_zyx = [nz, ny, nx]
@@ -542,6 +578,7 @@ class LabelAnnotator(anywidget.AnyWidget):
             self.z = st["z"]  # triggers _send_slice when it differs; resend anyway below
             self._send_slice()
             self.labels_rev += 1
+            self.undo_epoch += 1  # the browser's slice snapshots belong to the previous stack
             if self.mode == "instance":
                 self.active_label = self._next_label()
             self._update_extent()
@@ -576,18 +613,32 @@ class LabelAnnotator(anywidget.AnyWidget):
     @traitlets.observe("labels_from_js")
     def _on_labels_from_js(self, change):
         buf = change["new"]
-        if buf is None or len(bytes(buf)) == 0:
+        if buf is None:
             return
-        z, lab = decode_label_slice(buf)
-        if lab.shape != self._labels.shape[1:] or not 0 <= z < self._labels.shape[0]:
-            self.status = f"ignored label message for z={z} with shape {lab.shape}"
-            return
-        self._labels[z] = lab
-        self._slice_hist[z] = None
-        if self.mode == "instance" and self.auto_increment:
-            self.active_label = self._next_label()
-        self._update_extent()
-        self._update_counts()
+        try:
+            if len(bytes(buf)) == 0:
+                return
+            z, lab = decode_label_slice(buf)
+            if lab.shape != self._labels.shape[1:] or not 0 <= z < self._labels.shape[0]:
+                self.status = f"ignored label message for z={z} with shape {lab.shape}"
+                return
+            self._labels[z] = lab
+            self._slice_hist[z] = None
+            if self.mode == "instance" and self.auto_increment:
+                self.active_label = self._next_label()
+            self._update_extent()
+            self._update_counts()
+        finally:
+            # traitlets (and the hosts) drop a value equal to the current one, so a
+            # second identical message (e.g. "clear slice" again after set_labels or
+            # a stack switch changed the slice) would be lost: forget this one
+            self.labels_from_js = None
+
+    @traitlets.observe("labels_resync")
+    def _on_labels_resync(self, change):
+        """A newly rendered view starts from ``labels_to_js``: re-send it if browser strokes made it stale."""
+        if hasattr(self, "_image") and bytes(self.labels_to_js) != encode_label_slice(self._labels[self.z], self.z):
+            self._send_labels()
 
     @traitlets.observe("new_label_trigger")
     def _on_new_label(self, change):
@@ -938,7 +989,8 @@ class LabelAnnotator(anywidget.AnyWidget):
 
         Accepts unsigned ids in ``[0, 65535]`` and, with ``background=True``,
         the signed convention of :meth:`labels_signed` (negative values become
-        ``BACKGROUND_ID``). Clears the track undo history.
+        ``BACKGROUND_ID``). Clears the track undo history and the browser's
+        per-slice undo history (ctrl+z cannot bring back the replaced labels).
         """
         lab = np.asarray(labels)
         lab = lab[np.newaxis] if lab.ndim == 2 else lab
@@ -951,6 +1003,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         with self.hold_sync():
             self._send_slice()
             self.labels_rev += 1  # reload even if the bytes equal the last labels_to_js
+            self.undo_epoch += 1  # the browser's slice snapshots predate the new labels
         if self.mode == "instance":
             self.active_label = self._next_label()
         self._update_extent()
@@ -983,36 +1036,56 @@ class LabelAnnotator(anywidget.AnyWidget):
             False: ``uint32`` masks with the background id stored as 65535.
         stacks : {"current", "all"}
             With several stacks, ``"all"`` saves every stack as
-            ``<name>_<stack name>...`` (the shown stack is restored afterwards).
+            ``<name>_<stack name>...``. Stack names that map to the same file
+            names raise ``ValueError`` before anything is written.
+
+        Warns (and returns ``[]``) when no slice is selected, e.g. nothing is
+        annotated yet.
         """
         import tifffile
 
+        if slices not in ("annotated", "all", "current"):
+            raise ValueError(f"slices must be one of 'annotated', 'all', 'current', got {slices!r}")
+        if stacks not in ("current", "all"):
+            raise ValueError(f"stacks must be one of 'current', 'all', got {stacks!r}")
+        # (image, labels, current z, file stem) per stack; parked stacks are read in
+        # place, so saving never switches the shown stack
+        jobs = [(self._image, self._labels, int(self.z), name)]
         if stacks == "all" and len(self._parked) > 1:
-            shown, written = self.stack, []
-            try:
-                for k in range(len(self._parked)):
-                    self.stack = k
-                    tag = re.sub(r"[^\w.-]+", "_", (self.stack_names[k] if k < len(self.stack_names) else f"stack{k}")).strip("_")
-                    written += self.save(out_dir, f"{name}_{tag or k}", slices, overwrite, signed, stacks="current")
-            finally:
-                self.stack = shown
-            return written
+            jobs = []
+            for k, p in enumerate(self._parked):
+                image, labels, zc = (self._image, self._labels, int(self.z)) if k == self._stack_idx else (p["image"], p["labels"], p["z"])
+                tag = re.sub(r"[^\w.-]+", "_", (self.stack_names[k] if k < len(self.stack_names) else f"stack{k}")).strip("_")
+                jobs.append((image, labels, zc, f"{name}_{tag or k}"))
 
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
-        zs = {"annotated": self.annotated_slices(), "all": list(range(self._labels.shape[0])), "current": [self.z]}[slices]
         targets = []
-        for z in zs:
-            stem = name if self._labels.shape[0] == 1 else f"{name}_z{z:03d}"
-            targets.append((z, out / f"{stem}_img.tif", out / f"{stem}_masks.tif"))
-        if not overwrite:  # check everything first so a refused save writes nothing
-            clash = [str(p) for _, pi, pm in targets for p in (pi, pm) if p.exists()]
+        for image, labels, zc, stem0 in jobs:
+            nz = labels.shape[0]
+            if slices == "annotated":
+                zs = [int(z) for z in np.flatnonzero(labels.reshape(nz, -1).any(axis=1))]
+            else:
+                zs = list(range(nz)) if slices == "all" else [zc]
+            for z in zs:
+                stem = stem0 if nz == 1 else f"{stem0}_z{z:03d}"
+                targets.append((image, labels, z, out / f"{stem}_img.tif", out / f"{stem}_masks.tif"))
+        # check everything first so a refused save writes nothing
+        paths = [p for *_, pi, pm in targets for p in (pi, pm)]
+        dup = sorted(str(p) for p, n in Counter(paths).items() if n > 1)
+        if dup:
+            raise ValueError(f"several stacks would write {dup}: give the stacks distinct stack_names")
+        if not overwrite:
+            clash = [str(p) for p in paths if p.exists()]
             if clash:
                 raise FileExistsError(f"{clash} exist (pass overwrite=True)")
+        if not targets:
+            warnings.warn(f"save: no {slices} slices to write; nothing written", UserWarning, stacklevel=2)
+            return []
         written = []
-        for z, pi, pm in targets:
-            img = self._image[:, z]
+        for image, labels, z, pi, pm in targets:
+            img = image[:, z]
             tifffile.imwrite(pi, img[0] if img.shape[0] == 1 else img, compression="zlib")
-            tifffile.imwrite(pm, self._signed(self._labels[z]) if signed else self._labels[z], compression="zlib")
+            tifffile.imwrite(pm, self._signed(labels[z]) if signed else labels[z], compression="zlib")
             written += [pi, pm]
         return written

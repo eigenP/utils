@@ -3168,3 +3168,37 @@ def test_plot_volcano_uses_current_adjusttext_api(caplog, monkeypatch):
         assert not any("FancyArrowPatch" in r.getMessage() for r in caplog.records)
     finally:
         plt.close("all")
+
+
+def test_plot_volcano_adata_lays_out_only_the_figure_it_creates():
+    """plot_volcano_adata(ax=...) leaves every existing figure's layout alone.
+
+    Strategy: draw on a caller's axes once while an unrelated figure is current and once
+    while the caller's own figure is current, recording all axes positions before and
+    after; then call without ``ax`` as a control. adjust_text is patched out because only
+    the layout is under test.
+    Expected: with ``ax`` given, no axes of the unrelated figure or of the caller's
+    figure moves (no pyplot-global tight_layout); without ``ax`` the function's own
+    figure is laid out (its axes leave Matplotlib's default subplot position).
+    """
+    a = _volcano_adata(np.r_[np.full(10, 1e-10), np.full(10, 0.5)])
+    fig_user, ax_user = plt.subplots()
+    fig_other, _ = plt.subplots(1, 2)
+    default_pos = ax_user.get_position().bounds
+
+    def positions():
+        return [ax.get_position().bounds for f in (fig_user, fig_other) for ax in f.axes]
+
+    try:
+        with patch("eigenp_utils.single_cell.adjust_text"):
+            for current in (fig_other, fig_user):
+                plt.figure(current.number)
+                before = positions()
+                assert plot_volcano_adata(a, "rank_genes_groups", group="0", ax=ax_user) is ax_user
+                assert positions() == before
+
+            ax_new = plot_volcano_adata(a, "rank_genes_groups", group="0")
+        assert ax_new.figure not in (fig_user, fig_other)
+        assert not np.allclose(ax_new.get_position().bounds, default_pos)
+    finally:
+        plt.close("all")

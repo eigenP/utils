@@ -30,10 +30,6 @@ Prove that the code does what it claims, using **conceptual, invariant-based tes
 # Journal
 Entries are in chronological order. Test file paths reflect the 1:1 module layout adopted on 2025-02-25.
 
-## 2024-05-22 - Archetype Recovery and Invariants
-**Learning:** Verified that find_expression_archetypes correctly identifies gene modules using PC1 and aligns them with the cluster mean. This test ensures that the algorithm is robust to scale and shift transformations (affine invariance) and correctly separates orthogonal signals.
-**Action:** Future tests for clustering algorithms should always include synthetic ground-truth scenarios with known invariants (like scale/shift invariance for Pearson correlation-based methods).
-
 ## 2024-05-22 - Moran's I Verification
 **Learning:** Verified `morans_i_all_fast` against analytical properties.
 - **Invariant:** The Constant Vector on a row-standardized graph yields Moran's I = 1.0 (matching eigenvalue 1).
@@ -73,34 +69,22 @@ Entries are in chronological order. Test file paths reflect the 1:1 module layou
 **Action:** For small volumes or precise surface extraction, `gaussian_sigma` should be kept low (e.g., 1.0) to minimize threshold-induced shift errors. Tests for geometric algorithms must verify invariance to rigid transformations (translation, rotation).
 
 ## 2025-02-23 - Brightness Correction Invariants
-**Learning:** Verified `adjust_brightness_per_slice` as a Global Trend Corrector, not a local normalizer.
+**Learning:** Verified `correct_z_intensity_decay` (then called through the now-deprecated `adjust_brightness_per_slice`) as a Global Trend Corrector, not a local normalizer.
 - **Global Stability:** It perfectly flattens systematic exponential decay (CV < 1.5%) when the signal follows the model.
 - **Local Preservation:** It preserves local anomalies (outliers) relative to the corrected trend, rather than normalizing them away. This confirms the intent is to correct for physics (e.g., attenuation), not biology (e.g., sparse cells).
 - **Statistical Idempotence:** The correction is stable/idempotent, but finite sampling noise in the 99th percentile prevents perfect identity (Delta < 0.1%).
 **Action:** When testing statistical estimators on finite samples (like P99), exact equality assertions must be replaced with tolerance checks that account for sampling variance/overfitting.
 
-## 2025-02-24 - Drift Correction Windowing Bias
-**Learning:** The windowing function (`_2D_weighted_image`) used in drift estimation can significantly bias results on small images if the object is large relative to the field of view. A Gaussian moving by 1.0 px was estimated as moving only 0.2 px on a 32x32 image because the window attenuated the object's tails, effectively shifting its centroid back towards the center.
-**Action:** Tests for drift correction must use images large enough (e.g., 64x64 or 128x128) so that the object resides within the flat region of the window, or explicitly handle windowing effects.
-
 ## 2025-02-24 - Multiscale Coarsening Lineage Inconsistency
 **Learning:** Verified that `multiscale_coarsening` correctly handles "Simpson's Paradox" scenarios where the direct lineage (Fine->Coarse) disagrees with the indirect lineage (Fine->Mid->Coarse) due to aggregation "majority vote" flips.
 **Action:** Tests for hierarchical aggregation must explicitly mock or construct edge cases where the majority shifts across levels to ensure robustness against voting anomalies.
-
-## 2025-02-24 - CLAHE Limits & Identity
-**Learning:** Verified the mathematical properties of `_my_clahe_` (Adaptive Histogram Equalization):
-1.  **Monotonicity:** Contrast (entropy) increases monotonically with `clip_limit`.
-2.  **Identity Convergence:** As `clip_limit` $\to$ 0 (e.g. $10^{-5}$), the operation converges to a linear identity transform (correlation > 0.99), preserving relative signal shape rather than enforcing a uniform histogram.
-3.  **Sentinel Discontinuity:** `clip_limit=0` is a sentinel for "Unlimited AHE" (Max Contrast), causing a sharp discontinuity from `clip_limit=0.001` (Low Contrast). This behavior is correct but counter-intuitive.
-4.  **Saturation:** For smooth/sparse images, effective contrast limits saturate quickly (e.g. at 0.05) once the clip limit exceeds the maximum bin count of the local histogram.
-**Action:** Tests for contrast enhancement must account for signal content (saturation) and the specific sentinel value (0) to avoid false failures. Using `clip_limit=0` should be preferred for "Maximum Effect" rather than `clip_limit=1.0` to avoid ambiguity.
 
 ## 2025-02-24 - Focus Stacking Boundary Artifacts
 **Learning:** The `best_focus_image` algorithm blindly applied tapering (windowing) to all patches, including those at the image boundaries. This violated the Partition of Unity property, causing significant signal loss (fading to black) at the edges of the reconstructed image. Identity reproduction failed: a uniform input stack resulted in an image with dark borders.
 **Action:** The algorithm was updated to use context-aware windowing (`_get_1d_weight_variants`), selecting flat-start/flat-end profiles for boundary patches. A new invariant test (`tests/test_extended_depth_of_focus.py` (e.g. `test_partition_of_unity_via_linear_ramp`)) was added to enforce Identity Reproduction (Input=1s -> Output=1s) and Partition of Unity, ensuring future regressions are caught.
 
 ## 2025-02-24 - Subpixel Drift Correction Precision (merged duplicate entries)
-**Learning:** Verified the precision of `apply_drift_correction_2D(method='subpixel')` using synthetic moving Gaussians.
+**Learning:** Verified the precision of `apply_drift_correction(method='subpixel')` using synthetic moving Gaussians.
 - **Precision:** Subpixel (bicubic) correction reduces centroid jitter by nearly 200x (0.0004px vs 0.08px) compared to integer correction, confirming it is not just "interpolated" but "stabilized" to near-theoretical limits.
 - **Convention:** The drift table stores the **Correction Vector** (negative of object motion), which is the shift required to stabilize the image, not the motion vector itself.
 - **Cycle Consistency:** The algorithm satisfies cycle consistency: correcting a known shift restores the original image with negligible residual error ($< 10^{-5}$).
@@ -108,24 +92,16 @@ Entries are in chronological order. Test file paths reflect the 1:1 module layou
 **Action:** High-precision video stabilization requires testing against subpixel metrics; integer-based metrics (like "within 0.5px") are insufficient to validate bicubic/subpixel logic. The distinction between "Motion" and "Correction" vectors must be explicit in test expectations.
 
 ## 2025-02-24 - Bidirectional Drift Sign Inversion
-**Learning:** The `reverse_time='both'` mode in `apply_drift_correction_2D` was incorrectly calculating the average drift as `(dx_forward - dx_backward) / 2`. Since `dx_backward` and `dx_forward` have opposite signs for the same motion (e.g., -0.5 and +0.5 for +0.5 motion), this formula resulted in a correction vector with the **same sign** as the motion (e.g., +0.5), exacerbating drift instead of correcting it (Positive Feedback Loop).
+**Learning:** The `reverse_time='both'` mode in `apply_drift_correction` (now computed in `compute_drift_trajectory`) was incorrectly calculating the average drift as `(dx_forward - dx_backward) / 2`. Since `dx_backward` and `dx_forward` have opposite signs for the same motion (e.g., -0.5 and +0.5 for +0.5 motion), this formula resulted in a correction vector with the **same sign** as the motion (e.g., +0.5), exacerbating drift instead of correcting it (Positive Feedback Loop).
 **Action:** The formula was corrected to `(dx_backward - dx_forward) / 2`, ensuring the correction vector opposes the motion. A new test `tests/test_maxproj_registration.py` was created to verify the sign of correction for a known drift direction, catching any future regression into positive feedback.
 
-## 2025-02-24 - Dimensionality Parser Resizing Logic (historical: `dimensionality_parser` no longer exists in the package)
-**Learning:** The `dimensionality_parser` decorator relied on a strict size-matching heuristic to determine if a dimension was preserved or reduced. This caused it to fail on **Resizing** operations (e.g., downscaling) where dimensions are preserved but sizes change.
-**Action:** Implemented a **Rank Preservation Check** (`rank_in == rank_out`) to override the heuristic. If the number of dimensions is preserved, the parser now assumes all dimensions are kept and correctly maps the new output sizes. A dedicated resizing test validated this invariant (since removed together with the decorator).
-
 ## 2025-02-24 - Drift Correction Pairwise Bias
-**Learning:** Verified that the pairwise drift correction algorithm (`estimate_drift_2D`) exhibits a systematic linear bias when processing periodic motion. For a sinusoidal trajectory ($A=3.0$, $T=10$), the accumulated error grows linearly by approx 0.2 pixels per cycle. This "Drift Walk" is characteristic of pairwise registration where small asymmetric errors (likely from stationary windowing of moving content) accumulate $O(T)$.
+**Learning:** Verified that the pairwise drift correction algorithm (`compute_drift_trajectory`, used by `apply_drift_correction`) exhibits a systematic linear bias when processing periodic motion. For a sinusoidal trajectory ($A=3.0$, $T=10$), the accumulated error grows linearly by approx 0.2 pixels per cycle. This "Drift Walk" is characteristic of pairwise registration where small asymmetric errors (likely from stationary windowing of moving content) accumulate $O(T)$.
 **Action:** Acknowledged this limitation in `test_zero_mean_oscillation` in `tests/test_maxproj_registration.py` by relaxing the zero-mean tolerance to 1.0 px (for 50 frames). Future improvements must implement **Global Registration** (registering each frame to a temporally stable median reference) to bound the error to $O(1)$ and eliminate this bias.
 
 ## 2025-02-24 - Projection Idempotence & Boundary Conditions
-**Learning:** Verified that `project_onto_plane` perfectly satisfies linear algebraic invariants (Orthogonality, Idempotence, Null Space, Pythagorean Theorem). However, when verifying uniform intensity sampling (`sample_intensity_around_points_optimized`), the constant-background invariant failed because the underlying `scipy.ndimage.uniform_filter` applies zero-padding (`mode='constant', cval=0.0`) by default, heavily skewing sampled points near the image boundaries.
+**Learning:** Verified that `project_onto_plane` perfectly satisfies linear algebraic invariants (Orthogonality, Idempotence, Null Space, Pythagorean Theorem). However, when verifying uniform intensity sampling (`sample_intensity_around_points`), the constant-background invariant failed because the underlying `scipy.ndimage.uniform_filter` was called with its default zero-padding (`mode='constant', cval=0.0`), heavily skewing sampled points near the image boundaries. The code now passes `mode='reflect'`.
 **Action:** When testing mathematical invariants on convolution/filtering functions, carefully control boundary coordinates to prevent edge-effect artifacts from masking internal logic correctness. Pure algorithmic properties should be tested in the "valid" interior region.
-
-## 2025-02-25 - Test Suite Organization and Expectations
-**Learning:** The test suite was fragmented with a massive number of tiny files (e.g., `test_single_cell_kknn.py`, `test_single_cell_lineage.py`). It has been successfully aggregated to mirror the `src/eigenp_utils/` structure 1:1 (e.g., all single-cell tests now live in `tests/test_single_cell.py`). Furthermore, many tests lacked documentation explaining their purpose.
-**Action:** Moving forward, all new tests must be placed in the test file that exactly corresponds to the source module being tested. Do not create new, hyper-specific test files. Additionally, every test function MUST include a descriptive docstring and/or inline comments clearly articulating the test's intent and expectations (what is being tested and what the expected outcome is), avoiding trivial auto-generated summaries.
 
 ## 2026-11-23 - Full Test Suite Audit, 1:1 Mirroring & Invariant Upgrade
 **Learning:** Auditing all 18 source modules and 22 test files revealed accumulated merge debris (shadowed duplicate test names, verbatim copy-paste duplicates, tests that never called `eigenp_utils`, local-algebra tautologies, smoke tests passing invalid kwargs or vacuous thresholds like BaSiC flatfield error `< 1.5`, and unseeded RNGs), fragmented files violating 1:1 mirroring, and four real bugs exposed by the upgraded invariant tests: (1) `spline_utils.project_onto_plane` allocated `np.zeros_like(vectors)` and truncated float projections for integer inputs; (2) `maxproj_registration` passed all-zero baseline-removed constant projections to `phase_cross_correlation(..., upsample_factor=100, normalization=None)`, yielding `-0.75` px per iteration (`-2.25` px per frame) plus an RMS warning; (3) `plotting_utils.raincloud_plot` clipped half-violins at `verts.mean()` rather than `pos`, shifting the cut off-center because Matplotlib's closing polygon repeats vertex 0; and (4) `stats.add_stat_annotations` never inferred or passed `orient='h'` to `statannotations.Annotator`, crashing on horizontal plots even though `_order_from_ticks` already inspected `y` ticks.

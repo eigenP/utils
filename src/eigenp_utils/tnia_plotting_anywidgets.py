@@ -78,6 +78,28 @@ def _length_unit(pixel_sizes):
             return unit.strip()
     return None
 
+
+class _UncalibratedXYPixelSizes(dict):
+    """Parsed pixel sizes whose X and Y fell back to 1.0 (a widget passes these on to keep a given Z step)."""
+
+
+def _xy_pixel_sizes_given(pixel_sizes):
+    """
+    Whether ``pixel_sizes`` gives the X and Y pixel sizes (not None), so the
+    scale bar can be labelled in physical units. Missing X/Y sizes (e.g. an
+    uncalibrated dict from ``image_io``) are drawn as 1.0, and the bar is
+    labelled as for ``pixel_sizes=None``.
+    """
+    if pixel_sizes is None or isinstance(pixel_sizes, _UncalibratedXYPixelSizes):
+        return False
+    if isinstance(pixel_sizes, dict):
+        return pixel_sizes.get('Y') is not None and pixel_sizes.get('X') is not None
+    try:
+        raw = tuple(pixel_sizes)
+    except TypeError:
+        return False  # not pixel sizes; _parse_zyx_tuple_or_dict reports it
+    return len(raw) == 3 and raw[1] is not None and raw[2] is not None
+
 import anywidget
 import traitlets
 import matplotlib
@@ -438,7 +460,7 @@ def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``.
+            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
         attenuation (float, optional): for 'attenuated_mip', the attenuation per
             voxel along the ray (napari's default 0.05). Rays enter each slab at
             its lowest index (z = start for XY, y = start for XZ, x = start for
@@ -451,24 +473,25 @@ def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None
         if colormap is None:
             colormap = colors
 
-    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
 
-def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
+def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Args:
         image_to_show (3d numpy array, or a list of them for channels): image to plot
         pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple): size of figure to
-        projector: function to project with
+        projector: function ``f(volume, axis)`` to project with; None (default)
+            is the maximum ignoring NaN voxels, like ``projection='mip'``.
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
         blending (str, optional): channel compositing mode, see `show_zyx`.
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``.
+            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
         attenuation (float, optional): for 'attenuated_mip', the attenuation per
             voxel along the ray (napari's default 0.05). Rays enter each slab at
             its lowest index (z = start for XY, y = start for XZ, x = start for
@@ -536,7 +559,8 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         channel_label_colors (list, optional): label colours, overriding the
             ones derived from ``colormap`` (for pre-composited RGB input).
         pixel_sizes_given (bool, optional): whether the scale bar shows physical
-            units; defaults to ``pixel_sizes is not None``.
+            units; defaults to whether ``pixel_sizes`` gives the X and Y sizes
+            (not None).
         blending (str, optional): how channels are composited (napari's names):
             'additive', 'maximum', 'screen' or 'minimum'. None (default) keeps
             the historical behaviour: additive for colour names, maximum when a
@@ -571,7 +595,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             colormap = colors
 
     pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
-    both_given = (pixel_sizes is not None) if pixel_sizes_given is None else bool(pixel_sizes_given)
+    both_given = _xy_pixel_sizes_given(pixel_sizes) if pixel_sizes_given is None else bool(pixel_sizes_given)
 
     if isinstance(xy, list):
         colormap = _channel_colormaps(colormap, len(xy), blending)
@@ -653,7 +677,16 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     g_xy = _PanelRotation(np.shape(xy)[:2], rot_z, py, px)
     g_xz = _PanelRotation(np.shape(xz)[:2], rot_y, pz, px)
     g_zy = _PanelRotation(np.shape(zy)[:2], rot_x, py, pz)
-    xy, xz, zy = g_xy.warp(xy, cval=pad_value), g_xz.warp(xz, cval=pad_value), g_zy.warp(zy, cval=pad_value)
+
+    def _warp(g, panel):
+        panel = np.asarray(panel)
+        if g.angle != 0.0 and panel.ndim == 3 and np.issubdtype(panel.dtype, np.integer):
+            # imshow reads integer RGB(A) on a 0..255 scale but the resampled
+            # (float) panel on a 0..1 scale
+            panel = panel.astype(np.float32) / 255.0
+        return g.warp(panel, cval=pad_value)
+
+    xy, xz, zy = _warp(g_xy, xy), _warp(g_xz, xz), _warp(g_zy, zy)
     (sxy_h, sxy_w), (sxz_h, sxz_w), (szy_h, szy_w) = g_xy.p_out, g_xz.p_out, g_zy.p_out
 
     if use_plt:
@@ -921,7 +954,7 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``.
+            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
         attenuation (float, optional): for 'attenuated_mip', the attenuation per
             voxel along the ray (napari's default 0.05). Rays enter each slab at
             its lowest index (z = start for XY, y = start for XZ, x = start for
@@ -947,11 +980,11 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
     y_slices = slice(*y_)
     z_slices = slice(*z_)
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=np.max, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
 
 ### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=np.max, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ generates xy, xz, and zy max projections of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
@@ -960,14 +993,16 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
         image_to_show (3d numpy array): image to plot
         pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple): size of figure to
-        projector: function to project with (used when ``projection`` is None)
+        projector: function ``f(volume, axis)`` to project with (used when
+            ``projection`` is None); None (default) is the maximum ignoring NaN
+            voxels, like ``projection='mip'``.
         colormap (_type_, optional): _description_. Defaults to None.
         vmax (float, optional): maximum value for display range. Defaults to None.
         blending (str, optional): channel compositing mode, see `show_zyx`.
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``.
+            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
         attenuation (float, optional): for 'attenuated_mip', the attenuation per
             voxel along the ray (napari's default 0.05). Rays enter each slab at
             its lowest index (z = start for XY, y = start for XZ, x = start for
@@ -984,12 +1019,16 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
 
     def _projector(img, i):
         if projection is None:
-            return projector
+            return _nan_max_projection if projector is None else projector
         lo = hi = None
         if projection == 'attenuated_mip':
             # Samples are normalised with the channel's display range
-            lo = vmin[i] if isinstance(vmin, (list, tuple)) else vmin
-            hi = vmax[i] if isinstance(vmax, (list, tuple)) else vmax
+            if isinstance(image_to_show, list):
+                lo = _per_channel(vmin, len(image_to_show), None, 'vmin')[i]
+                hi = _per_channel(vmax, len(image_to_show), None, 'vmax')[i]
+            else:
+                lo = vmin[i] if isinstance(vmin, (list, tuple)) else vmin
+                hi = vmax[i] if isinstance(vmax, (list, tuple)) else vmax
             lo = _default_vmin(img) if lo is None else float(lo)
             hi = _finite_max(img) if hi is None else float(hi)
             if hi is None or not hi > lo:
@@ -1043,6 +1082,20 @@ def _check_gammas(gammas):
             raise ValueError(f"gamma must be > 0, got {g}")
 
 
+def _per_channel(val, n, default, name):
+    """
+    ``val`` as a list of one value per channel. A scalar (or None) applies to
+    every channel; a list or tuple shorter than ``n`` is padded with
+    ``default`` (as the widgets do) and its None entries take the default. A
+    longer one raises ValueError.
+    """
+    if not isinstance(val, (list, tuple)):
+        return [default if val is None else val] * n
+    if len(val) > n:
+        raise ValueError(f"{name} has {len(val)} entries for {n} channels")
+    return [default if v is None else v for v in val] + [default] * (n - len(val))
+
+
 def _finite_max(*arrays):
     """Largest finite value over several arrays (None if there is none)."""
     best = None
@@ -1076,6 +1129,9 @@ def _robust_vmax(arr, q=99.99, max_samples=1_000_000):
     Returns None if there is no finite value.
     """
     arr = np.asarray(arr)
+    if arr.dtype == bool:
+        # np.percentile cannot subtract booleans; masks are 0/1 levels
+        arr = arr.view(np.uint8)
     hi = _finite_max(arr)
     if hi is None:
         return None
@@ -1112,10 +1168,15 @@ def create_multichannel_rgb(
         Per-channel input range. If None, computed per channel across XY/XZ/ZY:
         vmin is 0, or the data minimum when the channel has negative values;
         vmax is the largest finite value. Scalars are broadcast to all channels.
+        (For vmin, vmax, gamma and opacity, a list shorter than the number of
+        channels is padded with the default; a longer one raises ValueError.)
     gamma : float | list[float]
         Power gamma applied AFTER linear [0,1] normalization (1 = linear).
-    colors : list[str | tuple]
-        One color per channel (default: ['magenta','cyan','yellow','green'][:n]).
+    colormap : str | tuple | list[str | tuple]
+        One color per channel (``colors`` is the deprecated name). Missing
+        entries take the unused default colours 'white', 'lime', 'magenta',
+        'yellow', 'cyan', 'red', 'blue' ('black', 'magenta', 'lime', 'blue',
+        'red', 'cyan', 'yellow' with ``blend='minimum'``).
     opacity : float | list[float] | None
         Opacity multiplier per channel (1 = full opacity).
     blend : str
@@ -1147,24 +1208,17 @@ def create_multichannel_rgb(
     zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
 
     # Broadcast params
-    gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+    gammas = _per_channel(gamma, n, 1, 'gamma')
     _check_gammas(gammas)
-    opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
+    opacities = _per_channel(opacity, n, 1.0, 'opacity')
 
-    colormap = _channel_colormaps(colormap, n)
+    colormap = _channel_colormaps(colormap, n, blend)
     color_map = [np.asarray(to_rgb(resolve_color(c)), dtype=np.float32) for c in colormap]
 
     # Determine per-channel vmin/vmax if not provided
     # vmin/vmax can be None, or a list containing floats and/or Nones
-    if vmin is None:
-        vmins = [None] * n
-    else:
-        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
-
-    if vmax is None:
-        vmaxs = [None] * n
-    else:
-        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
+    vmins = _per_channel(vmin, n, None, 'vmin')
+    vmaxs = _per_channel(vmax, n, None, 'vmax')
 
     for i in range(n):
         if vmins[i] is None:
@@ -1296,11 +1350,11 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
     xz_rgb = np.zeros((Hxz, Wxz, 3), dtype=np.float32)
     zy_rgb = np.zeros((Hzy, Wzy, 3), dtype=np.float32)
 
-    gammas = (list(gamma) if isinstance(gamma, (list, tuple)) else [gamma] * n)
+    gammas = _per_channel(gamma, n, 1, 'gamma')
     _check_gammas(gammas)
-    opacities = (list(opacity) if isinstance(opacity, (list, tuple)) else [opacity if opacity is not None else 1.0] * n)
+    opacities = _per_channel(opacity, n, 1.0, 'opacity')
 
-    colormap = _channel_colormaps(colormap, n)
+    colormap = _channel_colormaps(colormap, n, blend)
 
     cmap_list = []
     for c in colormap:
@@ -1311,15 +1365,8 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
         else:
             cmap_list.append(black_to(resolve_color(c)))
 
-    if vmin is None:
-        vmins = [None] * n
-    else:
-        vmins = list(vmin) if isinstance(vmin, (list, tuple)) else [vmin] * n
-
-    if vmax is None:
-        vmaxs = [None] * n
-    else:
-        vmaxs = list(vmax) if isinstance(vmax, (list, tuple)) else [vmax] * n
+    vmins = _per_channel(vmin, n, None, 'vmin')
+    vmaxs = _per_channel(vmax, n, None, 'vmax')
 
     for i in range(n):
         if vmins[i] is None:
@@ -1441,14 +1488,45 @@ def _attenuated_mip(volume, axis, lo, hi, attenuation):
     return float(lo) + m * span
 
 
+def _is_float_ndarray(vol):
+    """True for a float ndarray (other inputs, which hold no NaN, use the plain NumPy reductions)."""
+    return isinstance(vol, np.ndarray) and np.issubdtype(vol.dtype, np.floating)
+
+
+# np.fmax/np.fmin.reduce equal np.max/np.min bit for bit on NaN-free data and
+# run as fast, so the default MIP needs no extra pass to look for NaN.
+def _nan_max_projection(vol, axis):
+    """Maximum along ``axis`` ignoring NaN voxels; NaN only where the whole ray is NaN (no warning)."""
+    return np.fmax.reduce(vol, axis=axis) if _is_float_ndarray(vol) else np.max(vol, axis=axis)
+
+
+def _nan_min_projection(vol, axis):
+    """Minimum along ``axis`` ignoring NaN voxels; NaN only where the whole ray is NaN (no warning)."""
+    return np.fmin.reduce(vol, axis=axis) if _is_float_ndarray(vol) else np.min(vol, axis=axis)
+
+
+def _nan_mean_projection(vol, axis):
+    """Mean along ``axis`` of the non-NaN voxels; NaN only where the whole ray is NaN (no warning)."""
+    out = np.mean(vol, axis=axis)
+    if not _is_float_ndarray(vol) or not np.isnan(out).any():
+        return out  # a NaN voxel makes its ray's mean NaN, so only then is the mean redone
+    nan = np.isnan(vol)
+    count = vol.shape[axis] - nan.sum(axis=axis)
+    # accumulate float16 in float32, as np.mean does
+    total = np.where(nan, 0, vol).sum(axis=axis, dtype=np.float32 if vol.dtype == np.float16 else None)
+    out = np.full(total.shape, np.nan, dtype=vol.dtype)
+    np.divide(total, count, out=out, where=count > 0)
+    return out
+
+
 def _projector_for(projection, attenuation, lo=None, hi=None):
-    """A ``f(volume, axis)`` projector for a canonical projection name."""
+    """A ``f(volume, axis)`` projector for a canonical projection name (NaN voxels are ignored)."""
     if projection == 'mip':
-        return np.max
+        return _nan_max_projection
     if projection == 'minip':
-        return np.min
+        return _nan_min_projection
     if projection == 'average':
-        return np.mean
+        return _nan_mean_projection
     return lambda vol, axis: _attenuated_mip(vol, axis, lo, hi, attenuation)
 
 
@@ -1457,9 +1535,12 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     Blend multiple channels of intensities into RGB.
 
     intensities : (N, C) array
-        Values per point per channel.
+        Values per point per channel. NaN means no signal in that channel.
     base_colors : list of str or rgb tuples
         Colors per channel.
+    gamma : float or list of float
+        Per-channel gamma; a list shorter than C is padded with 1 (a longer
+        one raises ValueError).
     blending : str, optional
         'additive' (default; ``soft_clip`` applies), 'maximum', 'screen' or
         'minimum' (each channel from white to its colour, per-RGB minimum).
@@ -1491,14 +1572,19 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
     if not isinstance(vmax, (list, tuple)): vmax = [vmax]*C
     elif len(vmax) == 1: vmax = [vmax[0]]*C
     elif len(vmax) < C: vmax = list(vmax) + [None]*(C-len(vmax))
-    gammas = np.full(C, float(gamma)) if np.isscalar(gamma) else np.asarray(gamma, dtype=float)
+    gamma = gamma.tolist() if isinstance(gamma, np.ndarray) else gamma
+    gammas = [float(g) for g in _per_channel(gamma, C, 1.0, 'gamma')]
 
     for c in range(C):
         arr = intensities[:, c].astype(float)
-        vmin_c = np.nanmin(arr) if vmin[c] is None else vmin[c]
-        vmax_c = np.nanmax(arr) if vmax[c] is None else vmax[c]
+        # Default range: the channel's min/max ignoring NaN (an all-NaN channel shows nothing)
+        valid = arr[~np.isnan(arr)]
+        vmin_c = (valid.min() if valid.size else 0.0) if vmin[c] is None else vmin[c]
+        vmax_c = (valid.max() if valid.size else 1.0) if vmax[c] is None else vmax[c]
         norm = (arr - vmin_c) / max(1e-9, vmax_c - vmin_c)
-        norm = np.clip(norm, 0, 1)
+        # A NaN value is no signal (as in the image compositors), so the
+        # point keeps the other channels' colours instead of turning NaN.
+        norm = np.nan_to_num(np.clip(norm, 0, 1), nan=0.0)
         if gammas[c] != 1:
             norm = norm**gammas[c]
 
@@ -1999,11 +2085,12 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         # Traits set in one message (a middle-thumb drag sets x_start and x_end;
         # hover sync sets x_s and y_s) notify one at a time after all of them
         # are set, so the second notification would render the same state again.
+        state = self._render_state()
         if change is not None and getattr(change, 'name', None) in self._RENDER_STATE_TRAITS:
-            if self._render_state() == getattr(self, '_last_render_state', None):
+            if state == getattr(self, '_last_render_state', None):
                 return
-        self._last_render_state = self._render_state()
 
+        open_before = set(plt.get_fignums())
         fig = None
         try:
             fig = self._render()
@@ -2046,6 +2133,19 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 with matplotlib.rc_context({'savefig.bbox': 'standard'}):
                     fig.savefig(buf, format='png')
                 self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+            # Recorded only after a successful render, so a state whose render
+            # failed is retried by the next notification.
+            self._last_render_state = state
+        except Exception as e:
+            # A figure opened by a render that failed half-way was never returned.
+            for num in set(plt.get_fignums()) - open_before:
+                plt.close(num)
+            if change is None:
+                raise  # building the widget: report to the caller
+            # From an interactive change the exception would only reach the
+            # kernel log while the image silently stays stale: keep the last
+            # frame and say why in the widget.
+            self.warning_msg = f"⚠️ Render failed: {type(e).__name__}: {e}"
         finally:
             if fig is not None:
                 plt.close(fig)
@@ -2059,6 +2159,15 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     def _render_state(self):
         return tuple(repr(getattr(self, name)) for name in self._RENDER_STATE_TRAITS)
+
+    def _warn_inverted_ranges(self, channels):
+        """Tell the GUI that these channels' vmin > vmax is drawn with vmax = vmin + 1."""
+        if not channels:
+            return
+        which = (f"channel {channels[0]}" if len(channels) == 1
+                 else "channels " + ", ".join(str(c) for c in channels))
+        msg = f"⚠️ vmin > vmax for {which}: using vmax = vmin + 1"
+        self.warning_msg = f"{self.warning_msg}  {msg}" if self.warning_msg else msg
 
     def _handle_hover_sync(self, change):
         if not self.sync_on_hover:
@@ -2179,6 +2288,14 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         self.copy_png_data = base64.b64encode(data).decode('utf-8') if data else "error"
 
     def _copy_params(self, change):
+        s = "\n".join(self._copy_params_lines())
+        # Clear first so an unchanged view still fires a change event in JS
+        # (which copies on change), and assign the final string only once.
+        self.copy_params_string = ""
+        self.copy_params_string = s
+
+    def _copy_params_lines(self):
+        """The current view as keyword-argument lines (one ``key=value,`` each)."""
         s = []
 
         x_s_phys = self.x_s * self.sx
@@ -2223,7 +2340,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
             if self.projection == 'attenuated_mip':
                 s.append(f"attenuation={self.attenuation},")
 
-        self.copy_params_string = "\n".join(s)
+        return s
 
 class TNIASliceWidget(TNIAWidgetBase):
     """
@@ -2285,7 +2402,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 
         self.im_orig = im
 
-        self._pixel_sizes_given = pixel_sizes is not None
+        self._pixel_sizes_given = _xy_pixel_sizes_given(pixel_sizes)
         self._length_unit = _length_unit(pixel_sizes)
 
         self.figsize = figsize
@@ -2459,6 +2576,9 @@ class TNIASliceWidget(TNIAWidgetBase):
             vmax_curr = [vmax_resolved[i] for i in visible_indices]
             gamma_curr = [gamma_resolved[i] for i in visible_indices]
             opacity_curr = [opacity_resolved[i] for i in visible_indices]
+            # The compositor draws vmin > vmax with vmax = vmin + 1; say so in the GUI.
+            self._warn_inverted_ranges([i for i in visible_indices
+                                        if vmin_resolved[i] is not None and vmin_resolved[i] > vmax_resolved[i]])
             if self.channel_labels_input is not None:
                 channel_labels_curr = [self.channel_names[i] for i in visible_indices]
             else:
@@ -2474,6 +2594,12 @@ class TNIASliceWidget(TNIAWidgetBase):
             # Robust default if vmax is not explicitly set
             if vmax_val is None:
                 vmax_val = self._auto_vmax[0]
+
+            if vmin_val is not None and vmin_val > vmax_val:
+                # Matplotlib's norms raise for vmin > vmax; use the multichannel
+                # compositor's rule (create_multichannel_rgb) so both paths agree.
+                vmax_val = vmin_val + 1.0
+                self._warn_inverted_ranges([0])
 
             gamma_val = float(self.gamma_list[0])
             opacity_val = float(self.opacity_list[0])
@@ -2504,6 +2630,10 @@ class TNIASliceWidget(TNIAWidgetBase):
         if getattr(self, '_pixel_sizes_given', False):
             pass_pixel_sizes = {'Z': self.sz, 'Y': self.sy, 'X': self.sx,
                                 'unit': getattr(self, '_length_unit', None)}
+        elif (getattr(self, 'sz', 1.0), getattr(self, 'sy', 1.0), getattr(self, 'sx', 1.0)) != (1.0, 1.0, 1.0):
+            # X or Y is unknown: keep the steps that were given (e.g. the Z
+            # step), but label the bar as for pixel_sizes=None
+            pass_pixel_sizes = _UncalibratedXYPixelSizes(Z=self.sz, Y=self.sy, X=self.sx)
 
         # show_zyx_max_slabs returns a Figure
         fig = show_zyx_max_slabs(
@@ -2537,6 +2667,14 @@ class TNIASliceWidget(TNIAWidgetBase):
         return fig
 
 
+class _PointList(traitlets.List):
+    """List trait that also takes a tuple or an (N, 3) array of points."""
+    def validate(self, obj, value):
+        if isinstance(value, (tuple, np.ndarray)):
+            value = list(value)
+        return super().validate(obj, value)
+
+
 class TNIAAnnotatorWidget(TNIASliceWidget):
     """
     Subclass of TNIASliceWidget that supports interactive point annotation.
@@ -2553,7 +2691,36 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     click_coords = traitlets.Dict().tag(sync=True) # {'plane': 'xy', 'x': 0.5, 'y': 0.5, 't': 123}
 
     # Data
-    points = traitlets.List().tag(sync=True) # List of [z, y, x] lists
+    points = _PointList().tag(sync=True) # List of [z, y, x] lists
+
+    @traitlets.validate('points')
+    def _validate_points(self, proposal):
+        """
+        Store every point as a ``[z, y, x]`` list of ints, so tuples or integral
+        float rows (e.g. from ``np.loadtxt``) match the points that clicks,
+        ``add_point`` and ``remove_point`` build. Non-integral or malformed
+        points are refused; points outside the volume are dropped (never drawn).
+        """
+        dims = getattr(self, 'dims', None)
+        out = []
+        n_outside = 0
+        for p in proposal['value']:
+            try:
+                v = np.asarray(p, dtype=float).reshape(-1)
+            except (TypeError, ValueError):
+                v = None
+            if v is None or v.size != 3 or not np.all(np.isfinite(v)) or not np.all(v == np.round(v)):
+                raise traitlets.TraitError(
+                    f"each point must be three integer voxel indices (z, y, x), got {p!r}")
+            pt = [int(c) for c in v]
+            if dims is not None and not all(0 <= c < n for c, n in zip(pt, dims)):
+                n_outside += 1
+                continue
+            out.append(pt)
+        if n_outside:
+            warnings.warn(f"Dropped {n_outside} point(s) outside the volume (Z, Y, X) = {tuple(dims)}.",
+                          UserWarning, stacklevel=2)
+        return out
 
     @property
     def annotate(self):
@@ -2705,6 +2872,10 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         idx = self._phys_to_index(plane, phys_x, phys_y)
         if idx is None:
             return
+        # A click on the padding of a rotated panel maps outside the volume;
+        # it must not be clamped onto the border and added as a real point.
+        extent = {'x': X, 'y': Y, 'z': Z}
+        outside = any(not 0 <= i < extent[axis] for axis, i in idx.items())
         data_x = idx.get('x', self.x_s)
         data_y = idx.get('y', self.y_s)
         data_z = idx.get('z', self.z_s)
@@ -2714,7 +2885,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         data_z = max(0, min(Z - 1, data_z))
 
         if self.annotation_action == 'add':
-            self.add_point(data_z, data_y, data_x)
+            if not outside:
+                self.add_point(data_z, data_y, data_x)
         elif self.annotation_action == 'delete':
             if not self.points:
                 return
@@ -2877,7 +3049,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
         super().__init__(X_dim, Y_dim, Z_dim, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
         self.channels = channels
-        self._pixel_sizes_given = pixel_sizes is not None
+        self._pixel_sizes_given = _xy_pixel_sizes_given(pixel_sizes)
         self._length_unit = _length_unit(pixel_sizes)
         pz, py, px = _parse_zyx_tuple_or_dict(pixel_sizes, default_val=1.0)
         self.sx = px
@@ -3089,18 +3261,17 @@ class TNIAScatterWidget(TNIAWidgetBase):
         # Initialize observers and render
         self._init_observers()
 
-    def _copy_params(self, change):
+    def _copy_params_lines(self):
         """
         Like the base class, but slabs in the units ``show_zyx_max_scatter_interactive``
         takes: positions in data coordinates (index + data minimum), thicknesses in
         data units (one index is one data unit).
         """
-        super()._copy_params(change)
-        lines = self.copy_params_string.split("\n")
+        lines = super()._copy_params_lines()
         lines[0] = (f"slabs_position=({self.z_s + self.zmin}, {self.y_s + self.ymin}, "
                     f"{self.x_s + self.xmin}),")
         lines[1] = f"slabs_thickness=({self.z_t}, {self.y_t}, {self.x_t}),"
-        self.copy_params_string = "\n".join(lines)
+        return lines
 
     def _label_colors(self):
         """Colour of each channel as drawn (used for the channel labels)."""
@@ -3456,6 +3627,10 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
                 vmin_c = np.nanmin(vals) if vmin_resolved[0] is None else vmin_resolved[0]
                 vmax_c = np.nanmax(vals) if vmax_resolved[0] is None else vmax_resolved[0]
+                if vmin_c > vmax_c:
+                    # Normalize raises for vmin > vmax (same rule as the slice viewer)
+                    vmax_c = vmin_c + 1.0
+                    self._warn_inverted_ranges([0])
                 norm = matplotlib.colors.Normalize(vmin=vmin_c, vmax=vmax_c)
                 _scatter_planes(self.X_arr, self.Y_arr, self.Z_arr, c=vals, cmap=cmap, norm=norm)
 
@@ -4037,11 +4212,22 @@ class IsoScatterWidget(anywidget.AnyWidget):
         self.is_continuous = False
         self.is_categorical = False
 
+        # A single colour (color='red', the matplotlib idiom) colours every point
+        self.fixed_color = None
+        if color is not None and np.ndim(color) == 0 and matplotlib.colors.is_color_like(color):
+            self.fixed_color = color
+            color = None
+
         # Ensure color is numpy array
         if color is not None:
              self.color = np.asarray(color)
         else:
              self.color = None
+
+        # Points with a non-finite coordinate cannot be placed (and would make
+        # the centroid and radius NaN); drop them with their colour values.
+        self.X_orig, self.Y_orig, self.Z_orig, self.color = _finite_points(
+            self.X_orig, self.Y_orig, self.Z_orig, self.color)
 
         # Handle empty data
         if len(self.X_orig) == 0:
@@ -4096,6 +4282,9 @@ class IsoScatterWidget(anywidget.AnyWidget):
         dz = (self.Z_orig - self.cz) * self.sz
         dists = np.sqrt(dx**2 + dy**2 + dz**2)
         self.max_radius = dists.max() * 1.05 # 5% buffer
+        if not self.max_radius > 0:
+            # One point (or identical points): avoid identical axis limits
+            self.max_radius = max(self.sx, self.sy, self.sz)
 
         # Analyze color types (after subsampling)
         if self.color is not None:
@@ -4123,10 +4312,12 @@ class IsoScatterWidget(anywidget.AnyWidget):
     def _render_wrapper(self, change):
         fig = self._render()
         if fig:
-            buf = io.BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-            self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
-            plt.close(fig)
+            try:
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+                self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
+            finally:
+                plt.close(fig)
 
     def _save_svg(self, change):
         fig = self._render()
@@ -4208,7 +4399,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         elif self.is_categorical:
             scatter_kwargs['c'] = self.c_mapped
         else:
-            scatter_kwargs['c'] = 'gray'
+            scatter_kwargs['c'] = 'gray' if self.fixed_color is None else self.fixed_color
 
         # Global Limits
         lim = self.max_radius
@@ -4308,9 +4499,11 @@ def show_iso_scatter(
     Parameters
     ----------
     X, Y, Z : array-like
-        Coordinates of points.
-    color : array-like, optional
-        Color values (continuous or categorical).
+        Coordinates of points. Points with a non-finite coordinate are
+        dropped (with a warning), together with their ``color`` values.
+    color : array-like or color, optional
+        Color values (continuous or categorical), one per point, or a single
+        matplotlib colour (e.g. ``'red'``) for every point.
     sxy, sz : float
         Scaling factors for XY and Z dimensions (used when ``pixel_sizes`` is None).
     pixel_sizes : tuple or dict, optional

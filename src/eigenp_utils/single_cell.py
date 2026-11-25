@@ -4522,8 +4522,9 @@ def plot_volcano_adata(
         neg_log10_pvals[inf_mask] = cap
 
     # --- 3. Plotting ---
+    created_fig = None
     if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
+        created_fig, ax = plt.subplots(figsize=figsize)
 
     # Scatter plot for all genes (non-significant)
     ax.scatter(
@@ -4625,7 +4626,10 @@ def plot_volcano_adata(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    plt.tight_layout()
+    # Lay out only a figure created here: plt.tight_layout() acted on whatever
+    # pyplot figure was current, and a caller's figure keeps its own layout
+    if created_fig is not None:
+        created_fig.tight_layout()
     return ax
 
 

@@ -21,6 +21,7 @@ import matplotlib.patheffects as patheffects
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+import traitlets
 from matplotlib.colors import to_rgb
 from matplotlib.figure import Figure
 
@@ -1280,6 +1281,70 @@ def test_scale_bar_uses_pixel_size_unit(unit, size, expected):
             plt.close(fig)
 
 
+@pytest.mark.parametrize("pixel_sizes, physical", [
+    ({"Z": None, "Y": None, "X": None, "unit": None}, False),  # uncalibrated image_io dict
+    ({"Z": 2.0, "Y": None, "X": None, "unit": "micron"}, False),  # only the Z step is known
+    ({"Z": 2.0, "Y": 0.5, "X": None}, False),  # X, the axis the bar measures, is unknown
+    ({"Z": None, "Y": 0.5, "X": None}, False),  # only the Y step is known
+    ((2.0, None, None), False),
+    ({"Z": None, "Y": 0.5, "X": 0.5, "unit": "micron"}, True),  # control: X and Y given
+    (None, False),  # control: the uncalibrated label itself
+])
+def test_scale_bar_is_labelled_physically_only_with_x_and_y_pixel_sizes(pixel_sizes, physical):
+    """The scale bar reads 'N µm' only when the X and Y pixel sizes were given.
+
+    Strategy: render a (10, 50, 50) volume with pixel sizes whose X and/or Y
+    entry is None (as uncalibrated readers report them) through
+    ``show_zyx_max``, the slice widget and the scatter widget (points and
+    density). The None-axis fallback warnings are expected at construction;
+    widget re-renders run with warnings as errors.
+
+    Expected outcome: without X and Y the label is the one used for
+    ``pixel_sizes=None`` ('`pixel_sizes`'), not 'N µm', while the steps that
+    were given still set the panel geometry (a Z step of 2 doubles the XZ
+    panel height, a Y step of 0.5 halves the XY panel height), in the widget
+    as in ``show_zyx_max``; re-rendering a widget does not repeat the
+    warnings. With X and Y given the label stays in µm.
+    """
+    expect_warning = pixel_sizes is not None and any(
+        v is None for v in (pixel_sizes.values() if isinstance(pixel_sizes, dict) else pixel_sizes))
+    raw = ((pixel_sizes.get("Z"), pixel_sizes.get("Y"), pixel_sizes.get("X")) if isinstance(pixel_sizes, dict)
+           else (pixel_sizes or (None, None, None)))
+    pz, py, px = (1.0 if v is None else v for v in raw)
+
+    def check(fig, geometry=False):
+        try:
+            label = _scale_bar_artists(fig)[1].get_text()
+            assert ("µm" in label) if physical else (label == "`pixel_sizes`"), label
+            if geometry:
+                for ax, size in ((fig.axXZ, 10 * pz), (fig.axXY, 50 * py)):
+                    assert abs(np.diff(ax.get_ylim())[0]) == pytest.approx(size, rel=1e-6)
+                assert abs(np.diff(fig.axXY.get_xlim())[0]) == pytest.approx(50 * px, rel=1e-6)
+        finally:
+            plt.close(fig)
+
+    def build(fn, *args, **kwargs):
+        if not expect_warning:
+            return fn(*args, **kwargs)
+        with pytest.warns(UserWarning, match="No value for axis"):
+            return fn(*args, **kwargs)
+
+    im = np.random.default_rng(0).random((10, 50, 50)).astype(np.float32)
+    check(build(show_zyx_max, im, pixel_sizes=pixel_sizes), geometry=True)
+
+    w = build(show_zyx_max_slice_interactive, im, pixel_sizes=pixel_sizes)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        check(w._render(), geometry=True)
+
+    pts = (np.array([0, 9.0]), np.array([0, 49.0]), np.array([0, 49.0]))
+    for render in ("points", "density"):
+        ws = build(show_zyx_max_scatter_interactive, pts, pixel_sizes=pixel_sizes, render=render)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            check(ws._render())
+
+
 def test_tnia_figsize_scale():
     """Verify ``figsize_scale`` scales the auto-computed widget figure size linearly.
 
@@ -1889,6 +1954,117 @@ def test_scale_bar_toggle_triggers_one_rerender():
     assert w.image_data != before
 
 
+def test_vmin_above_vmax_still_renders_with_vmax_vmin_plus_one():
+    """A vmin set above vmax keeps every viewer rendering, with the compositor's vmax = vmin + 1 rule.
+
+    Matplotlib's norms raise for vmin > vmax. The single-channel slice viewer
+    passed the pair straight to them, so the render raised inside the
+    observer (the error went to the kernel log, a pyplot figure leaked, and
+    the image froze), while the multichannel compositor silently used
+    vmax = vmin + 1. Typing vmin above vmax is easy when adjusting contrast
+    one box at a time. Strategy: set ``vmin_list``/``vmax_list`` to
+    [500]/[100] on a single-channel uint16 viewer.
+    Expected outcome: no exception and no leaked figure; a new image whose norm
+    spans (500, 501), the multichannel rule; a warning in ``warning_msg``; later
+    changes (a slab move) still render. The same input on a two-channel viewer and
+    on a continuous scatter channel renders with a warning too.
+    Negative control: an ordered pair renders as given, without a warning.
+    """
+    rng = np.random.default_rng(0)
+    vol = rng.integers(0, 1000, (8, 32, 32)).astype(np.uint16)
+    w = show_zyx_max_slice_interactive(vol, figsize=(4, 4))
+    assert w.warning_msg == ""
+    open_before = plt.get_fignums()
+    before = w.image_data
+
+    w.vmin_list = [500.0]
+    w.vmax_list = [100.0]
+    assert plt.get_fignums() == open_before
+    assert w.image_data != before
+    assert "vmin > vmax" in w.warning_msg
+    fig = w._render()
+    try:
+        norm = fig.axXY.images[0].norm
+        assert (norm.vmin, norm.vmax) == (500.0, 501.0)
+    finally:
+        plt.close(fig)
+
+    inverted = w.image_data
+    w.z_s = w.z_s + 2  # later renders still work (the crosshairs move)
+    assert w.image_data != inverted
+
+    w.vmax_list = [900.0]  # negative control: an ordered range is used as given
+    assert w.warning_msg == ""
+    fig = w._render()
+    try:
+        norm = fig.axXY.images[0].norm
+        assert (norm.vmin, norm.vmax) == (500.0, 900.0)
+    finally:
+        plt.close(fig)
+
+    multi = show_zyx_max_slice_interactive([vol, vol], figsize=(4, 4))
+    before = multi.image_data
+    multi.vmin_list = [500.0, 0.0]
+    multi.vmax_list = [100.0, 900.0]
+    assert multi.image_data != before
+    assert "vmin > vmax" in multi.warning_msg and "channel 0" in multi.warning_msg
+
+    pts = rng.random((200, 3)) * [8, 32, 32]
+    scatter = show_zyx_max_scatter_interactive(pts, channels=rng.uniform(0, 1000, 200), render="points")
+    before = scatter.image_data
+    scatter.vmin_list = [500.0]
+    scatter.vmax_list = [100.0]
+    assert scatter.image_data != before
+    assert "vmin > vmax" in scatter.warning_msg
+
+
+def test_failed_render_keeps_last_frame_reports_warning_and_retries(monkeypatch):
+    """A render that raises during an interactive change is reported in the GUI and retried.
+
+    An exception raised from a trait observer only reaches the kernel log, so
+    the image used to freeze without any message; the half-built pyplot figure
+    was never closed; and the render state was recorded before rendering, so
+    the second notification of the same comm message (``x_start`` and
+    ``x_end`` of a middle-thumb drag) skipped the retry. Strategy: make
+    ``_render`` open a pyplot figure and raise once, then move the slab with
+    both traits in one ``hold_trait_notifications`` block.
+    Expected outcome: no exception escapes, no figure is left open, the
+    failure is shown in ``warning_msg`` and the second notification renders
+    the new slab (the warning clears).
+    Negative control: a failure while building the widget still raises.
+    """
+    w = show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4))
+    good = w.image_data
+    inner = w._render
+    calls = {"n": 0}
+
+    def fail_once():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            plt.figure()
+            raise RuntimeError("render exploded")
+        return inner()
+
+    seen = []
+    w.observe(lambda c: seen.append(c["new"]), names="warning_msg")
+    w._render = fail_once
+    open_before = plt.get_fignums()
+    with w.hold_trait_notifications():  # how ipywidgets applies one comm message
+        w.x_start, w.x_end = w.x_start + 3, w.x_end + 3
+    assert plt.get_fignums() == open_before
+    assert any("render exploded" in m for m in seen)
+    assert calls["n"] == 2
+    assert w.image_data != good
+    assert w.warning_msg == ""
+
+    def broken_render(self):
+        raise RuntimeError("bad input")
+
+    monkeypatch.setattr(TNIASliceWidget, "_render", broken_render)
+    with pytest.raises(RuntimeError, match="bad input"):
+        show_zyx_max_slice_interactive(_structured_volume())
+
+
 # ---------------------------------------------------------------------------
 # Histograms, bit-depth inference, and robust default vmax
 # ---------------------------------------------------------------------------
@@ -2168,6 +2344,37 @@ def test_default_vmax_of_all_nan_channel_does_not_warn():
     assert w.vmax_list[1] == 1.0
 
 
+def test_bool_mask_channels_open_in_slice_viewers():
+    """Boolean masks (e.g. from ``extract_surface``) open in the slice viewer and the annotator.
+
+    ``_robust_vmax`` used to call ``np.percentile`` on the bool sample, which
+    raises NumPy's "boolean subtract" TypeError, and every viewer computes it
+    per channel at construction. Strategy: build the single-channel viewer, a
+    two-channel viewer with a mask channel and the point annotator on a mask.
+    Expected outcome: each renders; the mask channel's default vmax is 1.0,
+    its dtype stays ``bool`` and its histogram keeps the 1-bit (0/1) range.
+    Negative control: ``_robust_vmax`` of the mask equals that of the same
+    mask as uint8, and an all-False mask gives 0.0 instead of raising.
+    """
+    mask = np.zeros((8, 32, 32), dtype=bool)
+    mask[2:5, 10:20, 10:20] = True
+    vol = np.random.default_rng(0).integers(0, 4000, mask.shape).astype(np.uint16)
+
+    assert tpa._robust_vmax(mask) == tpa._robust_vmax(mask.astype(np.uint8)) == 1.0
+    assert tpa._robust_vmax(np.zeros_like(mask)) == 0.0
+
+    single = show_zyx_max_slice_interactive(mask, figsize=(4, 4))
+    multi = show_zyx_max_slice_interactive([vol, mask], figsize=(4, 4))
+    annot = show_zyx_max_slice_interactive_point_annotator(mask, figsize=(4, 4))
+    for w, i in ((single, 0), (multi, 1), (annot, 0)):
+        assert w.image_data
+        assert w.vmax_list[i] == 1.0
+        assert w.channel_dtypes[i] == "bool"
+        assert w.histograms_data[i]["bit_depth"] == 1
+        assert w.histograms_data[i]["bin_edges"][0] == -0.5
+        assert w.histograms_data[i]["bin_edges"][-1] == 1.5
+
+
 # ---------------------------------------------------------------------------
 # Copy-parameters, copy-PNG, marimo app, and standalone execution
 # ---------------------------------------------------------------------------
@@ -2228,6 +2435,34 @@ def test_scatter_copy_params_round_trip():
     w2 = show_zyx_max_scatter_interactive((Z, Y, X), pixel_sizes=(2, 0.5, 0.5), **kwargs)
     for attr in ("x_start", "x_end", "y_start", "y_end", "z_start", "z_end"):
         assert getattr(w2, attr) == getattr(w, attr), attr
+
+
+@pytest.mark.parametrize("kind", ["slice", "scatter"])
+def test_copy_params_sends_the_final_string_once_per_click(kind):
+    """Every "📋 kwargs" click sends the final kwargs string exactly once, even for an unchanged view.
+
+    The browser copies on ``change:copy_params_string``, and traitlets does not
+    notify an unchanged value, so a second click on an unchanged view copied
+    nothing. The scatter viewer also assigned the string twice per click, so
+    the browser first received slabs in index units. Strategy: observe the
+    trait and bump ``copy_params_trigger`` twice without changing the view.
+    Expected outcome: exactly two non-empty notifications, both equal to the
+    final string (the trait is cleared in between, as for the PNG copy).
+    """
+    rng = np.random.default_rng(0)
+    if kind == "slice":
+        w = show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4))
+    else:
+        pts = rng.random((50, 3)) * [8, 32, 48] + [0, 0, 500]
+        w = show_zyx_max_scatter_interactive(pts)
+
+    seen = []
+    w.observe(lambda c: seen.append(c["new"]), names="copy_params_string")
+    w.copy_params_trigger += 1
+    w.copy_params_trigger += 1
+    final = w.copy_params_string
+    assert final.startswith("slabs_position=")
+    assert [s for s in seen if s] == [final, final]
 
 
 @pytest.mark.parametrize("kind", ["slice", "scatter"])
@@ -2488,6 +2723,80 @@ def test_iso_scatter_subsampling_is_seeded_and_leaves_global_rng_alone():
     assert np.array_equal(w1.X_orig, w2.X_orig)
 
 
+def test_iso_scatter_drops_nonfinite_points_with_their_colours():
+    """Points with a NaN/inf coordinate are dropped (with a warning) together with their colour values.
+
+    One non-finite coordinate used to make the centroid and radius NaN, and
+    ``set_xlim`` then raised, so tracking or segmentation output with a few
+    missing positions could not be shown (``TNIAScatterWidget`` already drops
+    them). Strategy: put a NaN in X and an inf in Z of a 60-point cloud with a
+    per-point colour array.
+    Expected outcome: a warning, 58 points left with the matching 58 colours,
+    a finite radius and a rendered image.
+    """
+    X, Y, Z = _iso_points(n=60)
+    X[3] = np.nan
+    Z[7] = np.inf
+    color = np.arange(60.0)
+    with pytest.warns(UserWarning, match="non-finite"):
+        w = show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4))
+    assert w.X_orig.size == w.Y_orig.size == w.Z_orig.size == w.color.size == 58
+    assert 3.0 not in w.color and 7.0 not in w.color
+    assert np.isfinite(w.max_radius) and w.max_radius > 0
+    assert w.image_data
+
+
+def test_iso_scatter_single_colour_and_single_point():
+    """``color='red'`` draws every point red, and one point renders without singular-limit warnings.
+
+    A colour name (the matplotlib idiom) became a 0-d array that the
+    categorical path then iterated, raising TypeError. A single point (or
+    identical points) gave a zero radius, so every axis got identical limits
+    and Matplotlib warned nine times. Strategy: render a cloud with
+    ``color='red'`` and inspect the Top View collection; render one point
+    while recording warnings.
+    Expected outcome: all face colours are red; the one-point widget has a
+    positive radius, an image and no 'singular' warning.
+    Negative control: ``color=None`` keeps the grey default.
+    """
+    X, Y, Z = _iso_points(n=30)
+    for color, expected in (("red", "red"), (None, "gray")):
+        w = show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4))
+        assert not w.is_continuous and not w.is_categorical
+        fig = w._render()
+        try:
+            top = [ax for ax in fig.axes if ax.get_title() == "Top View (X-Y)"][0]
+            fc = top.collections[0].get_facecolors()
+            assert np.allclose(fc[:, :3], to_rgb(expected))
+        finally:
+            plt.close(fig)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        w1 = show_iso_scatter([1.0], [2.0], [3.0], figsize=(4, 4))
+    assert w1.max_radius > 0 and w1.image_data
+    assert not [c for c in caught if "singular" in str(c.message)]
+
+
+def test_iso_scatter_failed_savefig_does_not_leak_a_figure(monkeypatch):
+    """A render whose PNG encoding fails still closes its pyplot figure.
+
+    Strategy: make ``Figure.savefig`` raise, rotate the camera (which
+    re-renders) and compare the open pyplot figures before and after.
+    Expected outcome: the error propagates and no figure is left open.
+    """
+    w = show_iso_scatter(*_iso_points(n=20), figsize=(4, 4))
+    open_before = plt.get_fignums()
+
+    def failing_savefig(self, *args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(Figure, "savefig", failing_savefig)
+    with pytest.raises(RuntimeError, match="disk full"):
+        w.azim = w.azim + 10
+    assert plt.get_fignums() == open_before
+
+
 # ---------------------------------------------------------------------------
 # Rotation geometry (_rotate_expand, physical-space rotation, scatter parity)
 # ---------------------------------------------------------------------------
@@ -2692,6 +3001,42 @@ def test_rotated_anisotropic_panel_keeps_physical_aspect():
         np.testing.assert_allclose([xs[1], ys[1]], [40, 0], atol=1)
     finally:
         plt.close(fig)
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_rotated_integer_rgb_panel_keeps_its_colours(dtype):
+    """Rotating a pre-composited integer RGB panel keeps imshow's 0..255 scale.
+
+    Strategy: an RGB panel with red = 60 everywhere, shown by ``show_zyx``
+    without rotation, rotated by 30 degrees, and rotated in the white theme
+    (``blending='minimum'``).
+
+    Expected outcome: unrotated, imshow gets the integer panel unchanged (red
+    60, which it reads as 60/255). Rotated, the panel is float with red 60/255
+    inside the image instead of being clipped to 1.0 (saturated), and the
+    corners added by the rotation are black (white in the white theme).
+    """
+    rgb = np.zeros((20, 20, 3), dtype=dtype)
+    rgb[..., 0] = 60
+    fig = show_zyx(rgb, rgb[:5], rgb[:, :5])
+    try:
+        xy = np.asarray(fig.axXY.images[0].get_array())
+        assert np.issubdtype(xy.dtype, np.integer)
+        np.testing.assert_array_equal(xy[10, 10], [60, 0, 0])
+    finally:
+        plt.close(fig)
+
+    for blending, corner in ((None, [0, 0, 0]), ("minimum", [1, 1, 1])):
+        fig = show_zyx(rgb, rgb[:5], rgb[:, :5], rotate_view=30, blending=blending)
+        try:
+            xy = np.asarray(fig.axXY.images[0].get_array())
+            assert np.issubdtype(xy.dtype, np.floating)
+            h, w = xy.shape[:2]
+            np.testing.assert_allclose(xy[h // 2, w // 2], [60 / 255, 0, 0], atol=1e-3)
+            assert xy[..., 0].max() <= 60 / 255 + 1e-3 or blending == "minimum"
+            np.testing.assert_allclose(xy[0, 0], corner, atol=1e-3)
+        finally:
+            plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -2972,20 +3317,143 @@ def test_multichannel_default_vmin_shows_negative_channels():
             fn([neg, pos], [neg, pos], [neg, pos], gamma=[1, 0])
 
 
+def test_short_per_channel_lists_are_padded_and_long_ones_raise():
+    """Per-channel lists shorter than the channel count take the default for the missing channels.
+
+    Strategy: compose two channels with one-entry ``vmin``, ``vmax``, ``gamma``
+    and ``opacity`` lists in ``create_multichannel_rgb`` and
+    ``create_multichannel_rgb_cmap`` (and a one-entry ``gamma`` in
+    ``blend_colors``), and compare with the lists padded by hand; pass three
+    entries for two channels; render ``show_zyx_max`` with a short ``vmax``
+    list, also with 'attenuated_mip', which reads vmin/vmax per channel.
+
+    Expected outcome: a short list gives the same output as the list padded
+    with the parameter's default (None for vmin/vmax, 1 for gamma and opacity)
+    instead of an IndexError; a longer list raises a ValueError naming the
+    parameter.
+    """
+    rng = np.random.default_rng(0)
+    a, b = rng.uniform(0, 10, (2, 8, 8))
+    cases = [("vmin", [1.0], [1.0, None]), ("vmax", [5.0], [5.0, None]),
+             ("gamma", [0.5], [0.5, 1]), ("opacity", [0.5], [0.5, 1.0])]
+    for fn in (create_multichannel_rgb, create_multichannel_rgb_cmap):
+        for name, short, padded in cases:
+            out = fn([a, b], [a, b], [a, b], colormap=["red", "lime"], **{name: short})
+            ref = fn([a, b], [a, b], [a, b], colormap=["red", "lime"], **{name: padded})
+            for o, r in zip(out, ref):
+                np.testing.assert_array_equal(o, r)
+            with pytest.raises(ValueError, match=f"{name} has 3 entries for 2 channels"):
+                fn([a, b], [a, b], [a, b], **{name: padded + [1.0]})
+
+    vals = np.column_stack([a.ravel(), b.ravel()])
+    np.testing.assert_array_equal(
+        blend_colors(vals, ["red", "lime"], gamma=[0.5]),
+        blend_colors(vals, ["red", "lime"], gamma=[0.5, 1.0]),
+    )
+    with pytest.raises(ValueError, match="gamma has 3 entries for 2 channels"):
+        blend_colors(vals, ["red", "lime"], gamma=[0.5, 1.0, 1.0])
+
+    vol = rng.uniform(0, 10, (2, 4, 6, 6))
+    for projection in (None, "attenuated_mip"):
+        f0 = show_zyx_max([vol[0], vol[1]], vmin=[0.0], vmax=[5.0], projection=projection)
+        f1 = show_zyx_max([vol[0], vol[1]], vmin=[0.0, None], vmax=[5.0, None], projection=projection)
+        try:
+            np.testing.assert_array_equal(_panel_rgb(f0), _panel_rgb(f1))
+        finally:
+            plt.close(f0)
+            plt.close(f1)
+
+
 def test_annotator_point_outside_volume_paints_nothing():
     """Verify adding points outside the volume bounds leaves the annotation mask unchanged.
 
     Strategy: add one interior point via ``show_zyx_max_slice_interactive_point_annotator``
     and record the painted voxel count, then add two out-of-bounds points.
-    Expected outcome: painted voxel count in ``_annot_img`` does not change.
+    Expected outcome: painted voxel count in ``_annot_img`` does not change and
+    the out-of-bounds points are dropped with a warning.
     """
     w = show_zyx_max_slice_interactive_point_annotator(np.zeros((20, 64, 64), dtype=np.uint8))
     w.add_point(10, 30, 30)
     inside = int((w._annot_img > 0).sum())
     assert inside > 0
-    w.add_point(-5, 30, 30)
-    w.add_point(10, 80, 30)
+    with pytest.warns(UserWarning, match="outside the volume"):
+        w.add_point(-5, 30, 30)
+    with pytest.warns(UserWarning, match="outside the volume"):
+        w.add_point(10, 80, 30)
     assert int((w._annot_img > 0).sum()) == inside
+    assert w.points == [[10, 30, 30]]
+
+
+def test_annotator_points_trait_normalises_tuples_arrays_and_floats():
+    """``points`` stores ``[z, y, x]`` lists of ints whatever row type it is given.
+
+    The trait used to accept anything: points set as tuples (rows read back from
+    a CSV) never matched the ``[z, y, x]`` lists that ``remove_point`` and
+    ``add_point`` build, so they could not be deleted and were duplicated; an
+    (N, 3) array was rejected; float rows (``np.loadtxt``) were stored and made
+    the painting observer slice with floats, raising on that and every later
+    change; points outside the volume were kept (and saved) but never drawn.
+    Strategy: set tuples, an integral float array and invalid points.
+    Expected outcome: tuples become int lists that remove/add match; the array
+    is accepted and painted; a non-integral or two-coordinate point is refused
+    with a TraitError (the old value stays); out-of-volume points are dropped
+    with a warning. Negative control: int lists are stored as given.
+    """
+    w = show_zyx_max_slice_interactive_point_annotator(np.zeros((20, 64, 64), dtype=np.uint8))
+    w.points = [[5, 10, 10], [6, 7, 8]]
+    assert w.points == [[5, 10, 10], [6, 7, 8]]
+
+    w.points = [(5, 10, 10), (5, 20, 20)]
+    assert w.points == [[5, 10, 10], [5, 20, 20]]
+    assert all(type(v) is int for p in w.points for v in p)
+    w.remove_point(5, 10, 10)
+    assert w.points == [[5, 20, 20]]
+    w.add_point(5, 20, 20)
+    assert w.points == [[5, 20, 20]]
+
+    w.points = np.array([[3.0, 4.0, 5.0]])
+    assert w.points == [[3, 4, 5]]
+    assert w._annot_img[3, 4, 5] == 255
+
+    with pytest.raises(traitlets.TraitError, match="integer"):
+        w.points = [[3.5, 4, 5]]
+    with pytest.raises(traitlets.TraitError, match="integer"):
+        w.points = [[1, 2]]
+    assert w.points == [[3, 4, 5]]
+
+    with pytest.warns(UserWarning, match="outside the volume"):
+        w.points = [[3, 4, 5], [-1, 4, 5], [3, 64, 5]]
+    assert w.points == [[3, 4, 5]]
+
+
+def test_annotator_click_in_rotated_padding_adds_no_point():
+    """A click on the empty corner of a rotated panel adds nothing.
+
+    ``rotate_view`` pads each panel with empty corners; a click there maps to
+    indices outside the volume, which used to be clamped onto the border and
+    added as a real point. Strategy: rotate the XY panel by 45 degrees and
+    click near the top-left corner of its axes (padding).
+    Expected outcome: no point. Negative control: a click at the panel centre
+    (inside the image) still adds one point.
+    """
+    w = show_zyx_max_slice_interactive_point_annotator(
+        np.zeros((10, 64, 64), dtype=np.uint8), rotate_view=(45, 0, 0), figsize=(4, 4)
+    )
+    w.annotation_mode = True
+    info = w.axis_bounds["xy"]
+
+    def at(fx, fy, t):
+        return {
+            "plane": "xy",
+            "x": info["x0"] + fx * (info["x1"] - info["x0"]),
+            "y": info["y0_js"] + fy * (info["y1_js"] - info["y0_js"]),
+            "t": t,
+        }
+
+    w.click_coords = at(0.03, 0.03, 1)
+    assert w.points == []
+    w.click_coords = at(0.5, 0.5, 2)
+    assert len(w.points) == 1
 
 
 def test_scatter_widget_drops_nonfinite_points_and_accepts_empty_input():
@@ -3100,6 +3568,33 @@ def test_minimum_blending_with_inverted_colormaps():
     np.testing.assert_allclose(xy[1, 1], q(blues, 0.0), atol=1e-6)
 
 
+def test_compositor_default_colours_follow_the_blend_mode():
+    """Called directly with ``blend='minimum'``, the compositors use the inverted default colours.
+
+    Strategy: compose channel 0 fully on and channel 1 off without a
+    ``colormap`` through ``create_multichannel_rgb`` and
+    ``create_multichannel_rgb_cmap``, with 'minimum' and 'additive' blending,
+    and compare with ``show_zyx(..., blending='minimum')``.
+
+    Expected outcome: with 'minimum', channel 0 is drawn in the first inverted
+    default colour (black), exactly as ``show_zyx`` draws it, instead of
+    white on white (invisible); with 'additive' the defaults are unchanged
+    (channel 0 white).
+    """
+    on, off = np.ones((2, 2)), np.zeros((2, 2))
+    fig = show_zyx([on, off], [on, off], [on, off], blending="minimum")
+    try:
+        via_show_zyx = _panel_rgb(fig)
+    finally:
+        plt.close(fig)
+    for fn in (create_multichannel_rgb, create_multichannel_rgb_cmap):
+        xy, _, _ = fn([on, off], [on, off], [on, off], blend="minimum")
+        np.testing.assert_allclose(xy[0, 0], [0, 0, 0])
+        np.testing.assert_allclose(xy, via_show_zyx, atol=1e-6)
+        xy, _, _ = fn([on, off], [on, off], [on, off], blend="additive")
+        np.testing.assert_allclose(xy[0, 0], [1, 1, 1])
+
+
 def test_default_blending_is_unchanged():
     """Verify ``blending=None`` stays pixel-identical to additive (colors) and maximum (colormaps).
 
@@ -3187,6 +3682,35 @@ def test_blend_colors_minimum():
     )
 
 
+@pytest.mark.parametrize("colours", [["red", "lime"], ["viridis", "lime"]])
+@pytest.mark.parametrize("blending", ["additive", "maximum", "screen", "minimum"])
+def test_blend_colors_nan_in_one_channel_keeps_the_other_channels(blending, colours):
+    """A NaN value of one channel counts as no signal instead of blackening the point.
+
+    Strategy: blend three points where the second has no value (NaN) in
+    channel 0 and the third none in channel 1, with the default range and with
+    the same range given explicitly; then add an all-NaN third channel. Each
+    is compared with the same points where the NaN is replaced by the
+    channel's vmin. Warnings are errors.
+
+    Expected outcome: the colours are finite and equal to the reference (the
+    other channel stays visible), the default range is still each channel's
+    finite min/max, and the all-NaN channel adds nothing and does not warn.
+    """
+    vals = np.array([[0.0, 1.0], [np.nan, 2.0], [5.0, np.nan]])
+    no_signal = np.array([[0.0, 1.0], [0.0, 2.0], [5.0, 1.0]])
+    rng = dict(vmin=[0.0, 1.0], vmax=[5.0, 2.0])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ref = blend_colors(no_signal, colours, blending=blending, **rng)
+        np.testing.assert_allclose(blend_colors(vals, colours, blending=blending, **rng), ref)
+        np.testing.assert_allclose(blend_colors(vals, colours, blending=blending), ref)
+        with_empty = np.column_stack([vals, np.full(3, np.nan)])
+        np.testing.assert_allclose(blend_colors(with_empty, colours + ["blue"], blending=blending), ref)
+    if colours == ["red", "lime"] and blending in ("additive", "maximum", "screen"):
+        np.testing.assert_allclose(ref, [[0, 0, 0], [0, 1, 0], [1, 0, 0]])
+
+
 def test_invalid_blending_and_projection_raise():
     """Verify invalid ``blending``, ``projection``, and negative ``attenuation`` raise ``ValueError``.
 
@@ -3215,6 +3739,72 @@ def test_slab_projections_match_numpy(projection, ref):
     fig = show_zyx_max_slabs(img, [2, 7], [1, 5], [3, 6], projection=projection, vmin=0, vmax=1)
     try:
         np.testing.assert_allclose(_panel_rgb(fig), ref(img[3:6], axis=0), rtol=1e-6)
+    finally:
+        plt.close(fig)
+
+
+def test_projections_ignore_nan_voxels():
+    """NaN voxels along a ray do not hide the valid signal behind them.
+
+    Strategy: a zero volume with NaN over half of plane z=0, an all-NaN ray at
+    (y, x) = (0, 0), and a bead of 100 at (z, y, x) = (5, 10, 5) behind the
+    NaN plane. Project it with ``show_zyx_max`` (default MIP, alone and as a
+    channel of a composite), with the named 'mip', 'minip', 'average' and
+    'attenuated_mip' (attenuation 0) projections, and with ``np.max`` passed
+    explicitly as ``projector``. Project a NaN-free random volume the same way,
+    and average a float16 volume whose ray sum exceeds the float16 range.
+    Warnings are errors.
+
+    Expected outcome: the MIP keeps the bead (100) and is 0 on the other rays;
+    MinIP is 0; 'average' is the mean of the finite samples (100 / 9 on the
+    bead's ray); only the all-NaN ray is NaN; the composite shows the bead
+    (white) instead of black; attenuation 0 equals the MIP wherever the MIP is
+    finite. An explicitly passed projector is used as given (NaN propagates).
+    Without NaN every projection equals ``np.max`` / ``np.min`` / ``np.mean``
+    exactly, and the float16 average is accumulated like ``np.mean`` (finite).
+    """
+    v = np.zeros((10, 20, 20), dtype=np.float32)
+    v[0, :, :10] = np.nan
+    v[:, 0, 0] = np.nan
+    v[5, 10, 5] = 100.0
+
+    def expected(bead):
+        out = np.zeros((20, 20), dtype=np.float32)
+        out[10, 5] = bead
+        out[0, 0] = np.nan
+        return out
+
+    def xy(*args, **kwargs):
+        fig = show_zyx_max(*args, **kwargs)
+        try:
+            return _panel_rgb(fig)
+        finally:
+            plt.close(fig)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        mip = xy(v, vmin=0, vmax=100)
+        np.testing.assert_array_equal(mip, expected(100.0))
+        np.testing.assert_array_equal(xy(v, vmin=0, vmax=100, projection="mip"), expected(100.0))
+        np.testing.assert_array_equal(xy(v, vmin=0, vmax=100, projection="minip"), expected(0.0))
+        np.testing.assert_allclose(xy(v, vmin=0, vmax=100, projection="average"), expected(100.0 / 9), rtol=1e-6)
+        att = xy(v, vmin=0, vmax=100, projection="attenuated_mip", attenuation=0.0)
+        finite = np.isfinite(mip)
+        assert finite.sum() == 399
+        np.testing.assert_allclose(att[finite], mip[finite], rtol=1e-6)
+        np.testing.assert_allclose(xy([v, 0 * v])[10, 5], [1, 1, 1], atol=1e-6)
+
+        clean = np.random.default_rng(0).standard_normal((10, 20, 20)).astype(np.float32)
+        for projection, ref in ((None, np.max), ("mip", np.max), ("minip", np.min), ("average", np.mean)):
+            np.testing.assert_array_equal(xy(clean, vmin=-1, vmax=1, projection=projection), ref(clean, axis=0))
+
+        v16 = np.full((10, 2, 2), 10000, dtype=np.float16)
+        v16[0, 0, 0] = np.nan
+        np.testing.assert_array_equal(tpa._nan_mean_projection(v16, axis=0), np.full((2, 2), 10000, np.float16))
+
+    fig = show_zyx_projection(v, projector=np.max, vmin=0, vmax=100)
+    try:
+        assert np.isnan(_panel_rgb(fig)[10, 5])
     finally:
         plt.close(fig)
 

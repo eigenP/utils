@@ -21,7 +21,13 @@ from skimage.morphology import disk
 
 def apply_median_filter(height_map):
     """
-    Apply a 3x3 median filter to a 2D array.
+    Apply a 5-point cross median filter to a 2D array.
+
+    The footprint is ``skimage.morphology.disk(1)``: each pixel and its four
+    edge neighbours (``[[0, 1, 0], [1, 1, 1], [0, 1, 0]]``), not a 3x3 square,
+    with 'reflect' borders; the same as ``scipy.ndimage.median_filter(
+    height_map, footprint=disk(1), mode='reflect')``. For the 3x3 square median
+    use ``median_filter.median_filter_fast(height_map, size=3)``.
 
     Parameters:
     height_map (ndarray): A 2D array representing the height map.

@@ -439,10 +439,18 @@ def _ensure_pixel_size_array(pixel_sizes: Optional[Union[Dict[str, float], List[
 def create_ellipsoid_struct(
     radius_um: float,
     spacing: Optional[Union[Iterable[float], Dict[str, float]]] = None,
-    pixel_sizes: Optional[Union[Dict[str, float], Iterable[float]]] = None
+    pixel_sizes: Optional[Union[Dict[str, float], Iterable[float]]] = None,
+    *,
+    ndim: int = 3,
 ) -> np.ndarray:
-    """Creates a boolean 3D ellipsoidal structuring element centered at origin."""
-    sp = _resolve_spacing(spacing, pixel_sizes, ndim=3)
+    """Creates a boolean ellipsoidal structuring element centered at origin.
+
+    3D (Z, Y, X) by default; ``ndim=2`` gives a (Y, X) ellipse, with pixel sizes
+    for those axes.
+    """
+    if ndim not in (2, 3):
+        raise ValueError(f"ndim must be 2 (Y, X) or 3 (Z, Y, X), got {ndim}.")
+    sp = _resolve_spacing(spacing, pixel_sizes, ndim=ndim)
     radius_um = max(float(radius_um), 1e-6)
 
     radii_vox = [radius_um / s for s in sp]
@@ -453,7 +461,7 @@ def create_ellipsoid_struct(
     struct = dist_sq <= (radius_um ** 2)
     # Guarantee at least the single center voxel is active
     if not np.any(struct):
-        struct = np.ones((1, 1, 1), dtype=bool)
+        struct = np.ones((1,) * ndim, dtype=bool)
     return struct
 
 
@@ -468,7 +476,11 @@ def generate_morphological_surface_mask(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Computes a continuous morphological envelope and extracts the physical surface layer.
+
+    `binary_mask` is 2D (Y, X) or 3D (Z, Y, X); `pixel_sizes` gives the same axes.
     """
+    if binary_mask.ndim not in (2, 3):
+        raise ValueError(f"binary_mask must be 2D (Y, X) or 3D (Z, Y, X), got {binary_mask.ndim}D.")
     sp = _resolve_spacing(spacing, pixel_sizes, ndim=binary_mask.ndim)
 
     coords = np.argwhere(binary_mask)
@@ -498,7 +510,7 @@ def generate_morphological_surface_mask(
         effective_spacing = sp
 
     # 3. Anisotropic morphological closing with boundary padding to prevent edge erosion
-    struct = create_ellipsoid_struct(closing_radius_um, spacing=effective_spacing)
+    struct = create_ellipsoid_struct(closing_radius_um, spacing=effective_spacing, ndim=binary_mask.ndim)
     pad_width = tuple((s, s) for s in struct.shape)
     padded_binary = np.pad(downscaled_binary, pad_width, mode='constant', constant_values=False)
 
