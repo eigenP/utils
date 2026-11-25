@@ -64,7 +64,8 @@ def _reduced_surface(img_reduced, gaussian_sigma, clahe_clip, threshold):
     Find the top surface on a binned volume.
 
     Returns the refined height of every reduced column (``surface_z_red``, -1 where
-    there is no surface) and the boolean ``has_surface`` map.
+    there is no surface, -0.5 where the column is foreground from the first slice)
+    and the boolean ``has_surface`` map.
     """
     # --- 3. SMOOTHING ---
     img_blurred = ndimage.gaussian_filter(
@@ -179,8 +180,11 @@ def _reduced_surface(img_reduced, gaussian_sigma, clahe_clip, threshold):
     # For z_int == 0 the column is foreground from the first slice: z_prev == z_int and
     # val_prev == val_at > thresh, so the formula would give delta = thresh - val_at
     # (e.g. -150): a large negative height that the upscaling then smears into
-    # neighbouring columns. There the surface is simply at z = 0.
-    delta = np.where(z_int > 0, np.clip((thresh - val_prev) / denom, 0.0, 1.0), 0.0)
+    # neighbouring columns. There the surface is at (or above) the top edge of the
+    # first block, -0.5 in block-centre coordinates: the upscaling maps it to
+    # (-0.5 + 0.5) * sz - 0.5 = -0.5, clipped to 0 (a 0 here would become the block
+    # centre, (sz - 1) / 2, e.g. 1.5 for sz = 4).
+    delta = np.where(z_int > 0, np.clip((thresh - val_prev) / denom, 0.0, 1.0), -0.5)
     z_refined = (z_prev.astype(np.float32) + delta).astype(np.float32)
 
     del img_proc, img_mask

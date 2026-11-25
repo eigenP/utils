@@ -42,7 +42,10 @@ def ensure_directory(filepath):
 
 def un_gzip(input_file_path, output=None):
     """
-    Unzips a .gz file.
+    Unzips a .gz file, unless the output already exists.
+
+    The data is written to ``<output>.part`` and renamed to the output only once
+    complete, so an existing output is never a truncated, interrupted unzip.
 
     Parameters:
     - input_file_path: The path to the .gz file.
@@ -61,16 +64,19 @@ def un_gzip(input_file_path, output=None):
     # Check if the unzipped file already exists to avoid re-unzipping
     if not output_path.exists():
         print(f"Unzipping {input_path} to {output_path}...")
+        # Decompress next to the output and move it into place only once complete, so
+        # an interrupted unzip (error, KeyboardInterrupt, killed kernel) is never
+        # mistaken for a finished one later
+        part = output_path.with_name(output_path.name + '.part')
         try:
             with gzip.open(input_path, 'rb') as f_in:
-                with open(output_path, 'wb') as f_out:
+                with open(part, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
+            os.replace(part, output_path)
             print("Unzipping complete.")
-        except Exception as e:
-            # Cleanup if failed
-            if output_path.exists():
-                output_path.unlink()
-            raise e
+        finally:
+            if part.exists():
+                part.unlink()
     else:
         print(f"File already unzipped at {output_path}.")
 

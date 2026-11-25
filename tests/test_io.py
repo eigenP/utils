@@ -200,6 +200,38 @@ def test_un_gzip_cache_and_failure_cleanup(tmp_path):
         un_gzip(tmp_path / "does_not_exist.gz")
 
 
+def test_un_gzip_interrupted_unzip_is_not_reused(tmp_path, monkeypatch):
+    """Verify an interrupted ``un_gzip`` leaves no output that a later call would reuse.
+
+    Strategy: decompress a 1 MiB archive with ``shutil.copyfileobj`` patched to
+    write 1000 bytes and then raise ``KeyboardInterrupt`` (as a kernel interrupt
+    would; it is not an ``Exception``), then call ``un_gzip`` again unpatched.
+    Before the fix the truncated output stayed in place and the second call
+    printed 'File already unzipped' and returned it.
+    Expected outcome: the interrupt propagates, neither the output nor a
+    ``.part`` file is left behind, and the second call writes the full payload.
+    """
+    payload = bytes(range(256)) * 4096
+    gz_path = tmp_path / "data.bin.gz"
+    with gzip.open(gz_path, "wb") as f:
+        f.write(payload)
+    out = tmp_path / "data.bin"
+
+    def interrupted_copy(fsrc, fdst, *args, **kwargs):
+        fdst.write(fsrc.read(1000))
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as m:
+        m.setattr(eio.shutil, "copyfileobj", interrupted_copy)
+        with pytest.raises(KeyboardInterrupt):
+            un_gzip(gz_path)
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["data.bin.gz"]
+
+    assert un_gzip(gz_path) == out
+    assert out.read_bytes() == payload
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["data.bin", "data.bin.gz"]
+
+
 # ---------------------------------------------------------------------------
 # Downloads (native sync, fallback, truncation, async native & WASM)
 # ---------------------------------------------------------------------------

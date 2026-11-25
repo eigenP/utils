@@ -156,9 +156,11 @@ def stitch_tiles(
     --------
     xr.DataArray
         STCZYX mosaic with S = 1, the input dtype, physical Y/X coordinates
-        starting at 0 and ``attrs['pixel_sizes']``. ``attrs['stitching']``
-        records the tile positions (pixels, top-left, ``(y, x)``), the stage-only
-        positions and the number of registered pairs used.
+        starting at 0 and ``attrs['pixel_sizes']``. Auxiliary coordinates along
+        C, T or Z (e.g. channel ``color`` and ``role``) are kept.
+        ``attrs['stitching']`` records the tile positions (pixels, top-left,
+        ``(y, x)``), the stage-only positions and the number of registered pairs
+        used.
     """
     warnings.warn(
         "stitch_tiles is a minimal translation-only 2D stitcher. For more control "
@@ -252,6 +254,11 @@ def stitch_tiles(
         pixel_sizes=sizes,
     )
     mosaic = mosaic.assign_coords(T=tiles.coords['T'], Z=tiles.coords['Z'])
+    # Per-channel / per-plane metadata (e.g. colour and role along C) are
+    # auxiliary coordinates along C, T or Z: they apply to the mosaic unchanged
+    aux = {name: coord.variable for name, coord in tiles.coords.items()
+           if name not in tiles.dims and coord.dims in (('C',), ('T',), ('Z',))}
+    mosaic = mosaic.assign_coords(aux)
     mosaic.name = tiles.name
     mosaic.attrs['stitching'] = {
         'positions_px': positions.tolist(),
