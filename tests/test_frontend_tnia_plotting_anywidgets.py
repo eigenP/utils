@@ -21,6 +21,8 @@ def static_widget_server():
       real two-channel sham volume widget.
     - ``/isolated.html``: minimal proxy and startup-race harness with realistic
       normalized ``[0, 1]`` multi-plane ``axis_bounds`` (``xy``, ``zy``, ``xz``).
+    - ``/dispose.html``: the full widget with instrumented document listeners,
+      ResizeObservers and timers, keeping render()'s cleanup in ``window.cleanup``.
     """
     tmpdir = tempfile.TemporaryDirectory()
     base_path = Path(tmpdir.name)
@@ -138,6 +140,74 @@ def static_widget_server():
 </html>
 """
     (base_path / "isolated.html").write_text(isolated_html)
+
+    # View-disposal harness: counts document keydown listeners, live
+    # ResizeObservers and pending 30 s clipboard timers before the module is
+    # loaded, then keeps whatever render() returns (anywidget calls it when the
+    # view is removed).
+    dispose_state = dict(full_state, axis_bounds=w.axis_bounds)
+    dispose_html = f"""<!DOCTYPE html>
+<html>
+<body style="margin: 0;">
+  <div id="widget-container"></div>
+  <script type="module">
+    const keydown = new Set();
+    const addDoc = document.addEventListener.bind(document);
+    const removeDoc = document.removeEventListener.bind(document);
+    document.addEventListener = (type, fn, opts) => {{
+      if (type === 'keydown') keydown.add(fn);
+      return addDoc(type, fn, opts);
+    }};
+    document.removeEventListener = (type, fn, opts) => {{
+      if (type === 'keydown') keydown.delete(fn);
+      return removeDoc(type, fn, opts);
+    }};
+    window.docKeydownCount = () => keydown.size;
+
+    let liveObservers = 0;
+    const RO = window.ResizeObserver;
+    window.ResizeObserver = class extends RO {{
+      observe(target) {{
+        if (!this._live) {{ this._live = true; liveObservers++; }}
+        return super.observe(target);
+      }}
+      disconnect() {{
+        if (this._live) {{ this._live = false; liveObservers--; }}
+        return super.disconnect();
+      }}
+    }};
+    window.liveObservers = () => liveObservers;
+
+    const longTimers = new Set();
+    const setT = window.setTimeout.bind(window);
+    const clearT = window.clearTimeout.bind(window);
+    window.setTimeout = (fn, ms, ...args) => {{
+      const id = setT(() => {{ longTimers.delete(id); fn(...args); }}, ms);
+      if (ms >= 30000) longTimers.add(id);
+      return id;
+    }};
+    window.clearTimeout = (id) => {{ longTimers.delete(id); return clearT(id); }};
+    window.pendingLongTimers = () => longTimers.size;
+
+    const {{ default: widget }} = await import('./tnia_plotting_anywidgets.js');
+    const listeners = {{}};
+    window.mockModel = {{
+      state: {json.dumps(dispose_state)},
+      get(key) {{ return this.state[key]; }},
+      set(key, val) {{
+        this.state[key] = val;
+        (listeners[`change:${{key}}`] || []).forEach(cb => cb());
+      }},
+      save_changes() {{}},
+      on(evt, cb) {{ (listeners[evt] = listeners[evt] || []).push(cb); }},
+    }};
+    window.cleanup = widget.render({{ model: window.mockModel, el: document.getElementById('widget-container') }});
+    window.rendered = true;
+  </script>
+</body>
+</html>
+"""
+    (base_path / "dispose.html").write_text(dispose_html)
 
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(base_path))
     httpd = http.server.HTTPServer(("localhost", 0), handler)
@@ -475,3 +545,165 @@ def test_frontend_copy_png_button_writes_clipboard(page, static_widget_server):
     btn.click()
     page.evaluate("window.mockModel.set('copy_png_data', 'error')")
     page.get_by_role("button", name="❌").wait_for(state="visible", timeout=5000)
+
+
+def _type_into_channel_box(page, label, index, text):
+    """Type `text` into the `label` box (vmin, vmax, gamma, opacity) of channel `index` and commit it."""
+    page.evaluate(
+        """([label, index, text]) => {
+            const inp = [...document.querySelectorAll('span')]
+                .filter(s => s.textContent === label)[index].nextElementSibling;
+            inp.value = text;
+            inp.dispatchEvent(new Event('change'));
+        }""",
+        [label, index, text],
+    )
+
+
+def test_frontend_vmin_vmax_boxes_keep_vmin_at_most_vmax(page, static_widget_server):
+    """A vmin typed above vmax (or a vmax below vmin) is clamped to the other bound.
+
+    The histogram slider already keeps vmin <= vmax, but the text boxes only
+    clamped to the dtype range, so typing vmin above vmax sent an inverted
+    pair (which froze the single-channel render). Strategy: set channel 0 to
+    vmin 10 / vmax 100, type vmin 200, then vmax 20.
+    Expected outcome: vmin becomes 100 (the current vmax), then vmax becomes
+    100 (the current vmin), each shown in its box.
+    Negative controls: a value inside the range is kept, and an empty (auto)
+    vmax does not clamp vmin.
+    """
+    page.goto(static_widget_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+    page.evaluate("window.mockModel.set('vmin_list', [10, 0]); window.mockModel.set('vmax_list', [100, 255])")
+
+    _type_into_channel_box(page, "vmin", 0, "200")
+    assert page.evaluate("window.mockModel.get('vmin_list')") == [100, 0]
+    _type_into_channel_box(page, "vmin", 0, "50")
+    assert page.evaluate("window.mockModel.get('vmin_list')") == [50, 0]
+    _type_into_channel_box(page, "vmax", 0, "20")
+    assert page.evaluate("window.mockModel.get('vmax_list')") == [50, 255]
+    box_values = page.evaluate(
+        "() => [...document.querySelectorAll('span')]"
+        ".filter(s => s.textContent === 'vmin' || s.textContent === 'vmax')"
+        ".slice(0, 2).map(s => s.nextElementSibling.value)"
+    )
+    assert box_values == ["50", "50"]
+
+    _type_into_channel_box(page, "vmax", 0, "")
+    _type_into_channel_box(page, "vmin", 0, "240")
+    assert page.evaluate("window.mockModel.get('vmin_list')") == [240, 0]
+    assert page.evaluate("window.mockModel.get('vmax_list')") == ["", 255]
+
+
+def test_frontend_range_slider_with_zero_max_is_hidden_and_stays_at_zero(page, static_widget_server):
+    """A dimension of size 1 (Z of a 2D image, max position 0) hides its range row and never sends 1.
+
+    ``model.get(maxTrait) || 1`` turned the 0 into 1, so the Z track spanned
+    [0, 1] and the end box or thumb could send z_end = 1, out of range.
+    Strategy: set ``z_max_pos`` (and the Z slab) to 0, as Python does for 2D
+    input, then type 1 into the Z end box.
+    Expected outcome: the Z row is hidden and z_end stays 0.
+    Negative control: the X and Y rows stay visible.
+    """
+    page.goto(static_widget_server)
+    page.get_by_text("Z Range").wait_for(state="visible")
+    page.evaluate(
+        "() => { const m = window.mockModel;"
+        " m.set('z_start', 0); m.set('z_end', 0); m.set('z_max_pos', 0); }"
+    )
+    assert not page.get_by_text("Z Range").is_visible()
+    assert page.get_by_text("X Range").is_visible() and page.get_by_text("Y Range").is_visible()
+
+    page.evaluate(
+        "() => { const z_end = [...document.querySelectorAll('input[type=number]')][5];"
+        " z_end.value = '1'; z_end.dispatchEvent(new Event('change')); }"
+    )
+    assert page.evaluate("window.mockModel.get('z_end')") == 0
+
+
+def test_frontend_copy_kwargs_writes_the_clipboard_from_the_click(page, static_widget_server):
+    """The "📋 kwargs" button starts its clipboard write inside the click and copies on every click.
+
+    The kwargs were written only when ``copy_params_string`` changed, after the
+    Python round trip: outside the click's user activation (Safari rejects
+    such writes) and never for a second click on an unchanged view; failures
+    only reached the console. Strategy: count ``navigator.clipboard.write``
+    calls; click, then answer as Python does (clear, then the string); click
+    again with the same string; finally make the write fail.
+    Expected outcome: each click starts one write before Python answers, each
+    answer lands in the clipboard with a ✅, and a failed write shows ❌.
+    """
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    page.goto(static_widget_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+    page.evaluate("""() => {
+        window.clipWrites = 0;
+        const write = navigator.clipboard.write.bind(navigator.clipboard);
+        navigator.clipboard.write = (items) => { window.clipWrites++; return write(items); };
+    }""")
+    kwargs = "vmin=[0.0],\nvmax=[255.0],"
+
+    for n in (1, 2):
+        btn = page.get_by_role("button", name="📋 kwargs", exact=True)
+        btn.wait_for(state="visible", timeout=5000)
+        btn.click()
+        assert page.evaluate("window.clipWrites") == n  # started inside the click
+        assert page.evaluate("window.mockModel.get('copy_params_trigger')") == n
+        page.evaluate("s => { window.mockModel.set('copy_params_string', ''); "
+                      "window.mockModel.set('copy_params_string', s); }", kwargs)
+        page.get_by_role("button", name="✅").wait_for(state="visible", timeout=5000)
+        assert page.evaluate("navigator.clipboard.readText()") == kwargs
+
+    page.evaluate("() => { navigator.clipboard.write = () => Promise.reject(new Error('denied')); }")
+    btn = page.get_by_role("button", name="📋 kwargs", exact=True)
+    btn.wait_for(state="visible", timeout=5000)
+    btn.click()
+    page.evaluate("s => window.mockModel.set('copy_params_string', s)", kwargs + "\n")
+    page.get_by_role("button", name="❌").wait_for(state="visible", timeout=5000)
+
+
+def test_frontend_view_cleanup_releases_document_listener_and_observers(page, static_widget_server):
+    """render() returns a cleanup that removes everything the view registered outside its element.
+
+    anywidget disposes a view by removing its model listeners and then calling
+    the cleanup render() returned; a 'destroy' handler never runs then. The
+    view used to return nothing, so each re-run cell left a document keydown
+    listener (holding the model and image) that still sent ``hover_coords``
+    when 'c' was typed, plus its histogram ResizeObservers. Strategy: in the
+    instrumented harness, hover the XY panel and press 'c' (positive control:
+    ``hover_coords`` is sent), click the PNG and the kwargs buttons twice each
+    before Python answers, then call the cleanup and press 'c' again.
+    Expected outcome: a second click supersedes the first and drops its 30 s
+    timer (one pending timer per button, so the cleanup can clear it, and the
+    stale timer cannot later reset the newer pending copy); the cleanup is a
+    function; afterwards no document keydown listener, live ResizeObserver or
+    pending 30 s copy timer is left, and 'c' sends nothing.
+    """
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    page.goto(f"{static_widget_server}/dispose.html")
+    page.wait_for_function("window.rendered === true")
+    page.locator("img").wait_for(state="visible")
+
+    assert page.evaluate("window.docKeydownCount()") == 1
+    assert page.evaluate("window.liveObservers()") == 2  # one per channel histogram
+
+    box = page.locator("img").bounding_box()
+    x0, y0, bw, bh = page.evaluate("window.mockModel.get('axis_bounds').xy.bbox")
+    page.mouse.move(box["x"] + (x0 + bw / 2) * box["width"], box["y"] + (y0 + bh / 2) * box["height"])
+    page.keyboard.press("c")
+    assert page.evaluate("window.mockModel.get('hover_coords')")["plane"] == "xy"
+
+    for _ in range(2):  # the second click supersedes the first
+        page.get_by_role("button", name="📋 PNG", exact=True).click()
+        page.get_by_role("button", name="📋 kwargs", exact=True).click()
+    assert page.evaluate("window.pendingLongTimers()") == 2
+
+    assert page.evaluate("typeof window.cleanup") == "function"
+    page.evaluate("window.cleanup()")
+    assert page.evaluate("window.docKeydownCount()") == 0
+    assert page.evaluate("window.liveObservers()") == 0
+    assert page.evaluate("window.pendingLongTimers()") == 0
+
+    page.evaluate("window.mockModel.state.hover_coords = null")
+    page.keyboard.press("c")
+    assert page.evaluate("window.mockModel.get('hover_coords')") is None
