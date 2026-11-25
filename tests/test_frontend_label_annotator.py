@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from eigenp_utils.label_annotator import LabelAnnotator, decode_label_slice
+from eigenp_utils.label_annotator import LabelAnnotator, decode_label_slice, encode_label_slice
 
 H, W = 40, 40
 VIEW_PX = 400  # viewport width -> zoom 10 (one image pixel = 10 CSS px)
@@ -50,6 +50,8 @@ window.lastLabelsB64 = () => {
   let s = ''; for (const b of u) s += String.fromCharCode(b);
   return btoa(s);
 };
+window.widget = widget;
+window.b64ToDataView = b64ToDataView;
 widget.render({ model: window.mockModel, el: document.getElementById('c') });
 window.ready = true;
 </script></body></html>
@@ -563,3 +565,338 @@ def test_stack_keys_and_z_buttons(page, serve):
     z0 = _get(page, "z")
     page.locator(".lbl-zrow .lbl-step").nth(3).click()  # z ›
     assert _get(page, "z") == min(z0 + 1, 2)
+
+
+# ------------------------------------------------- review fixes (2026-11-25)
+# what Python changes on a stack switch (``_on_stack``) and on ``set_labels``
+_STACK_SWITCH = ["stack", "shape_zyx", "track_undo_ids", "z", "image_to_js", "labels_to_js",
+                 "labels_prev_to_js", "labels_next_to_js", "labels_rev", "undo_epoch", "active_label"]
+_SET_LABELS = ["track_undo_ids", "labels_to_js", "labels_prev_to_js", "labels_next_to_js", "labels_rev",
+               "undo_epoch", "active_label"]
+_TRACK_OP = ["track_undo_ids", "labels_to_js", "labels_prev_to_js", "labels_next_to_js", "labels_rev"]
+
+
+def _push(page, w, names):
+    """Mirror the Python traits ``names`` into the page's mock model, one ``set`` (and change event) each, in order.
+
+    Hosts deliver the traits of one Python update in no fixed order (marimo
+    emits one change per key), so tests pass several orders. Names the widget
+    does not have are skipped.
+    """
+    st = json.loads(_state_json(w))
+    for n in names:
+        if n in st:
+            page.evaluate(
+                "([k, v]) => window.mockModel.set(k, (v && v.__b64__ !== undefined) ? window.b64ToDataView(v.__b64__) : v)",
+                [n, st[n]],
+            )
+
+
+def _apply_last(page, w):
+    """Apply the page's last ``labels_from_js`` message to the Python widget (as the host would)."""
+    w.labels_from_js = base64.b64decode(page.evaluate("window.lastLabelsB64()"))
+
+
+@pytest.mark.parametrize("epoch_first", [False, True])
+def test_undo_after_stack_switch_does_not_restore_the_other_stack(page, serve, epoch_first):
+    """ctrl+z after PageDown must not write the previous stack's slice into the shown stack (R4-01).
+
+    Strategy: two 2D stacks (z is always 0); stack 1 holds a 100-px mask with
+    id 5. Paint a stroke on stack 0 and apply it in Python, switch Python to
+    stack 1 and mirror its traits into the page (``undo_epoch`` last or
+    first), then press ctrl+z.
+    Expected outcome: nothing is sent (the only snapshot belongs to stack 0),
+    the status says there is nothing to undo, and the page still shows the
+    id-5 mask. Before the fix ctrl+z sent stack 0's empty slice, which
+    Python wrote into stack 1 and erased the mask.
+    """
+    img = np.random.default_rng(3).random((H, W)).astype(np.float32)
+    lab1 = np.zeros((H, W), np.uint32)
+    lab1[10:20, 10:20] = 5
+    w = LabelAnnotator([img, img.copy()], labels=[None, lab1], brush_radius=0)
+    w.auto_fill = False
+    _open(page, serve(w))
+    _stroke(page, [(5, 30), (35, 30)])
+    _apply_last(page, w)
+    sent = page.evaluate("window.lastLabelsB64()")
+    w.stack = 1
+    order = ["undo_epoch"] + [n for n in _STACK_SWITCH if n != "undo_epoch"] if epoch_first else _STACK_SWITCH
+    _push(page, w, order)
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("Control+z")
+    assert page.evaluate("window.lastLabelsB64()") == sent, "undo sent another stack's slice"
+    assert "nothing to undo" in page.locator(".lbl-status").inner_text()
+    assert (w.stack_labels[1] == 5).sum() == 100
+    _stroke(page, [(5, 2), (8, 2)])  # the page still holds stack 1's mask
+    z, lab = _last_labels(page)
+    assert z == 0 and (lab == 5).sum() == 100 and lab[2, 5:9].all()
+
+
+def test_undo_right_after_pagedown_does_not_send_the_previous_stack(page, serve):
+    """ctrl+z after PageDown, before Python has answered the switch, sends nothing (R4-01).
+
+    Strategy: two 2D stacks; stack 1 holds a 100-px mask with id 5. Paint a
+    stroke on stack 0 and apply it in Python, press PageDown (the page's
+    ``stack`` becomes 1, Python's answer is still in flight, e.g. busy kernel)
+    and press ctrl+z at once. Then Python switches.
+    Expected outcome: ctrl+z sends no label message (Python, which applies
+    messages after the switch, would write the stack-0 snapshot into stack 1)
+    and says there is nothing to undo; stack 1 keeps its mask. Negative
+    control: the same ctrl+z without PageDown still undoes the stroke.
+    """
+    img = np.random.default_rng(3).random((H, W)).astype(np.float32)
+    lab1 = np.zeros((H, W), np.uint32)
+    lab1[10:20, 10:20] = 5
+    w = LabelAnnotator([img, img.copy()], labels=[None, lab1], brush_radius=0)
+    w.auto_fill = False
+    _open(page, serve(w))
+    _stroke(page, [(5, 30), (35, 30)])
+    _apply_last(page, w)
+    sent = page.evaluate("window.lastLabelsB64()")
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("PageDown")
+    assert _get(page, "stack") == 1
+    page.keyboard.press("Control+z")
+    assert page.evaluate("window.lastLabelsB64()") == sent, "undo sent stack 0's slice after PageDown"
+    assert "nothing to undo" in page.locator(".lbl-status").inner_text()
+    w.stack = 1
+    assert (w.stack_labels[1] == 5).sum() == 100
+
+    w2 = LabelAnnotator([img, img.copy()], labels=[None, lab1], brush_radius=0)
+    w2.auto_fill = False
+    _open(page, serve(w2))
+    _stroke(page, [(5, 30), (35, 30)])
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("Control+z")
+    z, lab = _last_labels(page)
+    assert z == 0 and not lab.any(), "negative control: ctrl+z undoes the stroke"
+
+
+def test_undo_after_set_labels_does_not_revert_it(page, serve):
+    """ctrl+z after ``set_labels`` must not restore a slice snapshot taken before it (R4-01).
+
+    Strategy: paint a stroke and apply it in Python, then ``set_labels`` fills
+    the slice with id 3 and the page receives Python's update; press ctrl+z.
+    Expected outcome: nothing is sent and the page keeps showing id 3 (the
+    snapshot predates ``set_labels``, whose docstring promises only to clear
+    the track undo history; reverting the replacement on one slice is wrong).
+    """
+    w = _widget()
+    w.auto_fill = False
+    _open(page, serve(w))
+    _stroke(page, [(5, 20), (35, 20)])
+    _apply_last(page, w)
+    sent = page.evaluate("window.lastLabelsB64()")
+    w.set_labels(np.full((H, W), 3, np.uint32))
+    _push(page, w, _SET_LABELS)
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("Control+z")
+    assert page.evaluate("window.lastLabelsB64()") == sent
+    assert (w.labels == 3).all()
+
+
+@pytest.mark.parametrize("ids_first", [False, True])
+def test_track_undo_routes_to_python_on_every_stack(page, serve, ids_first):
+    """Track ops on a second stack, and on the first after a round trip, stay undoable from the page (R4-02).
+
+    Strategy: two 3D stacks with id 4 on z=0 and id 6 on z=1. On stack 0
+    merge 4 -> 6 (Python), mirror the result; switch to stack 1 (traits in
+    two orders) and merge there; ctrl+z; apply the request; switch back to
+    stack 0; ctrl+z again.
+    Expected outcome: each ctrl+z sends ``{op: undo, serial}`` for the shown
+    stack's own last op and Python restores that stack exactly. Before the
+    fix stack 1's first op reused serial 1, which the page had already seen,
+    so it got no undo marker; and the round trip dropped stack 0's markers.
+    """
+    _, lab = _widget3d()
+    img = np.random.default_rng(1).random((3, H, W)).astype(np.float32)
+    w = LabelAnnotator([img, img.copy()], axes="ZYX", labels=[lab, lab.copy()], brush_radius=0)
+    _open(page, serve(w))
+    page.locator(".lbl-viewport").focus()
+    switch = (["track_undo_ids"] + [n for n in _STACK_SWITCH if n != "track_undo_ids"]) if ids_first else _STACK_SWITCH
+    assert w.merge_ids(4, 6)
+    _push(page, w, _TRACK_OP)
+    w.stack = 1
+    _push(page, w, switch)
+    assert w.merge_ids(4, 6)
+    _push(page, w, _TRACK_OP)
+    page.keyboard.press("Control+z")
+    req = _get(page, "track_request")
+    assert req.get("op") == "undo" and req["serial"] == w.track_undo_ids[-1]
+    w.track_request = req
+    np.testing.assert_array_equal(w.labels, lab)
+    _push(page, w, _TRACK_OP)
+    w.stack = 0
+    _push(page, w, switch)
+    page.keyboard.press("Control+z")
+    req = _get(page, "track_request")
+    assert req.get("op") == "undo" and req["serial"] == w.track_undo_ids[-1]
+    w.track_request = req
+    np.testing.assert_array_equal(w.labels, lab)
+
+
+def _client_xy_in(page, view, x, y):
+    r = page.evaluate(
+        f"(() => {{ const b = document.querySelectorAll('canvas.lbl-img')[{view}].getBoundingClientRect();"
+        " return [b.left, b.top, b.width, b.height]; })()"
+    )
+    return r[0] + (x + 0.5) * r[2] / W, r[1] + (y + 0.5) * r[3] / H
+
+
+def _stroke_in(page, view, pts):
+    page.mouse.move(*_client_xy_in(page, view, *pts[0]))
+    page.mouse.down()
+    for p in pts[1:]:
+        page.mouse.move(*_client_xy_in(page, view, *p), steps=4)
+    page.mouse.up()
+
+
+def test_second_view_adopts_strokes_of_the_first(page, serve):
+    """Two views of one model must not overwrite each other's strokes (R4-03).
+
+    Strategy: render a second view of the same mock model next to the first
+    (JupyterLab "new view for output", the widget displayed twice); paint row
+    2 in view 1, then row 30 in view 2.
+    Expected outcome: view 2's message holds both strokes (it adopted view
+    1's message instead of sending its stale copy, which erased row 2 in
+    Python), and view 1 shows view 2's stroke too.
+    """
+    page.set_viewport_size({"width": 1400, "height": 900})
+    w = _widget()
+    w.auto_fill = False
+    _open(page, serve(w))
+    page.evaluate(
+        """() => { const box = document.createElement('div'), d = document.createElement('div');
+        box.style.cssText = 'position:absolute; left:680px; top:0; width:630px';
+        box.appendChild(d); document.body.appendChild(box);
+        window.widget.render({ model: window.mockModel, el: d }); }"""
+    )
+    page.wait_for_function(
+        """() => { const c = document.querySelectorAll('canvas.lbl-img');
+        return c.length === 2 && c[1].width === 40 && document.querySelectorAll('.lbl-stage')[1].style.transform.includes('scale('); }"""
+    )
+    _stroke_in(page, 0, [(2, 2), (10, 2)])
+    _stroke_in(page, 1, [(2, 30), (10, 30)])
+    _, lab = _last_labels(page)
+    assert lab[2, 2:11].all() and lab[30, 2:11].all(), "view 2 sent a stale slice without view 1's stroke"
+    _stroke_in(page, 0, [(20, 20), (20, 20)])
+    _, lab = _last_labels(page)
+    assert lab[2, 2:11].all() and lab[30, 2:11].all() and lab[20, 20]
+
+
+def test_view_rendered_after_strokes_resyncs_before_painting(page, serve):
+    """A view rendered after strokes (page reload, re-display) asks Python for the current slice (R4-03).
+
+    Strategy: apply a stroke on row 2 in Python (painted in an earlier view;
+    Python does not echo strokes, so ``labels_to_js`` is stale), open a new
+    page from the widget state, hand the page's ``labels_resync`` request to
+    Python and mirror Python's answer; then paint row 30.
+    Expected outcome: the page requested a resync, Python re-sent the slice,
+    and the new stroke's message keeps row 2 (before the fix it was sent
+    without it and Python lost the earlier stroke).
+    """
+    w = _widget()
+    w.auto_fill = False
+    edit = np.zeros((H, W), np.uint16)
+    edit[2, 2:11] = 1
+    w.labels_from_js = encode_label_slice(edit, 0)
+    _open(page, serve(w))
+    req = _get(page, "labels_resync")
+    assert req, "the view did not ask Python to resync"
+    w.labels_resync = req
+    _push(page, w, ["labels_to_js", "labels_prev_to_js", "labels_next_to_js", "labels_rev"])
+    _stroke(page, [(2, 30), (10, 30)])
+    _apply_last(page, w)
+    assert w.labels[2, 2:11].all() and w.labels[30, 2:11].all()
+
+
+def test_z_and_stack_keys_are_ignored_while_painting(page, serve):
+    """ArrowUp/Down, Alt+arrows and PageUp/Down do nothing during a drag (R4-05).
+
+    Strategy: 3D widget at z=1; press the mouse on row 5, drag, press each
+    navigation key, drag further and release.
+    Expected outcome: ``z`` stays 1 and the whole stroke is sent for z=1.
+    Afterwards ArrowUp steps z again (negative control).
+    """
+    w, _ = _widget3d()
+    w.auto_fill = False
+    _open(page, serve(w))
+    page.locator(".lbl-viewport").focus()
+    page.mouse.move(*_client_xy(page, 2, 5))
+    page.mouse.down()
+    page.mouse.move(*_client_xy(page, 15, 5), steps=4)
+    for key in ("ArrowUp", "ArrowDown", "Alt+ArrowRight", "PageDown"):
+        page.keyboard.press(key)
+        assert _get(page, "z") == 1, key
+    page.mouse.move(*_client_xy(page, 30, 5), steps=4)
+    page.mouse.up()
+    z, lab = _last_labels(page)
+    assert z == 1 and lab[5, 2:31].all()
+    page.keyboard.press("ArrowUp")
+    assert _get(page, "z") == 2
+
+
+def test_slice_replaced_mid_stroke_cancels_the_stroke(page, serve):
+    """A slice reload from Python during a drag cancels the stroke instead of splitting it (R4-05).
+
+    Strategy: 3D widget at z=1; start a drag on row 5, then Python moves to
+    z=2 (traits mirrored into the page), continue the drag and release; then
+    paint a dot. Repeat with a same-slice reload (``labels_rev`` bump) mid-drag.
+    Expected outcome: no message carries the cancelled stroke (before the fix
+    its first part was lost and the rest was sent as an edit of z=2); the
+    status says it was cancelled; the following dot is sent for z=2 alone.
+    """
+    w, lab = _widget3d()
+    w.auto_fill = False
+    _open(page, serve(w))
+    page.mouse.move(*_client_xy(page, 2, 5))
+    page.mouse.down()
+    page.mouse.move(*_client_xy(page, 15, 5), steps=4)
+    w.z = 2
+    _push(page, w, ["z", "image_to_js", "labels_to_js", "labels_prev_to_js", "labels_next_to_js"])
+    assert "cancelled" in page.locator(".lbl-status").inner_text()  # before hovering overwrites it
+    page.mouse.move(*_client_xy(page, 30, 5), steps=4)
+    page.mouse.up()
+    assert page.evaluate("window.lastLabelsB64()") is None
+    _stroke(page, [(20, 38), (20, 38)])
+    z, sent = _last_labels(page)
+    assert z == 2 and not sent[5].any() and sent[38, 20] and sent.sum() == sent[38, 20]
+
+    page.mouse.move(*_client_xy(page, 2, 5))
+    page.mouse.down()
+    page.mouse.move(*_client_xy(page, 15, 5), steps=4)
+    before = page.evaluate("window.lastLabelsB64()")
+    page.evaluate("window.mockModel.set('labels_rev', 5)")
+    assert "cancelled" in page.locator(".lbl-status").inner_text()
+    page.mouse.move(*_client_xy(page, 30, 5), steps=4)
+    page.mouse.up()
+    assert page.evaluate("window.lastLabelsB64()") == before
+
+
+def test_view_cleanup_removes_window_listener_and_resize_observer(page, serve):
+    """Removing a view must release its window ``resize`` listener and ResizeObserver (R4-18).
+
+    Strategy: spy on ``window.add/removeEventListener`` and
+    ``ResizeObserver.prototype.disconnect``, render a second view, call the
+    cleanup function ``render`` returned.
+    Expected outcome: the ``resize`` handler added by the view is removed and
+    its observer disconnected (before the fix both kept every discarded view,
+    with its image, labels and undo snapshots, alive).
+    """
+    w = _widget()
+    _open(page, serve(w))
+    out = page.evaluate(
+        """() => {
+        const added = [], removed = []; let disconnected = 0;
+        const oa = window.addEventListener, orm = window.removeEventListener, od = ResizeObserver.prototype.disconnect;
+        window.addEventListener = function (t, f, o) { if (t === 'resize') added.push(f); return oa.call(this, t, f, o); };
+        window.removeEventListener = function (t, f, o) { if (t === 'resize') removed.push(f); return orm.call(this, t, f, o); };
+        ResizeObserver.prototype.disconnect = function () { disconnected++; return od.call(this); };
+        const d = document.createElement('div'); document.body.appendChild(d);
+        const cleanup = window.widget.render({ model: window.mockModel, el: d });
+        cleanup();
+        window.addEventListener = oa; window.removeEventListener = orm; ResizeObserver.prototype.disconnect = od;
+        return [added.length, removed.length, added[0] === removed[0], disconnected];
+    }"""
+    )
+    assert out == [1, 1, True, 1]

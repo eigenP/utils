@@ -1093,3 +1093,282 @@ def test_multiple_stacks_keep_separate_labels_and_state(tmp_path):
     assert w.stack == 1
     with pytest.raises(ValueError):
         LabelAnnotator([a, b], stack_names=["x"], axes="ZYX")
+
+
+# ------------------------------------------------- review fixes (2026-11-25)
+def test_undo_epoch_bumps_on_stack_switch_and_set_labels_only():
+    """``undo_epoch`` tells the browser to drop its per-slice undo history (R4-01).
+
+    Strategy: two same-shape 2D stacks; record ``undo_epoch`` before and after
+    a browser stroke, a track op, its undo, a stack switch, ``set_labels`` and
+    a z change (3D widget).
+    Expected outcome: the epoch changes exactly on the stack switch and on
+    ``set_labels`` (the browser's slice snapshots then belong to another stack
+    or to replaced labels); strokes, track ops (whose browser undo markers must
+    survive), track undo and z changes leave it alone.
+    """
+    a = np.zeros((6, 7), np.float32)
+    w = LabelAnnotator([a, a.copy()], stack_names=["a", "b"])
+    ep = w.undo_epoch
+    edit = np.zeros((6, 7), np.uint16)
+    edit[1:3, 1:3] = 4
+    w.labels_from_js = encode_label_slice(edit, 0)
+    assert w.undo_epoch == ep, "strokes keep the browser undo history"
+    assert w.delete_id(4) and w.undo_track_op()
+    assert w.undo_epoch == ep, "track ops and their undo keep it too"
+    w.stack = 1
+    assert w.undo_epoch == ep + 1
+    w.set_labels(np.ones((6, 7), np.uint32))
+    assert w.undo_epoch == ep + 2
+    w3 = LabelAnnotator(np.zeros((3, 6, 7), np.float32), axes="ZYX")
+    ep3 = w3.undo_epoch
+    w3.z = 0
+    assert w3.undo_epoch == ep3, "z changes are handled per slice in the browser"
+
+
+def test_track_op_serials_are_unique_across_stacks():
+    """Track-op serials never repeat across stacks (R4-02).
+
+    Strategy: two 3D stacks with the same three tracks; merge + split on
+    stack 0, switch to stack 1 and merge there, switch back; then send a stale
+    undo request carrying stack 1's serial while stack 0 is shown.
+    Expected outcome: stack 0 reports serials ``[1, 2]``, stack 1's first op
+    gets serial 3 (not 1 again: the browser appends only serials it has not
+    mirrored yet), stack 0's ids come back as ``[1, 2]``, and the stale
+    request is refused without changing stack 0.
+    """
+    _, lab = _two_tracks()
+    img = np.random.default_rng(7).random(lab.shape).astype(np.float32)
+    w = LabelAnnotator([img, img.copy()], axes="ZYX", labels=[lab, lab.copy()])
+    assert w.merge_ids(5, 3) and w.split_id(3, 2) is not None
+    assert w.track_undo_ids == [1, 2]
+    w.stack = 1
+    assert w.track_undo_ids == []
+    assert w.merge_ids(5, 3)
+    assert w.track_undo_ids == [3]
+    w.stack = 0
+    assert w.track_undo_ids == [1, 2]
+    before = w.labels
+    w.track_request = {"op": "undo", "serial": 3, "n": 1}
+    assert "out of sync" in w.status
+    np.testing.assert_array_equal(w.labels, before)
+    w.track_request = {"op": "undo", "serial": 2, "n": 2}
+    assert w.track_undo_ids == [1]
+
+
+def test_identical_label_messages_apply_after_python_changed_the_slice():
+    """A label message byte-identical to the previous one is still applied (R4-04).
+
+    Strategy: (a) one 2D widget: the browser clears the slice (zeros), Python
+    ``set_labels`` fills it with 3, the browser clears it again with the same
+    bytes; (b) two same-shape 2D stacks with masks: clear stack 0, switch to
+    stack 1, clear stack 1 with the same bytes.
+    Expected outcome: the second clear empties the slice in both cases
+    (traitlets and the hosts drop equal values, so the widget must forget each
+    message once applied). Negative control: the first message is applied as
+    before.
+    """
+    clear = encode_label_slice(np.zeros((6, 7), np.uint16), 0)
+    w = LabelAnnotator(np.zeros((6, 7), np.float32), labels=np.full((6, 7), 2))
+    w.labels_from_js = clear
+    assert not w.labels.any()
+    w.set_labels(np.full((6, 7), 3))
+    w.labels_from_js = clear
+    assert not w.labels.any(), "second identical clear must be applied"
+
+    lab = np.full((6, 7), 2, np.uint32)
+    ws = LabelAnnotator([np.zeros((6, 7)), np.zeros((6, 7))], labels=[lab, lab.copy()])
+    ws.labels_from_js = clear
+    ws.stack = 1
+    ws.labels_from_js = clear
+    assert [int(x.max()) for x in ws.stack_labels] == [0, 0]
+
+
+def test_float_labels_must_be_finite_integers():
+    """Float label arrays are accepted only when every value is a finite integer (R4-09).
+
+    Strategy: pass float labels with NaN, with non-integral values (0.999,
+    1.7), integral floats, ``-1.0`` with ``background=True``, and an id above
+    65535, to the constructor and to ``set_labels``.
+    Expected outcome: NaN and non-integral values raise ``ValueError`` (NaN
+    used to allocate 16 GiB in a bincount; 0.999 was silently floored to 0);
+    integral floats load exactly as their integer ids, ``-1.0`` becomes the
+    background id; the out-of-range message still says "labels must be in" and
+    points to ``relabel_sequential``.
+    """
+    img = np.zeros((2, 3), np.float32)
+    nan = np.array([[0, 1, 2], [np.nan, 0, 0]], np.float32)
+    with pytest.raises(ValueError, match="finite"):
+        LabelAnnotator(img, labels=nan)
+    with pytest.raises(ValueError, match="integer"):
+        LabelAnnotator(img, labels=np.array([[0, 1.7, 2.2], [0.999, 0, 0]]))
+    w = LabelAnnotator(img, labels=np.array([[0.0, 1.0, 2.0], [0.0, 0.0, 7.0]]))
+    np.testing.assert_array_equal(w.labels, [[0, 1, 2], [0, 0, 7]])
+    assert w.labels.dtype == np.uint32 and w.active_label == 8
+    with pytest.raises(ValueError, match="finite"):
+        w.set_labels(nan)
+    np.testing.assert_array_equal(w.labels, [[0, 1, 2], [0, 0, 7]])
+    wb = LabelAnnotator(img, labels=np.array([[-1.0, 1.0, 0.0], [0.0, 0.0, 0.0]]), background=True)
+    assert wb.labels[0, 0] == LabelAnnotator.BACKGROUND_ID
+    with pytest.raises(ValueError, match="labels must be in.*relabel_sequential"):
+        LabelAnnotator(img, labels=np.full((2, 3), 70_000.0))
+
+
+def test_list_of_stacks_takes_labels_as_sequence_or_stacked_array():
+    """With a list of stacks, ``labels`` is a sequence or an array stacked along axis 0 (R4-11).
+
+    Strategy: two ``(2, 8, 9)`` stacks; pass labels as a list, a tuple, a
+    stacked ``(2, 2, 8, 9)`` ndarray, None, a single ``(2, 8, 9)`` array (one
+    stack's labels), a 3-entry stacked array, and a dict.
+    Expected outcome: list, tuple and stacked array load each stack's ids
+    (3 and 4); None starts empty; the single array raises ``ValueError``
+    (its entries do not match the stacks' shapes), the 3-entry array raises
+    ``ValueError`` and the dict raises ``TypeError``, instead of silently
+    starting every stack empty.
+    """
+    imgs = [np.zeros((2, 8, 9), np.float32), np.zeros((2, 8, 9), np.float32)]
+    lab = np.zeros((2, 2, 8, 9), np.uint32)
+    lab[0] = 3
+    lab[1] = 4
+    for labels in (list(lab), tuple(lab), lab):
+        w = LabelAnnotator(imgs, axes="ZYX", labels=labels)
+        assert [int(x.max()) for x in w.stack_labels] == [3, 4]
+    w = LabelAnnotator(imgs, axes="ZYX", labels=None)
+    assert [int(x.max()) for x in w.stack_labels] == [0, 0]
+    with pytest.raises(ValueError):
+        LabelAnnotator(imgs, axes="ZYX", labels=lab[0])
+    with pytest.raises(ValueError, match="2 stacks but 3"):
+        LabelAnnotator(imgs, axes="ZYX", labels=np.zeros((3, 2, 8, 9), np.uint32))
+    with pytest.raises(TypeError):
+        LabelAnnotator(imgs, axes="ZYX", labels={0: lab[0], 1: lab[1]})
+
+
+def test_save_all_stacks_refuses_colliding_names_and_leaves_the_view_alone(tmp_path):
+    """``save(stacks="all")`` checks every stack before writing and does not drive the UI (R4-12).
+
+    Strategy: two 2D stacks named "cage A" and "cage/A" (both sanitise to
+    ``cage_A``) with masks 1 and 2; save with ``overwrite=True`` and with
+    ``overwrite=False``. Then two distinct names, ``keep_label`` on and an
+    active id set by hand, observing ``stack`` and ``labels_rev`` while saving.
+    Expected outcome: the colliding saves raise ``ValueError`` and write no
+    file (stack 0's masks were silently replaced before); with distinct names
+    both stacks are written with their own masks, while ``stack``,
+    ``active_label``, ``labels_rev`` and the shown image are untouched and no
+    stack switch is notified.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    a = np.random.default_rng(0).random((6, 7)).astype(np.float32)
+    labs = [np.full((6, 7), 1, np.uint32), np.full((6, 7), 2, np.uint32)]
+    w = LabelAnnotator([a, a.copy()], labels=labs, stack_names=["cage A", "cage/A"])
+    for ow in (True, False):
+        with pytest.raises(ValueError, match="stack_names"):
+            w.save(tmp_path, "t", overwrite=ow, stacks="all")
+        assert list(tmp_path.iterdir()) == []
+
+    w = LabelAnnotator([a, a.copy()], labels=labs, stack_names=["A", "B"], keep_label=True)
+    w.active_label = 1
+    seen = []
+    w.observe(lambda ch: seen.append(ch["new"]), names="stack")
+    rev, img = w.labels_rev, bytes(w.image_to_js)
+    paths = w.save(tmp_path, "t", stacks="all")
+    assert [p.name for p in paths] == ["t_A_img.tif", "t_A_masks.tif", "t_B_img.tif", "t_B_masks.tif"]
+    assert int(tifffile.imread(paths[1]).max()) == 1 and int(tifffile.imread(paths[3]).max()) == 2
+    assert seen == [] and w.stack == 0 and w.active_label == 1
+    assert w.labels_rev == rev and bytes(w.image_to_js) == img
+
+
+def test_save_validates_arguments_and_warns_when_nothing_is_written(tmp_path):
+    """``save`` rejects unknown ``slices`` / ``stacks`` values and warns on an empty save (R4-22).
+
+    Strategy: call ``save`` with ``slices="anotated"``, ``stacks="All"`` (on a
+    two-stack widget), then an unannotated widget with the default
+    ``slices="annotated"``.
+    Expected outcome: the typos raise ``ValueError`` naming the allowed values
+    (instead of a bare ``KeyError`` or silently saving only the current
+    stack) and write nothing; the empty save returns ``[]`` with a
+    ``UserWarning``.
+    """
+    w = LabelAnnotator(np.zeros((3, 6, 7), np.float32), axes="ZYX", labels=np.ones((3, 6, 7), np.uint32))
+    with pytest.raises(ValueError, match="'annotated', 'all', 'current'"):
+        w.save(tmp_path, "a", slices="anotated")
+    two = LabelAnnotator([np.zeros((6, 7)), np.zeros((6, 7))], labels=[np.ones((6, 7)), np.ones((6, 7))])
+    with pytest.raises(ValueError, match="'current', 'all'"):
+        two.save(tmp_path, "a", stacks="All")
+    assert list(tmp_path.iterdir()) == []
+    empty = LabelAnnotator(np.zeros((3, 6, 7), np.float32), axes="ZYX")
+    with pytest.warns(UserWarning, match="nothing"):
+        assert empty.save(tmp_path, "e") == []
+
+
+def test_nan_and_inf_image_pixels_render_without_warnings():
+    """Non-finite image pixels are mapped before the uint8 cast, so no RuntimeWarning (R4-23).
+
+    Strategy: a float ramp with one NaN, one +inf and one -inf pixel, and an
+    all-NaN image, built and z-stepped with RuntimeWarnings turned into errors.
+    Expected outcome: no warning; NaN and -inf render as 0, +inf as 255, and
+    the finite pixels render exactly as before (monotone ramp up to 255).
+    """
+    img = np.linspace(0, 1, 2 * 6 * 7, dtype=np.float32).reshape(2, 6, 7)
+    img[1, 0, 0], img[1, 0, 1], img[1, 0, 2] = np.nan, np.inf, -np.inf
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        w = LabelAnnotator(img, axes="ZYX")
+        w.z = 1
+        LabelAnnotator(np.full((6, 7), np.nan, np.float32))
+    data = np.frombuffer(bytes(w.image_to_js), np.uint8, offset=_IMG_HDR.size).reshape(6, 7)
+    assert data[0, 0] == 0 and data[0, 1] == 255 and data[0, 2] == 0
+    assert data[-1, -1] == 255 and np.all(np.diff(data.ravel()[3:].astype(int)) >= 0)
+
+
+def test_bool_image_is_accepted_and_saved_unchanged(tmp_path):
+    """A boolean mask (e.g. from ``extract_surface``) can be the image (C-04).
+
+    Strategy: a ``(3, 6, 7)`` bool volume as the image (axes ``ZYX``), then
+    as one of two stacks; read the display slice and save an annotated slice.
+    Expected outcome: no ``TypeError`` from the percentile of bool data; True
+    pixels display as 255 and False as 0; ``save`` writes the original bool
+    data, not a rescaled copy.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    mask = np.zeros((3, 6, 7), bool)
+    mask[:, 2:4, 2:5] = True
+    w = LabelAnnotator(mask, axes="ZYX", labels=np.ones((3, 6, 7), np.uint32))
+    data = np.frombuffer(bytes(w.image_to_js), np.uint8, offset=_IMG_HDR.size).reshape(6, 7)
+    np.testing.assert_array_equal(data, np.where(mask[1], 255, 0))
+    paths = w.save(tmp_path, "m", slices="current")
+    saved = tifffile.imread(paths[0])
+    assert saved.dtype == bool
+    np.testing.assert_array_equal(saved, mask[1])
+    two = LabelAnnotator([mask, mask.copy()], axes="ZYX")
+    two.stack = 1
+    np.testing.assert_array_equal(np.frombuffer(bytes(two.image_to_js), np.uint8, offset=_IMG_HDR.size).reshape(6, 7), data)
+
+
+def test_rendered_view_resync_resends_stale_slice_only():
+    """A view rendered after strokes asks for the current slice; Python re-sends it if stale (R4-03).
+
+    Strategy: a 3D widget at z=1; bump ``labels_resync`` (what a newly
+    rendered view does) before any stroke, then after a browser stroke on
+    z=1, then after a stroke on another slice.
+    Expected outcome: with nothing stale no labels are re-sent (``labels_rev``
+    unchanged; a view rendered while the kernel is busy must not have its
+    queued strokes reloaded away); after the stroke on the shown slice
+    ``labels_to_js`` carries it and ``labels_rev`` is bumped (so the new view
+    does not start from, and later send back, the pre-stroke slice); a stroke
+    on another slice does not make the shown slice stale.
+    """
+    w = LabelAnnotator(np.zeros((3, 6, 7), np.float32), axes="ZYX")
+    rev = w.labels_rev
+    w.labels_resync += 1
+    assert w.labels_rev == rev
+    edit = np.zeros((6, 7), np.uint16)
+    edit[1:3, 1:3] = 4
+    w.labels_from_js = encode_label_slice(edit, 1)
+    w.labels_resync += 1
+    assert w.labels_rev == rev + 1
+    z, sl = decode_label_slice(w.labels_to_js)
+    assert z == 1
+    np.testing.assert_array_equal(sl, edit)
+    w.labels_from_js = encode_label_slice(edit, 0)
+    w.labels_resync += 1
+    assert w.labels_rev == rev + 1
