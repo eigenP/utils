@@ -15,6 +15,18 @@
 # ]
 # ///
 
+# Notes for editors (numbers on the default data; recheck them whenever the
+# simulation or the default drawing changes):
+# - The twin positive control needs a tolerance: with ~60 random peaks along one
+#   drawing, several genes peak within a few cells of a twin's parent, and graph
+#   W1 has a noise floor among them (strict twin rank 4-7 on the default drawings,
+#   1 beyond eps = 3 x trajectory length / n_traj). Report both the strict and
+#   the beyond-eps rank. Do not attribute the strict rank to baseline or log
+#   scale; both hypotheses were tested and rejected.
+# - The default drawing (_branched_horseshoe) is a horseshoe with a side branch,
+#   so the default data already show why a single cell ordering (pseudotime) is
+#   not enough: Spearman reaches rho ~ 0.74 with the truth, graph W1 ~ 0.96.
+
 import marimo
 
 __generated_with = "0.25.1"

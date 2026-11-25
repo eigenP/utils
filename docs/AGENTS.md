@@ -8,13 +8,15 @@ The `docs/` directory contains several important resources to help you write bet
 - **`MEMORIES.md`**: Tracks important context, learnings, and general behavioral rules established over time. Review this to understand existing conventions, performance gotchas, and architectural decisions.
 - **`MARIMO_skill.md`**: Provides specific instructions and skills for working with `marimo` notebooks and applications within the project.
 
+**Where to record learnings:** repo-wide rules and learnings go in `docs/MEMORIES.md`; derivations and learnings specific to one persona go in that persona's journal (`docs/matth.md`, `docs/testr.md`, `docs/bolt.md`). The root `AGENTS.md` is only a pointer to these files.
+
 ### Agent Personalities
 For specialized tasks, agents should refer to these files to channel specific expertise:
 - **`matth.md`**: "Matth 🧠 — Algorithmic Design & Applied Math". Owns mathematical and statistical correctness: estimator bias, calibration, exact formulations, numerical stability. Changes may alter outputs, but only with an analytic ground truth.
 - **`testr.md`**: "Testr 🧪 — Invariant-Based Verification". Owns the test suite: conceptual, invariant- or analytic-oracle tests, edge cases and calibration checks, with no flaky or golden-value assertions. Fixes the bugs its tests expose.
 - **`bolt.md`**: "Bolt ⚡ — Performance & Memory". Owns runtime and peak memory of hot paths. Output must be unchanged, shown by an equivalence test and a before/after benchmark.
 
-Each persona file starts with a charter (mission, scope, operating procedure, definition of done, red flags), followed by a chronological journal of dated **Learning / Action** entries. Add new learnings to the journal of the persona that produced them.
+Each persona file starts with a charter (mission, scope, operating procedure, definition of done, red flags), followed by a chronological journal of dated **Learning / Action** entries. Add persona-specific learnings to the journal of the persona that produced them; repo-wide rules go in `MEMORIES.md`.
 
 **Weekly persona upgrade:** a scheduled task rotates the personas by ISO week number (`W mod 3`: 0 = Matth, 1 = Testr, 2 = Bolt). Each run opens one draft PR with a targeted change that introduces no regressions, plus a short report. Changes to public APIs or to visible output also update the matching demo notebook.
 
@@ -22,10 +24,13 @@ Each persona file starts with a charter (mission, scope, operating procedure, de
 - Install the test dependencies once: `uv sync --all-extras` (the `dev` extra includes pytest and pytest-playwright), then `uv run playwright install chromium` for the browser tests in `tests/test_frontend_*.py`.
 - Run the suite with `uv run pytest tests/`. Without pytest-playwright or a browser the frontend tests are skipped locally; in CI (`CI=true`) they error instead.
 - The Pyodide (WASM) suite: `uv build --wheel`, `npm install --no-save --prefix tests/wasm pyodide@314.0.0`, then `node tests/wasm/run_pyodide_tests.mjs` (see the `pyodide` job in `.github/workflows/ci.yml`).
+- Test files mirror source modules 1:1: tests for `src/eigenp_utils/<module>.py` live in `tests/test_<module>.py` (e.g. `tests/test_single_cell.py` for `single_cell.py`). Do not create new, narrowly scoped test files.
+- Every test function has a docstring stating what it tests, the strategy and the expected outcome (no trivial auto-generated summaries).
+- Test public wrappers (e.g. `show_zyx_max_slice_interactive`) rather than internal widget classes (`TNIASliceWidget`) where possible.
 - Ensure all tests pass locally before submission.
 
 ## Dependencies
-- Install development dependencies using `uv venv && source .venv/bin/activate && uv pip install -e ".[all,dev]"` (or `uv run`).
+- Install development dependencies from the lock file with `uv sync --all-extras` (see *Testing*), then run tools with `uv run`.
 - **Inline Script Metadata (PEP 723):**
     - Moving forward, we use inline script metadata to define dependencies for each individual source file in `src/eigenp_utils/`.
     - Core dependencies (like `numpy`, `scipy`) are still listed in `pyproject.toml`, but specialized or file-specific dependencies should be declared in the file header.
@@ -42,6 +47,12 @@ Each persona file starts with a charter (mission, scope, operating procedure, de
       # ///
       ```
     - Start with permissive versioning (e.g., just the package name) unless a specific version is required.
+    - Each header in `src/` must list the same third-party dependencies the module imports and say `requires-python = ">=3.11"` (matching `pyproject.toml`); a CI consistency check for this is being added.
+
+## Matplotlib (object-oriented interface)
+- Library code never touches pyplot global state: no `plt.figure()`, `plt.gcf()`, `plt.gca()`, `plt.tight_layout()` or `plt.get_fignums()` on figures or axes that belong to the caller.
+- Widgets render with `matplotlib.figure.Figure` (not `plt.figure`/`plt.subplots`), so they never register figures with pyplot.
+- Functions that draw take `fig`/`ax` explicitly and return the figure (and axes) they drew on. Lay out only figures the function created itself (e.g. `layout='tight'` at creation), never one passed in by the caller.
 
 ## Python Versions
 - The project requires Python 3.11 or later (3.10 reached end-of-life in October 2026). The stdlib `tomllib` can be used without a `tomli` fallback.

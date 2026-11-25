@@ -30,18 +30,7 @@ Make every numerical routine in `eigenp_utils` **mathematically correct first**.
 ---
 
 # Journal
-Entries are in chronological order. Superseded entries are marked and kept for their derivations.
-
-## 2024-05-18 - Invalid N-Dimensional Interpolation for Spline Parameterization
-**Learning:** In `spline_utils.py`, the `calculate_vector_difference(overlap_only=True)` function attempted to construct a spatial bounding box using Python's built-in `max()` and `min()` functions on N-dimensional arrays. This is invalid in NumPy and raises a `ValueError: The truth value of an array with more than one element is ambiguous`. Furthermore, even if `np.maximum` and `np.minimum` were used correctly, the original implementation passed an N-dimensional spatial array (the `start` to `end` bounding box diagonal) directly to `np.interp` as the `x` coordinates. `np.interp` evaluates piecewise linear interpolants in 1D space, not N-dimensional space. To compute the difference between the geometric overlap of two parametric splines, one must filter the original points using the geometric bounding box intersection and re-parameterize the cropped segments via B-splines (`splprep`) into the common number of required output points, establishing a proper mapping.
-**Action:** Always verify dimensional assumptions of interpolation functions. `np.interp` is strictly for 1D scalar mapping. Use geometric operations to clip curves (e.g. bounding box masking) and re-parameterize them using `splprep`/`splev` when evaluating parametric distances. Never use `max()` or `min()` on NumPy arrays.
-
-## 2024-05-22 - Generalized Moran's I Formula for Irregular Graphs (superseded 2025-02-28)
-> **Superseded:** the current implementation centres first ($z = x - \bar{x}$, then $z^T W z$); see the 2025-02-28 entry. Kept for the derivation.
-
-**Learning:** The standard simplified formula for Moran's I ($I = \frac{N}{S_0} \frac{x^T W x}{x^T x}$) assumes either row-standardized weights ($S_0=N$) OR ignores the impact of the mean ($\bar{x}$) on the cross-product term for irregular graphs. Specifically, the expansion of the numerator $\sum_{ij} w_{ij} (x_i - \bar{x})(x_j - \bar{x})$ includes terms $-\bar{x} \sum_i x_i R_i$ and $-\bar{x} \sum_j x_j C_j$ (where $R_i, C_j$ are row/col sums of $W$). If the graph has isolated nodes ($R_i=0$) or general weights ($R_i \neq 1$), these terms do not cancel out with $+S_0 \bar{x}^2$ as they do in the regular/standardized case. Neglecting them leads to bias when the mean is non-zero, making the statistic sensitive to simple shifts in data.
-
-**Action:** When implementing spatial statistics, always use the general quadratic form expansion rather than simplified versions that rely on implicit assumptions about graph regularity or weight normalization. I updated `morans_i_all_fast` to include the full expansion: $\text{Num} = x^T W x - \bar{x}(x^T W \mathbf{1}) - \bar{x}(\mathbf{1}^T W x) + \bar{x}^2 S_0$. This ensures correctness for any weight matrix (binary, inverse-distance, etc.) and any topology (including disconnected components).
+Entries are in chronological order. Superseded entries are removed; git history keeps them.
 
 ## 2024-05-23 - Cubic Interpolation for Z-Reconstruction
 **Learning:** In Extended Depth of Focus (EDOF), using linear interpolation to reconstruct pixel intensities from fractional Z-depths acts as a low-pass filter, significantly attenuating contrast and peak intensity (by >10% for sharp foci). This degradation counteracts the benefits of sub-pixel depth estimation. While linear interpolation is sufficient for smooth geometric transformations, it fails to preserve the spectral characteristics of the in-focus image, which is by definition a local maximum in sharpness/intensity.
@@ -60,7 +49,7 @@ The standard approach of calculating drift between $t$ and $t-1$ for correction 
 
 **Action:**
 Decouple the problem into two distinct phases:
-1. **Trajectory Estimation:** Calculate the global absolute position $P_t$ for every frame relative to a fixed reference (Frame 0). This allows global smoothing or constraints to be applied to the trajectory $P(t)$ before any image data is modified.
+1. **Trajectory Estimation:** Compute the whole trajectory $P_t$ before any image data is modified. In `compute_drift_trajectory` (`maxproj_registration.py`) it is integrated from pairwise steps: each frame is registered to its neighbour ($t-1 \to t$; reverse mode $t \to t-1$), the step is clamped, and $P_t = P_{t-1} + \Delta_t$ (`cum_d`), so $P_0 = 0$ (forward) or $P_{T-1} = 0$ (reverse). Frames are not registered to frame 0 directly, so per-step errors still accumulate as described above; having the full trajectory first is what would allow global smoothing or constraints on $P(t)$.
 2. **Correction Application:** Treat correction as a functional mapping $I'_t(x) = I_t(x - P_t)$. This is stateless and parallelizable.
 For bidirectional estimation, explicitly average the forward step $\Delta P_{fwd} = P_t - P_{t-1}$ and backward step $\Delta P_{bwd} = -(P_{t-1} - P_t)$ to reduce bias, rather than relying on implicit loop ordering.
 
@@ -77,14 +66,6 @@ The "surface" is by definition a large, coherent structure.
 
 **Action:**
 Enforce topological coherence by identifying connected components in the thresholded volume. Filter out any component that is significantly smaller than the largest foreground component (e.g., $< 10\% S_{max}$). This robustly rejects floating debris regardless of intensity, provided it is spatially disconnected from the main body.
-
-## 2024-05-26 - Package Import Standards for Tests
-**Learning:**
-Tests should not import from `src.package_name` (e.g., `from src.eigenp_utils...`). This fails in CI environments where the package is installed as `eigenp_utils`.
-Using `from eigenp_utils...` is correct but requires the package to be installed in the local environment (e.g., via `pip install -e .` or `PYTHONPATH` manipulation) to run tests locally.
-
-**Action:**
-Always write tests assuming the package is installed (`from package_name import ...`). To run tests locally, ensure the package is installed in editable mode.
 
 ## 2024-06-15 - Bias-Corrected Bootstrap and Robust Effect Sizes
 **Learning:** Common statistical implementations often rely on estimators that assume infinite data or perfect distributions, leading to biases in small or contaminated samples:
@@ -140,6 +121,10 @@ Always write tests assuming the package is installed (`from package_name import 
 ## 2025-05-24 - Exact Hypergeometric Expectations for Lineage Coupling
 **Learning:** Permutation testing for categorical co-occurrences without spatial dependencies (e.g. lineage coupling of clones across cell types) introduces non-deterministic variation, handles extreme tail values poorly, and is exceptionally slow. The probability of zero occurrences of a subset of cells assigned to a specific set of types within a randomly drawn clone of size $k$ perfectly maps to the hypergeometric distribution. Because calculating exact expectations and variances for single or paired presence involves evaluating probabilities of zero occurrences ($P(X = 0)$), we can use a computationally stable and fully vectorized log-gamma approximation ($P(X=0) = \exp(\ln\Gamma(N-K+1) - \ln\Gamma(N-K-k+1) - \ln\Gamma(N+1) + \ln\Gamma(N-k+1))$) and the inclusion-exclusion principle to perfectly solve for expectations and variances.
 **Action:** Replace heuristic permutation testing with analytical log-gamma formulations of the hypergeometric distribution when evaluating categorical co-occurrence enrichment. It eliminates non-deterministic variation, provides exact variance estimates even in the extreme tails, and enables highly parallel vectorized calculations.
+
+## 2025-05-25 - OLS-Seeded NLLS for Exponential Z-Decay
+**Learning:** Log-OLS ($\ln y = \ln a + bx$ via `np.polyfit`) assumes multiplicative error, but slice intensities have additive error, so fitting in log space mis-weights dim slices.
+**Action:** In `correct_z_intensity_decay` the log-OLS fit only seeds a bounded `scipy.optimize.curve_fit` (decay rate $\le 0$) on the linear-scale data.
 
 ## 2026-11-23 - PAGA Initialisation Without Private APIs or Global RNG State
 **Learning:** `tl_pacmap(init='paga')` called scanpy's private `get_init_pos_from_paga`. scanpy 1.13 made it keyword-only (`rng` Generator, required `adjacency`), so the call raised `TypeError`; up to 1.12 it called `np.random.seed(random_state)`, so every call reset the caller's global NumPy stream. The construction is closed-form: cells of group g go to p_g - d/2 + U[0,1)^2 * d with d = p_g - p_h (h = most strongly connected group), i.e. uniform in the box centred on p_g with half-widths |d|/2; isolated groups sit at p_g. `RandomState(seed).random_sample` draws the same stream as `np.random.seed(seed); np.random.random`, so a local generator reproduces scanpy <= 1.12 bit for bit without the side effect.

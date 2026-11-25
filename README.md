@@ -6,9 +6,9 @@
 
 ### Image Analysis
 * **Extended Depth of Focus (EDOF)**: Reconstruct focused 2D images from 3D stacks with high accuracy using log-parabolic interpolation of focus scores and continuous surface sampling.
-* **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`. Memory optimized for large datasets, with a parallelization vignette available via `dask_extract_surface`.
+* **Surface Extraction**: Robust extraction of 2D surfaces from 3D volumes. Includes topological filtering (Connected Components Analysis) to handle debris, nearest-neighbor inpainting for invalid regions, and precise upscaling via `RegularGridInterpolator`. Volumes that do not fit in memory (dask, zarr, memmap) are processed tile by tile with `extract_surface_tiled`, which gives the same result as a whole-volume `extract_surface` call.
 * **Registration & Drift Correction**: Bidirectional 2D drift correction (`apply_drift_correction`, `apply_subpixel_drift_correction`, `estimate_drift`, `compute_drift_trajectory`), and iterative shift-compensated windowing (`maxproj_registration`) to eliminate systematic biases and achieve sub-pixel stability.
-* **Intensity Rescaling**: Tools for contrast enhancement (including CLAHE), Z-axis intensity decay correction using exact analytical Ordinary Least Squares (OLS) fitting and gamma adjustment (`correct_z_intensity_decay`), and pure-NumPy/SciPy BaSiCPy shading correction (`fit_basic_shading`, `apply_basic_shading`).
+* **Intensity Rescaling**: Tools for contrast enhancement (including CLAHE), Z-axis intensity decay correction (`correct_z_intensity_decay`: a bounded non-linear least-squares exponential fit, seeded by log-space OLS, then gamma or gain correction per slice), a fast k x k per-slice median filter that matches `scipy.ndimage.median_filter(mode='reflect')` exactly (`median_filter_fast` in `eigenp_utils.median_filter`, numba or NumPy backend), and pure-NumPy/SciPy BaSiCPy shading correction (`fit_basic_shading`, `apply_basic_shading`).
 * **Segmentation**: Fast 2D/3D spot labeling using `voronoi_otsu_labeling`.
 * **Anisotropic Pixel Support**: Core spatial processing and morphology functions natively handle physical pixel sizes to accurately support anisotropic microscopy data without structural distortion.
 * **3D Plane Sampling & Geometry**: Utilities to fit planes using RANSAC (`fit_plane_ransac`), compute orthonormal bases (`generate_plane_basis`), and dynamically extract or sample 2D oriented planes from anisotropic 3D volumes (`sample_volume_plane`).
@@ -76,14 +76,14 @@ uv pip install "eigenp_utils @ git+https://github.com/eigenP/utils.git"
 Using [`pixi`](https://pixi.sh) (inside a pixi workspace, which needs a conda `python`; `pixi add python` if it has none):
 
 ```bash
-pixi add --pypi "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
+pixi add --pypi "eigenp_utils[image-analysis,plotting,single-cell] @ git+https://github.com/eigenP/utils.git"
 ```
 
 This writes the dependency to `[pypi-dependencies]` in `pixi.toml` (or `[tool.pixi.pypi-dependencies]` in `pyproject.toml`). The equivalent manifest entry, if you prefer to edit it by hand:
 
 ```toml
 [pypi-dependencies]
-eigenp_utils = { git = "https://github.com/eigenP/utils.git", branch = "main", extras = ["all"] }
+eigenp_utils = { git = "https://github.com/eigenP/utils.git", branch = "main", extras = ["image-analysis", "plotting", "single-cell"] }
 ```
 
 `pixi.lock` pins the exact commit, so new commits on `main` are not picked up until you update the lock file:
@@ -92,37 +92,37 @@ eigenp_utils = { git = "https://github.com/eigenP/utils.git", branch = "main", e
 pixi update eigenp_utils
 ```
 
-`pixi update` re-resolves only that package (to the latest commit of the branch) and rewrites `pixi.lock`; the environment is synced on the next `pixi run`/`pixi shell`, or immediately with `pixi install`. For the PyPI release instead of `git+`, use `pixi add --pypi "eigenp-utils[all]"`; `pixi update eigenp-utils` then moves to the newest version allowed by the manifest constraint, and `pixi upgrade eigenp-utils` also raises that constraint.
+`pixi update` re-resolves only that package (to the latest commit of the branch) and rewrites `pixi.lock`; the environment is synced on the next `pixi run`/`pixi shell`, or immediately with `pixi install`. For the PyPI release instead of `git+`, use `pixi add --pypi "eigenp-utils[image-analysis,plotting,single-cell]"`; `pixi update eigenp-utils` then moves to the newest version allowed by the manifest constraint, and `pixi upgrade eigenp-utils` also raises that constraint.
 
 ### Optional Dependencies
 
 You can choose to install optional dependencies if you need functionality such as single-cell analysis or image analysis:
 
-- `[image-analysis]` - installs `scikit-image`.
+- `[image-analysis]` - installs `scikit-image` and `xarray`.
 - `[single-cell]` - installs packages like `scanpy`, `pacmap`, `leidenalg`, etc.
 - `[plotting]` - installs `plotly`, `statannotations` and `statsmodels`.
 - `[bonsai]` - installs Bonsai's run-time requirements (`scikit-learn`, `ruamel.yaml`, `psutil`); independent of `[single-cell]`. Bonsai itself is cloned separately (see `eigenp_utils.bonsai_tree`). `[bonsai-mpi]` adds `mpi4py` and the MPICH wheels for parallel runs (`run_bonsai(n_procs=...)`) without a system MPI (Linux/macOS).
-- `[all]` - installs all of the optional dependencies above.
+- `[all]` - installs all of the optional dependencies above **plus** `[dev]` (pytest, pytest-playwright, marimo, pot). It is meant for development; to use the package, list the groups you need instead.
 - `[dev]` - installs all dependencies and additional tools for testing (e.g. `pytest`).
 
 e.g. (uv install)
 
 ```bash
-uv pip install "eigenp-utils[all]"
+uv pip install "eigenp-utils[image-analysis,plotting,single-cell]"
 ```
 *(Note: quotes are required so the shell doesn't misinterpret the brackets.)*
 
 For the latest development versions with optional dependencies:
 
 ```bash
-pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
+pip install "eigenp_utils[image-analysis,plotting,single-cell] @ git+https://github.com/eigenP/utils.git"
 ```
 or
 ```bash
-uv pip install "eigenp_utils[all] @ git+https://github.com/eigenP/utils.git"
+uv pip install "eigenp_utils[image-analysis,plotting,single-cell] @ git+https://github.com/eigenP/utils.git"
 ```
 
-You can replace `[all]` with other groups like `[single-cell]` or `[image-analysis,single-cell]` depending on your specific needs.
+Pick the groups you need, e.g. `[single-cell]` or `[image-analysis,single-cell]`.
 
 ### Browser / WASM (marimo, Pyodide)
 
