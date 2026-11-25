@@ -313,6 +313,51 @@ def test_contrast_stretching_uint8_preserves_dynamic_range():
     assert stretched.max() == 255
 
 
+def test_sparse_signal_is_not_blanked_by_degenerate_percentiles():
+    """Verify the shared degenerate-range fallback (R6-02, D02): sparse spots keep their signal and warn.
+
+    Strategy: (+) 15 spots of 1000 on a zero 200x200 float image (0.04%
+    foreground, below 100 - 99.9 %) through ``normalize_image`` and
+    ``contrast_stretching``, float and uint16; (-) a dense ramp keeps the
+    exact percentile behaviour without a warning.
+    Expected outcome: spots map to 1.0 (dtype max for uint16) and background to
+    0, with a UserWarning; before, normalize_image returned zeros and
+    contrast_stretching the raw input.
+    """
+    img = np.zeros((200, 200), np.float32)
+    img[::50, ::15][:3, :5] = 1000.0
+    for arr, top in ((img, 1.0), (img.astype(np.uint16), 65535)):
+        with pytest.warns(UserWarning, match="percentiles"):
+            out = normalize_image(arr)
+        assert out.max() == top and out.min() == 0
+        with pytest.warns(UserWarning, match="percentiles"):
+            out = contrast_stretching(arr)
+        assert out.max() == top and out.min() == 0
+
+    ramp = np.linspace(0, 1, 40_000, dtype=np.float32).reshape(200, 200)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        lo, hi = np.percentile(ramp, (0.5, 99.9))
+        np.testing.assert_allclose(normalize_image(ramp), np.clip((ramp - lo) / (hi - lo), 0, 1), atol=1e-6)
+
+
+def test_large_images_keep_exact_percentiles():
+    """Verify ``normalize_image`` and ``contrast_stretching`` use exact percentiles above 1e6 pixels.
+
+    Strategy: a 1100x1000 gamma-distributed float image (1.1e6 pixels, more
+    than the 1e6-value sample of ``robust_range``) compared with the
+    ``np.nanpercentile`` normalisation the functions used before D02.
+    Expected outcome: equal to float precision (a sampled estimate differed by
+    up to ~1% of the output range). Negative control: a small image is exact
+    either way (covered by the ramp check above).
+    """
+    img = np.random.default_rng(0).gamma(2.0, 50.0, (1100, 1000)).astype(np.float32)
+    lo, hi = np.nanpercentile(img, (0.5, 99.9))
+    np.testing.assert_allclose(normalize_image(img), np.clip((img - lo) / (hi - lo), 0, 1), atol=1e-5)
+    lo, hi = np.nanpercentile(img, (0.0, 99.9))
+    np.testing.assert_allclose(contrast_stretching(img), np.clip((img - lo) / (hi - lo), 0, 1), atol=1e-5)
+
+
 def test_contrast_stretching_and_normalize_image_constant_and_dtypes():
     """Constant images produce finite outputs without NaNs, and normalize_image converts dtypes."""
     const_f32 = np.full((16, 16), 0.42, dtype=np.float32)

@@ -20,6 +20,7 @@ import math
 import datetime
 import warnings
 from .stats import remove_outliers
+from ._conventions import channel_color_hex
 
 # --- Initialization: Load Font and Style ---
 ROOT_DIR = Path(__file__).parent
@@ -208,14 +209,20 @@ def _image_info_lines(image, shown=None) -> list:
 
 
 def _swatch_color(value):
-    """RGB of a channel colour entry (a colormap name gives its last colour), else None."""
-    if not isinstance(value, str) or not value:
+    """RGB of a channel colour entry (a colormap name gives its last colour), else None.
+
+    The package's one resolver (``_conventions.channel_color_hex``, colormap
+    names first: 'gray', 'pink', 'hot' are also CSS colours). Changed (D03,
+    2026-11): RGB(A) tuples and registered Colormap instances give a swatch
+    too (they gave none).
+    """
+    if value is None or (isinstance(value, str) and not value):
         return None
-    try:  # colormap names first: 'gray', 'pink', 'hot' are also CSS colours
-        return mpl_colormaps[value](1.0)[:3]
-    except (KeyError, ValueError):
-        pass
-    return mcolors.to_rgb(value) if mcolors.is_color_like(value) else None
+    try:
+        hex_ = channel_color_hex(value, strict=False)
+    except TypeError:  # an unregistered Colormap instance
+        return None
+    return None if hex_ is None else mcolors.to_rgb(hex_)
 
 
 def _wrap_value(text, width):

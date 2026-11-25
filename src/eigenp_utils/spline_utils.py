@@ -5,6 +5,8 @@ from scipy.interpolate import splprep, splev
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+from ._conventions import resolve_pixel_sizes
+
 # Function to generate random 3D coordinates
 def generate_random_3d_coordinates(num_points=10, seed=None):
     if seed is not None:
@@ -290,46 +292,35 @@ def calculate_spline_length(coords, resolution=None):
     - coords: List or tuple of arrays in order [Z, Y, X] for 3D or [Y, X] for 2D.
     - resolution: Pixel sizes as a sequence/array in the same axis order as `coords`
       ([Z, Y, X] or [Y, X]; a [Z, Y, X] triple is also accepted for 2D), a dictionary
-      {'Z','Y','X'}, or None. Missing or None entries fall back to 1.0 with a warning.
+      {'Z','Y','X'} (with an optional length 'unit', converted to µm), a scalar, or None.
+      A missing Z with known Y and X takes the finest of them; other missing or None
+      entries fall back to 1.0. Both warn. Non-finite or non-positive sizes raise.
 
     Returns:
-    - Real-world length in units of the pixel size.
+    - Real-world length in µm (in pixels for axes without a size).
+
+    Changed (D01, 2026-11): resolution goes through the package's shared
+    parser: units are converted to µm, a missing Z takes the finest of Y/X
+    (it used to be 1.0), and non-positive sizes raise ValueError.
     """
     ndim = len(coords)
     if ndim not in [2, 3]:
         raise ValueError("coords must be a list of 2 or 3 arrays ([Z], Y, X)")
 
-    # Default resolutions
     res = {'X': 1.0, 'Y': 1.0, 'Z': 1.0}
     axes_used = ['Z', 'Y', 'X'][-ndim:]
 
-    if resolution is None:
-        pass
-    elif isinstance(resolution, dict):
-        for axis in axes_used:
-            value = resolution.get(axis)
-            if value is None:
-                warnings.warn(
-                    f"No pixel size for axis {axis} in resolution; using 1.0.", stacklevel=2
-                )
-            else:
-                res[axis] = float(value)
-    else:
-        values = list(np.ravel(np.asarray(resolution, dtype=object)))
-        if len(values) == 3 and ndim == 2:
-            values = values[-2:]  # a [Z, Y, X] triple for a 2D (Y, X) spline
-        if len(values) != ndim:
-            raise ValueError(
-                f"resolution has {len(values)} entries; expected {ndim} "
-                f"({', '.join(axes_used)}) for {ndim}D coordinates."
-            )
+    if resolution is not None:
+        if not isinstance(resolution, dict) and np.ndim(resolution) > 1:
+            resolution = list(np.ravel(np.asarray(resolution, dtype=object)))
+        values, _, _ = resolve_pixel_sizes(resolution, ndim)
         for axis, value in zip(axes_used, values):
             if value is None:
                 warnings.warn(
                     f"No pixel size for axis {axis} in resolution; using 1.0.", stacklevel=2
                 )
             else:
-                res[axis] = float(value)
+                res[axis] = value
 
     # Map coordinates to resolutions:
     # If 3D, coords are [Z, Y, X]

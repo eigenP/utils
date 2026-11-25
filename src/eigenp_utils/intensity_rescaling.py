@@ -7,6 +7,8 @@ import scipy.ndimage as ndimage
 from scipy.fft import dctn, idctn
 import skimage.transform as transform
 
+from ._conventions import robust_range
+
 
 def _float_to_int(arr, dtype):
     """Round floats and cast them to an integer dtype, clipping to its range (NaN -> 0).
@@ -95,8 +97,16 @@ def contrast_stretching(image, p_min=0.0, p_max=99.9):
     """
     Stretch the intensity range of the image based on percentiles, to [0, 1]
     (floats) or [0, dtype max] (integers).
+
+    The percentiles are exact, over the finite values (NaN and inf ignored).
+    When they are equal although the image is not constant (signal on fewer than
+    (100 - p_max)% of the pixels), the range falls back to the data maximum
+    (and minimum) with a UserWarning. A constant image is returned unchanged.
+
+    Changed (D02, 2026-11): the degenerate case used to return the input
+    unchanged (raw units, not mapped to [0, 1]).
     """
-    v_min, v_max = np.nanpercentile(image, (p_min, p_max))
+    v_min, v_max = robust_range(image, p_min, p_max, n=max(np.size(image), 1), stacklevel=3)
     if v_min == v_max:
         return image
     return rescale_intensity(image, in_range=(v_min, v_max), out_range=(0.0, 1.0))
@@ -106,10 +116,16 @@ def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=No
     Normalize image intensities to lie between 0 and 1 (for float) or 0 and MAX (for int).
 
     NaN pixels are ignored when computing the percentiles; they stay NaN in float
-    outputs and become 0 in integer outputs.
+    outputs and become 0 in integer outputs (inf is ignored too). The
+    percentiles are exact. When they are equal although the image is not constant (signal on fewer
+    than (100 - upper_percentile)% of the pixels), the range falls back to the
+    data maximum (and minimum) with a UserWarning. A constant image gives 0.
+
+    Changed (D02, 2026-11): the degenerate case used to give an all-zero image.
     """
     image = np.asarray(image)
-    lower_bound, upper_bound = np.nanpercentile(image, (lower_percentile, upper_percentile))
+    lower_bound, upper_bound = robust_range(image, lower_percentile, upper_percentile,
+                                            n=max(image.size, 1))
 
     work = image if image.dtype == np.float32 else image.astype(np.float64)
     denom = upper_bound - lower_bound
