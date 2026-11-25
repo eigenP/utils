@@ -1561,10 +1561,10 @@ def brightness_diagnostic_plotter(diagnostic_data, ax=None):
     Plots the diagnostic data returned by `correct_z_intensity_decay(..., return_diagnostic=True)`.
 
     The points are the 99th percentile of each z-slice and the line is the fitted
-    decay, in the units the correction works in: integer input is scaled to [0, 1]
-    first (by the dtype maximum for 8/16-bit, by the data's maximum magnitude for
-    wider integers), float input keeps its raw intensities. Neither curve is
-    normalised to the fit.
+    decay, in the units the correction works in: integer input is first divided by
+    the dtype maximum (8/16-bit) or by the data's maximum magnitude (wider integers),
+    so unsigned data lies in [0, 1]; float input keeps its raw intensities. Neither
+    curve is normalised to the fit.
 
     Args:
         diagnostic_data (dict): The diagnostic data containing `x_data`, `y_data_norm`, `y_fit_norm`, and `gamma_fit_func`.
