@@ -27,6 +27,8 @@ import warnings
 
 import numpy as np
 
+from ._conventions import _degenerate_fallback, robust_range, sample_values
+
 # scikit-image is imported inside the legacy `_my_clahe_` only, so `clahe_u8`
 # (numba / NumPy) works in minimal environments without scikit-image.
 
@@ -356,6 +358,8 @@ def map_histogram(hist, min_val, max_val, n_pixels):
 # ---------------------------------------------------------------------------
 
 _NBINS_U8 = 256
+# Values sampled (fixed seed) to estimate the percentiles of non-uint8 input
+_SAMPLE_U8 = 1 << 22
 
 
 def _to_uint8(image, percentiles):
@@ -367,17 +371,14 @@ def _to_uint8(image, percentiles):
         return image.astype(np.uint8) * 255
     if image.dtype in (np.uint16, np.int16, np.int8):
         return _small_int_to_uint8(image, percentiles)
-    flat = image.reshape(-1)
-    # Percentiles on a strided subsample (<= ~4M values): exact enough for
-    # display/segmentation bounds, and O(1) in the volume size beyond that.
-    step = max(1, flat.size >> 22)
-    sample = flat[::step]
-    if np.issubdtype(sample.dtype, np.floating):
-        sample = sample[np.isfinite(sample)]
-    if sample.size == 0:
+    # Percentiles on a fixed-seed random sample of <= 4M values (a strided
+    # sample aliases with image columns, R6-13): exact enough for
+    # segmentation bounds, and O(1) in the volume size beyond that. A
+    # degenerate range (sparse signal) falls back to the data maximum, with a
+    # warning, instead of a black image (R6-02).
+    if sample_values(image, n=_SAMPLE_U8).size == 0:
         return np.zeros(image.shape, np.uint8)
-    lo, hi = np.percentile(sample, percentiles)
-    lo, hi = float(lo), float(hi)
+    lo, hi = robust_range(image, *percentiles, n=_SAMPLE_U8, stacklevel=3)
     out = np.empty(image.shape, np.float32)
     if hi > lo:
         np.subtract(image, lo, out=out, casting="unsafe")
@@ -400,13 +401,19 @@ def _small_int_to_uint8(image, percentiles):
         # two's complement view: v + offset == (code ^ sign bit)
         sign = np.array(1 << (8 * image.dtype.itemsize - 1), dtype=codes.dtype)
         codes = codes ^ sign
-    # histogram of a strided subsample (<= ~4M values), as for floats
-    counts = np.bincount(codes[::max(1, codes.size >> 22)],
-                         minlength=info.max + offset + 1)
+    # histogram of a fixed-seed random sample (<= 4M values), as for floats
+    if codes.size > _SAMPLE_U8:
+        sample = codes[np.random.default_rng(0).integers(0, codes.size, _SAMPLE_U8)]
+    else:
+        sample = codes
+    counts = np.bincount(sample, minlength=info.max + offset + 1)
     cdf = np.cumsum(counts)
     # 'lower'-style percentiles on the exact histogram
     ranks = np.asarray(percentiles, float) / 100 * (cdf[-1] - 1)
-    lo, hi = np.searchsorted(cdf, ranks, side='right')
+    lo, hi = (int(v) for v in np.searchsorted(cdf, ranks, side='right'))
+    if hi <= lo and codes.size:
+        lo, hi = _degenerate_fallback(lo, hi, int(codes.min()), int(codes.max()),
+                                      *percentiles, stacklevel=4)
     levels = np.arange(counts.size, dtype=np.float32)
     if hi > lo:
         lut = (levels - lo) * np.float32(255.0 / (hi - lo))
@@ -637,7 +644,13 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
         Normalised clip limit as in ``_my_clahe_``: 0 ~ identity, 1 or None = AHE.
         Equivalent to OpenCV's ``clipLimit = 256 * clip_limit``.
     percentiles : (float, float)
-        Input range for non-uint8 images.
+        Input range for non-uint8 images, estimated on a fixed-seed random
+        sample of at most 4M values. When the two percentiles are equal
+        (signal on fewer than (100 - upper)% of the voxels) the range falls
+        back to the data maximum (and minimum), with a UserWarning.
+        Changed (D02, 2026-11): that case used to give an all-black input
+        (all-zero for integer input); the sample used to be strided, which
+        aliases with image columns.
     backend : {'auto', 'numba', 'numpy'}
 
     Returns

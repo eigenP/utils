@@ -382,6 +382,36 @@ def test_clahe_u8_small_int_conversion_matches_float_reference():
         assert np.abs(out.astype(int) - ref.astype(int)).max() <= 1, dt
 
 
+def test_clahe_u8_sparse_signal_and_column_patterns():
+    """Verify sparse signal is not blanked (R6-02) and the percentile sample does not alias with columns (R6-13).
+
+    Strategy: (+) 15 bright spots on zeros in float32 and uint16 (degenerate
+    (0.1, 99.9) range); (+) a 64x512x512 float volume whose every 4th column is
+    offset by -50 (a strided sample with step 4 sees one column phase only);
+    (-) dense data keep the previous mapping (no warning).
+    Expected outcome: spots map to 255 with a UserWarning instead of 0; the
+    sampled percentiles match the exact ones within 0.5% of the range.
+    """
+    from eigenp_utils.clahe_equalize_adapthist import _to_uint8
+
+    img = np.zeros((200, 200), np.float32)
+    img[::50, ::15][:3, :5] = 1000.0
+    for arr in (img, img.astype(np.uint16)):
+        with pytest.warns(UserWarning, match="percentiles"):
+            out = _to_uint8(arr, (0.1, 99.9))
+        assert out.max() == 255 and out[1, 1] == 0
+
+    rng = np.random.default_rng(0)
+    vol = rng.normal(300, 20, (64, 512, 512)).astype(np.float32)
+    vol[..., ::4] -= 50
+    exact = np.percentile(vol, (0.1, 99.9))
+    out = _to_uint8(vol, (0.1, 99.9))
+    # the value that maps to grey level 0 / 255 is within 0.5% of the exact percentile range
+    span = exact[1] - exact[0]
+    assert abs(vol[out == 0].max() - exact[0]) < 0.005 * span
+    assert abs(vol[out == 255].min() - exact[1]) < 0.005 * span
+
+
 def test_clahe_u8_identity_and_edge_cases():
     """Low clip ~ identity; constant images, 1D, oversized kernels, and size-1 axes do not fail."""
     image = _camera()

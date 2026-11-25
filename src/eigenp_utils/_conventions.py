@@ -419,16 +419,29 @@ def robust_range(a, pmin=0.1, pmax=99.9, *, n=1_000_000, seed=0, stacklevel=2):
     lo, hi = (float(v) for v in np.percentile(sample, [pmin, pmax]))
     if hi <= lo:
         mn, mx = _finite_extremes(a, sample)
-        if mx is not None and mx > mn:
-            if mx > lo:
-                hi = mx
-            else:
-                lo, hi = mn, mx
-            warnings.warn(
-                f"The ({pmin}, {pmax}) percentiles of the data are equal (signal on fewer than "
-                f"{100 - pmax:g}% of the values); using the range [{lo:g}, {hi:g}] instead.",
-                UserWarning, stacklevel=stacklevel + 1,
-            )
+        lo, hi = _degenerate_fallback(lo, hi, mn, mx, pmin, pmax, stacklevel=stacklevel + 1)
+    return lo, hi
+
+
+def _degenerate_fallback(lo, hi, mn, mx, pmin, pmax, stacklevel=2):
+    """Shared rule for a degenerate percentile range ``hi <= lo`` of non-constant data.
+
+    ``hi`` becomes the finite maximum ``mx`` (``lo`` the minimum ``mn`` if
+    that is still degenerate), with a UserWarning. Constant data (``mx <=
+    mn``) are returned unchanged and silently. Values may be data units or
+    integer codes; they are returned as given.
+    """
+    if hi > lo or mx is None or not mx > mn:
+        return lo, hi
+    if mx > lo:
+        hi = mx
+    else:
+        lo, hi = mn, mx
+    warnings.warn(
+        f"The ({pmin}, {pmax}) percentiles of the data are equal (signal on fewer than "
+        f"{100 - pmax:g}% of the values); using the range [{lo:g}, {hi:g}] instead.",
+        UserWarning, stacklevel=stacklevel + 1,
+    )
     return lo, hi
 
 
