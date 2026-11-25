@@ -217,6 +217,34 @@ def test_savefig_svg_editable_text(tmp_path):
             plt.close(fig)
 
 
+def test_savefig_svg_editable_text_false_outlines_glyphs_after_set_plotting_style(tmp_path):
+    """Verify editable_text=False outlines glyphs even when the global rcParams ask for <text>.
+
+    Strategy: inside an isolated rc_context, call set_plotting_style() (which sets the
+    global svg.fonttype to 'none', as the demos do), then export the same figure with
+    editable_text=False and, as a control, with the default editable_text=True.
+    Expected: editable_text=False writes no <text elements (glyphs become paths) and
+    leaves the global svg.fonttype at 'none'; the default export still writes <text.
+    """
+    with plt.rc_context():
+        set_plotting_style()
+        assert plt.rcParams["svg.fonttype"] == "none"
+        fig, ax = plt.subplots()
+        try:
+            ax.text(0.5, 0.5, "Outlined Text")
+
+            svg_outlined = tmp_path / "outlined"
+            savefig_svg(svg_outlined, editable_text=False)
+            assert "<text" not in svg_outlined.with_suffix(".svg").read_text()
+            assert plt.rcParams["svg.fonttype"] == "none"
+
+            svg_editable = tmp_path / "editable"
+            savefig_svg(svg_editable)
+            assert "<text" in svg_editable.with_suffix(".svg").read_text()
+        finally:
+            plt.close(fig)
+
+
 def test_savefig_svg_raster_threshold_and_file_size(tmp_path):
     """Verify scatter_raster_threshold rasterizes dense scatters, shrinks SVGs, and respects None.
 
@@ -303,24 +331,23 @@ def test_raincloud_plot_custom_tick_labels(orientation, label_kwarg, tick_getter
         ("horizontal", "y_label", "get_yticklabels", "get_ylabel"),
     ],
 )
-def test_raincloud_plot_label_mismatch_warning(capsys, orientation, label_kwarg, tick_getter, axis_label_getter):
+def test_raincloud_plot_label_mismatch_warning(orientation, label_kwarg, tick_getter, axis_label_getter):
     """Verify mismatched tick-label sequence length warns and falls back to default ticks.
 
     Strategy: supply a 1-element label list for 2 groups in vertical and horizontal modes.
-    Expected: warning is printed naming the mismatched parameter, ticks remain ['0', '1'],
-    and the stringified list is used as the axis label.
+    Expected: a UserWarning (warnings.warn, not print) names the mismatched parameter,
+    ticks remain ['0', '1'], and the stringified list is used as the axis label.
     """
     rng = np.random.default_rng(2)
     data = [rng.normal(0, 1, 40), rng.normal(2, 1, 40)]
 
-    res = raincloud_plot(data, orientation=orientation, **{label_kwarg: ["Group A"]})
+    with pytest.warns(UserWarning, match=rf"{label_kwarg} list length \(1\) does not match number of groups \(2\)"):
+        res = raincloud_plot(data, orientation=orientation, **{label_kwarg: ["Group A"]})
     try:
         ax = res["axes"]
         ticks = [t.get_text() for t in getattr(ax, tick_getter)()]
         assert ticks == ["0", "1"]
         assert getattr(ax, axis_label_getter)() == "['Group A']"
-        captured = capsys.readouterr()
-        assert f"Warning: {label_kwarg} list length (1) does not match number of groups (2)" in captured.out
     finally:
         plt.close(res["fig"])
 
@@ -748,6 +775,141 @@ def test_raincloud_leaves_callers_figure_and_pyplot_alone():
     finally:
         plt.close(fig1)
         plt.close(fig2)
+
+
+def _raincloud_two_groups(kind, palette):
+    """Call raincloud_plot on the same two groups 'A' and 'B' given as input ``kind``."""
+    rng = np.random.default_rng(5)
+    a, b = rng.normal(0, 1, 20), rng.normal(3, 1, 20)
+    long_df = pd.DataFrame({"g": ["A"] * 20 + ["B"] * 20, "v": np.r_[a, b]})
+    if kind == "list":
+        return raincloud_plot([a, b], x_label=["A", "B"], palette=palette)
+    if kind == "dict":
+        return raincloud_plot({"A": a, "B": b}, palette=palette)
+    if kind == "wide_df":
+        return raincloud_plot(pd.DataFrame({"A": a, "B": b}), palette=palette)
+    if kind == "long_df":
+        return raincloud_plot(long_df, x="g", y="v", palette=palette)
+    return raincloud_plot(long_df, x="g", y="v", hue="g", palette=palette)  # "hue"
+
+
+_GRAY = mpl_colormaps["gray"]
+_VIRIDIS = mpl_colormaps["viridis"]
+
+
+@pytest.mark.parametrize("kind", ["list", "dict", "wide_df", "long_df", "hue"])
+@pytest.mark.parametrize(
+    "palette, expected",
+    [
+        ("viridis", [_VIRIDIS(0.0), _VIRIDIS(1.0)]),
+        ("gray", [_GRAY(0.0), _GRAY(1.0)]),  # colormap names win over CSS colours
+        ("tab:red", ["tab:red", "tab:red"]),
+        (["#00ff00", "#ff00ff"], ["#00ff00", "#ff00ff"]),
+        ({"A": "#ff0000", "B": "#0000ff"}, ["#ff0000", "#0000ff"]),
+        ({"A": "#ff0000"}, ["#ff0000", "#4C78A8"]),
+    ],
+)
+def test_raincloud_palette_resolves_the_same_for_every_input_type(kind, palette, expected):
+    """Verify every raincloud_plot input type resolves palette the same way.
+
+    Strategy: draw the same two groups 'A' and 'B' as a list of arrays (labelled via
+    x_label), a dict, a wide DataFrame, a long DataFrame with x/y, and a long DataFrame
+    with hue, for a colormap name, a name that is both a colormap and a CSS colour
+    ('gray'), a single colour, a list, a full dict and a partial dict.
+    Expected: the two violins get the same colours for every input type: a colormap is
+    sampled at 0 and 1, a colour string colours every group, a list is cycled, a dict is
+    looked up by group label with '#4C78A8' for missing labels.
+    """
+    res = _raincloud_two_groups(kind, palette)
+    try:
+        colors = [v.get_facecolor()[0][:3] for v in _violin_collections(res["axes"])]
+        assert len(colors) == 2
+        for got, want in zip(colors, expected):
+            np.testing.assert_allclose(got, mpl.colors.to_rgb(want), atol=1e-6)
+    finally:
+        plt.close(res["fig"])
+
+
+@pytest.mark.parametrize("kind", ["list", "dict", "wide_df", "long_df", "hue"])
+def test_raincloud_default_palette_and_invalid_palette_string(kind):
+    """Verify the default palette is unchanged and an unknown palette string raises early.
+
+    Strategy: draw two groups with palette=None for every input type, then pass a string
+    that is neither a colormap nor a colour and compare the open pyplot figures before
+    and after the failing call.
+    Expected: without hue both groups are '#4C78A8'; with hue the hues get the first two
+    default cycle colours; the unknown string raises ValueError and leaves no figure open.
+    """
+    res = _raincloud_two_groups(kind, None)
+    try:
+        colors = [v.get_facecolor()[0][:3] for v in _violin_collections(res["axes"])]
+        expected = ["#4C78A8", "#F58518"] if kind == "hue" else ["#4C78A8", "#4C78A8"]
+        for got, want in zip(colors, expected):
+            np.testing.assert_allclose(got, mpl.colors.to_rgb(want), atol=1e-6)
+    finally:
+        plt.close(res["fig"])
+
+    before = plt.get_fignums()
+    with pytest.raises(ValueError, match="NotAColormap"):
+        _raincloud_two_groups(kind, "NotAColormap")
+    assert plt.get_fignums() == before
+
+
+def test_raincloud_jitter_differs_between_groups_and_is_reproducible():
+    """Verify the rain jitter is drawn from one seeded generator across all groups.
+
+    Strategy: plot two groups of equal size, subtract each group's position and the
+    default rain offset (0.2) from the scatter x coordinates, and plot the same data twice.
+    Expected: the first group's jitter is the first draw of default_rng(0) (unchanged), the
+    second group's jitter differs from the first, and repeating the call gives identical
+    offsets.
+    """
+    rng = np.random.default_rng(3)
+    data = [rng.normal(0, 1, 30), rng.normal(0, 1, 30)]
+    res = raincloud_plot(data)
+    res_again = raincloud_plot(data)
+    try:
+        rains = _rain_collections(res["axes"])
+        jitter = [rains[i].get_offsets()[:, 0] - i - 0.2 for i in range(2)]
+        np.testing.assert_allclose(jitter[0], np.random.default_rng(0).normal(0, 0.04, 30), atol=1e-12)
+        assert not np.allclose(jitter[0], jitter[1])
+        for c1, c2 in zip(rains, _rain_collections(res_again["axes"])):
+            np.testing.assert_array_equal(c1.get_offsets(), c2.get_offsets())
+    finally:
+        plt.close(res["fig"])
+        plt.close(res_again["fig"])
+
+
+def test_raincloud_unmatched_highlight_mask_warns_for_long_dataframes():
+    """Verify the DataFrame x/y branch warns about an unmatched highlight_mask like the others.
+
+    Strategy: pass a 2-element mask for a 40-row long DataFrame (x/y and x/y/hue), then
+    a matching per-row mask as a control while recording warnings.
+    Expected: the unmatched mask emits the same 'highlight_mask could not be matched'
+    UserWarning as list/dict input and nothing is highlighted; the matching mask emits
+    no such warning and highlights its rows.
+    """
+    import warnings
+
+    rng = np.random.default_rng(4)
+    df = pd.DataFrame({"g": ["A"] * 20 + ["B"] * 20, "h": ["x", "y"] * 20, "v": rng.normal(size=40)})
+    for kw in ({}, {"hue": "h"}):
+        with pytest.warns(UserWarning, match="highlight_mask could not be matched"):
+            res = raincloud_plot(df, x="g", y="v", highlight_mask=[True, False], highlight_color="lime", **kw)
+        try:
+            assert _scatter_points(res["axes"], "lime") == 0
+        finally:
+            plt.close(res["fig"])
+
+    mask = (df["v"] > 0).to_numpy()
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        res_ok = raincloud_plot(df, x="g", y="v", highlight_mask=mask, highlight_color="lime")
+    try:
+        assert not [w for w in record if "highlight_mask" in str(w.message)]
+        assert _scatter_points(res_ok["axes"], "lime") == int(mask.sum())
+    finally:
+        plt.close(res_ok["fig"])
 
 
 # =========================================
@@ -1318,6 +1480,105 @@ def test_hist_imshow_is_a_deprecated_alias_of_describe_image():
         plt.close(ref["fig"])
 
 
+def test_describe_image_passes_norm_and_interpolation_to_imshow():
+    """Verify describe_image forwards norm= and interpolation= instead of clashing with them.
+
+    Strategy: pass a LogNorm with limits and interpolation='bilinear', compare with the
+    default call, then trigger errors (gamma together with norm; norm together with vmin;
+    an unknown cmap) and compare the open pyplot figures before and after.
+    Expected: the image uses the given LogNorm and interpolation, the display row and
+    markers use the norm's limits, the default interpolation stays 'nearest'; gamma with
+    norm raises a ValueError naming both, and no failing call leaves a figure open.
+    """
+    from matplotlib.colors import LogNorm
+
+    img = np.tile(np.linspace(0.01, 1.0, 50), (10, 1))
+    res = describe_image(img, norm=LogNorm(vmin=0.1, vmax=0.5), interpolation="bilinear")
+    default = describe_image(img)
+    try:
+        im = res["axes"]["Image"].images[0]
+        assert isinstance(im.norm, LogNorm) and (im.norm.vmin, im.norm.vmax) == (0.1, 0.5)
+        assert im.get_interpolation() == "bilinear"
+        assert "display: vmin 0.1  vmax 0.5" in res["info"]
+        assert sorted(ln.get_xdata()[0] for ln in res["axes"]["Histogram"].lines) == [0.1, 0.5]
+        assert default["axes"]["Image"].images[0].get_interpolation() == "nearest"
+    finally:
+        plt.close(res["fig"])
+        plt.close(default["fig"])
+
+    before = plt.get_fignums()
+    with pytest.raises(ValueError, match="gamma.*norm"):
+        describe_image(img, gamma=0.5, norm=LogNorm())
+    with pytest.raises(ValueError):
+        describe_image(img, norm=LogNorm(), vmin=0.1)
+    with pytest.raises(ValueError):
+        describe_image(img, cmap="not_a_colormap_name")
+    assert plt.get_fignums() == before
+
+
+class _HugeLazyVolume:
+    """Array stand-in for a lazy (dask/zarr-like) volume far too large to load.
+
+    It knows its shape and dtype, answers indexing with a small plane and records the
+    index, and fails the test if anything converts the whole volume to an array.
+    """
+
+    def __init__(self):
+        self.shape = (2**24, 2**24, 3, 4)  # 2**50 elements: cannot be allocated
+        self.dtype = np.dtype(np.uint16)
+        self.ndim = len(self.shape)
+        self.requested = []
+
+    def __getitem__(self, idx):
+        self.requested.append(idx)
+        return np.arange(12, dtype=self.dtype).reshape(3, 4)
+
+    def __array__(self, dtype=None, copy=None):
+        raise AssertionError("describe_image converted the whole volume to an array")
+
+
+def test_describe_image_indexes_lazy_volumes_before_loading():
+    """Verify describe_image loads only the shown plane of a lazy nD input.
+
+    Strategy: pass an array stand-in of shape (2**24, 2**24, 3, 4) whose __array__ fails
+    the test, with return_image_only=True and for the full figure.
+    Expected: only the middle plane (2**23, 2**23, :, :) is requested, the slice is
+    returned as an ndarray, and the info lists the full shape and dtype without loading or
+    allocating the volume.
+    """
+    vol = _HugeLazyVolume()
+    plane = describe_image(vol, return_image_only=True)
+    assert isinstance(plane, np.ndarray)
+    np.testing.assert_array_equal(plane, np.arange(12).reshape(3, 4))
+    assert vol.requested == [(2**23, 2**23, slice(None), slice(None))]
+
+    res = describe_image(vol)
+    try:
+        assert f"shape: {vol.shape}" in res["info"] and "dtype: uint16" in res["info"]
+        assert "shown: middle slice (8388608, 8388608)" in res["info"]
+        np.testing.assert_array_equal(res["axes"]["Image"].images[0].get_array(), plane)
+    finally:
+        plt.close(res["fig"])
+
+
+def test_describe_image_all_nan_image_has_no_display_range():
+    """Verify an image without finite values gets no meaningless display range.
+
+    Strategy: describe an all-NaN float image, with and without explicit vmin/vmax.
+    Expected: the info says 'no finite values' and has no 'display' row, and the
+    histogram has no vmin/vmax markers or clipped-intensity shading.
+    """
+    for kwargs in ({}, {"vmin": 0.2, "vmax": 0.8}):
+        res = describe_image(np.full((6, 8), np.nan), **kwargs)
+        try:
+            assert "no finite values" in res["info"]
+            assert "display" not in res["info"]
+            hist = res["axes"]["Histogram"]
+            assert not hist.lines and not hist.patches
+        finally:
+            plt.close(res["fig"])
+
+
 # =========================================
 # brightness_diagnostic_plotter
 # =========================================
@@ -1353,6 +1614,34 @@ def test_brightness_diagnostic_plotter_object_oriented_and_none():
         plt.close(target_fig)
         if fig is not None:
             plt.close(fig)
+
+
+def test_brightness_diagnostic_plotter_labels_the_per_slice_p99_truthfully():
+    """Verify the diagnostic plot does not call the raw per-slice 99th percentile 'normalized'.
+
+    Strategy: plot a diagnostic dict like the one correct_z_intensity_decay(...,
+    return_diagnostic=True) returns, whose y values are raw per-slice 99th percentiles,
+    and read the axis label, the legend labels and the docstring.
+    Expected: no label says 'normalized'; the data series and the y axis name the 99th
+    percentile; the docstring points to correct_z_intensity_decay, not to the deprecated
+    adjust_brightness_per_slice.
+    """
+    diag = {
+        "x_data": np.arange(4),
+        "y_data_norm": np.array([900.0, 700.0, 500.0, 400.0]),
+        "y_fit_norm": np.array([880.0, 690.0, 540.0, 420.0]),
+        "gamma_fit_func": "exponential",
+    }
+    fig = brightness_diagnostic_plotter(diag)
+    try:
+        ax = fig.axes[0]
+        labels = [ln.get_label() for ln in ax.lines]
+        assert not any("normaliz" in s.lower() for s in labels + [ax.get_ylabel()])
+        assert "99th percentile" in labels[0] and "99th percentile" in ax.get_ylabel()
+        doc = brightness_diagnostic_plotter.__doc__
+        assert "correct_z_intensity_decay" in doc and "adjust_brightness_per_slice" not in doc
+    finally:
+        plt.close(fig)
 
 
 # =========================================
