@@ -341,6 +341,23 @@ def test_sparse_signal_is_not_blanked_by_degenerate_percentiles():
         np.testing.assert_allclose(normalize_image(ramp), np.clip((ramp - lo) / (hi - lo), 0, 1), atol=1e-6)
 
 
+def test_large_images_keep_exact_percentiles():
+    """Verify ``normalize_image`` and ``contrast_stretching`` use exact percentiles above 1e6 pixels.
+
+    Strategy: a 1100x1000 gamma-distributed float image (1.1e6 pixels, more
+    than the 1e6-value sample of ``robust_range``) compared with the
+    ``np.nanpercentile`` normalisation the functions used before D02.
+    Expected outcome: equal to float precision (a sampled estimate differed by
+    up to ~1% of the output range). Negative control: a small image is exact
+    either way (covered by the ramp check above).
+    """
+    img = np.random.default_rng(0).gamma(2.0, 50.0, (1100, 1000)).astype(np.float32)
+    lo, hi = np.nanpercentile(img, (0.5, 99.9))
+    np.testing.assert_allclose(normalize_image(img), np.clip((img - lo) / (hi - lo), 0, 1), atol=1e-5)
+    lo, hi = np.nanpercentile(img, (0.0, 99.9))
+    np.testing.assert_allclose(contrast_stretching(img), np.clip((img - lo) / (hi - lo), 0, 1), atol=1e-5)
+
+
 def test_contrast_stretching_and_normalize_image_constant_and_dtypes():
     """Constant images produce finite outputs without NaNs, and normalize_image converts dtypes."""
     const_f32 = np.full((16, 16), 0.42, dtype=np.float32)

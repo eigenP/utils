@@ -968,3 +968,38 @@ def test_uncalibrated_and_dpi_only_tiffs_report_none(tmp_path):
         assert get_tiff_voxel_size(p72)["X"] is None
     with pytest.warns(UserWarning, match="72 dpi"):
         assert get_stczyx_pixel_sizes(load_image(p72)) == {"Z": None, "Y": None, "X": None, "unit": None}
+
+
+def test_imagej_inch_and_pixel_units_report_none(tmp_path):
+    """Verify ImageJ TIFFs whose unit is 'inch' or 'pixel' give unknown sizes, not calibrations.
+
+    Fiji writes unit 'inch' when it re-saves a dpi-only screenshot, and
+    'pixel' for an uncalibrated stack. Strategy: write both as ImageJ ZYX
+    stacks with a spacing; read them with ``get_tiff_voxel_size`` and merge a
+    µm Z override through ``load_image``.
+    Expected outcome: 'inch' warns (print dpi) and gives X = Y = Z = None
+    (it used to give 352.8 µm pixels silently); 'pixel' gives None without a
+    warning, and a Z override merges (it used to raise ValueError).
+    Negative control: the same file with unit 'micron' keeps its sizes.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    vol = np.zeros((3, 16, 16), np.uint8)
+    p_in = tmp_path / "inch.tif"
+    tifffile.imwrite(p_in, vol, imagej=True, resolution=(72, 72), resolutionunit=2,
+                     metadata={"axes": "ZYX", "spacing": 2.0, "unit": "inch"})
+    with pytest.warns(UserWarning, match="inches"):
+        assert get_tiff_voxel_size(p_in) == {"X": None, "Y": None, "Z": None, "unit": None}
+
+    p_px = tmp_path / "pixel.tif"
+    tifffile.imwrite(p_px, vol, imagej=True, metadata={"axes": "ZYX", "spacing": 1.0, "unit": "pixel"})
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("error")
+        assert get_tiff_voxel_size(p_px) == {"X": None, "Y": None, "Z": None, "unit": None}
+        ps = get_stczyx_pixel_sizes(load_image(p_px, pixel_sizes={"Z": 2.0}))
+    assert ps["Z"] == 2.0 and ps["X"] is None and ps["Y"] is None
+
+    p_um = tmp_path / "micron.tif"
+    tifffile.imwrite(p_um, vol, imagej=True, resolution=(2.0, 2.0),
+                     metadata={"axes": "ZYX", "spacing": 1.5, "unit": "micron"})
+    assert get_tiff_voxel_size(p_um) == {"X": 0.5, "Y": 0.5, "Z": 1.5, "unit": "micron"}

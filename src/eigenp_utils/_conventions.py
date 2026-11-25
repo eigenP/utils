@@ -46,6 +46,8 @@ __all__ = [
     "BLENDING_MODES",
     "to_um",
     "is_length_unit",
+    "is_pixel_unit",
+    "is_inch_unit",
     "format_length",
     "resolve_pixel_sizes",
     "sample_values",
@@ -81,6 +83,8 @@ _UNIT_TO_UM = {
     "inch": 25400.0, "in": 25400.0, "inches": 25400.0,
 }
 _INCH_SPELLINGS = ("inch", "in", "inches")
+# "Units" meaning uncalibrated (ImageJ writes 'pixel' for an uncalibrated image).
+_PIXEL_UNITS = ("pixel", "pixels", "px", "pix")
 
 
 def _unit_key(unit):
@@ -95,6 +99,16 @@ def _unit_key(unit):
 def is_length_unit(unit) -> bool:
     """True if ``unit`` is a known length unit (any spelling of nm, µm, mm, cm, m, Å, inch)."""
     return _unit_key(unit) in _UNIT_TO_UM
+
+
+def is_pixel_unit(unit) -> bool:
+    """True if ``unit`` means "pixels", i.e. uncalibrated ('pixel', 'pixels', 'px', 'pix')."""
+    return _unit_key(unit) in _PIXEL_UNITS
+
+
+def is_inch_unit(unit) -> bool:
+    """True if ``unit`` is a spelling of inch (a print resolution, not a calibration)."""
+    return _unit_key(unit) in _INCH_SPELLINGS
 
 
 def _is_um_spelling(unit) -> bool:
@@ -152,6 +166,8 @@ def format_length(value_um):
 def _as_float(v, axis):
     if v is None:
         return None
+    if isinstance(v, (str, bytes, bool, np.bool_)) or getattr(getattr(v, "dtype", None), "kind", "x") in "bUSO":
+        raise ValueError(f"pixel_sizes[{axis!r}] must be a number or None, got {v!r}")
     try:
         return float(v)
     except (TypeError, ValueError):
@@ -189,14 +205,18 @@ def resolve_pixel_sizes(ps, ndim=3, *, axes="zyx", fill_z=True, warn=True, stack
     calibrated : tuple of bool
         Whether each size was given (False for unknown or filled-in axes).
     unit : str
-        'µm' for known length units and for no unit; an unknown unit (e.g.
-        'pixel') is returned as given, with the values unconverted.
+        'µm' for known length units, for no unit and for pixel units; an
+        unknown unit (e.g. 'a.u.') is returned as given, with the values
+        unconverted.
 
     Raises
     ------
     ValueError
-        Wrong number of entries, a non-numeric entry, or a size that is not
-        finite and > 0.
+        Wrong number of entries, a non-numeric entry (strings and booleans
+        included), or a size that is not finite and > 0.
+
+    A pixel unit ('pixel', 'pixels', 'px', 'pix', as ImageJ writes for an
+    uncalibrated image) means uncalibrated: every value is None.
     """
     letters = axes.upper()
     if not 1 <= ndim <= len(letters):
@@ -209,7 +229,7 @@ def resolve_pixel_sizes(ps, ndim=3, *, axes="zyx", fill_z=True, warn=True, stack
         keyed = {str(k).upper(): v for k, v in ps.items()}
         unit = keyed.get("UNIT")
         raw = [keyed.get(a) for a in out_axes]
-    elif isinstance(ps, (str, bytes)):
+    elif isinstance(ps, (str, bytes, bool, np.bool_)):
         raise ValueError(f"pixel_sizes must be a dict, a sequence or a number, got {ps!r}")
     elif isinstance(ps, numbers.Number) or (hasattr(ps, "ndim") and getattr(ps, "ndim") == 0):
         raw = [ps] * ndim
@@ -229,11 +249,12 @@ def resolve_pixel_sizes(ps, ndim=3, *, axes="zyx", fill_z=True, warn=True, stack
     for a, v in zip(out_axes, values):
         if v is not None and not (math.isfinite(v) and v > 0):
             raise ValueError(f"pixel_sizes[{a!r}] must be finite and positive, got {v!r}.")
-    calibrated = [v is not None for v in values]
-
     out_unit = UM
     if isinstance(unit, str) and not unit.strip():
         unit = None
+    if unit is not None and is_pixel_unit(unit):
+        values, unit = [None] * ndim, None  # sizes "in pixels" are no calibration
+    calibrated = [v is not None for v in values]
     if unit is not None:
         if is_length_unit(unit):
             if warn and any(v is not None for v in values):
@@ -280,18 +301,66 @@ def _finite(flat):
     return flat
 
 
-def _lazy_sample(a, n, rng):
-    """Values of randomly chosen chunks of a dask array, about ``n`` of them (no full compute)."""
+#: Lazy (dask) arrays with more chunks than this are scanned on a fixed-seed
+#: choice of this many chunks (approximate statistics); fewer are scanned whole.
+_MAX_LAZY_CHUNKS = 256
+
+
+def _finite_flat(x):
+    flat = np.asarray(x).reshape(-1)
+    if flat.dtype == bool:
+        flat = flat.astype(np.uint8)
+    return _finite(flat)
+
+
+def _lazy_scan(a, n, rng):
+    """``(sample, min, max)`` of a dask-like array, one chunk in memory at a time.
+
+    Every chunk is visited (a fixed-seed choice of ``_MAX_LAZY_CHUNKS`` chunks
+    when there are more), contributing its finite extremes and an equal share
+    of the ``n`` sampled values, so signal confined to a few chunks is seen.
+    The whole array is never materialised.
+    """
     nb = tuple(a.numblocks)
     total = int(np.prod(nb)) if nb else 1
-    per_block = max(1, int(a.size // max(total, 1)))
-    want = max(1, min(total, -(-n // per_block)))
-    picks = rng.permutation(total)[:want]
-    parts = [np.asarray(a.blocks[np.unravel_index(int(p), nb)].compute()) for p in picks]
-    flat = np.concatenate([np.asarray(p).reshape(-1) for p in parts]) if parts else np.empty(0)
-    if flat.size > n:
-        flat = flat[rng.integers(0, flat.size, n)]
-    return flat
+    picks = np.arange(total) if total <= _MAX_LAZY_CHUNKS else np.sort(
+        rng.choice(total, _MAX_LAZY_CHUNKS, replace=False))
+    per_chunk = max(1, -(-n // len(picks)))
+    parts, mn, mx = [], None, None
+    for p in picks:
+        flat = _finite_flat(a.blocks[np.unravel_index(int(p), nb)].compute())
+        if flat.size == 0:
+            continue
+        cmn, cmx = float(flat.min()), float(flat.max())
+        mn = cmn if mn is None else min(mn, cmn)
+        mx = cmx if mx is None else max(mx, cmx)
+        parts.append(flat if flat.size <= per_chunk else flat[rng.integers(0, flat.size, per_chunk)])
+    sample = np.concatenate(parts) if parts else np.empty(0)
+    if sample.size > n:
+        sample = sample[rng.integers(0, sample.size, n)]
+    return sample, mn, mx
+
+
+def _sample_and_extremes(a, n=1_000_000, seed=0):
+    """``(sample, min, max)``: :func:`sample_values` plus the finite extremes (None if none).
+
+    Extremes are exact for in-memory data and for lazy data with at most
+    ``_MAX_LAZY_CHUNKS`` chunks (one streaming pass), else taken over the
+    scanned chunks.
+    """
+    a = _unwrap(a)
+    rng = np.random.default_rng(seed)
+    if _is_lazy(a):
+        return _lazy_scan(a, n, rng)
+    arr = np.asarray(a)
+    if arr.size > n:
+        idx = rng.integers(0, arr.size, n)
+        flat = arr[np.unravel_index(idx, arr.shape)] if arr.ndim > 1 else arr.reshape(-1)[idx]
+    else:
+        flat = arr.reshape(-1)
+    sample = _finite_flat(flat)
+    mn, mx = _array_extremes(arr)
+    return sample, mn, mx
 
 
 def sample_values(a, n=1_000_000, seed=0):
@@ -301,47 +370,26 @@ def sample_values(a, n=1_000_000, seed=0):
     so small images give exact statistics. Larger ones are sampled at random
     indices with ``numpy.random.default_rng(seed)`` (deterministic; a strided
     sample can alias with image rows or columns). Booleans become uint8.
-    An xarray.DataArray is unwrapped; dask arrays are sampled chunk-wise
-    (a fixed-seed choice of whole chunks, then of values) without computing the
-    whole array.
+    An xarray.DataArray is unwrapped. A dask array is never computed whole: its
+    chunks are computed one at a time (all of them, or a fixed-seed choice of
+    256 when there are more) and each contributes an equal share of the sample.
     """
-    a = _unwrap(a)
-    rng = np.random.default_rng(seed)
-    if _is_lazy(a):
-        flat = _lazy_sample(a, n, rng)
-    else:
-        arr = np.asarray(a)
-        if arr.size > n:
-            idx = rng.integers(0, arr.size, n)
-            flat = arr[np.unravel_index(idx, arr.shape)] if arr.ndim > 1 else arr.reshape(-1)[idx]
-        else:
-            flat = arr.reshape(-1)
-    flat = np.asarray(flat)
-    if flat.dtype == bool:
-        flat = flat.astype(np.uint8)
-    return _finite(flat)
+    return _sample_and_extremes(a, n, seed)[0]
 
 
-def _finite_extremes(a, sample):
-    """(min, max) of the finite values: of the whole array for in-memory data, else of the sample."""
-    a = _unwrap(a)
-    if not _is_lazy(a):
-        arr = np.asarray(a)
-        if arr.dtype == bool:
-            arr = arr.view(np.uint8)
-        if arr.size == 0:
-            return None, None
-        if np.issubdtype(arr.dtype, np.floating):
-            finite = np.isfinite(arr)
-            if finite.all():
-                return float(arr.min()), float(arr.max())
+def _array_extremes(arr):
+    """(min, max) of the finite values of an in-memory array, (None, None) if there are none."""
+    if arr.dtype == bool:
+        arr = arr.view(np.uint8)
+    if arr.size == 0:
+        return None, None
+    if np.issubdtype(arr.dtype, np.floating):
+        finite = np.isfinite(arr)
+        if not finite.all():
             arr = arr[finite]
             if arr.size == 0:
                 return None, None
-        return float(arr.min()), float(arr.max())
-    if sample.size == 0:
-        return None, None
-    return float(sample.min()), float(sample.max())
+    return float(arr.min()), float(arr.max())
 
 
 def _is_integer_dtype(a):
@@ -356,8 +404,10 @@ def _robust_max(a, q=99.99, n=1_000_000, seed=0):
     fewer than (100 - q)% of the values). Integer data give an integer
     (rounded up). None when there is no finite value.
     """
-    sample = sample_values(a, n, seed)
-    _, hi = _finite_extremes(a, sample)
+    return _robust_max_of(a, *_sample_and_extremes(a, n, seed), q=q)
+
+
+def _robust_max_of(a, sample, mn, hi, q=99.99):
     if hi is None:
         return None
     if sample.size == 0:
@@ -386,16 +436,23 @@ def default_display_range(volume, q=99.99, n=1_000_000, seed=0):
 
     Pass the source volume, not projected panels: on a maximum projection a
     single hot pixel covers far more than 0.01% of the pixels.
+
+    The minimum and maximum are exact for in-memory data. A dask array is
+    scanned one chunk at a time (no whole-array compute): exact for up to 256
+    chunks, else over a fixed-seed choice of 256 chunks (approximate).
+
+    Changed (2026-11 review): lazy arrays used to be sampled from a few whole
+    chunks only, so signal or negative values confined to other chunks were
+    missed; every chunk now contributes.
     """
     a = _unwrap(volume)
     if getattr(a, "dtype", None) == bool:
         return 0.0, 1.0
-    sample = sample_values(a, n, seed)
-    lo, _ = _finite_extremes(a, sample)
+    sample, lo, hi = _sample_and_extremes(a, n, seed)
     if lo is None:
         return 0.0, 1.0
     vmin = min(0.0, lo)
-    vmax = _robust_max(a, q, n, seed)
+    vmax = _robust_max_of(a, sample, lo, hi, q=q)
     if vmax is None or not vmax > vmin:
         vmax = vmin + 1.0
     return float(vmin), float(vmax)
@@ -413,12 +470,11 @@ def robust_range(a, pmin=0.1, pmax=99.9, *, n=1_000_000, seed=0, stacklevel=2):
     Constant data return ``(v, v)`` without a warning; no finite value gives
     (0.0, 1.0).
     """
-    sample = sample_values(a, n, seed)
+    sample, mn, mx = _sample_and_extremes(a, n, seed)
     if sample.size == 0:
         return 0.0, 1.0
     lo, hi = (float(v) for v in np.percentile(sample, [pmin, pmax]))
     if hi <= lo:
-        mn, mx = _finite_extremes(a, sample)
         lo, hi = _degenerate_fallback(lo, hi, mn, mx, pmin, pmax, stacklevel=stacklevel + 1)
     return lo, hi
 
@@ -626,25 +682,43 @@ def resolve_blending(colors, blending=None, *, stacklevel=2):
     return "maximum"
 
 
+def _is_single_colour(given):
+    """True for one colour / colormap given where a list of them is expected."""
+    from matplotlib import colors as mcolors
+
+    if isinstance(given, (str, mcolors.Colormap)):
+        return True
+    if isinstance(given, np.ndarray):
+        return given.ndim == 1 and given.size in (3, 4) and np.issubdtype(given.dtype, np.number)
+    return isinstance(given, tuple) and mcolors.is_color_like(given)
+
+
 def default_colors(given, n, blending=None):
     """``given`` channel colours padded to ``n`` with the unused palette colours (cycled).
 
-    ``given`` is None, one colour / colormap (a string, a colour tuple or a
-    Colormap), or a sequence of them. Missing entries take the colours of
-    :data:`PALETTE` (:data:`PALETTE_MINIMUM` for ``blending='minimum'``) not
-    already given; when all are used, the palette cycles.
+    ``given`` is None, one colour / colormap (a string, an RGB(A) tuple or 1-D
+    array, or a Colormap), or a sequence of them in which None means "use the
+    default". Missing entries take the colours of :data:`PALETTE`
+    (:data:`PALETTE_MINIMUM` for ``blending='minimum'``) whose resolved colour
+    (:func:`channel_color_hex`) is not already given, so ``'#00ff00'`` uses up
+    'lime' and ``'gray'`` (end colour white) uses up 'white'; when all are
+    used, the palette cycles. Entries beyond ``n`` are dropped. Given entries
+    are returned as given (canonicalise with :func:`channel_spec`).
     """
-    from matplotlib import colors as mcolors
-
     palette = PALETTE_MINIMUM if _check_blending(blending) == "minimum" else PALETTE
     if given is None:
         given = []
-    elif isinstance(given, (str, mcolors.Colormap)) or (isinstance(given, tuple) and mcolors.is_color_like(given)):
+    elif _is_single_colour(given):
         given = [given]
     else:
         given = list(given)
-    fill = [c for c in palette if not any(c is g or (isinstance(g, str) and c == g) for g in given)] or palette
-    return given[:n] + [fill[i % len(fill)] for i in range(max(0, n - len(given)))]
+    given = given[:n] + [None] * max(0, n - len(given))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # 'pink' etc. warn when the caller resolves them
+        used = {channel_color_hex(g, strict=False) for g in given if g is not None}
+    fill = [c for c in palette if channel_color_hex(c) not in used] or palette
+    k = iter(range(n))
+    return [g if g is not None else fill[next(k) % len(fill)] for g in given]
 
 
 # ---------------------------------------------------------------------------

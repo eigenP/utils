@@ -97,7 +97,7 @@ def test_resolve_pixel_sizes_accepts_dict_sequence_scalar_and_none():
 def test_resolve_pixel_sizes_converts_units_to_um():
     """Verify known length units are converted to µm and unknown units are passed through.
 
-    Strategy: parse nm, cm and escaped-micro dicts, and a dict with an unknown unit.
+    Strategy: parse nm, cm and escaped-micro dicts, and a dict with an unknown unit ('a.u.').
     Expected outcome: values in µm with unit 'µm'; the unknown unit keeps the
     raw values and is returned as given.
     """
@@ -105,9 +105,26 @@ def test_resolve_pixel_sizes_converts_units_to_um():
     assert vals == pytest.approx((0.3, 0.1, 0.1)) and unit == "µm"
     vals, _, unit = resolve_pixel_sizes({"Z": None, "Y": 1e-4, "X": 1e-4, "unit": "cm"}, warn=False)
     assert vals == pytest.approx((1.0, 1.0, 1.0)) and unit == "µm"
-    assert resolve_pixel_sizes({"Z": 1, "Y": 1, "X": 1, "unit": "pixel"}) == ((1.0, 1.0, 1.0), (True,) * 3, "pixel")
+    assert resolve_pixel_sizes({"Z": 1, "Y": 1, "X": 1, "unit": "a.u."}) == ((1.0, 1.0, 1.0), (True,) * 3, "a.u.")
     with pytest.warns(UserWarning, match="inch"):
         resolve_pixel_sizes({"Y": 0.001, "X": 0.001, "unit": "inch"}, fill_z=False)
+
+
+def test_pixel_units_mean_uncalibrated():
+    """Verify a pixel unit ('pixel', 'pixels', 'px') gives unknown sizes, not calibrated 1.0 values.
+
+    Strategy: parse ImageJ-style dicts with unit 'pixel'/'px' (Z missing).
+    Expected outcome: all values None, nothing calibrated, unit 'µm', and no
+    "isotropic voxels" fill warning. Negative control: an unknown non-length
+    unit is still passed through with its values.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for u in ("pixel", "Pixels", "px"):
+            assert resolve_pixel_sizes({"Y": 1, "X": 1, "unit": u}) == ((None,) * 3, (False,) * 3, "µm")
+    assert resolve_pixel_sizes({"Z": 2, "Y": 1, "X": 1, "unit": "a.u."})[2] == "a.u."
+    assert conv.is_pixel_unit("pixel") and not conv.is_pixel_unit("µm") and not conv.is_pixel_unit(None)
+    assert conv.is_inch_unit("Inch") and not conv.is_inch_unit("cm")
 
 
 def test_resolve_pixel_sizes_fills_missing_z_from_finest_xy_only():
@@ -132,11 +149,13 @@ def test_resolve_pixel_sizes_fills_missing_z_from_finest_xy_only():
 @pytest.mark.parametrize("bad", [
     {"Z": 0.0, "Y": 1.0, "X": 1.0}, {"Z": -1.0, "Y": 1, "X": 1}, (1.0, np.nan, 1.0), (1.0, 1.0, np.inf),
     (1.0, 1.0), (1.0, 1.0, 1.0, 1.0), "1.0", ("bad", 1.0, 1.0), 0.0,
+    ("1", 1, 1), {"Z": "2", "Y": 1, "X": 1}, (True, 1, 1), True, np.bool_(True),
 ])
 def test_resolve_pixel_sizes_rejects_invalid_values(bad):
     """Verify zero, negative, non-finite, non-numeric and wrong-length pixel sizes raise ValueError.
 
-    Strategy: parse each invalid specification.
+    Strategy: parse each invalid specification, including numeric strings and
+    booleans inside sequences and dicts (they used to be coerced by float()).
     Expected outcome: ValueError.
     """
     with pytest.raises(ValueError):
@@ -213,6 +232,30 @@ def test_sample_values_samples_lazy_arrays_chunkwise_without_full_compute():
     assert set(np.unique(s)) <= set(np.unique(arr))
     lo, hi = default_display_range(lazy)
     assert lo == 0.0 and 900 < hi <= 1000 and lazy.full_computes == 0
+
+
+def test_lazy_display_range_sees_signal_confined_to_a_few_chunks():
+    """Verify a dask-like volume chunked per plane gets the same range as the in-memory volume.
+
+    Strategy: (50, 256, 256) noise around 100 with a bright blob in planes
+    20-29 and a negative patch in plane 40, chunked one plane per chunk, for
+    several seeds. Before the fix only ceil(n / chunk) whole chunks were drawn,
+    so the negative minimum or the blob was missed depending on the seed.
+    Expected outcome: equal to the numpy result for every seed, and no full
+    compute. Negative control: the numpy result itself is (-500, 3000).
+    """
+    rng = np.random.default_rng(0)
+    v = rng.normal(100, 5, (50, 256, 256)).astype(np.float32)
+    v[20:30, 100:200, 100:200] = 3000
+    v[40, :10, :10] = -500
+    ref = default_display_range(v)
+    assert ref == (-500.0, 3000.0)
+    for seed in range(4):
+        lazy = _FakeDask(v, (1, 256, 256))
+        assert default_display_range(lazy, n=200_000, seed=seed) == ref
+        assert lazy.full_computes == 0
+        s = sample_values(lazy, n=200_000, seed=seed)
+        assert s.size == 200_000 and np.any(s == 3000)
 
 
 def test_default_display_range_rules():
@@ -363,6 +406,34 @@ def test_default_colors_pads_with_unused_palette_and_cycles():
     assert default_colors(["lime"], 3) == ["lime", "white", "magenta"]
     assert default_colors(None, 9) == PALETTE + PALETTE[:2]
     assert default_colors(None, 2, "minimum") == PALETTE_MINIMUM[:2]
+
+
+def test_default_colors_excludes_by_resolved_colour_and_matches_the_annotator():
+    """Verify palette exclusion compares resolved colours, None entries are filled, and an RGB array is one colour.
+
+    Strategy: '#00ff00' must use up 'lime', 'gray' (end colour white) must
+    use up 'white'; a None entry in a list is filled; a 1-D RGB ndarray is one
+    channel. The viewers (``_resolve_channels``) and LabelAnnotator
+    (``_channel_colors``) must then give the same hex colours.
+    Expected outcome: no two channels share a colour; viewer == annotator.
+    Negative control: string-only inputs keep their previous result.
+    """
+    from eigenp_utils import label_annotator as la
+    from eigenp_utils import tnia_plotting_anywidgets as tpa
+
+    assert default_colors(["#00ff00"], 3) == ["#00ff00", "white", "magenta"]
+    assert default_colors(["gray", None], 2) == ["gray", "lime"]
+    assert default_colors([None, "white"], 2) == ["lime", "white"]
+    rgb = np.array([1.0, 0.0, 0.0])
+    out = default_colors(rgb, 2)
+    assert out[0] is rgb and out[1] == "white"
+    assert default_colors(["lime"], 3) == ["lime", "white", "magenta"]  # negative control
+    for given, n in ((["#00ff00"], 3), (["gray", None], 2), ([(0, 1, 0)], 2), (None, 9), (["magma"], 2)):
+        specs, _ = tpa._resolve_channels(given, n, "additive")
+        viewer = [channel_color_hex(s) for s in specs]
+        assert viewer == la._channel_colors(given, n)
+        if n <= len(PALETTE):
+            assert len(set(viewer)) == n
 
 
 def test_per_channel_broadcasts_pads_and_rejects_long_lists():

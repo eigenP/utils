@@ -1269,10 +1269,14 @@ def test_scale_bar_and_label_have_faint_black_outline():
     ("nm", 500.0, "20 µm"),
     ("micron", 0.5, "20 µm"),
     ("\\u00B5m", 0.5, "20 µm"),  # ImageJ's escaped micro sign
-    ("pixel", 1.0, "50 pixel"),  # unknown unit: shown as given
+    ("a.u.", 1.0, "50 a.u."),    # unknown unit: shown as given
+    ("pixel", 1.0, "50 px"),     # ImageJ's uncalibrated unit: a pixel bar (D01 review fix)
 ])
 def test_scale_bar_uses_pixel_size_unit(unit, size, expected):
     """Verify scale bars convert known length units to µm and display unknown units verbatim.
+
+    A pixel unit ('pixel') means uncalibrated and gives the 'px' bar (it used to
+    be shown verbatim as an unknown unit, '50 pixel').
 
     Strategy: pass pixel-size dicts with known length units and an unknown unit
     to ``show_zyx_max``, ``show_zyx_max_slice_interactive``, and
@@ -2374,21 +2378,21 @@ def test_default_vmax_of_all_nan_channel_does_not_warn():
 def test_bool_mask_channels_open_in_slice_viewers():
     """Boolean masks (e.g. from ``extract_surface``) open in the slice viewer and the annotator.
 
-    ``_robust_vmax`` used to call ``np.percentile`` on the bool sample, which
+    ``_robust_vmax`` (now ``_conventions._robust_max``) used to call ``np.percentile`` on the bool sample, which
     raises NumPy's "boolean subtract" TypeError, and every viewer computes it
     per channel at construction. Strategy: build the single-channel viewer, a
     two-channel viewer with a mask channel and the point annotator on a mask.
     Expected outcome: each renders; the mask channel's default vmax is 1.0,
     its dtype stays ``bool`` and its histogram keeps the 1-bit (0/1) range.
-    Negative control: ``_robust_vmax`` of the mask equals that of the same
+    Negative control: ``_robust_max`` of the mask equals that of the same
     mask as uint8, and an all-False mask gives 0.0 instead of raising.
     """
     mask = np.zeros((8, 32, 32), dtype=bool)
     mask[2:5, 10:20, 10:20] = True
     vol = np.random.default_rng(0).integers(0, 4000, mask.shape).astype(np.uint16)
 
-    assert tpa._robust_vmax(mask) == tpa._robust_vmax(mask.astype(np.uint8)) == 1.0
-    assert tpa._robust_vmax(np.zeros_like(mask)) == 0.0
+    assert tpa._robust_max(mask) == tpa._robust_max(mask.astype(np.uint8)) == 1.0
+    assert tpa._robust_max(np.zeros_like(mask)) == 0.0
 
     single = show_zyx_max_slice_interactive(mask, figsize=(4, 4))
     multi = show_zyx_max_slice_interactive([vol, mask], figsize=(4, 4))
@@ -4407,6 +4411,30 @@ def test_compositors_share_one_implementation():
             pts = blend_colors(np.column_stack([a.ravel(), b.ravel()]), cmap, vmin=0, vmax=1, blending=blend)
             np.testing.assert_array_equal(x1, x2)
             np.testing.assert_allclose(pts, x1.reshape(-1, 3), atol=1e-6)
+
+
+def test_per_channel_lists_behave_the_same_in_every_viewer():
+    """D04 (R1-13): a per-channel list longer than the channels raises in the static and widget viewers.
+
+    Strategy: two channels with ``vmax=[1, 2, 3]`` (and ``gamma`` of 3
+    entries) through ``show_zyx_max``, the slice widget and the scatter
+    widget; then a short list with a None entry.
+    Expected outcome: ValueError naming the parameter everywhere (the widgets
+    used to drop the extra entry silently); the short list is padded with
+    the default in the widgets (negative control).
+    """
+    a = np.random.default_rng(0).random((4, 5, 6)).astype(np.float32)
+    pts = (np.array([0.0, 3.0]), np.array([0.0, 4.0]), np.array([0.0, 5.0]))
+    chans = np.array([[0.2, 0.5], [0.7, 0.1]])
+    for kw, msg in ((dict(vmax=[1, 2, 3]), "vmax has 3 entries"), (dict(gamma=[1, 1, 1]), "gamma has 3 entries")):
+        with pytest.raises(ValueError, match=msg):
+            plt.close(show_zyx_max([a, a], **kw))
+        with pytest.raises(ValueError, match=msg):
+            show_zyx_max_slice_interactive([a, a], **kw)
+        with pytest.raises(ValueError, match=msg):
+            show_zyx_max_scatter_interactive(pts, channels=chans, **kw)
+    w = show_zyx_max_slice_interactive([a, a], vmax=[2.0, None], gamma=[0.5])
+    assert w.vmax_list[0] == 2.0 and w.vmax_list[1] == w._auto_vmax[1] and w.gamma_list == [0.5, 1.0]
 
 
 def test_annotator_and_xarray_colours_use_the_shared_palette():

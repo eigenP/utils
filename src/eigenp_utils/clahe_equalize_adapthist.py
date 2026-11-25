@@ -27,7 +27,18 @@ import warnings
 
 import numpy as np
 
-from ._conventions import _degenerate_fallback, robust_range, sample_values
+try:
+    from ._conventions import _degenerate_fallback, robust_range, sample_values
+except ImportError:  # run as a standalone script: load _conventions.py from next to this file
+    import importlib.util as _ilu
+    import pathlib as _pathlib
+
+    _spec = _ilu.spec_from_file_location(
+        "_eigenp_conventions", _pathlib.Path(__file__).resolve().with_name("_conventions.py"))
+    _conv = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_conv)
+    _degenerate_fallback, robust_range, sample_values = (
+        _conv._degenerate_fallback, _conv.robust_range, _conv.sample_values)
 
 # scikit-image is imported inside the legacy `_my_clahe_` only, so `clahe_u8`
 # (numba / NumPy) works in minimal environments without scikit-image.

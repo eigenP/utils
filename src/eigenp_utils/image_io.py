@@ -6,7 +6,7 @@ import xarray as xr
 import tifffile
 import xml.etree.ElementTree as ET
 
-from ._conventions import UM, is_length_unit, resolve_pixel_sizes, to_um
+from ._conventions import UM, is_inch_unit, is_length_unit, is_pixel_unit, resolve_pixel_sizes, to_um
 
 
 _STCZYX = 'STCZYX'
@@ -43,6 +43,8 @@ def _normalize_pixel_sizes(pixel_sizes):
         unit = next((v for k, v in pixel_sizes.items() if str(k).upper() == 'UNIT'), None)
         pixel_sizes = {k: v for k, v in pixel_sizes.items() if str(k).upper() != 'UNIT'}
     values, _, _ = resolve_pixel_sizes(pixel_sizes, 3, fill_z=False, warn=False)
+    if is_pixel_unit(unit):  # sizes "in pixels" are no calibration
+        values, unit = (None, None, None), None
     return {**dict(zip(_SPATIAL, values)), 'unit': unit}
 
 
@@ -652,14 +654,18 @@ def get_tiff_voxel_size(filepath):
     written. Unknown units are kept (with a warning when the axes disagree).
 
     Uncalibrated files report None for X and Y, not 1.0: resolution tags of
-    1/1 without a unit (tifffile's default), and resolution tags in inches
-    that no ImageJ unit overrides (a print resolution such as 72 dpi, not a
-    microscope calibration; a UserWarning says so).
+    1/1 without a unit (tifffile's default), resolution tags in inches that
+    no ImageJ unit overrides, and an ImageJ or OME unit 'inch' (a print
+    resolution such as 72 dpi, not a microscope calibration; a UserWarning
+    says so). Sizes in a pixel unit ('pixel', 'px', ImageJ's uncalibrated
+    unit) are None too, Z included.
 
     Changed (D01, 2026-11): sizes in cm / mm / nm / ... are converted to µm
     (they used to keep the file's unit unless the axes' units differed), and
     uncalibrated or inch-only files give X = Y = None (they used to give the
-    raw tag values, e.g. 1.0, or 352.8 µm pixels for a 72-dpi screenshot).
+    raw tag values, e.g. 1.0, or 352.8 µm pixels for a 72-dpi screenshot);
+    ImageJ/OME sizes in 'pixel' or 'inch' units give None (they used to be
+    reported with that unit).
     """
     voxel_data = {'X': None, 'Y': None, 'Z': None, 'unit': None}
     units = {'X': None, 'Y': None, 'Z': None}
@@ -739,6 +745,26 @@ def get_tiff_voxel_size(filepath):
                     elif voxel_data['X'] == 1.0 and voxel_data['Y'] == 1.0:
                         # tifffile's default 1/1 resolution without a unit: not calibrated
                         voxel_data['X'] = voxel_data['Y'] = None
+
+    # ---------------------------------------------------------
+    # 3b. Units that are no calibration: pixels, and inches (dpi)
+    # ---------------------------------------------------------
+    inch_axes = []
+    for ax in ('X', 'Y', 'Z'):
+        if voxel_data[ax] is None:
+            continue
+        if is_pixel_unit(units[ax]):
+            voxel_data[ax], units[ax] = None, None
+        elif is_inch_unit(units[ax]):
+            inch_axes.append(ax)
+            voxel_data[ax], units[ax] = None, None
+    if inch_axes:
+        warnings.warn(
+            f"{Path(str(filepath)).name}: the {'/'.join(inch_axes)} calibration is in inches, usually a "
+            "print resolution (dpi) and not a microscope calibration; those pixel sizes are reported "
+            "as unknown (None). Pass pixel_sizes= to set them.",
+            UserWarning, stacklevel=2,
+        )
 
     # ---------------------------------------------------------
     # 4. Report all sizes in µm (one common unit)

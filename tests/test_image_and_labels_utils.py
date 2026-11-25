@@ -743,7 +743,8 @@ def test_pixel_size_units_are_converted_to_um_and_missing_z_uses_finest_xy():
     (+) a dict with Z missing and Y/X known; (-) a non-length unit warns.
     Expected outcome: identical structuring elements (21 px across at 0.1 µm),
     not the 3x3x3 element nm values used to give; the missing Z takes 0.1 µm
-    with a warning naming axis Z; the unit 'pixel' warns and is used as µm.
+    with a warning naming axis Z; a non-length unit ('a.u.') warns and is used
+    as µm; the unit 'pixel' means uncalibrated (all axes unknown, 1.0, warning).
     """
     ref = create_ellipsoid_struct(1.0, pixel_sizes=(0.1, 0.1, 0.1))
     assert ref.shape == (21, 21, 21)
@@ -753,8 +754,12 @@ def test_pixel_size_units_are_converted_to_um_and_missing_z_uses_finest_xy():
         no_z = create_ellipsoid_struct(1.0, pixel_sizes={"y": 0.1, "x": 0.1, "unit": "µm"})
     np.testing.assert_array_equal(no_z, ref)
     with pytest.warns(UserWarning, match="not a length unit"):
+        au = create_ellipsoid_struct(1.0, pixel_sizes={"Z": 0.1, "Y": 0.1, "X": 0.1, "unit": "a.u."})
+    np.testing.assert_array_equal(au, ref)
+    # 'pixel' (ImageJ's uncalibrated unit) is no calibration: every axis unknown -> 1.0, with a warning
+    with pytest.warns(UserWarning, match="no value for axis Z, Y, X"):
         px = create_ellipsoid_struct(1.0, pixel_sizes={"Z": 0.1, "Y": 0.1, "X": 0.1, "unit": "pixel"})
-    np.testing.assert_array_equal(px, ref)
+    assert px.shape == (3, 3, 3)
 
 
 @pytest.mark.parametrize(

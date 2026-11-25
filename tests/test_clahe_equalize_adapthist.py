@@ -466,3 +466,37 @@ def test_clahe_u8_empty_input_returns_empty_uint8(backend):
     out = clahe_u8(image, kernel_size=8, backend=backend)
     assert out.shape == image.shape and np.ptp(out) > 0
     np.testing.assert_array_equal(out, clahe_u8(image, kernel_size=8, backend="numpy"))
+
+
+def test_clahe_module_runs_standalone_with_sibling_conventions(tmp_path):
+    """The module keeps its PEP 723 standalone use (D09-A): copied next to
+    ``_conventions.py`` and loaded by file path with ``eigenp_utils`` not
+    importable, ``clahe_u8`` still works."""
+    import shutil
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+
+    import eigenp_utils.clahe_equalize_adapthist as mod
+
+    src = Path(mod.__file__).parent
+    for name in ("clahe_equalize_adapthist.py", "_conventions.py"):
+        shutil.copy(src / name, tmp_path / name)
+    code = textwrap.dedent(f"""
+        import sys, runpy, importlib.abc
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "eigenp_utils" or name.startswith("eigenp_utils."):
+                    raise ModuleNotFoundError(name)
+        sys.meta_path.insert(0, Block())
+        ns = runpy.run_path({str(tmp_path / 'clahe_equalize_adapthist.py')!r})
+        out = ns["clahe_u8"](np.random.default_rng(0).random((64, 64)).astype("float32"))
+        assert out.dtype == np.uint8
+        print("ok")
+    """)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env={"MPLBACKEND": "Agg", "PATH": ""})
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip().endswith("ok")

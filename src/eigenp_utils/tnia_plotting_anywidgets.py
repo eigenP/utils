@@ -63,12 +63,7 @@ def _parse_zyx_tuple_or_dict(val, default_val=None, warn=True):
 
 
 try:
-    from ._conventions import (
-        PALETTE, PALETTE_MINIMUM, UM, channel_spec, default_colors, default_display_range,
-        format_length, is_length_unit, per_channel, resolve_blending, resolve_pixel_sizes,
-        sample_values, to_um, _robust_max, channel_colormap,
-        channel_color_hex as _conv_color_hex,
-    )
+    from . import _conventions as _conv
 except ImportError:  # run as a standalone script: load _conventions.py from next to this file
     import importlib.util as _ilu
     import sys as _sys
@@ -78,13 +73,13 @@ except ImportError:  # run as a standalone script: load _conventions.py from nex
     _conv = _ilu.module_from_spec(_spec)
     _sys.modules.setdefault("_eigenp_conventions", _conv)
     _spec.loader.exec_module(_conv)
-    (PALETTE, PALETTE_MINIMUM, UM, channel_spec, default_colors, default_display_range,
-     format_length, is_length_unit, per_channel, resolve_blending, resolve_pixel_sizes,
-     sample_values, to_um, _robust_max, channel_colormap, _conv_color_hex) = (
-        _conv.PALETTE, _conv.PALETTE_MINIMUM, _conv.UM, _conv.channel_spec, _conv.default_colors,
-        _conv.default_display_range, _conv.format_length, _conv.is_length_unit, _conv.per_channel,
-        _conv.resolve_blending, _conv.resolve_pixel_sizes, _conv.sample_values, _conv.to_um,
-        _conv._robust_max, _conv.channel_colormap, _conv.channel_color_hex)
+
+PALETTE, PALETTE_MINIMUM, UM = _conv.PALETTE, _conv.PALETTE_MINIMUM, _conv.UM
+channel_spec, channel_colormap, _conv_color_hex = _conv.channel_spec, _conv.channel_colormap, _conv.channel_color_hex
+default_colors, default_display_range, per_channel = _conv.default_colors, _conv.default_display_range, _conv.per_channel
+format_length, is_length_unit, is_pixel_unit, to_um = _conv.format_length, _conv.is_length_unit, _conv.is_pixel_unit, _conv.to_um
+resolve_blending, resolve_pixel_sizes, sample_values = _conv.resolve_blending, _conv.resolve_pixel_sizes, _conv.sample_values
+_robust_max, _check_blending = _conv._robust_max, _conv._check_blending
 
 
 class _UncalibratedXYPixelSizes(dict):
@@ -102,8 +97,10 @@ def _viewer_pixel_sizes(pixel_sizes, warn=True):
     finest of them (with a warning); other missing axes are drawn with size 1
     (pixel units) and warn, naming the axis. ``xy_calibrated`` is whether X and
     Y were given: only then is the scale bar labelled in physical units, else
-    in pixels ('px'). Scalars are rejected (the viewers take a Z, Y, X triple),
-    as are non-finite and non-positive sizes.
+    in pixels ('px'). A pixel unit ('pixel', 'px', ImageJ's uncalibrated
+    unit) means uncalibrated: sizes 1 and a 'px' bar, without a warning.
+    Scalars are rejected (the viewers take a Z, Y, X triple), as are
+    non-finite and non-positive sizes.
     """
     if pixel_sizes is None:
         return (1.0, 1.0, 1.0), False, None
@@ -113,7 +110,9 @@ def _viewer_pixel_sizes(pixel_sizes, warn=True):
         raise ValueError(f"pixel_sizes must be a dict or a (Z, Y, X) sequence, got {pixel_sizes!r}")
     values, calibrated, unit = resolve_pixel_sizes(pixel_sizes, 3, warn=warn, stacklevel=3)
     missing = [a for a, v in zip('ZYX', values) if v is None]
-    if missing and warn:
+    in_pixels = isinstance(pixel_sizes, dict) and any(
+        str(k).upper() == 'UNIT' and is_pixel_unit(v) for k, v in pixel_sizes.items())
+    if missing and warn and not in_pixels:
         warnings.warn(
             f"No value for axis {', '.join(missing)} in pixel_sizes; using 1.0 (pixel units).",
             UserWarning, stacklevel=3,
@@ -338,21 +337,10 @@ _DEFAULT_CHANNEL_COLORS = PALETTE
 # the composite then looks like an inverted additive composite.
 _DEFAULT_INVERTED_CHANNEL_COLORS = PALETTE_MINIMUM
 
-# Channel compositing modes (napari names; 'add'/'max'/'min' accepted as aliases).
-_BLENDING_MODES = ('additive', 'maximum', 'screen', 'minimum')
-_BLENDING_ALIASES = {'add': 'additive', 'max': 'maximum', 'min': 'minimum'}
+# Channel compositing modes (napari names; 'add'/'max'/'min' accepted as aliases):
+# _conventions.BLENDING_MODES, validated by _conventions._check_blending.
 # Slab projections (napari's volume rendering modes, applied along the view axis).
 _PROJECTIONS = ('mip', 'minip', 'average', 'attenuated_mip')
-
-
-def _check_blending(blending):
-    """Canonical blending name, or None for each function's historical default."""
-    if blending is None:
-        return None
-    b = _BLENDING_ALIASES.get(blending, blending)
-    if b not in _BLENDING_MODES:
-        raise ValueError(f"blending must be one of {_BLENDING_MODES} (or None), got {blending!r}")
-    return b
 
 
 def _check_projection(projection, attenuation=0.05):
@@ -381,17 +369,9 @@ def _channel_specs(colormap, n, blending=None):
     return [channel_spec(c) for c in _channel_colormaps(colormap, n, blending)]
 
 
-def is_colormap(c):
-    """
-    Checks if a string is a valid matplotlib colormap name.
-    """
-    if not isinstance(c, str):
-        return False
-    try:
-        matplotlib.colormaps[c]
-        return True
-    except (ValueError, KeyError):
-        return False
+#: Public name of `_conventions.is_colormap_name`: True if ``c`` is a string
+#: naming a registered matplotlib colormap.
+is_colormap = _conv.is_colormap_name
 
 def _gui_channel_color(c, blending=None):
     """GUI colour for a channel; dark inks of minimum blending are lifted to stay readable in the dark GUI."""
@@ -637,7 +617,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     the panels' min/max; pixel sizes are converted to µm and the scale bar
     reads 'N px' without X/Y sizes and picks nm / µm / mm by length;
     registered Colormap instances are accepted; all-white-start colormaps
-    blend with 'minimum' by default.
+    blend with 'minimum' by default. Missing channel colours skip palette
+    colours already given in any spelling ('#00ff00' uses up 'lime', 'gray'
+    uses up 'white'), and None entries in a colormap list take a palette
+    colour, as in LabelAnnotator.
     """
     if figsize is None:
         figsize = (10, 10)
@@ -909,7 +892,9 @@ def _add_scale_bar(ax_line, ax_physical_width_um, pixel_sizes_given, figsize, un
 
     Changed (D01, 2026-11): the label picks nm / µm / mm by the bar's length
     ('500 nm', '20 µm', '2 mm'; it used to be µm only), and without X/Y
-    pixel sizes it reads 'N px' (it used to read '`pixel_sizes`').
+    pixel sizes it reads 'N px' (it used to read '`pixel_sizes`'). Sizes in
+    a pixel unit ('pixel', 'px') count as uncalibrated and also give 'N px'
+    (they used to be shown as an unknown unit, '50 pixel').
     """
     # ``fontsize_pt`` None picks a size from the figure height; 0 hides the
     # label only (the bar keeps its auto-size width; ``scale_bar_show``
@@ -1138,12 +1123,6 @@ def _finite_min(*arrays):
     return best
 
 
-def _default_vmin(*arrays):
-    """0 (fluorescence convention), or the data minimum if the data go below 0."""
-    m = _finite_min(*arrays)
-    return 0.0 if m is None else min(0.0, m)
-
-
 def _check_gammas(gammas):
     for g in gammas:
         if g is not None and not float(g) > 0:
@@ -1221,30 +1200,6 @@ def _finite_max(*arrays):
         m = float(a.max())
         best = m if best is None else max(best, m)
     return best
-
-
-def _robust_vmax(arr, q=99.99, max_samples=1_000_000):
-    """
-    Default display maximum: the `q`-th percentile of the finite values.
-
-    A few hot pixels, saturated debris or a single bright cell set the plain
-    maximum and leave the rest of the image dark. q = 99.99 tolerates hot
-    pixels up to 0.01% of the voxels (a camera's hot-pixel rate, since they
-    repeat in every Z slice) while saturating little of a sparse channel: with
-    q = 99.9, a channel whose blobs cover ~0.2% of the voxels had ~40% of its
-    signal saturated. The percentile is estimated
-    on a fixed-seed random sample of at most `max_samples` values (a strided
-    sample can alias with the image rows). When the signal is sparser than
-    (100 - q)% of the voxels the percentile equals the background level; the
-    plain maximum is used then. Integer images get an integer (rounded up).
-    Returns None if there is no finite value. The rule lives in
-    `_conventions` (``default_display_range`` uses it for every viewer).
-    """
-    arr = np.asarray(arr)
-    if arr.dtype == bool:
-        # masks are 0/1 levels
-        arr = arr.view(np.uint8)
-    return _robust_max(arr, q, max_samples)
 
 
 def _norm_window(a, lo, hi, g, eps=1e-12):
@@ -1415,8 +1370,10 @@ def create_multichannel_rgb(
     `blend_colors`.
 
     Changed (D02/D04, 2026-11): the default vmax is the robust 99.99th
-    percentile (it was the finite maximum); colormap names and registered
-    Colormap instances are accepted here too.
+    percentile (it was the finite maximum). Colormap names now go through
+    their full LUT (they used to be drawn as a black->end-colour ramp, e.g.
+    'viridis' as black->yellow), so their output changes visibly; registered
+    Colormap instances are accepted.
     """
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
@@ -1534,8 +1491,9 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
         Colors (or colormap names) per channel; missing entries take the
         unused palette colours.
     vmin, vmax : float or list of float, optional
-        Per-channel range; a one-entry list applies to every channel. None
-        (per channel) is the channel's min / max ignoring NaN.
+        Per-channel range; a one-entry list applies to every channel, a
+        shorter list is padded with None, and a list longer than C raises
+        ValueError. None (per channel) is the channel's min / max ignoring NaN.
     gamma : float or list of float
         Per-channel gamma; a list shorter than C is padded with 1 (a longer
         one raises ValueError).
@@ -1558,7 +1516,8 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
 
     Changed (D04, 2026-11): ``blending=None`` follows the viewers' rule (it
     was always additive, also with colormap names), and colormap names use
-    their 8-bit LUT (up to 1/255 different).
+    their 8-bit LUT (up to 1/255 different). A vmin / vmax / gamma list
+    longer than C raises ValueError (extra entries used to be ignored).
     """
     intensities = np.asarray(intensities)
     N, C = intensities.shape
@@ -2335,9 +2294,11 @@ class TNIASliceWidget(TNIAWidgetBase):
     percentile), and a cleared GUI box restores that cached value. Pixel
     sizes are converted to µm; without X/Y sizes the scale bar reads 'px'.
 
-    Changed (D01-D03, 2026-11): vmin used to default to 0.0, which clipped
+    Changed (D01-D04, 2026-11): vmin used to default to 0.0, which clipped
     signed data, and a cleared vmin box used the current slab's minimum;
-    registered Colormap instances are accepted.
+    registered Colormap instances are accepted. Per-channel vmin / vmax /
+    gamma / opacity lists longer than the number of channels raise
+    ValueError, as in the static viewers (extra entries used to be dropped).
     """
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
@@ -2438,11 +2399,12 @@ class TNIASliceWidget(TNIAWidgetBase):
         self._auto_vmin = [r[0] for r in ranges]
         self._auto_vmax = [r[1] for r in ranges]
         self.vmin_list = [self._auto_vmin[i] if v is None else float(v)
-                          for i, v in enumerate(_to_list(vmin, self.num_channels, None))]
+                          for i, v in enumerate(per_channel(vmin, self.num_channels, 'vmin'))]
         self.vmax_list = [self._auto_vmax[i] if v is None else float(v)
-                          for i, v in enumerate(_to_list(vmax, self.num_channels, None))]
-        self.gamma_list = _to_list(gamma, self.num_channels, 1.0)
-        self.opacity_list = _to_list(opacity, self.num_channels, 1.0)
+                          for i, v in enumerate(per_channel(vmax, self.num_channels, 'vmax'))]
+        # the static viewers' per-channel rule: a list longer than the channels raises
+        self.gamma_list = per_channel(gamma, self.num_channels, 'gamma', 1.0)
+        self.opacity_list = per_channel(opacity, self.num_channels, 'opacity', 1.0)
 
         # Convert physical position/thickness to pixel indices
         def _default_t(n): return max(1, n // 64)
@@ -3145,14 +3107,14 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 return [val] * n
 
         def _resolve_vmin(val, n):
-            lst = _to_list(val, n, None)
+            lst = per_channel(val, n, 'vmin')
             res = []
             for x in lst:
                 res.append(0.0 if x is None else float(x))
             return res
 
         def _resolve_vmax(val, n, mode, cont_single, cont_multi):
-            lst = _to_list(val, n, None)
+            lst = per_channel(val, n, 'vmax')
             res = []
             for i, x in enumerate(lst):
                 if x is not None:
@@ -3169,8 +3131,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
         self.vmin_list = _resolve_vmin(vmin, self.C)
         self.vmax_list = _resolve_vmax(vmax, self.C, self.mode, self.cont_single, self.cont_multi)
-        self.gamma_list = _to_list(gamma, self.C, 1.0)
-        self.opacity_list = _to_list(opacity, self.C, 1.0)
+        self.gamma_list = per_channel(gamma, self.C, 'gamma', 1.0)
+        self.opacity_list = per_channel(opacity, self.C, 'opacity', 1.0)
 
         if channel_labels is not None:
             self.channel_names = _to_list(channel_labels, self.C, "Channel")
@@ -4045,6 +4007,11 @@ def show_zyx_max_scatter_interactive(
           channel (1.0 for an all-NaN channel); `vmin` defaults to 0.
         - The function dynamically determines its rendering mode: if `render=None`, it defaults to
           `'points'` for point counts under 10,000, and `'density'` for larger datasets to optimize interactive performance.
+
+    Changed (D04, 2026-11): per-channel `vmin`, `vmax`, `gamma` and `opacity`
+    follow the static viewers' rule (`_conventions.per_channel`): a list
+    longer than the number of channels raises ValueError (extra entries used
+    to be dropped silently); None entries take the default.
     """
     if colors is not None:
         warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)

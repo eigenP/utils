@@ -58,7 +58,7 @@ import anywidget
 import numpy as np
 import traitlets
 
-from ._conventions import PALETTE, channel_color_hex, channel_spec, default_display_range, robust_range
+from ._conventions import PALETTE, _is_single_colour, channel_color_hex, channel_spec, default_colors, default_display_range, robust_range
 from .labels_cmap_data import LABELS_CMAP_COLORS
 
 _ASSETS = Path(__file__).parent
@@ -95,14 +95,16 @@ def _color_hex(c) -> str:
 
 def _channel_colors(given, c: int) -> list[str]:
     """``c`` hex colours: ``given`` (None, or up to ``c`` entries) padded with unused palette colours, cycled."""
-    given = list(given) if given else []
+    if given is None:
+        given = []
+    elif _is_single_colour(given):
+        given = [given]
+    else:
+        given = list(given)
     if len(given) > c:
         raise ValueError(f"need {c} channel names/colors, got {len(given)} colors")
-    specs = [None if v is None else channel_spec(v) for v in given]
-    specs += [None] * (c - len(specs))
-    used = {channel_color_hex(s) for s in specs if s is not None}
-    fill = iter([p for p in PALETTE if channel_color_hex(p) not in used] * c or PALETTE * c)
-    return [channel_color_hex(s if s is not None else next(fill)) for s in specs]
+    # the viewers' rule (_conventions.default_colors): unused palette colours, compared by resolved colour
+    return [channel_color_hex(s) for s in default_colors(given, c)]
 
 
 def _colors_from_coord(values) -> list | None:
