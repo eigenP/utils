@@ -150,7 +150,8 @@ for name, cmap in I_SERIES_COLORMAPS.items():
 
 
 def _image_info(image, shown=None):
-    """Structured description of an array or an (STCZYX) xarray.DataArray.
+    """Structured description of an (STCZYX) xarray.DataArray, or of an array given
+    as its ``(shape, dtype)`` (so a lazy or large input is neither loaded nor copied).
 
     Returns ``(rows, channels)``: ``rows`` is a list of ``(key, value)`` strings,
     ``channels`` is ``None`` or ``(columns, cells)`` with one row of strings per
@@ -184,15 +185,16 @@ def _image_info(image, shown=None):
                 cells.append([str(i), str(lab)] + ["" if (isinstance(v, float) and np.isnan(v)) else str(v) for v in vals])
             channels = (["C", "name"] + [str(k) for k in meta], cells)
     else:
-        rows.append(("shape", str(tuple(np.shape(image)))))
-        rows.append(("dtype", str(np.asarray(image).dtype)))
+        shape, dtype = image
+        rows.append(("shape", str(tuple(shape))))
+        rows.append(("dtype", str(np.dtype(dtype))))
     if shown:
         rows.append(("shown", shown))
     return rows, channels
 
 
 def _image_info_lines(image, shown=None) -> list:
-    """Text lines describing an array or an (STCZYX) xarray.DataArray."""
+    """Text lines describing an (STCZYX) xarray.DataArray or an array's ``(shape, dtype)``."""
     rows, channels = _image_info(image, shown)
     lines = [f"{k}: {v}" for k, v in rows if k != "shown"]
     if channels is not None:
@@ -386,8 +388,9 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     full-width info table.
 
     For inputs with more than two dimensions the middle slice of every extra
-    dimension is shown. The info table lists the shape and dtype, or for an
-    ``xarray.DataArray`` (e.g. STCZYX from ``image_io``) the source, dims,
+    dimension is shown; it is indexed before conversion to NumPy, so a lazy
+    (dask, zarr, memmap) volume loads only that plane. The info table lists
+    the shape and dtype, or for an ``xarray.DataArray`` (e.g. STCZYX from ``image_io``) the source, dims,
     pixel sizes and which slice is shown, plus min / max / mean of the shown
     slice and, when set (``vmin``/``vmax``/``gamma``), the display range with
     the fraction of clipped pixels; channels and their metadata coordinates
@@ -402,7 +405,7 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         The number of bins to use for the histogram. Default is 64.
     gamma : float, optional
         Display gamma (``PowerNorm``); ``vmin``/``vmax`` passed in ``imshow_kwargs``
-        are applied to that norm.
+        are applied to that norm. Cannot be combined with a ``norm``.
     return_image_only : bool, optional
         Return only the 2D slice that would be shown.
     info_width : int, optional
@@ -411,7 +414,9 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     image_size : float, optional
         Length in inches of the image's longer side.
     **imshow_kwargs
-        Passed to ``imshow`` (``cmap``, ``vmin``, ``vmax``, ...).
+        Passed to ``imshow`` (``cmap``, ``vmin``, ``vmax``, ``norm``,
+        ``interpolation``, ...). Defaults: ``origin='lower'``, ``cmap='gray'``,
+        ``interpolation='nearest'``.
 
     Returns
     -------
@@ -433,6 +438,7 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     ### SET DEFAULT KWARGS
     imshow_kwargs.setdefault('origin', 'lower')
     imshow_kwargs.setdefault('cmap', 'gray')
+    imshow_kwargs.setdefault('interpolation', 'nearest')
 
     shown = None
     shown_channel = None
@@ -450,13 +456,16 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         info_src = da
         image = np.asarray(da.isel(sel).values) if sel else np.asarray(da.values)
     else:
-        image = np.asarray(image)
-        im_shape = image.shape
+        if not (hasattr(image, "shape") and hasattr(image, "__getitem__")):
+            image = np.asarray(image)  # e.g. nested Python lists
+        im_shape = tuple(image.shape)
         if len(im_shape) > 2:
             middle_indices = [s // 2 for s in im_shape[:-2]]
             shown = "middle slice " + str(tuple(middle_indices)) + " of the leading dims"
+            # index before converting: a lazy (dask/zarr/memmap) volume loads one plane only
             image = image[tuple(middle_indices + [slice(None), slice(None)])]
-        info_src = np.empty(im_shape, dtype=image.dtype) if len(im_shape) > 2 else image
+        image = np.asarray(image)
+        info_src = (im_shape, image.dtype)  # no full-shape stand-in array
 
     if return_image_only:
         return image
@@ -482,18 +491,25 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     w_hist, h_hist = max(w_img, 3.0), 0.9
     col_w = max(w_img, w_hist)
 
+    norm = imshow_kwargs.pop('norm', None)
+    if gamma != 1:
+        if norm is not None:
+            raise ValueError("Pass either gamma (a PowerNorm) or norm, not both.")
+        # matplotlib refuses a norm together with vmin/vmax, so hand them to the norm
+        norm = PowerNorm(gamma=gamma, vmin=imshow_kwargs.pop('vmin', None),
+                         vmax=imshow_kwargs.pop('vmax', None))
+
     fig = plt.figure(figsize=(col_w + 2.0, h_img + h_hist + 4.0))
     ax_img = fig.add_axes([0.1, 0.6, 0.4, 0.3])
     ax_hist = fig.add_axes([0.1, 0.4, 0.4, 0.1])
     ax_info = fig.add_axes([0.0, 0.0, 1.0, 0.3])
 
-    norm = None
-    if gamma != 1:
-        # matplotlib refuses a norm together with vmin/vmax, so hand them to the norm
-        norm = PowerNorm(gamma=gamma, vmin=imshow_kwargs.pop('vmin', None),
-                         vmax=imshow_kwargs.pop('vmax', None))
-    im = ax_img.imshow(image, norm=norm, interpolation='nearest', **imshow_kwargs)
-    vmin, vmax = im.norm.vmin, im.norm.vmax
+    try:
+        im = ax_img.imshow(image, norm=norm, **imshow_kwargs)
+    except Exception:
+        plt.close(fig)  # a rejected keyword must not leave an empty pyplot figure open
+        raise
+    vmin, vmax = im.norm.vmin, im.norm.vmax  # also the limits of a norm passed in
 
     frac = np.zeros(0)
     if finite.size:
@@ -512,14 +528,14 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     ax_hist.set_ylabel('Fraction')
 
     # display range: dashed lines at vmin / vmax, intensities the display clips shaded
+    # (only with finite data: without it the autoscaled limits mean nothing)
     display = None
-    if vmin is not None and vmax is not None and np.isfinite([vmin, vmax]).all():
-        lo = min(float(finite.min()), vmin) if finite.size else vmin
-        hi = max(float(finite.max()), vmax) if finite.size else vmax
+    if finite.size and vmin is not None and vmax is not None and np.isfinite([vmin, vmax]).all():
+        dmin, dmax = float(finite.min()), float(finite.max())
+        lo, hi = min(dmin, vmin), max(dmax, vmax)
         if hi <= lo:
             hi = lo + 1
         ax_hist.set_xlim(lo, hi)
-        dmin, dmax = (float(finite.min()), float(finite.max())) if finite.size else (None, None)
         for v in (vmin, vmax):
             if v not in (dmin, dmax):  # autoscaled limits sit on the data range: nothing to mark
                 ax_hist.axvline(v, color="#6B6B6B", ls=(0, (3, 2)), lw=1)
@@ -529,10 +545,9 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
             ax_hist.axvspan(vmax, hi, color="#808080", alpha=0.18, lw=0)
         if (vmin, vmax) != (dmin, dmax) or gamma != 1:  # else it repeats the intensity row
             display = f"vmin {vmin:.4g}  vmax {vmax:.4g}" + (f"  gamma {gamma:g}" if gamma != 1 else "")
-            if finite.size:
-                clipped = np.mean((finite < vmin) | (finite > vmax))
-                if clipped > 0:
-                    display += f"  ({100 * clipped:.2g}% of pixels clipped)"
+            clipped = np.mean((finite < vmin) | (finite > vmax))
+            if clipped > 0:
+                display += f"  ({100 * clipped:.2g}% of pixels clipped)"
 
     info_lines.append(stats)
     rows.append(("intensity", stats))
@@ -647,6 +662,44 @@ def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
     return rgb_image
 
 
+_RAINCLOUD_COLOR = "#4C78A8"
+_RAINCLOUD_HUE_COLORS = ["#4C78A8", "#F58518", "#E45756", "#72B7B2", "#54A24B",
+                         "#EECA3B", "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC"]
+
+
+def _resolve_palette(palette, keys):
+    """One colour per entry of ``keys`` (group labels or hue levels, in drawing order).
+
+    ``None`` gives the default blue for every key. A dict is looked up by key, then by
+    ``str(key)``, with the default blue for missing keys. A string is tried as a
+    colormap name first (sampled evenly over the keys, its middle colour for a single
+    key), so names that are also CSS colours ('gray', 'pink') are colormaps, as in
+    ``_swatch_color`` and ``tnia_plotting_anywidgets.resolve_color``; any other colour
+    string colours every key. Any other sequence is cycled. Raises ValueError for
+    anything that is not a colour, before a figure is created.
+    """
+    keys = list(keys)
+    if palette is None:
+        colors = [_RAINCLOUD_COLOR] * len(keys)
+    elif isinstance(palette, dict):
+        colors = [palette[k] if k in palette else palette.get(str(k), _RAINCLOUD_COLOR) for k in keys]
+    elif isinstance(palette, str):
+        try:
+            cmap = mpl_colormaps[palette]
+        except (KeyError, ValueError):
+            cmap = None
+        if cmap is not None:
+            colors = list(cmap(np.linspace(0, 1, len(keys)))) if len(keys) > 1 else [cmap(0.5)] * len(keys)
+        else:
+            colors = [palette] * len(keys)
+    else:
+        colors = list(itertools.islice(itertools.cycle(palette), len(keys)))
+    for c in colors:
+        if not mcolors.is_color_like(c):
+            raise ValueError(f"palette: {c!r} is neither a colormap name nor a colour")
+    return colors
+
+
 def raincloud_plot(data,
                    x_label=None,
                    y_label=None,
@@ -690,8 +743,13 @@ def raincloud_plot(data,
         Existing axes to plot on.
     orientation : {'vertical', 'horizontal'}, default 'vertical'
         Orientation of the plot.
-    palette : list of colors or str, optional
-        Colors to use.
+    palette : str, list of colors or dict, optional
+        Colors of the groups (of the hue levels when ``hue`` is given), resolved the
+        same way for every input type: a colormap name is sampled evenly (colormaps
+        win over colours of the same name, e.g. 'gray', 'pink'); any other string is
+        one colour for every group; a list is cycled; a dict maps group labels (hue
+        levels) to colours, '#4C78A8' for missing ones. Default: '#4C78A8' for every
+        group, or a 10-colour cycle for hue levels.
     figsize : tuple, default (4, 4)
         Figure size if creating a new figure.
     x : str, optional
@@ -793,34 +851,12 @@ def raincloud_plot(data,
             else:
                 dodge = True
 
-        # Resolve Palette
+        # Resolve Palette: one colour per hue level, or per category without hue
         if hue:
-            if isinstance(palette, dict):
-                color_map = palette
-            else:
-                if palette is None:
-                    pal_list = ["#4C78A8", "#F58518", "#E45756", "#72B7B2", "#54A24B", "#EECA3B", "#B279A2", "#FF9DA6", "#9D755D", "#BAB0AC"]
-                    pal_iter = itertools.cycle(pal_list)
-                elif isinstance(palette, str):
-                    # Check if it's a colormap
-                    try:
-                        cmap = mpl_colormaps[palette]
-                        # Sample colors from colormap
-                        if len(hues) > 1:
-                            colors = cmap(np.linspace(0, 1, len(hues)))
-                        else:
-                            colors = [cmap(0.5)]
-                        pal_iter = itertools.cycle(colors)
-                    except (KeyError, ValueError):
-                        # Not a colormap, treat as single color
-                        pal_iter = itertools.cycle([palette])
-                else:
-                    pal_iter = itertools.cycle(palette)
-
-                color_map = {h: next(pal_iter) for h in hues}
+            hue_palette = _RAINCLOUD_HUE_COLORS if palette is None else palette
+            color_map = dict(zip(hues, _resolve_palette(hue_palette, hues)))
         else:
-             # Legacy default: all blue if no palette, or cycle if palette
-             pass
+            cat_colors = _resolve_palette(palette, cats)
 
         # Build PlotItems
         total_width = width_violin
@@ -850,22 +886,13 @@ def raincloud_plot(data,
                         offset = 0
 
                     pos = i_cat + offset
-                    col = color_map.get(h, "#4C78A8")
+                    col = color_map[h]
                 else:
                     group_data = sub_df
                     label = str(cat)
                     pos = i_cat
                     offset = 0
-
-                    if palette is None:
-                        col = "#4C78A8"
-                    elif isinstance(palette, str):
-                        col = palette
-                    elif isinstance(palette, dict):
-                         col = palette.get(cat, "#4C78A8")
-                    else:
-                        pal_cycle = itertools.cycle(palette)
-                        col = next(itertools.islice(pal_cycle, i_cat, i_cat + 1))
+                    col = cat_colors[i_cat]
 
                 vals = group_data[val_col].values
                 if highlight_mask is not None:
@@ -968,14 +995,6 @@ def raincloud_plot(data,
         else:
             raise ValueError("Unsupported data type")
 
-        if highlight_mask is not None and all(m is None for m in raw_masks):
-            warnings.warn(
-                "highlight_mask could not be matched to the data and is ignored. Give one "
-                "boolean per value (per row for a DataFrame), a dict of masks for dict data, "
-                "or a list with one mask per group for a list of groups.",
-                stacklevel=2,
-            )
-
         # Colors
         n_groups = len(raw_plot_data)
 
@@ -996,24 +1015,7 @@ def raincloud_plot(data,
         if labels_override is not None:
             effective_labels = labels_override
 
-        if palette is None:
-            colors = ["#4C78A8"] * n_groups
-        elif isinstance(palette, dict):
-            colors = []
-            for lbl in effective_labels:
-                # Try exact match first, then string match
-                if lbl in palette:
-                    colors.append(palette[lbl])
-                elif str(lbl) in palette:
-                    colors.append(palette[str(lbl)])
-                else:
-                    colors.append("#4C78A8") # Fallback color
-        elif isinstance(palette, str):
-             # If single color string
-            colors = [palette] * n_groups
-        else:
-            # List of colors
-            colors = list(itertools.islice(itertools.cycle(palette), n_groups))
+        colors = _resolve_palette(palette, effective_labels)
 
         for i, (label, vals) in enumerate(raw_plot_data):
             plot_items.append({
@@ -1026,6 +1028,15 @@ def raincloud_plot(data,
             })
             xtick_positions.append(i)
             xtick_labels.append(label)
+
+    # Same check for every input type (the DataFrame x/y branch used to ignore it silently)
+    if highlight_mask is not None and all(item['mask'] is None for item in plot_items):
+        warnings.warn(
+            "highlight_mask could not be matched to the data and is ignored. Give one "
+            "boolean per value (per row for a DataFrame), a dict of masks for dict data, "
+            "or a list with one mask per group for a list of groups.",
+            stacklevel=2,
+        )
 
     # --- 2. Calculate Total Points for Rasterization ---
     total_points = sum(len(item['values']) for item in plot_items)
@@ -1045,6 +1056,9 @@ def raincloud_plot(data,
         outlier_method = 'robust_zscore'
 
     # --- 4. Plotting Loop ---
+    # One seeded generator for all groups: re-seeding per group gave every group of
+    # the same size the same jitter pattern, which reads as paired data
+    rng = np.random.default_rng(0)
     for item in plot_items:
         vals = item['values']
         pos = item['position']
@@ -1087,7 +1101,6 @@ def raincloud_plot(data,
                 verts[:, 1] = np.clip(verts[:, 1], pos, None)
 
         # B. Scatter (Rain)
-        rng = np.random.default_rng(0)
         # Scale jitter and offset by width ratio relative to 0.5 (default)
         scale_factor = width / 0.5
         jitter_vals = rng.normal(loc=0, scale=0.04 * scale_factor, size=len(vals))
@@ -1133,14 +1146,16 @@ def raincloud_plot(data,
                 xtick_labels = x_label
                 x_label = None
             else:
-                print(f"Warning: x_label list length ({len(x_label)}) does not match number of groups ({len(xtick_labels)}). Using as axis label.")
+                warnings.warn(f"x_label list length ({len(x_label)}) does not match number of groups "
+                              f"({len(xtick_labels)}). Using as axis label.", stacklevel=2)
     else:
         if y_label is not None and isinstance(y_label, (list, tuple, np.ndarray)) and not isinstance(y_label, str):
             if len(y_label) == len(xtick_labels):
                 xtick_labels = y_label
                 y_label = None
             else:
-                print(f"Warning: y_label list length ({len(y_label)}) does not match number of groups ({len(xtick_labels)}). Using as axis label.")
+                warnings.warn(f"y_label list length ({len(y_label)}) does not match number of groups "
+                              f"({len(xtick_labels)}). Using as axis label.", stacklevel=2)
 
     if vert:
         ax.set_xticks(xtick_positions)
@@ -1484,7 +1499,9 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
         helps keep SVG file sizes manageable for large datasets.
     editable_text : bool, default True
         If True, exports SVGs with editable text by temporarily setting
-        `svg.fonttype` to 'none' and `axes.unicode_minus` to False.
+        `svg.fonttype` to 'none' and `axes.unicode_minus` to False. If False,
+        glyphs are outlined as paths (`svg.fonttype` 'path'), whatever the
+        global setting (e.g. after `set_plotting_style()`).
     **kwargs :
         Additional keyword arguments passed directly to `plt.savefig`.
     """
@@ -1520,6 +1537,10 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
     if editable_text:
         context_rc['svg.fonttype'] = 'none'
         context_rc['axes.unicode_minus'] = False
+    else:
+        # Outline glyphs even if the global rcParams say 'none' (set_plotting_style).
+        # axes.unicode_minus is left alone: the style's font may lack U+2212.
+        context_rc['svg.fonttype'] = 'path'
 
     # Call savefig on the current figure with the context
     with plt.rc_context(context_rc):
@@ -1537,7 +1558,13 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
 
 def brightness_diagnostic_plotter(diagnostic_data, ax=None):
     """
-    Plots the diagnostic data returned by `adjust_brightness_per_slice` when `return_diagnostic=True`.
+    Plots the diagnostic data returned by `correct_z_intensity_decay(..., return_diagnostic=True)`.
+
+    The points are the 99th percentile of each z-slice and the line is the fitted
+    decay, in the units the correction works in: integer input is scaled to [0, 1]
+    first (by the dtype maximum for 8/16-bit, by the data's maximum magnitude for
+    wider integers), float input keeps its raw intensities. Neither curve is
+    normalised to the fit.
 
     Args:
         diagnostic_data (dict): The diagnostic data containing `x_data`, `y_data_norm`, `y_fit_norm`, and `gamma_fit_func`.
@@ -1558,10 +1585,10 @@ def brightness_diagnostic_plotter(diagnostic_data, ax=None):
         fig, ax = plt.subplots(figsize=(8, 5), layout='tight')
     else:
         fig = ax.figure
-    ax.plot(x_data, y_data_norm, 'o', label='Raw 99th Percentile (Normalized)', alpha=0.7)
+    ax.plot(x_data, y_data_norm, 'o', label='99th percentile per slice', alpha=0.7)
     ax.plot(x_data, y_fit_norm, '-', label=f'Fitted Curve ({gamma_fit_func})', linewidth=2)
     ax.set_xlabel('Z-slice index')
-    ax.set_ylabel('Normalized Intensity')
+    ax.set_ylabel('Intensity (99th percentile)')
     ax.set_title('Z-axis Intensity Decay Fit')
     ax.legend()
     ax.grid(True, linestyle='--', alpha=0.6)
