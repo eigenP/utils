@@ -508,7 +508,9 @@ def test_get_tiff_voxel_size_ome_and_standard_tags(tmp_path):
     units, and (3) standard TIFFs with ``CENTIMETER`` (3) and ``INCH`` (2)
     resolution tags and asymmetric X/Y resolutions.
     Expected outcome: OME physical sizes harmonize to ``µm`` when units differ;
-    standard TIFF tags invert ``pixels/unit`` to ``units/pixel`` with exact unit.
+    standard TIFF tags invert ``pixels/unit`` to ``units/pixel``, converted to
+    µm for cm tags; inch-only tags (a print dpi) are uncalibrated (None) with a
+    warning. (Changed by D01: these used to report raw 'cm' / 'inch' values.)
     """
     tifffile = pytest.importorskip("tifffile")
 
@@ -548,15 +550,18 @@ def test_get_tiff_voxel_size_ome_and_standard_tags(tmp_path):
     res_mix = get_tiff_voxel_size(p_mix)
     assert res_mix == {"X": pytest.approx(0.2), "Y": pytest.approx(0.25), "Z": pytest.approx(0.5), "unit": "µm"}
 
+    # D01: lengths are reported in µm (0.005 cm = 50 µm), not in the tag's unit
     p_cm = tmp_path / "tags_cm.tif"
     tifffile.imwrite(p_cm, np.zeros((8, 9), np.uint8), resolution=(200.0, 100.0), resolutionunit=3)
     res_cm = get_tiff_voxel_size(p_cm)
-    assert res_cm == {"X": pytest.approx(0.005), "Y": pytest.approx(0.01), "Z": None, "unit": "cm"}
+    assert res_cm == {"X": pytest.approx(50.0), "Y": pytest.approx(100.0), "Z": None, "unit": "µm"}
 
+    # D01: an inch resolution without ImageJ/OME units is a print dpi, i.e. uncalibrated
     p_in = tmp_path / "tags_in.tif"
     tifffile.imwrite(p_in, np.zeros((8, 9), np.uint8), resolution=(100.0, 50.0), resolutionunit=2)
-    res_in = get_tiff_voxel_size(p_in)
-    assert res_in == {"X": pytest.approx(0.01), "Y": pytest.approx(0.02), "Z": None, "unit": "inch"}
+    with pytest.warns(UserWarning, match="inches .* print resolution"):
+        res_in = get_tiff_voxel_size(p_in)
+    assert res_in == {"X": None, "Y": None, "Z": None, "unit": None}
 
 
 @patch("eigenp_utils.image_io.tifffile.TiffFile")
@@ -904,3 +909,62 @@ def test_load_image_pixel_size_override_and_channel_rename_errors(tmp_path):
             mock_cls.return_value.__enter__.return_value = mock_tif
             with pytest.raises(ValueError, match=msg):
                 load_image(tmp_path / "ambig.tif")
+
+
+# ---------------------------------------------------------------------------
+# D01: readers report µm; uncalibrated is None
+# ---------------------------------------------------------------------------
+
+
+def test_cm_and_nm_tiffs_load_in_um_and_overrides_merge_in_um(tmp_path):
+    """Verify cm / nm calibrated TIFFs round-trip to µm, and per-axis overrides are merged in µm (C-01, C-02, R8-02).
+
+    Strategy: (+) write a 1 µm/px stack as cm resolution tags (no Z step) and
+    an ImageJ stack in nm; read with ``get_tiff_voxel_size`` and
+    ``load_image`` (with a Z override without unit, and with an override in
+    nm). (-) a µm ImageJ stack keeps its values.
+    Expected outcome: X/Y = 1 µm with unit 'µm' (not 1e-4 'cm'); the unitless
+    Z override is read as µm next to them; an nm override is converted; the nm
+    ImageJ stack loads as 0.1 / 0.3 µm; the µm control is unchanged.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    p_cm = tmp_path / "cm.tif"
+    tifffile.imwrite(p_cm, np.zeros((5, 16, 16), np.uint16), resolution=(1e4, 1e4), resolutionunit="CENTIMETER")
+    assert get_tiff_voxel_size(p_cm) == {"X": pytest.approx(1.0), "Y": pytest.approx(1.0), "Z": None, "unit": "µm"}
+    ps = get_stczyx_pixel_sizes(load_image(p_cm, input_axes="ZYX", pixel_sizes={"Z": 2.0}))
+    assert ps == {"Z": pytest.approx(2.0), "Y": pytest.approx(1.0), "X": pytest.approx(1.0), "unit": "µm"}
+    ps_nm = get_stczyx_pixel_sizes(load_image(p_cm, input_axes="ZYX", pixel_sizes={"Z": 500.0, "unit": "nm"}))
+    assert ps_nm["Z"] == pytest.approx(0.5) and ps_nm["X"] == pytest.approx(1.0) and ps_nm["unit"] == "µm"
+
+    p_nm = tmp_path / "nm.tif"
+    tifffile.imwrite(p_nm, np.zeros((4, 8, 8), np.uint16), imagej=True, resolution=(1 / 100.0, 1 / 100.0),
+                     metadata={"axes": "ZYX", "unit": "nm", "spacing": 300.0})
+    ps = get_stczyx_pixel_sizes(load_image(p_nm))
+    assert ps == {"Z": pytest.approx(0.3), "Y": pytest.approx(0.1), "X": pytest.approx(0.1), "unit": "µm"}
+
+    p_um = tmp_path / "um.tif"
+    tifffile.imwrite(p_um, np.zeros((4, 8, 8), np.uint16), imagej=True, resolution=(2.0, 2.0),
+                     metadata={"axes": "ZYX", "unit": "micron", "spacing": 1.5})
+    assert get_tiff_voxel_size(p_um) == {"X": 0.5, "Y": 0.5, "Z": 1.5, "unit": "micron"}
+
+
+def test_uncalibrated_and_dpi_only_tiffs_report_none(tmp_path):
+    """Verify uncalibrated (1/1, no unit) and inch-only TIFFs give X = Y = None from both readers (R8-01).
+
+    Strategy: write a TIFF with tifffile's default resolution, and a 72-dpi
+    'screenshot' (inch tags); read both with ``get_tiff_voxel_size`` and
+    ``load_image``.
+    Expected outcome: both readers agree on None (no fake 1.0 or 352.8 µm
+    pixels); the dpi file warns that the inch resolution is a print dpi.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    p = tmp_path / "plain.tif"
+    tifffile.imwrite(p, np.zeros((6, 7), np.uint8))
+    assert get_tiff_voxel_size(p) == {"X": None, "Y": None, "Z": None, "unit": None}
+
+    p72 = tmp_path / "shot.tif"
+    tifffile.imwrite(p72, np.zeros((64, 64), np.uint8), resolution=(72.0, 72.0), resolutionunit="INCH")
+    with pytest.warns(UserWarning, match="72 dpi"):
+        assert get_tiff_voxel_size(p72)["X"] is None
+    with pytest.warns(UserWarning, match="72 dpi"):
+        assert get_stczyx_pixel_sizes(load_image(p72)) == {"Z": None, "Y": None, "X": None, "unit": None}

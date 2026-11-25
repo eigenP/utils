@@ -6,6 +6,8 @@ import xarray as xr
 import tifffile
 import xml.etree.ElementTree as ET
 
+from ._conventions import UM, is_length_unit, resolve_pixel_sizes, to_um
+
 
 _STCZYX = 'STCZYX'
 
@@ -34,25 +36,25 @@ _SPATIAL = ('Z', 'Y', 'X')
 
 def _normalize_pixel_sizes(pixel_sizes):
     """{'Z', 'Y', 'X', 'unit'} dict (None where unknown) from a dict or a (Z, Y, X) sequence."""
-    if pixel_sizes is None:
-        return {'Z': None, 'Y': None, 'X': None, 'unit': None}
+    # Parsed and validated by the shared parser; the unit is kept as given here
+    # (conversion to µm is up to the caller), and a missing Z is not filled in.
+    unit = None
     if isinstance(pixel_sizes, dict):
-        keyed = {str(k).upper(): v for k, v in pixel_sizes.items()}
-        out = {ax: keyed.get(ax) for ax in _SPATIAL}
-        out['unit'] = pixel_sizes.get('unit')
-    else:
-        values = list(pixel_sizes)
-        if len(values) != 3:
-            raise ValueError(f"pixel_sizes must be a dict or a (Z, Y, X) sequence, got {pixel_sizes!r}.")
-        out = dict(zip(_SPATIAL, values))
-        out['unit'] = None
-    for ax in _SPATIAL:
-        if out[ax] is not None:
-            v = float(out[ax])
-            if not (np.isfinite(v) and v > 0):
-                raise ValueError(f"pixel_sizes['{ax}'] must be finite and positive, got {out[ax]!r}.")
-            out[ax] = v
-    return out
+        unit = next((v for k, v in pixel_sizes.items() if str(k).upper() == 'UNIT'), None)
+        pixel_sizes = {k: v for k, v in pixel_sizes.items() if str(k).upper() != 'UNIT'}
+    values, _, _ = resolve_pixel_sizes(pixel_sizes, 3, fill_z=False, warn=False)
+    return {**dict(zip(_SPATIAL, values)), 'unit': unit}
+
+
+def _sizes_in_um(ps):
+    """A normalised pixel-size dict with sizes in a known length unit converted to µm ('unit': 'µm').
+
+    No unit stays None (µm by convention); an unknown unit is kept unconverted.
+    """
+    factor = _um_factor(ps['unit'])
+    if factor is None:
+        return ps
+    return {**{ax: None if ps[ax] is None else ps[ax] * factor for ax in _SPATIAL}, 'unit': UM}
 
 
 def _coord_spacing(da: xr.DataArray, dim: str):
@@ -317,7 +319,11 @@ def load_image(
         ``strict``.
     pixel_sizes : dict or (Z, Y, X) sequence, optional
         Overrides the source's values **per axis** (``{"Z": 0.5}`` keeps the
-        file's X/Y).
+        file's X/Y). Sizes without a ``'unit'`` are in µm; file sizes and
+        overrides in known length units are converted to µm before merging.
+        Changed (D01, 2026-11): the result is in µm ('unit': 'µm'); before,
+        overrides were merged with the file's raw values and unit (a Z
+        override next to X/Y in cm was read as cm).
     series : int, optional
         TIFF only: read this series. By default series of identical shape
         (multi-position OME-TIFF) are stacked along ``S``; otherwise series 0
@@ -339,17 +345,29 @@ def load_image(
         name = path.name.lower()
         if name.endswith((".tif", ".tiff")):
             data, file_ps, input_axes = _read_tiff(path, input_axes, series)
-            if file_ps and file_ps.get("unit") is None and file_ps.get("X") == 1.0 and file_ps.get("Y") == 1.0:
-                file_ps = {**file_ps, "X": None, "Y": None}  # resolution tags absent: 1.0 means "unknown"
         else:
             raise ValueError(
                 f"unsupported file type: {path.name}; load_image reads .tif/.tiff. For other formats read "
                 "the file with its own reader (to an array or xarray.DataArray with named dims) and pass that"
             )
-    given = _normalize_pixel_sizes(pixel_sizes)
-    base = _normalize_pixel_sizes(file_ps)
+    # File sizes and overrides are each converted to µm before they are merged
+    # per axis (an override without a unit is in µm).
+    given = _sizes_in_um(_normalize_pixel_sizes(pixel_sizes))
+    base = _sizes_in_um(_normalize_pixel_sizes(file_ps))
     ps = {a: given[a] if given[a] is not None else base[a] for a in ("Z", "Y", "X")}
-    ps["unit"] = given["unit"] or base["unit"]
+    used = set()
+    if any(given[a] is not None for a in ("Z", "Y", "X")):
+        used.add(given["unit"])
+    if any(given[a] is None and base[a] is not None for a in ("Z", "Y", "X")):
+        used.add(base["unit"])
+    unknown = used - {None, UM}
+    if unknown and len(used) > 1:
+        # An unknown unit cannot be converted, so it cannot be mixed either
+        raise ValueError(
+            f"pixel_sizes override in {given['unit'] or UM!r} cannot be merged with the file's sizes in "
+            f"{base['unit'] or UM!r}; give all three sizes in one unit"
+        )
+    ps["unit"] = unknown.pop() if unknown else (UM if UM in used else None)
     if all(ps[a] is None for a in ("Z", "Y", "X")):
         ps = None
     original = None
@@ -607,24 +625,13 @@ def numpy_to_stczyx_xarray(
     )
 
 
-# Length units in metres, keyed by the spellings ImageJ, OME and TIFF use
-_UNIT_IN_METRES = {
-    'm': 1.0, 'meter': 1.0, 'metre': 1.0,
-    'cm': 1e-2, 'centimeter': 1e-2,
-    'mm': 1e-3, 'millimeter': 1e-3,
-    'µm': 1e-6, 'μm': 1e-6, 'um': 1e-6, 'micron': 1e-6, 'microns': 1e-6, 'micrometer': 1e-6,
-    'nm': 1e-9, 'nanometer': 1e-9,
-    'å': 1e-10, 'angstrom': 1e-10,
-    'inch': 0.0254, 'in': 0.0254,
-}
-
-
-def _unit_in_metres(unit):
-    if unit is None:
+def _um_factor(unit):
+    """Factor from a known length unit to µm (inch included, without its warning), else None."""
+    if unit is None or not is_length_unit(unit):
         return None
-    # ImageJ writes µ as the escape sequence 'µ'
-    key = str(unit).strip().replace('\\u00B5', 'µ').replace('\\u00b5', 'µ').lower()
-    return _UNIT_IN_METRES.get(key)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return float(to_um(1.0, unit))
 
 
 def get_tiff_voxel_size(filepath):
@@ -638,10 +645,21 @@ def get_tiff_voxel_size(filepath):
       (ImageJ omits the entry when the step is 1.0). A ``zunit`` that differs
       from ``unit`` is converted.
     - OME-TIFF sizes are read with their per-axis units (default µm).
-    - X/Y fall back to the TIFF resolution tags (inch or cm).
+    - X/Y fall back to the TIFF resolution tags (cm, or none).
 
-    When the axes have different units (e.g. X/Y from resolution tags in cm and
-    Z from OME in µm), all sizes are converted to µm.
+    Sizes in known length units are reported in µm (µm is the package's
+    canonical unit); a single µm spelling ('um', 'micron', ...) is kept as
+    written. Unknown units are kept (with a warning when the axes disagree).
+
+    Uncalibrated files report None for X and Y, not 1.0: resolution tags of
+    1/1 without a unit (tifffile's default), and resolution tags in inches
+    that no ImageJ unit overrides (a print resolution such as 72 dpi, not a
+    microscope calibration; a UserWarning says so).
+
+    Changed (D01, 2026-11): sizes in cm / mm / nm / ... are converted to µm
+    (they used to keep the file's unit unless the axes' units differed), and
+    uncalibrated or inch-only files give X = Y = None (they used to give the
+    raw tag values, e.g. 1.0, or 352.8 µm pixels for a 72-dpi screenshot).
     """
     voxel_data = {'X': None, 'Y': None, 'Z': None, 'unit': None}
     units = {'X': None, 'Y': None, 'Z': None}
@@ -705,33 +723,44 @@ def get_tiff_voxel_size(filepath):
 
                 # Standard TIFF ResolutionUnit: 1=None, 2=Inch, 3=Centimeter.
                 # ImageJ's own 'unit' defines its resolution tags, so it takes precedence.
-                if res_unit_tag and units['X'] is None:
-                    unit_val = res_unit_tag.value
-                    if unit_val == 2:
-                        units['X'] = units['Y'] = 'inch'
-                    elif unit_val == 3:
+                unit_val = res_unit_tag.value if res_unit_tag else None
+                if units['X'] is None and voxel_data['X'] is not None:
+                    if unit_val == 3:
                         units['X'] = units['Y'] = 'cm'
+                    elif unit_val == 2:
+                        # A print resolution (dpi), not a microscope calibration
+                        warnings.warn(
+                            f"{Path(str(filepath)).name}: the only X/Y calibration is a TIFF resolution in "
+                            f"inches ({x_num / x_den:g} dpi), usually a print resolution; X/Y pixel sizes "
+                            "are reported as unknown (None). Pass pixel_sizes= to set them.",
+                            UserWarning, stacklevel=2,
+                        )
+                        voxel_data['X'] = voxel_data['Y'] = None
+                    elif voxel_data['X'] == 1.0 and voxel_data['Y'] == 1.0:
+                        # tifffile's default 1/1 resolution without a unit: not calibrated
+                        voxel_data['X'] = voxel_data['Y'] = None
 
     # ---------------------------------------------------------
-    # 4. Report all sizes in one unit
+    # 4. Report all sizes in µm (one common unit)
     # ---------------------------------------------------------
     present = {ax: units[ax] for ax in ('X', 'Y', 'Z') if voxel_data[ax] is not None}
-    first_unit = next((u for u in present.values() if u is not None), units['X'])
-    # Spellings of the same unit ('um', 'µm', 'micron') count as one unit
-    distinct = {_unit_in_metres(u) or u for u in present.values() if u is not None}
-    if len(distinct) <= 1:
-        voxel_data['unit'] = first_unit
-    elif all(_unit_in_metres(u) is not None for u in present.values()):
-        for ax, u in present.items():
-            voxel_data[ax] = voxel_data[ax] * _unit_in_metres(u) / 1e-6
-        voxel_data['unit'] = 'µm'
+    named = [u for u in present.values() if u is not None]
+    if all(_um_factor(u) is not None for u in named):
+        if named and len({str(u) for u in named}) == 1 and _um_factor(named[0]) == 1.0:
+            voxel_data['unit'] = named[0]  # a single µm spelling, kept as written
+        else:
+            for ax, u in present.items():
+                if u is not None:
+                    voxel_data[ax] = voxel_data[ax] * _um_factor(u)
+            voxel_data['unit'] = UM if named else None
     else:
-        warnings.warn(
-            f"Pixel sizes of {filepath} use units {present} that could not be converted "
-            "to a common unit; 'unit' refers to X.",
-            UserWarning,
-            stacklevel=2,
-        )
-        voxel_data['unit'] = units['X']
+        if len({_um_factor(u) or u for u in named}) > 1:
+            warnings.warn(
+                f"Pixel sizes of {filepath} use units {present} that could not be converted "
+                "to a common unit; 'unit' refers to X.",
+                UserWarning,
+                stacklevel=2,
+            )
+        voxel_data['unit'] = units['X'] if units['X'] is not None else named[0]
 
     return voxel_data

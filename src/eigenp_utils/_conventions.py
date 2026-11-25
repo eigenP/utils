@@ -222,7 +222,7 @@ def resolve_pixel_sizes(ps, ndim=3, *, axes="zyx", fill_z=True, warn=True, stack
             entries = entries[-ndim:]
         if len(entries) != ndim:
             raise ValueError(
-                f"pixel_sizes has {len(entries)} entries, expected {ndim} ({', '.join(out_axes)})."
+                f"pixel_sizes sequence has {len(entries)} entries, expected {ndim} ({', '.join(out_axes)})."
             )
         raw = entries
     values = [_as_float(v, a) for a, v in zip(out_axes, raw)]
