@@ -836,6 +836,11 @@ function render({ model, el: root }) {
     ["change:show_adjacent", () => { drawAdjacent(); syncControls(); }],
     ["change:track_undo_ids", () => { if (!checkEpoch()) syncTrackUndo(); }],
     ["change:undo_epoch", checkEpoch],
+    // a stack switch requested here (PageDown, stack selector) reaches Python
+    // later: drop the slice snapshots now, so a ctrl+z before Python's answer
+    // cannot send the previous stack's slice into the new one (track markers
+    // stay; Python refuses a serial that is not its top)
+    ["change:stack", () => { state.undo = state.undo.filter((u) => u.track !== undefined); }],
     ["change:labels_from_js", onForeignLabels],
     ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:stack change:stack_names change:shape_zyx change:class_names change:status change:active_label_extent change:counts_text", () => { syncControls(); drawCursor(); }],
     ["change:channel_names", buildChannels],

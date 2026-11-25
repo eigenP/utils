@@ -632,6 +632,46 @@ def test_undo_after_stack_switch_does_not_restore_the_other_stack(page, serve, e
     assert z == 0 and (lab == 5).sum() == 100 and lab[2, 5:9].all()
 
 
+def test_undo_right_after_pagedown_does_not_send_the_previous_stack(page, serve):
+    """ctrl+z after PageDown, before Python has answered the switch, sends nothing (R4-01).
+
+    Strategy: two 2D stacks; stack 1 holds a 100-px mask with id 5. Paint a
+    stroke on stack 0 and apply it in Python, press PageDown (the page's
+    ``stack`` becomes 1, Python's answer is still in flight, e.g. busy kernel)
+    and press ctrl+z at once. Then Python switches.
+    Expected outcome: ctrl+z sends no label message (Python, which applies
+    messages after the switch, would write the stack-0 snapshot into stack 1)
+    and says there is nothing to undo; stack 1 keeps its mask. Negative
+    control: the same ctrl+z without PageDown still undoes the stroke.
+    """
+    img = np.random.default_rng(3).random((H, W)).astype(np.float32)
+    lab1 = np.zeros((H, W), np.uint32)
+    lab1[10:20, 10:20] = 5
+    w = LabelAnnotator([img, img.copy()], labels=[None, lab1], brush_radius=0)
+    w.auto_fill = False
+    _open(page, serve(w))
+    _stroke(page, [(5, 30), (35, 30)])
+    _apply_last(page, w)
+    sent = page.evaluate("window.lastLabelsB64()")
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("PageDown")
+    assert _get(page, "stack") == 1
+    page.keyboard.press("Control+z")
+    assert page.evaluate("window.lastLabelsB64()") == sent, "undo sent stack 0's slice after PageDown"
+    assert "nothing to undo" in page.locator(".lbl-status").inner_text()
+    w.stack = 1
+    assert (w.stack_labels[1] == 5).sum() == 100
+
+    w2 = LabelAnnotator([img, img.copy()], labels=[None, lab1], brush_radius=0)
+    w2.auto_fill = False
+    _open(page, serve(w2))
+    _stroke(page, [(5, 30), (35, 30)])
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("Control+z")
+    z, lab = _last_labels(page)
+    assert z == 0 and not lab.any(), "negative control: ctrl+z undoes the stroke"
+
+
 def test_undo_after_set_labels_does_not_revert_it(page, serve):
     """ctrl+z after ``set_labels`` must not restore a slice snapshot taken before it (R4-01).
 
