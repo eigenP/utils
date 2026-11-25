@@ -58,6 +58,7 @@ import anywidget
 import numpy as np
 import traitlets
 
+from ._conventions import PALETTE, channel_color_hex, channel_spec, default_display_range, robust_range
 from .labels_cmap_data import LABELS_CMAP_COLORS
 
 _ASSETS = Path(__file__).parent
@@ -67,7 +68,10 @@ _MAX_WIRE_LABEL = np.iinfo(np.uint16).max
 BACKGROUND_ID = _MAX_WIRE_LABEL  # reserved id for annotated background (background=True)
 _TRACK_UNDO_MAX = 20  # whole-volume operations kept for undo
 
-_DEFAULT_CHANNEL_COLORS = ["#ff00ff", "#00ff00", "#00ffff", "#ff8000", "#ffff00", "#ffffff", "#ff0000", "#0080ff"]
+# The package palette (white, lime, magenta, ...), shared with the ortho viewers
+# and cycled for more channels (D03). It used to start with magenta and fail
+# above 8 channels.
+_DEFAULT_CHANNEL_COLORS = PALETTE
 
 
 def _class_palette(n: int) -> list[str]:
@@ -80,16 +84,39 @@ def _class_palette(n: int) -> list[str]:
 
 
 def _color_hex(c) -> str:
-    """Hex colour for the browser from a colour or colormap name ('gray' -> its end colour, white)."""
-    import matplotlib
-    import matplotlib.colors as mcolors
+    """Hex colour for the browser from a colour or colormap name ('gray' -> its end colour, white).
 
-    if isinstance(c, str):
+    The package's one resolver (``_conventions.channel_color_hex``): colormap
+    names win over CSS names, RGB(A) tuples and registered Colormap instances
+    work, an unregistered instance raises TypeError, other values ValueError.
+    """
+    return channel_color_hex(c)
+
+
+def _channel_colors(given, c: int) -> list[str]:
+    """``c`` hex colours: ``given`` (None, or up to ``c`` entries) padded with unused palette colours, cycled."""
+    given = list(given) if given else []
+    if len(given) > c:
+        raise ValueError(f"need {c} channel names/colors, got {len(given)} colors")
+    specs = [None if v is None else channel_spec(v) for v in given]
+    specs += [None] * (c - len(specs))
+    used = {channel_color_hex(s) for s in specs if s is not None}
+    fill = iter([p for p in PALETTE if channel_color_hex(p) not in used] * c or PALETTE * c)
+    return [channel_color_hex(s if s is not None else next(fill)) for s in specs]
+
+
+def _colors_from_coord(values) -> list | None:
+    """Channel colours from a DataArray ``color`` coordinate (names, hex or RGB tuples); unusable entries -> None."""
+    out = []
+    for v in list(values):
         try:
-            return mcolors.to_hex(matplotlib.colormaps[c](1.0)[:3])
-        except (KeyError, ValueError):
-            pass
-    return mcolors.to_hex(c)
+            out.append(channel_spec(v))
+        except (TypeError, ValueError):
+            if not (v is None or (isinstance(v, str) and not v) or (isinstance(v, float) and np.isnan(v))):
+                warnings.warn(f"channel colour {v!r} is not a colour or colormap name; using the default.",
+                              UserWarning, stacklevel=3)
+            out.append(None)
+    return None if all(v is None for v in out) else out
 
 
 def _rgb_hex(rgb) -> str:
@@ -135,19 +162,25 @@ def _restore_axes(labels_zyx: np.ndarray, spatial_axes: str) -> np.ndarray:
 
 
 def _robust_limits(arr: np.ndarray, lo: float, hi: float, max_samples: int = 2_000_000, seed: int = 0):
-    flat = arr.reshape(-1)
-    if flat.size > max_samples:
-        rng = np.random.default_rng(seed)
-        flat = flat[rng.integers(0, flat.size, max_samples)]
-    if flat.dtype == np.bool_:  # e.g. a mask from extract_surface; np.percentile cannot interpolate bool
-        flat = flat.astype(np.uint8)
-    flat = flat[np.isfinite(flat)]
-    if flat.size == 0:
-        return 0.0, 1.0
-    a, b = np.percentile(flat, [lo, hi])
+    """Display limits from explicit ``(lo, hi)`` percentiles (``percentiles=``), in data units.
+
+    The shared ``_conventions.robust_range`` rule: a fixed-seed sample, and
+    when the percentiles coincide on non-constant data (signal sparser than
+    (100 - hi)%), the data maximum with a warning (it used to be ``lo + 1``,
+    which rendered sparse channels binary). Constant data give ``(v, v + 1)``;
+    no finite value gives (0, 1).
+    """
+    a, b = robust_range(arr, lo, hi, n=max_samples, seed=seed, stacklevel=3)
     if b <= a:
         b = a + 1.0
     return float(a), float(b)
+
+
+def _display_limits(arr: np.ndarray, percentiles) -> tuple[float, float]:
+    """Default display limits of a channel (D02): the package's default display range, or ``percentiles``."""
+    if percentiles is None:
+        return default_display_range(arr)
+    return _robust_limits(arr, *percentiles)
 
 
 def _coerce_label_values(lab: np.ndarray, background: bool) -> np.ndarray:
@@ -226,10 +259,23 @@ class LabelAnnotator(anywidget.AnyWidget):
     classes : list of str, optional
         Class names for semantic mode.
     channel_names, channel_colors : list of str, optional
-        Colours may be any matplotlib colour or colormap name (a colormap such
-        as ``"gray"`` maps to its end colour).
-    percentiles : (float, float)
-        Display scaling to 8 bit, per channel over the whole volume.
+        Colours may be any matplotlib colour (name, hex, RGB tuple) or
+        colormap name or registered Colormap (a colormap such as ``"gray"``
+        maps to its end colour). Missing colours take the package palette
+        ('white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue'), cycled,
+        as in the ortho viewers.
+    percentiles : (float, float), optional
+        Display scaling to 8 bit, per channel over the whole volume. None
+        (default) uses the package's default display range, the same as the
+        ortho viewers: 0 (or the data minimum if negative) to the robust
+        99.99th percentile (the maximum for signal sparser than 0.01%).
+        Explicit percentiles (e.g. ``(0.1, 99.99)``, the old default) fall
+        back to the data maximum, with a warning, when they coincide.
+
+    Changed (D02/D03, 2026-11): the default range was (p0.1, p99.99) with
+    ``lo + 1`` for sparse channels (rendered binary); the default colours
+    were magenta, green, cyan, ... and more than 8 channels raised;
+    RGB-tuple colours in a DataArray ``color`` coordinate were ignored.
     brush_radius : int
         Brush radius in pixels.
     keep_label : bool
@@ -383,7 +429,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         classes: list[str] | None = None,
         channel_names: list[str] | None = None,
         channel_colors: list[str] | None = None,
-        percentiles: tuple[float, float] = (0.1, 99.99),
+        percentiles: tuple[float, float] | None = None,
         brush_radius: int = 2,
         keep_label: bool = False,
         show_adjacent: bool = False,
@@ -401,9 +447,7 @@ class LabelAnnotator(anywidget.AnyWidget):
             if channel_names is None and "C" in image.coords:
                 channel_names = [str(v) for v in image.coords["C"].values]
             if channel_colors is None and "color" in image.coords and image.coords["color"].dims == ("C",):
-                cols = list(image.coords["color"].values)
-                if all(isinstance(v, str) and v for v in cols):
-                    channel_colors = cols
+                channel_colors = _colors_from_coord(image.coords["color"].values)
         extra = []  # further stacks (list input): [(czyx, labels or None)]
         if isinstance(image, (list, tuple)):
             if not image:
@@ -437,7 +481,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         self._image = czyx
         self._spatial_axes = "".join(a for a in input_axes if a in "ZYX")
         c, nz, ny, nx = czyx.shape
-        self._limits = [_robust_limits(czyx[i], *percentiles) for i in range(c)]
+        self._limits = [_display_limits(czyx[i], percentiles) for i in range(c)]
 
         if labels is None:
             self._labels = np.zeros((nz, ny, nx), dtype=np.uint32)
@@ -449,9 +493,9 @@ class LabelAnnotator(anywidget.AnyWidget):
             self._labels = _coerce_label_values(lab, background)
 
         names = list(channel_names) if channel_names else [f"ch{i}" for i in range(c)]
-        colors = [_color_hex(v) for v in channel_colors] if channel_colors else (["#ffffff"] if c == 1 else _DEFAULT_CHANNEL_COLORS[:c])
-        if len(names) != c or len(colors) != c:
+        if len(names) != c:
             raise ValueError(f"need {c} channel names/colors")
+        colors = _channel_colors(channel_colors, c)
         classes = list(classes) if classes else (["foreground"] if mode == "semantic" else [])
         # cached (nonzero ids, pixel counts) per slice: extent / counts readouts, next id
         self._slice_hist: list[tuple[np.ndarray, np.ndarray] | None] = [None] * nz
@@ -475,7 +519,7 @@ class LabelAnnotator(anywidget.AnyWidget):
                     raise ValueError(f"stack {k}: labels shape {el.shape} does not match image {(ez, ey, ex)}")
                 el = _coerce_label_values(el, background)
             self._parked[k] = dict(
-                image=e_img, labels=el, limits=[_robust_limits(e_img[i], *percentiles) for i in range(c)],
+                image=e_img, labels=el, limits=[_display_limits(e_img[i], percentiles) for i in range(c)],
                 hist=[None] * ez, undo=[], z=ez // 2,
             )
 
