@@ -1680,19 +1680,138 @@ def test_describe_image_channel_table_swatches_and_shown_row():
 
 
 def test_hist_imshow_is_a_deprecated_alias_of_describe_image():
-    """Verify hist_imshow emits DeprecationWarning and delegates identically to describe_image."""
+    """Verify hist_imshow emits a FutureWarning naming 0.1.0 and delegates identically to describe_image.
+
+    Changed deliberately (D08): the warning was a DeprecationWarning, hidden by default
+    when attributed to library code; it is now a visible FutureWarning.
+    """
     img = np.random.default_rng(0).random((8, 9))
-    with pytest.warns(DeprecationWarning, match="describe_image"):
+    with pytest.warns(FutureWarning, match=r"hist_imshow is deprecated and will be removed in eigenp_utils 0\.1\.0; use describe_image"):
         res = hist_imshow(img, bins=16)
     ref = describe_image(img, bins=16)
     try:
         assert res["info"] == ref["info"] and res["info_html"] == ref["info_html"]
         assert list(res["axes"]) == list(ref["axes"])
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(FutureWarning):
             np.testing.assert_array_equal(hist_imshow(img, return_image_only=True), img)
     finally:
         plt.close(res["fig"])
         plt.close(ref["fig"])
+
+
+def test_describe_image_draws_row_zero_at_the_top():
+    """D26: origin='upper' by default (row 0 at the top, as the ortho viewers, Fiji, napari).
+
+    (+) default: origin 'upper', y axis inverted (ylim (H - 0.5, -0.5)).
+    (-) an explicit origin='lower' is still honoured.
+    """
+    img = np.arange(6.0).reshape(2, 3)
+    res = describe_image(img)
+    im = res["axes"]["Image"].images[0]
+    assert im.origin == "upper"
+    assert res["axes"]["Image"].get_ylim() == (1.5, -0.5)
+    res2 = describe_image(img, origin="lower")
+    assert res2["axes"]["Image"].images[0].origin == "lower"
+
+
+def test_describe_image_shows_rgb_images_as_rgb():
+    """D26 / R5-08: rgb='auto' shows a trailing 3/4 axis of uint8 or [0, 1] floats as colour.
+
+    (+) (20, 30, 3) uint8 and (20, 30, 4) float in [0, 1]: the whole image is drawn, one
+        histogram per colour channel, the info says RGB / RGBA.
+    (-) a (20, 30, 3) uint16 stack (3 slices) and a float stack with values above 1 are
+        still sliced along the leading axis; rgb=False forces slicing.
+    """
+    rng = np.random.default_rng(0)
+    rgb8 = rng.integers(0, 256, (20, 30, 3), dtype=np.uint8)
+    res = describe_image(rgb8)
+    shown = res["axes"]["Image"].images[0].get_array()
+    assert shown.shape == (20, 30, 3)
+    np.testing.assert_array_equal(np.asarray(shown), rgb8)
+    assert "shown: RGB" in res["info"]
+    assert len(res["axes"]["Histogram"].patches) == 3  # one step histogram per channel
+    np.testing.assert_array_equal(describe_image(rgb8, return_image_only=True), rgb8)
+
+    rgba = rng.random((20, 30, 4))
+    res = describe_image(rgba)
+    assert res["axes"]["Image"].images[0].get_array().shape == (20, 30, 4)
+    assert "shown: RGBA" in res["info"]
+
+    u16 = rng.integers(0, 4000, (20, 30, 3), dtype=np.uint16)
+    assert describe_image(u16, return_image_only=True).shape == (30, 3)
+    big = rng.random((20, 30, 3)) * 5
+    assert describe_image(big, return_image_only=True).shape == (30, 3)
+    assert describe_image(rgb8, rgb=False, return_image_only=True).shape == (30, 3)
+    with pytest.raises(ValueError, match="rgb"):
+        describe_image(u16[..., :2], rgb=True)
+    with pytest.raises(ValueError, match="RGB"):
+        describe_image(rgb8, gamma=2)
+
+
+def test_describe_image_dataarray_picks_y_x_by_name():
+    """R5-08: a channel-last DataArray (Y, X, C) shows a Y x X plane, not an X x C strip."""
+    xr = pytest.importorskip("xarray")
+    da = xr.DataArray(np.arange(4 * 5 * 3).reshape(4, 5, 3), dims=("Y", "X", "C"))
+    plane = describe_image(da, return_image_only=True)
+    np.testing.assert_array_equal(plane, da.isel(C=1).values)
+    res = describe_image(da)
+    assert "shown: C=1" in res["info"]
+    # dims ending in Y, X (STCZYX) are unchanged
+    da2 = xr.DataArray(np.arange(2 * 4 * 5).reshape(2, 4, 5), dims=("Z", "Y", "X"))
+    np.testing.assert_array_equal(describe_image(da2, return_image_only=True), da2.values[1])
+
+
+def _hist_counts(monkeypatch, *args, **kwargs):
+    """Run describe_image and return the (counts, edges) of its histogram, captured from Axes.hist."""
+    calls = []
+    orig = Axes.hist
+
+    def spy(self, *a, **k):
+        out = orig(self, *a, **k)
+        calls.append((np.asarray(out[0]), np.asarray(out[1])))
+        return out
+
+    monkeypatch.setattr(Axes, "hist", spy)
+    describe_image(*args, **kwargs)
+    monkeypatch.setattr(Axes, "hist", orig)
+    assert len(calls) == 1
+    return calls[0]
+
+
+def test_describe_image_integer_histograms_have_level_aligned_bins(monkeypatch):
+    """R5-09: integer data get bins of equal level counts, so flat data give flat histograms.
+
+    (+) uniform uint8 0..39 with bins=64: 40 bins, one per level, none empty (was 24 empty);
+        uniform uint16 0..299 with bins=64: every bin holds the same count (was 479..718),
+        edges at half levels.
+    (-) float data keep exactly ``bins`` equal bins over the data range.
+    """
+    img = np.tile(np.arange(40, dtype=np.uint8), (10, 1))
+    counts, edges = _hist_counts(monkeypatch, img, bins=64)
+    assert len(counts) == 40 and np.all(counts > 0) and np.ptp(counts) < 1e-12
+    np.testing.assert_allclose(edges[[0, -1]], [-0.5, 39.5])
+
+    img16 = np.tile(np.arange(300, dtype=np.uint16), (10, 1))
+    counts, edges = _hist_counts(monkeypatch, img16, bins=64)
+    assert len(counts) <= 64
+    assert np.allclose(np.diff(edges), np.diff(edges)[0]) and np.diff(edges)[0] == 5
+    assert np.ptp(counts) < 1e-12
+
+    flt = np.tile(np.arange(64.0), (4, 1))
+    counts, edges = _hist_counts(monkeypatch, flt, bins=16)
+    assert len(counts) == 16
+    np.testing.assert_allclose(edges[[0, -1]], [0.0, 63.0])
+
+
+def test_color_coded_projection_output_is_shown_by_describe_image_as_rgb():
+    """Seam (C-09): color_coded_projection -> describe_image shows the (Y, X, 3) colour image whole."""
+    rng = np.random.default_rng(0)
+    rgb = color_coded_projection(rng.random((5, 20, 30)))
+    res = describe_image(rgb)
+    shown = res["axes"]["Image"].images[0].get_array()
+    assert shown.shape == (20, 30, 3)
+    np.testing.assert_allclose(np.asarray(shown), rgb)
+    assert "shown: RGB" in res["info"]
 
 
 def test_describe_image_passes_norm_and_interpolation_to_imshow():

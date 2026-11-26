@@ -19,7 +19,7 @@ import itertools
 import math
 import datetime
 import warnings
-from ._conventions import channel_color_hex
+from ._conventions import channel_color_hex, warn_deprecated
 
 # --- Initialization: Load Font and Style ---
 ROOT_DIR = Path(__file__).parent
@@ -484,8 +484,53 @@ def _info_html(rows, channels, shown_channel=None):
     return _HTML("".join(out))
 
 
+def _yx_dims(dims):
+    """The (Y, X) dims of a DataArray: named Y and X (case-insensitive), else the last two."""
+    by_name = {str(d).upper(): d for d in dims}
+    if "Y" in by_name and "X" in by_name:
+        return by_name["Y"], by_name["X"]
+    return dims[-2], dims[-1]
+
+
+def _rgb_plane(image, shape, strict=False):
+    """``(plane, leading_index)`` when ``image`` holds RGB(A) in a trailing axis of 3 or 4, else None.
+
+    Only uint8 data or floats within [0, 1] count as colour, so a (Y, X, 3) uint16
+    Z stack is not mistaken for RGB. Leading axes beyond (Y, X, 3|4) take their
+    middle index, indexed before conversion (a lazy volume loads one plane).
+    ``strict`` (``rgb=True``) raises instead of returning None.
+    """
+    dtype = np.dtype(getattr(image, "dtype", np.float64))
+    ok_shape = len(shape) >= 3 and shape[-1] in (3, 4)
+    if not ok_shape or dtype.kind not in "uf" or (dtype.kind == "u" and dtype != np.uint8):
+        if strict:
+            raise ValueError("rgb=True needs a trailing axis of length 3 or 4 holding uint8 "
+                             f"or floats in [0, 1]; got shape {shape}, dtype {dtype}")
+        return None
+    lead = tuple(s // 2 for s in shape[:-3])
+    plane = np.asarray(image[lead + (slice(None),) * 3] if lead else image)
+    if dtype.kind == "f":
+        finite = plane[np.isfinite(plane)]
+        if finite.size and (finite.min() < 0 or finite.max() > 1):
+            if strict:
+                raise ValueError("rgb=True needs float colour values in [0, 1]")
+            return None
+    return plane, lead
+
+
+def _integer_bin_edges(lo, hi, bins):
+    """Level-aligned histogram edges for integers ``lo..hi``: every bin covers the same
+    number of levels, ``ceil((hi - lo + 1) / bins)``, edges at half levels (so ``bins``
+    is an upper bound, and each level gets its own bin when there are few)."""
+    lo, hi = int(lo), int(hi)
+    n_levels = hi - lo + 1
+    width = max(1, math.ceil(n_levels / int(bins)))
+    n_bins = math.ceil(n_levels / width)
+    return lo - 0.5 + width * np.arange(n_bins + 1)
+
+
 def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=None, image_size=4.0,
-                   **imshow_kwargs):
+                   rgb='auto', **imshow_kwargs):
     """
     Displays an image, its histogram and an info table, stacked in one column.
 
@@ -498,7 +543,11 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
 
     For inputs with more than two dimensions the middle slice of every extra
     dimension is shown; it is indexed before conversion to NumPy, so a lazy
-    (dask, zarr, memmap) volume loads only that plane. The info table lists
+    (dask, zarr, memmap) volume loads only that plane. A DataArray shows its
+    dims named Y and X (case-insensitive; else its last two dims). An array
+    whose trailing axis of length 3 or 4 holds uint8 or floats in [0, 1] is
+    shown as an RGB(A) image (``rgb``), e.g. the output of
+    :func:`color_coded_projection`. The info table lists
     the shape and dtype, or for an ``xarray.DataArray`` (e.g. STCZYX from ``image_io``) the source, dims,
     pixel sizes and which slice is shown, plus min / max / mean of the shown
     slice and, when set (``vmin``/``vmax``/``gamma``), the display range with
@@ -511,7 +560,10 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     image : array-like or xarray.DataArray
         The input image.
     bins : int, optional
-        The number of bins to use for the histogram. Default is 64.
+        The number of bins to use for the histogram. Default is 64. For
+        integer (and bool) data it is an upper bound: bins are aligned to
+        integer levels and each covers the same number of levels, so flat data
+        give a flat histogram.
     gamma : float, optional
         Display gamma (``PowerNorm``); ``vmin``/``vmax`` passed in ``imshow_kwargs``
         are applied to that norm. Cannot be combined with a ``norm``.
@@ -522,9 +574,16 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         as fit the figure width).
     image_size : float, optional
         Length in inches of the image's longer side.
+    rgb : {'auto', True, False}, default 'auto'
+        ``'auto'``: an ndarray whose trailing axis has length 3 or 4 and holds
+        uint8 or floats in [0, 1] is shown as colour, with one histogram per
+        colour channel (leading axes beyond it take their middle index).
+        ``True``: require such an image (ValueError otherwise). ``False``:
+        always slice the leading axes. DataArrays are never treated as RGB.
+        ``gamma``, ``norm``, ``vmin`` and ``vmax`` do not apply to colour.
     **imshow_kwargs
         Passed to ``imshow`` (``cmap``, ``vmin``, ``vmax``, ``norm``,
-        ``interpolation``, ...). Defaults: ``origin='lower'``, ``cmap='gray'``,
+        ``interpolation``, ...). Defaults: ``origin='upper'``, ``cmap='gray'``,
         ``interpolation='nearest'``.
 
     Returns
@@ -543,17 +602,27 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     >>> res["info_html"]  # last expression in a notebook cell: rendered table
 
     Formerly ``hist_imshow`` (deprecated alias).
+
+    Changed (D26, 2026-11): ``origin='upper'`` by default (row 0 at the top, as
+    the ortho viewers, LabelAnnotator, Fiji and napari; it was ``'lower'``).
+    RGB(A) arrays are shown as colour (``rgb='auto'``; they were sliced into a
+    strip 3 pixels wide). DataArrays pick Y/X by name.
+    Changed (R5-09, 2026-11): integer histograms use level-aligned bins.
     """
     ### SET DEFAULT KWARGS
-    imshow_kwargs.setdefault('origin', 'lower')
+    imshow_kwargs.setdefault('origin', 'upper')
     imshow_kwargs.setdefault('cmap', 'gray')
     imshow_kwargs.setdefault('interpolation', 'nearest')
+    if rgb not in ('auto', True, False):
+        raise ValueError(f"rgb must be 'auto', True or False, got {rgb!r}")
 
     shown = None
     shown_channel = None
+    is_rgb = False
     if hasattr(image, "dims") and hasattr(image, "isel"):
         da = image
-        extra = [d for d in da.dims[:-2]]
+        ydim, xdim = _yx_dims(da.dims)
+        extra = [d for d in da.dims if d not in (ydim, xdim)]
         sel = {d: da.sizes[d] // 2 for d in extra}
         if sel:
             parts = []
@@ -563,12 +632,20 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
             shown = ", ".join(parts)
         shown_channel = sel.get("C")
         info_src = da
-        image = np.asarray(da.isel(sel).values) if sel else np.asarray(da.values)
+        plane = da.isel(sel) if sel else da
+        image = np.asarray(plane.transpose(ydim, xdim).values)
     else:
         if not (hasattr(image, "shape") and hasattr(image, "__getitem__")):
             image = np.asarray(image)  # e.g. nested Python lists
         im_shape = tuple(image.shape)
-        if len(im_shape) > 2:
+        if rgb is not False:
+            candidate = _rgb_plane(image, im_shape, strict=rgb is True)
+            if candidate is not None:
+                image, lead = candidate
+                is_rgb = True
+                shown = ("RGBA" if im_shape[-1] == 4 else "RGB") + (
+                    f", middle slice {lead} of the leading dims" if lead else "")
+        if not is_rgb and len(im_shape) > 2:
             middle_indices = [s // 2 for s in im_shape[:-2]]
             shown = "middle slice " + str(tuple(middle_indices)) + " of the leading dims"
             # index before converting: a lazy (dask/zarr/memmap) volume loads one plane only
@@ -579,6 +656,12 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     if return_image_only:
         return image
 
+    if is_rgb:
+        if gamma != 1 or any(k in imshow_kwargs for k in ('norm', 'vmin', 'vmax')):
+            raise ValueError("gamma, norm, vmin and vmax do not apply to an RGB(A) image; "
+                             "pass rgb=False to show its slices with a colormap")
+        imshow_kwargs.pop('cmap')
+
     info_lines = _image_info_lines(info_src, shown)
     rows, channels = _image_info(info_src, shown)
 
@@ -587,9 +670,14 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         # numpy cannot subtract booleans (needed by hist and by the stats below)
         image = image.astype(np.uint8)
 
-    finite = image[np.isfinite(image)] if image.dtype.kind in "fc" else image.ravel()
-    if finite.size:
-        stats = f"min {finite.min():.4g}  max {finite.max():.4g}  mean {finite.mean():.4g}"
+    if is_rgb:
+        finite = image  # per-channel histograms below; stats over the colour values
+        stat_vals = image[..., :3][np.isfinite(image[..., :3])]
+    else:
+        finite = image[np.isfinite(image)] if image.dtype.kind in "fc" else image.ravel()
+        stat_vals = finite
+    if stat_vals.size:
+        stats = f"min {stat_vals.min():.4g}  max {stat_vals.max():.4g}  mean {stat_vals.mean():.4g}"
     else:
         stats = "no finite values"
 
@@ -621,9 +709,24 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     vmin, vmax = im.norm.vmin, im.norm.vmax  # also the limits of a norm passed in
 
     frac = np.zeros(0)
-    if finite.size:
+    if finite.size and is_rgb:
+        # one step histogram per colour channel (alpha is not shown)
+        n_px = finite.shape[0] * finite.shape[1]
+        hist_bins = _integer_bin_edges(0, 255, bins) if dtype == np.uint8 else np.linspace(0, 1, int(bins) + 1)
+        fracs = []
+        for c, col in zip(range(3), ("#D62728", "#2CA02C", "#1F77B4")):
+            vals = finite[..., c].ravel()
+            vals = vals[np.isfinite(vals)]
+            f, _, _ = ax_hist.hist(vals, bins=hist_bins, histtype='step', color=col,
+                                   weights=np.full(vals.size, 1.0 / max(n_px, 1)))
+            fracs.append(f)
+        frac = np.concatenate(fracs)
+    elif finite.size:
+        hist_bins = bins
+        if dtype.kind in "iub" and isinstance(bins, (int, np.integer)):
+            hist_bins = _integer_bin_edges(finite.min(), finite.max(), bins)
         # fraction of pixels per bin: unit-free, unlike a density in 1/intensity
-        frac, _, _ = ax_hist.hist(finite.ravel(), bins=bins, histtype='stepfilled',
+        frac, _, _ = ax_hist.hist(finite.ravel(), bins=hist_bins, histtype='stepfilled',
                                   weights=np.full(finite.size, 1.0 / finite.size))
     nonzero = frac[frac > 0]
     if nonzero.size and nonzero.max() > 10 * nonzero.min():
@@ -639,7 +742,8 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     # display range: dashed lines at vmin / vmax, intensities the display clips shaded
     # (only with finite data: without it the autoscaled limits mean nothing)
     display = None
-    if finite.size and vmin is not None and vmax is not None and np.isfinite([vmin, vmax]).all():
+    if (not is_rgb and finite.size and vmin is not None and vmax is not None
+            and np.isfinite([vmin, vmax]).all()):
         dmin, dmax = float(finite.min()), float(finite.max())
         lo, hi = min(dmin, vmin), max(dmax, vmax)
         if hi <= lo:
@@ -708,14 +812,12 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
 
 
 def hist_imshow(*args, **kwargs):
-    """Deprecated alias of :func:`describe_image` (same arguments and return value)."""
-    import warnings
+    """Deprecated alias of :func:`describe_image` (same arguments and return value).
 
-    warnings.warn(
-        "hist_imshow is deprecated; use eigenp_utils.describe_image (same arguments and return value)",
-        DeprecationWarning,
-        stacklevel=2,
-    )
+    Changed (D08, 2026-11): emits a FutureWarning (was a DeprecationWarning); it
+    will be removed in eigenp_utils 0.1.0.
+    """
+    warn_deprecated("hist_imshow", "describe_image")
     return describe_image(*args, **kwargs)
 
 
