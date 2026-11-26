@@ -133,8 +133,8 @@ def _length_unit(pixel_sizes):
 import anywidget
 import traitlets
 import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
+import sys
 import io
 import base64
 from matplotlib import gridspec
@@ -143,6 +143,26 @@ from scipy import ndimage as ndi
 from matplotlib.colors import PowerNorm, to_rgb, LinearSegmentedColormap
 import matplotlib.colors as mcolors
 from matplotlib.figure import Figure
+
+def _new_figure(**kwargs):
+    """A ``matplotlib.figure.Figure`` with an Agg canvas, not registered with pyplot (D05)."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    fig = Figure(**kwargs)
+    FigureCanvasAgg(fig)
+    return fig
+
+
+def _pyplot_fignums():
+    """Numbers of the open pyplot figures, without importing pyplot (empty if it was never imported)."""
+    plt = sys.modules.get('matplotlib.pyplot')
+    return set(plt.get_fignums()) if plt is not None else set()
+
+
+def _close_pyplot_figures(nums):
+    plt = sys.modules.get('matplotlib.pyplot')
+    for num in nums if plt is not None else ():
+        plt.close(num)
+
 
 # The widget assets sit next to this module; resolving them from __file__ (not
 # importlib.resources("eigenp_utils")) also works when the file runs standalone.
@@ -439,7 +459,7 @@ def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
 
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
+def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=False, opacity=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
@@ -456,7 +476,8 @@ def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), co
             minimum, and the robust 99.99th percentile).
 
     Changed (D02, 2026-11): the default range is computed on the volume (it
-    used to be the min/max of the three slices).
+    used to be the min/max of the three slices). Changed (D05, 2026-11):
+    ``use_plt`` defaults to False (a plain Figure, not registered with pyplot).
     """
 
     slice_zy = np.flip(np.rot90(image_to_show[:,:,x],1),0)
@@ -560,7 +581,7 @@ def _draw_channel_label_bar(axLabels, fontsize_pt, as_image=False):
         ))
 
 
-def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
+def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=False, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -609,8 +630,16 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             bar's line width follows it. None sizes it from the figure height;
             0 hides the label but keeps the bar (at the auto width).
             ``scale_bar_show`` toggles the bar.
+        use_plt (bool, optional): create the figure with ``pyplot.figure``
+            (registered with pyplot, shown by ``plt.show()``). Default False:
+            a plain ``matplotlib.figure.Figure``, which Jupyter and marimo
+            display when it is returned.
     Returns:
         matplotlib Figure with named axes ``axXY``, ``axZY``, ``axXZ``, ``axBar``.
+
+    Changed (D05, 2026-11): ``use_plt`` defaults to False (the object-oriented
+    interface; figures no longer pile up in pyplot), and the figure is no
+    longer drawn before it is returned.
 
     Changed (D01-D04, 2026-11): a single channel defaults to grey, not
     viridis; the default vmin/vmax is the robust default display range, not
@@ -712,9 +741,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     (sxy_h, sxy_w), (sxz_h, sxz_w), (szy_h, szy_w) = g_xy.p_out, g_xz.p_out, g_zy.p_out
 
     if use_plt:
+        import matplotlib.pyplot as plt  # only on request: library figures stay out of pyplot (D05)
         fig = plt.figure(figsize=figsize, constrained_layout=False)
     else:
-        fig = Figure(figsize=figsize, constrained_layout=False)
+        fig = _new_figure(figsize=figsize, constrained_layout=False)
 
     figW, figH = figsize
 
@@ -865,7 +895,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     fig.axBar = axBar
     fig.axLabels = axLabels
 
-    fig.canvas.draw()
+    # imshow's equal aspect may shrink a panel box; apply it now so transData
+    # (used for the widgets' axis_bounds) is final without a full draw.
+    for ax in (axXY, axZY, axXZ):
+        ax.apply_aspect()
     return fig
 
 def _scale_bar_fontsize(v):
@@ -2015,7 +2048,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
             if state == getattr(self, '_last_render_state', None):
                 return
 
-        open_before = set(plt.get_fignums())
+        open_before = _pyplot_fignums()
         fig = None
         try:
             fig = self._render()
@@ -2062,18 +2095,15 @@ class TNIAWidgetBase(anywidget.AnyWidget):
             # failed is retried by the next notification.
             self._last_render_state = state
         except Exception as e:
-            # A figure opened by a render that failed half-way was never returned.
-            for num in set(plt.get_fignums()) - open_before:
-                plt.close(num)
+            # A pyplot figure opened by a render that failed half-way (e.g. by a
+            # user projector) was never returned.
+            _close_pyplot_figures(_pyplot_fignums() - open_before)
             if change is None:
                 raise  # building the widget: report to the caller
             # From an interactive change the exception would only reach the
             # kernel log while the image silently stays stale: keep the last
             # frame and say why in the widget.
             self.warning_msg = f"⚠️ Render failed: {type(e).__name__}: {e}"
-        finally:
-            if fig is not None:
-                plt.close(fig)
     # Traits whose values fully describe what the slab/channel observers render.
     _RENDER_STATE_TRAITS = (
         'x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t',
@@ -2187,20 +2217,15 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 print(f"Saved to {self.save_filename}")
             except Exception as e:
                 print(f"Error saving file: {e}")
-            finally:
-                plt.close(fig)
 
     def _png_bytes(self, dpi=300):
         """The figure as PNG bytes, cropped like the SVG export (bbox 'tight')."""
         fig = self._render()
         if not fig:
             return None
-        try:
-            buf = io.BytesIO()
-            fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
-            return buf.getvalue()
-        finally:
-            plt.close(fig)
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
+        return buf.getvalue()
 
     def _copy_png(self, change):
         # Clear first so an identical image still fires a change event in JS.
@@ -2487,7 +2512,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 
             if not visible_indices:
                 # Create a placeholder figure
-                fig = plt.figure(figsize=self.figsize if self.figsize else (10, 10))
+                fig = _new_figure(figsize=self.figsize if self.figsize else (10, 10))
                 fig.text(0.5, 0.5, "No Channels Visible", ha='center', va='center', color='white')
                 fig.patch.set_facecolor('black')
                 return fig
@@ -2533,7 +2558,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             opacity_val = float(self.opacity_list[0])
 
             if opacity_val <= 0:
-                fig = plt.figure(figsize=self.figsize if self.figsize else (10, 10))
+                fig = _new_figure(figsize=self.figsize if self.figsize else (10, 10))
                 fig.text(0.5, 0.5, "No Channels Visible", ha='center', va='center', color='white')
                 fig.patch.set_facecolor('black')
                 return fig
@@ -3366,7 +3391,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 pixel_sizes={'Z': bzs, 'Y': bys, 'X': bxs, 'unit': self._length_unit},
                 pixel_sizes_given=self._pixel_sizes_given,
                 figsize=self.figsize, colormap=None,
-                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=self.subplot_bg,
+                vmin=None, vmax=None, gamma=1, colors=None, opacity=None, subplot_bg=self.subplot_bg,
                 rotate_view=self.rotate_view, channel_labels=channel_labels,
                 channel_label_fontsize_pt=self.channel_label_fontsize_pt,
                 channel_label_colors=self._label_colors(),
@@ -3462,7 +3487,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Create the figure at the size the layout was computed for
             fig_bg = 'white' if self._blend == 'minimum' else 'none'
-            fig = Figure(figsize=(figW, figH), facecolor=fig_bg) if not plt.get_fignums() else plt.figure(figsize=(figW, figH), facecolor=fig_bg)
+            fig = _new_figure(figsize=(figW, figH), facecolor=fig_bg)
 
             axLabels = None
             if channel_labels is not None:
@@ -3601,9 +3626,6 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 _add_scale_bar(axXY, w_x_xy, self._pixel_sizes_given, (figW, figH), unit=self._length_unit,
                                color='black' if self._blend == 'minimum' else 'white',
                                fontsize_pt=_scale_bar_fontsize(self.scale_bar_fontsize_pt))
-
-            # FORCE MATPLOTLIB TRANSFORMS BEFORE RETURN <<<
-            fig.canvas.draw()
             return fig
 
 
@@ -4263,14 +4285,13 @@ class IsoScatterWidget(anywidget.AnyWidget):
         self._render_wrapper(None)
 
     def _render_wrapper(self, change):
+        # The figure is a plain matplotlib Figure (never registered with
+        # pyplot), so a failed encode leaks nothing.
         fig = self._render()
         if fig:
-            try:
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-                self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
-            finally:
-                plt.close(fig)
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
 
     def _save_svg(self, change):
         fig = self._render()
@@ -4280,8 +4301,6 @@ class IsoScatterWidget(anywidget.AnyWidget):
                 print(f"Saved to {self.save_filename}")
             except Exception as e:
                 print(f"Error saving file: {e}")
-            finally:
-                plt.close(fig)
 
     def _get_rotation_matrix(self, elev_deg, azim_deg):
         # Convert to radians
@@ -4309,7 +4328,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         return Rx @ Rz
 
     def _render(self):
-        fig = plt.figure(figsize=self.figsize, facecolor='white')
+        fig = _new_figure(figsize=self.figsize, facecolor='white', layout='tight')
 
         # Layout: 3 Rows, 2 Columns
         # Row 0 (Span 2): 3D Scatter
@@ -4430,7 +4449,6 @@ class IsoScatterWidget(anywidget.AnyWidget):
         if self.title:
             fig.suptitle(self.title, fontsize=16)
 
-        fig.tight_layout()
         return fig
 
 def show_iso_scatter(

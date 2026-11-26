@@ -4478,3 +4478,62 @@ def test_histogram_sample_does_not_alias_and_int8_range_is_capped():
     assert not tpa._is_integer_valued(f)
     assert infer_bit_depth(np.array([0, 100], np.int8)) == (7, False)
     assert infer_histogram_range(np.array([0, 100], np.int8))[0] == (-0.5, 127.5)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): matplotlib OO interface (D05)
+# ---------------------------------------------------------------------------
+
+def test_no_pyplot_figures_after_rendering_every_viewer_with_defaults(tmp_path):
+    """D05 control: no viewer registers a figure with pyplot (OO interface only).
+
+    Strategy: close every pyplot figure, then build and use every static view
+    and every widget type with the default arguments (including the "No
+    Channels Visible" placeholder, copy-PNG, SVG export and IsoScatter's
+    camera), and finally open a user figure before rendering a scatter in
+    points mode (whose figure type used to depend on that global state).
+    Expected outcome: ``plt.get_fignums()`` stays empty throughout, then holds
+    only the user's figure; ``show_zyx`` returns a plain ``Figure`` whose
+    canvas is not pyplot-managed. (Changed by D05: ``use_plt`` defaulted to
+    True and every render created a pyplot figure.)
+    """
+    plt.close("all")
+    rng = np.random.default_rng(0)
+    vol = rng.random((6, 16, 20)).astype(np.float32)
+    figs = [
+        show_zyx(vol[3], vol[:, 8, :], np.flip(np.rot90(vol[:, :, 10], 1), 0)),
+        show_zyx_slice(vol, 5, 5, 3),
+        show_zyx_max(vol),
+        show_zyx_projection(vol),
+        show_zyx_max_slabs(vol),
+        tpa.show_zyx_projection_slabs(vol, slice(None), slice(None), slice(None)),
+    ]
+    assert all(type(f) is Figure for f in figs)
+    assert all(f.canvas.manager is None for f in figs)
+    assert plt.get_fignums() == []
+
+    w = show_zyx_max_slice_interactive(vol)
+    w.opacity_list = [0.0]  # placeholder figure
+    w.opacity_list = [1.0]
+    w.copy_png_trigger += 1
+    w.save_filename = str(tmp_path / "v.svg")
+    w.save_trigger += 1
+    multi = show_zyx_max_slice_interactive([vol, vol])
+    multi.opacity_list = [0.0, 0.0]
+    a = show_zyx_max_slice_interactive_point_annotator(vol)
+    a.points = [[3, 8, 10]]
+    pts = rng.random((50, 3)) * [6, 16, 20]
+    show_zyx_max_scatter_interactive(pts, render="points")
+    show_zyx_max_scatter_interactive(pts, render="density", bins=16)
+    iso = show_iso_scatter(*_iso_points(n=30), figsize=(4, 4))
+    iso.azim = iso.azim + 10
+    assert plt.get_fignums() == []
+
+    user_fig = plt.figure()
+    try:
+        show_zyx_max_scatter_interactive(pts, render="points")
+        assert plt.get_fignums() == [user_fig.number]
+    finally:
+        plt.close("all")
+    for f in figs:
+        plt.close(f)
