@@ -4851,3 +4851,37 @@ def test_snap_depth_falls_back_to_the_centre_for_flat_profiles_and_average():
                                                        slabs_thickness=(1000, 1000, 1000))
     _click_voxel(w, "xy", 5, 30, 40, 1)
     assert w.points == [[20, 30, 40]]
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): static wrapper API (D12)
+# ---------------------------------------------------------------------------
+
+def test_show_zyx_max_slabs_defaults_to_the_full_range_and_clamps_with_a_warning():
+    """D12 / R1-17: ``show_zyx_max_slabs`` without ranges is the full MIP; ranges are clamped with a warning.
+
+    Strategy: one bright voxel at (5, 15, 15) of a 10 x 30 x 30 volume;
+    (a) no x/y/z; (b) x=[-1, 31] (beyond both ends); (c) x=[30, 31] and
+    x=[40, 50] (entirely outside); (d) a valid range (negative control).
+    Expected outcome: (a) every panel equals ``show_zyx_max`` (the XY max was
+    0: only plane 0 was projected); (b) a UserWarning and the full X range;
+    (c) a ValueError naming the empty range (it was 'zero-size array to
+    reduction operation'); (d) no warning.
+    """
+    v = np.zeros((10, 30, 30), np.float32)
+    v[5, 15, 15] = 1.0
+    fig, ref = show_zyx_max_slabs(v), show_zyx_max(v)
+    for name in ("axXY", "axXZ", "axZY"):
+        np.testing.assert_array_equal(_panel_rgb(fig, name), _panel_rgb(ref, name))
+    assert _panel_rgb(fig).max() == 1.0
+
+    with pytest.warns(UserWarning, match="clipped"):
+        fig = show_zyx_max_slabs(v, x=[-1, 31], y=[0, 30], z=[0, 10])
+    np.testing.assert_array_equal(_panel_rgb(fig, "axXZ"), _panel_rgb(ref, "axXZ"))
+    for bad in ([30, 31], [40, 50]):
+        with pytest.raises(ValueError, match="x range"):
+            show_zyx_max_slabs(v, x=bad, y=[0, 30], z=[0, 10])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        show_zyx_max_slabs(v, x=[10, 20], y=[0, 30], z=[0, 10])
+    assert inspect.signature(show_zyx_max_slabs).parameters["x"].default is None

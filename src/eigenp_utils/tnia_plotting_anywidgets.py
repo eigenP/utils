@@ -1029,16 +1029,38 @@ def _add_scale_bar(ax_line, ax_physical_width_um, pixel_sizes_given, figsize, un
     )
 
 ### New function
-def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
+def _slab_slice(rng, n, name):
+    """
+    ``[start, stop)`` index range (rounded; a range of zero width widens to
+    one plane) -> slice clamped to ``[0, n)``. None is the whole axis.
+    Out-of-range bounds are clipped with a warning (negative values count
+    from 0, not from the end); a range with nothing left raises ValueError.
+    """
+    if rng is None:
+        return slice(None)
+    lo, hi = (int(np.round(float(v))) for v in rng)
+    if hi <= lo:
+        hi = lo + 1
+    clo, chi = max(0, lo), min(n, hi)
+    if chi <= clo:
+        raise ValueError(f"{name} range [{lo}, {hi}) lies outside the image (size {n} along {name.upper()}).")
+    if (clo, chi) != (lo, hi):
+        warnings.warn(f"{name} range [{lo}, {hi}) clipped to the image: [{clo}, {chi}).", UserWarning, stacklevel=3)
+    return slice(clo, chi)
+
+
+def show_zyx_max_slabs(image_to_show, x=None, y=None, z=None, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
 
     Args:
         image_to_show (3d numpy array): image to plot
-        x: slices for x in format [x_1, x_2] where values are integers, to be passed as slice(x_1, x_2, None)
-        y: slices for y in format [y_1, y_2] where values are integers
-        z: slices for z in format [z_1, z_2] where values are integers
+        x, y, z: half-open index ranges ``[start, stop)`` of the slabs
+            (voxel indices, rounded; a zero-width range widens to one
+            plane). None (default) is the whole axis, i.e. the full
+            projection. Bounds outside the image are clipped with a
+            warning; a range entirely outside raises ValueError.
         pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
         figsize (tuple, optional): figure size. Defaults to (10,10).
         colormap (_type_, optional): _description_. Defaults to None.
@@ -1054,24 +1076,22 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
             ZY); samples are normalised with the display range (vmin/vmax, or
             the channel's default range), so bright structures hide dimmer ones
             behind them.
+
+    Changed (D12, 2026-11): x, y and z default to None, the whole axis (the
+    defaults were [0, 1], the first plane of each axis), and out-of-range
+    bounds are clipped with a warning (they raised an opaque 'zero-size
+    array' error).
     """
     if colors is not None:
         warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
 
-    ### Coerce into integers for slices, rounding floats and ensuring non-zero bounds
-    x_ = [int(np.round(float(i))) for i in x]
-    y_ = [int(np.round(float(i))) for i in y]
-    z_ = [int(np.round(float(i))) for i in z]
-
-    if x_[1] <= x_[0]: x_[1] = x_[0] + 1
-    if y_[1] <= y_[0]: y_[1] = y_[0] + 1
-    if z_[1] <= z_[0]: z_[1] = z_[0] + 1
-
-    x_slices = slice(*x_)
-    y_slices = slice(*y_)
-    z_slices = slice(*z_)
+    shape =np.shape(image_to_show[0] if isinstance(image_to_show, list) else image_to_show)
+    Zn, Yn, Xn = shape[-3:]
+    x_slices = _slab_slice(x, Xn, 'x')
+    y_slices = _slab_slice(y, Yn, 'y')
+    z_slices = _slab_slice(z, Zn, 'z')
 
     return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
