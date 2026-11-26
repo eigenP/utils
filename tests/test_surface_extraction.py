@@ -636,3 +636,117 @@ def test_extract_surface_tiled_reads_one_tile_at_a_time():
     m_lazy = extract_surface_tiled(lazy, downscale_factor=4, gaussian_sigma=1.0, tile_size=32)
     np.testing.assert_array_equal(m_lazy, extract_surface(vol, downscale_factor=4, gaussian_sigma=1.0))
     assert lazy.largest_read <= 24 * 32 * 32
+
+
+def _tilted_textured_half_space(depth, shape=(64, 64, 64), tilt=3.0, seed=0):
+    """Poisson volume: textured tissue below a plane tilted by +-`tilt` voxels around `depth`.
+
+    Returns the uint16 volume and the true height map (Z of the tissue boundary per column).
+    """
+    Z, Y, X = shape
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[:Y, :X]
+    h = depth + tilt * (xx - X / 2) / (X / 2)
+    tissue = np.arange(Z)[:, None, None] >= h[None]
+    texture = 1 + 0.5 * np.sin(yy / 3.0) * np.cos(xx / 4.0)
+    lam = np.where(tissue, 40.0 * texture[None], 5.0)
+    return rng.poisson(lam).astype(np.uint16), h
+
+
+def _median_bias_per_depth(Z=64, **kw):
+    """Median (estimated - true) height of `extract_surface` at depths Z/8 ... 7Z/8."""
+    bias = []
+    for k in range(1, 8):
+        vol, h = _tilted_textured_half_space(k * Z / 8, shape=(Z, 64, 64))
+        _, est = extract_surface(vol, return_heightmap=True, **kw)
+        bias.append(float(np.median((est - h)[est >= 0])))
+    return np.array(bias)
+
+
+def test_extract_surface_default_blur_has_small_depth_independent_bias():
+    """D19 / R7-01: the default Z blur no longer moves the surface by 8-13 voxels with depth.
+
+    Strategy: tilted (+-3 voxel) textured Poisson half-spaces at depths Z/8 ... 7Z/8
+    of a 64-slice stack, default parameters (Z binned by 4). The old default
+    (isotropic sigma 4 in binned voxels = 16 raw slices along Z) gave biases from
+    +12.6 at Z/8 to -13.6 at 7Z/8.
+    Expected outcome: |median(h_est - h)| <= 2 voxels at every depth (measured
+    +1.1 ... -1.7), and the spread of the bias across depths is <= 3 voxels
+    (measured 2.8, was 26). The plan's tighter target, a spread <= 1 voxel, is NOT
+    met by the (1, 4, 4) default on this geometry: Otsu's threshold fraction still
+    moves with the tissue fraction, times a Z blur of 4 raw slices; the bias grows
+    towards 7Z/8, where the tissue is only 2 binned blocks thick.
+    """
+    bias = _median_bias_per_depth()
+    assert np.all(np.abs(bias) <= 2.0), bias
+    assert np.ptp(bias) <= 3.0, bias
+
+
+def test_extract_surface_old_isotropic_sigma_is_depth_biased():
+    """Negative control for D19: an explicit isotropic gaussian_sigma=4 still gives the old bias.
+
+    Strategy: the same depth series as the default-blur test with gaussian_sigma=4.0.
+    Expected outcome: the bias spread across depths exceeds 15 voxels, so the new
+    default (not the test volume) is what removes it.
+    """
+    bias = _median_bias_per_depth(gaussian_sigma=4.0)
+    assert np.ptp(bias) > 15.0, bias
+
+
+def test_extract_surface_default_sigma_is_per_axis():
+    """D19: the default gaussian_sigma is (1, 4, 4) binned voxels, for both entry points.
+
+    Strategy: compare the default call with explicit gaussian_sigma=(1, 4, 4).
+    Expected outcome: identical heights for extract_surface and extract_surface_tiled.
+    """
+    vol, _ = _tilted_textured_half_space(24, shape=(48, 48, 48))
+    _, h_default = extract_surface(vol, return_heightmap=True)
+    _, h_explicit = extract_surface(vol, gaussian_sigma=(1, 4, 4), return_heightmap=True)
+    np.testing.assert_array_equal(h_default, h_explicit)
+    tiled = extract_surface_tiled(vol, tile_size=16, return_mask=False)
+    np.testing.assert_array_equal(tiled, h_default)
+
+
+def test_extract_surface_isotropic_unbinned_unchanged():
+    """D19 negative control: isotropic, unbinned input with an explicit sigma is unchanged.
+
+    Strategy: downscale_factor=1 with an explicit scalar gaussian_sigma=2 (the new
+    default never applies) against the same call with sigma (2, 2, 2).
+    Expected outcome: bit-identical heights, and a bias below 0.1 voxel.
+    """
+    vol, h = _tilted_textured_half_space(32, shape=(64, 48, 48))
+    _, a = extract_surface(vol, downscale_factor=1, gaussian_sigma=2.0, return_heightmap=True)
+    _, b = extract_surface(vol, downscale_factor=1, gaussian_sigma=(2.0, 2.0, 2.0), return_heightmap=True)
+    np.testing.assert_array_equal(a, b)
+    assert abs(float(np.median(a - h))) < 0.1
+
+
+def test_extract_surface_sigma_in_micrometres():
+    """D19 opt-in: gaussian_sigma_um with pixel_sizes converts the blur to binned voxels per axis.
+
+    Strategy: Z step 2 µm, XY 0.5 µm, downscale_factor (2, 4, 4): binned voxels are
+    4 x 2 x 2 µm, so gaussian_sigma_um=(4, 8, 8) equals gaussian_sigma=(1, 4, 4) and a
+    scalar 8 µm equals (2, 4, 4). Units in a pixel_sizes dict are converted (nm).
+    Expected outcome: identical height maps for the matching pairs (both entry points);
+    gaussian_sigma_um without pixel_sizes warns and reads the sigma in raw voxels.
+    """
+    vol, _ = _tilted_textured_half_space(24, shape=(48, 48, 48))
+    kw = dict(downscale_factor=(2, 4, 4), return_heightmap=True)
+    ps = {"Z": 2.0, "Y": 0.5, "X": 0.5}
+    _, ref = extract_surface(vol, gaussian_sigma=(1, 4, 4), **kw)
+    _, um = extract_surface(vol, gaussian_sigma_um=(4.0, 8.0, 8.0), pixel_sizes=ps, **kw)
+    np.testing.assert_array_equal(um, ref)
+    nm_ps = {"Z": 2000, "Y": 500, "X": 500, "unit": "nm"}
+    _, nm = extract_surface(vol, gaussian_sigma_um=(4.0, 8.0, 8.0), pixel_sizes=nm_ps, **kw)
+    np.testing.assert_array_equal(nm, ref)
+    _, ref2 = extract_surface(vol, gaussian_sigma=(2, 4, 4), **kw)
+    _, um2 = extract_surface(vol, gaussian_sigma_um=8.0, pixel_sizes=ps, **kw)
+    np.testing.assert_array_equal(um2, ref2)
+    tiled = extract_surface_tiled(
+        vol, downscale_factor=(2, 4, 4), gaussian_sigma_um=8.0, pixel_sizes=ps, tile_size=16, return_mask=False
+    )
+    np.testing.assert_array_equal(tiled, ref2)
+
+    with pytest.warns(UserWarning, match="pixel_sizes"):
+        _, raw = extract_surface(vol, gaussian_sigma_um=(2.0, 16.0, 16.0), **kw)
+    np.testing.assert_array_equal(raw, ref)
