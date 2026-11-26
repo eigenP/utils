@@ -1105,6 +1105,31 @@ def test_load_image_lazy_compressed_tiff_needs_dask(tmp_path):
     np.testing.assert_array_equal(lazy.values[0, 0, 0], data)
 
 
+def test_load_image_lazy_pyramidal_tiff_reads_full_resolution(tmp_path):
+    """D31: lazy=True on a pyramidal (multi-resolution) compressed TIFF gives the full-resolution
+    level as a dask array.
+
+    (+) a 2-level zlib pyramid (SubIFDs, as in large OME-TIFFs): dask array equal to the eager
+        read of level 0 (tifffile's zarr store for such a series is a Group, which dsa.from_zarr
+        could not wrap).
+    (-) the single-level compressed case is covered by the test above.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    pytest.importorskip("zarr")
+    dsa = pytest.importorskip("dask.array")
+    data = np.arange(32 * 40, dtype=np.uint16).reshape(32, 40)
+    path = tmp_path / "pyramid.tif"
+    with tifffile.TiffWriter(path) as tw:
+        tw.write(data, subifds=1, compression="zlib", metadata={"axes": "YX"})
+        tw.write(data[::2, ::2], subfiletype=1, compression="zlib")
+    eager = load_image(path)
+    lazy = load_image(path, lazy=True)
+    assert isinstance(lazy.data, dsa.Array)
+    assert lazy.shape == eager.shape
+    np.testing.assert_array_equal(lazy.values, eager.values)
+    np.testing.assert_array_equal(lazy.values[0, 0, 0, 0], data)
+
+
 def test_load_image_lazy_needs_a_path():
     """lazy=True only applies to files; arrays are already in memory (or lazy themselves)."""
     with pytest.raises(ValueError, match="lazy"):

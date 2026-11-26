@@ -365,6 +365,27 @@ def test_set_plotting_style_returns_a_restoring_handle_and_context_manager():
         assert {k for k, v in before.items() if mpl.rcParams[k] != v} == set()
 
 
+def test_set_plotting_style_restore_keeps_a_later_backend_switch():
+    """D05 (e): like plt.rc_context, restore() never resets the backend.
+
+    (+) a backend switched after set_plotting_style() survives restore() (it went back to
+        the old backend or the auto sentinel).
+    (-) the other rcParams are still restored.
+    """
+    original = mpl.get_backend()
+    try:
+        with plt.rc_context():
+            fonttype_before = mpl.rcParams["svg.fonttype"]
+            handle = set_plotting_style(editable_text=fonttype_before != "none")
+            assert mpl.rcParams["svg.fonttype"] != fonttype_before
+            plt.switch_backend("svg")
+            handle.restore()
+            assert mpl.rcParams["backend"] == "svg"
+            assert mpl.rcParams["svg.fonttype"] == fonttype_before
+    finally:
+        plt.switch_backend(original)
+
+
 def test_set_plotting_style_warns_instead_of_printing(monkeypatch, capsys):
     """Missing style/font files give UserWarnings, not prints."""
     import eigenp_utils.plotting_utils as pu
@@ -1504,11 +1525,40 @@ def test_color_coded_projection_global_normalisation_keeps_noise_frames_dark():
     assert obj.min() > 0.4
 
 
+def _old_color_coded_projection(image, color_map="plasma"):
+    """Frozen copy of the pre-D25 algorithm (per-frame min-max), the reference for the (-) control."""
+    cmap = mpl_colormaps[color_map]
+    n = image.shape[0]
+    out = np.zeros(image.shape[1:] + (3,), np.float32)
+    for t in range(n):
+        frame = image[t].astype(np.float32)
+        lo, hi = np.nanmin(frame), np.nanmax(frame)
+        norm = (frame - lo) / (hi - lo) if hi > lo else np.clip(frame, 0.0, 1.0)
+        col = cmap(t / max(n - 1, 1))[:3]
+        for c in range(3):
+            np.maximum(out[..., c], norm * col[c], out=out[..., c])
+    return out
+
+
 def test_color_coded_projection_frames_spanning_unit_range_unchanged():
-    """D25 (-): binary frames that already span [0, 1] give the same output as per-frame scaling."""
+    """D25 (-): frames that already span their full range give the output of the old per-frame code.
+
+    Reference: a frozen copy of the pre-D25 per-frame min-max algorithm.
+    - binary 0/1 frames and uint8 frames spanning 0..255: identical (atol 1e-6);
+    - continuous float frames spanning exactly [0, 1]: equal up to the robust percentile
+      clipping (0.1 / 99.99 %), which changes only the most extreme pixels: atol 1e-3.
+    """
     rng = np.random.default_rng(1)
-    img = (rng.random((4, 16, 16)) > 0.5).astype(float)
-    np.testing.assert_allclose(color_coded_projection(img), color_coded_projection(img, normalize="frame"), atol=1e-6)
+    binary = (rng.random((4, 16, 16)) > 0.5).astype(float)
+    np.testing.assert_allclose(color_coded_projection(binary), _old_color_coded_projection(binary), atol=1e-6)
+
+    u8 = rng.integers(0, 256, (4, 64, 64)).astype(np.uint8)
+    u8[:, 0, 0], u8[:, 0, 1] = 0, 255
+    np.testing.assert_allclose(color_coded_projection(u8), _old_color_coded_projection(u8), atol=1e-6)
+
+    cont = rng.random((4, 64, 64))
+    cont[:, 0, 0], cont[:, 0, 1] = 0.0, 1.0
+    np.testing.assert_allclose(color_coded_projection(cont), _old_color_coded_projection(cont), atol=1e-3)
 
 
 def test_color_coded_projection_constant_frame_does_not_flood():
@@ -1919,6 +1969,21 @@ def test_describe_image_integer_histograms_have_level_aligned_bins(monkeypatch):
     counts, edges = _hist_counts(monkeypatch, flt, bins=16)
     assert len(counts) == 16
     np.testing.assert_allclose(edges[[0, -1]], [0.0, 63.0])
+
+
+@pytest.mark.parametrize("dtype", [np.int64, np.uint64])
+def test_describe_image_full_range_64bit_integers_still_plot(monkeypatch, dtype):
+    """R5-09: 64-bit integers spanning (most of) the dtype do not overflow the bin edges.
+
+    (+) [[min, max]] of int64 / uint64: monotonic edges, ``bins`` of them (the int64 product
+        overflowed and np.histogram raised 'bins must increase monotonically').
+    (-) the small-range integer case keeps its level-aligned bins (test above).
+    """
+    info = np.iinfo(dtype)
+    img = np.array([[info.min, info.max]], dtype=dtype)
+    counts, edges = _hist_counts(monkeypatch, img, bins=64)
+    assert np.all(np.diff(edges) > 0) and len(counts) == 64
+    assert counts[0] > 0 and counts[-1] > 0 and np.all(counts[1:-1] == 0)
 
 
 def test_color_coded_projection_output_is_shown_by_describe_image_as_rgb():

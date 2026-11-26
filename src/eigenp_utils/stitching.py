@@ -14,9 +14,11 @@ _MINIMAL_WARNING_SHOWN = False
 
 def _stage_factor(stage_unit, pixel_unit):
     """Factor converting stage positions from ``stage_unit`` to ``pixel_unit`` (1.0 when equal or
-    when the stage has no unit, which means the pixel unit). Raises ValueError when they cannot be
-    converted."""
-    if stage_unit is None or pixel_unit is None or str(stage_unit) == str(pixel_unit):
+    when the stage has no unit, which means the pixel unit). A pixel size without a unit is in µm
+    (D01). Raises ValueError when they cannot be converted."""
+    if pixel_unit is None:
+        pixel_unit = 'µm'
+    if stage_unit is None or str(stage_unit) == str(pixel_unit):
         return 1.0
     if is_length_unit(stage_unit) and is_length_unit(pixel_unit):
         import warnings as _w
@@ -182,15 +184,19 @@ def stitch_tiles(
         ``min_ncc=1.1`` idiom).
     max_area_ratio : float or None, default 4.0
         Refuse (ValueError, before allocating) a mosaic whose area exceeds this
-        many times the summed tile area, which usually means the stage
-        positions are not in the unit of the pixel sizes (e.g. nm read as µm).
-        None disables the check (e.g. for widely spaced positions).
+        many times the area of an n·h × n·w square (n tiles of h × w px). Any
+        chain of touching tiles fits in that square, including a diagonal
+        strip, so a larger canvas usually means the stage positions are not in
+        the unit of the pixel sizes (e.g. nm read as µm) or the tiles are
+        widely separated. None disables the check.
 
     Changed (D32, 2026-11): the pointer to multiview-stitcher is a
     UserWarning on the first call of the process only (it was on every call);
     added ``register``.
     Changed (R8-11, 2026-11): stage units are checked and converted, the
-    canvas size is checked before allocation (``max_area_ratio``), and linear
+    canvas size is checked before allocation (``max_area_ratio``, relative to
+    the n·h × n·w square so diagonal strips pass; unit-less pixel sizes count
+    as µm when converting stage units), and linear
     blending accumulates in float32 for inputs of up to 16 bits / float32
     (float64 otherwise).
 
@@ -260,12 +266,15 @@ def stitch_tiles(
     # Preflight: the canvas the stage positions imply, before any allocation
     extent = np.ptp(prior, axis=0) if n_tiles else np.zeros(2)
     est_h, est_w = int(np.ceil(extent[0])) + h, int(np.ceil(extent[1])) + w
-    if max_area_ratio is not None and est_h * est_w > max_area_ratio * n_tiles * h * w:
+    # Any chain of n touching h x w tiles (row, column, diagonal) fits in an (n*h) x (n*w) square
+    bound_area = n_tiles * n_tiles * h * w
+    if max_area_ratio is not None and est_h * est_w > max_area_ratio * bound_area:
         raise ValueError(
-            f"the stage positions imply a {est_h} x {est_w} px canvas, {est_h * est_w / (n_tiles * h * w):.3g}x "
-            f"the summed area of the {n_tiles} tiles of {h} x {w} px (max_area_ratio={max_area_ratio}). "
+            f"the stage positions imply a {est_h} x {est_w} px canvas, {est_h * est_w / bound_area:.3g}x "
+            f"the {n_tiles * h} x {n_tiles * w} px square that any chain of the {n_tiles} touching tiles "
+            f"of {h} x {w} px fits in, even a diagonal one (max_area_ratio={max_area_ratio}). "
             f"Check that the stage positions are in the unit of the pixel sizes ({sizes['unit'] or 'µm'}); "
-            "pass max_area_ratio=None for widely spaced positions."
+            "pass max_area_ratio=None for deliberately separated tiles."
         )
 
     # 2. Pairwise registration on the max projection of one channel

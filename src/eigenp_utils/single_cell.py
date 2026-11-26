@@ -612,6 +612,10 @@ def plot_clustering_tree(
 
     Returns:
         matplotlib.figure.Figure: The figure (call ``plt.show()`` yourself in scripts).
+
+    Changed (C-05, 2026-11): a colour map that cannot be built gives a
+    UserWarning (it was printed), and the legend uses ``Line2D`` proxy handles,
+    so no empty scatter collections are added to the current pyplot axes.
     """
 
     # 0. Validate Keys

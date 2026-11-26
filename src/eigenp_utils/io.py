@@ -56,6 +56,9 @@ def un_gzip(input_file_path, output=None):
     Parameters:
     - input_file_path: The path to the .gz file.
     - output: The path to the output file. If None, removes .gz extension.
+
+    Changed (2026-11): progress messages go to the module logger
+    (``logging.getLogger('eigenp_utils.io')``, INFO); they were printed.
     """
     input_path = Path(input_file_path)
 
@@ -93,6 +96,10 @@ def download_file(url: str, dest: Path, chunk: int = 8192) -> Path:
 
     Blocking, so unavailable in the browser (Pyodide); use
     ``await download_file_async(url, dest)`` there.
+
+    Changed (2026-11): the notice that urllib failed and ``requests`` is used
+    instead goes to the module logger (``logging.getLogger('eigenp_utils.io')``,
+    WARNING); it was printed.
     """
     dest = Path(dest)
     if dest.exists():

@@ -3,7 +3,7 @@ import pytest
 import xarray as xr
 from scipy import ndimage
 
-from eigenp_utils.image_io import array_to_stczyx_xarray
+from eigenp_utils.image_io import array_to_stczyx_xarray, get_stczyx_pixel_sizes
 from eigenp_utils.stitching import _solve_positions, stitch_tiles
 
 pytestmark = pytest.mark.filterwarnings("ignore:stitch_tiles is a minimal:UserWarning")
@@ -464,3 +464,41 @@ def test_stitch_tiles_keeps_channel_and_plane_aux_coords():
     assert mosaic.attrs['stitching'] == reference.attrs['stitching']
     np.testing.assert_array_equal(mosaic.attrs['stitching']['positions_px'], true - true.min(axis=0))
     assert 'stage_y' not in mosaic.coords and 'stage_x' not in mosaic.coords
+
+
+@pytest.mark.parametrize("unit, scale", [("mm", 1e-3), ("nm", 1e3)])
+def test_stitch_tiles_converts_stage_units_when_pixel_sizes_have_no_unit(unit, scale):
+    """R8-11/D01: unit-less pixel sizes are µm, so stage coords in mm or nm are still converted.
+
+    (+) stage in mm or nm with pixel_sizes given as a plain tuple (unit None): same positions
+        as the stage given in µm (before the fix, mm stacked both tiles at 0 and nm raised a
+        misleading canvas-size error).
+    (-) the same stage given without a unit keeps the pixel unit (reference positions).
+    """
+    tiles = np.zeros((2, 32, 32), np.uint8)
+    um = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes=(1.0, 0.5, 0.5),
+                                stage_positions={'Y': [0, 0], 'X': [0, 14]})
+    assert get_stczyx_pixel_sizes(um)['unit'] is None
+    ref = stitch_tiles(um, register=False).attrs['stitching']['positions_px']
+    assert np.array_equal(ref, [[0, 0], [0, 28]])
+    other = um.assign_coords(
+        stage_y=('S', um.stage_y.values * scale, {'units': unit}),
+        stage_x=('S', um.stage_x.values * scale, {'units': unit}),
+    )
+    np.testing.assert_array_equal(stitch_tiles(other, register=False).attrs['stitching']['positions_px'], ref)
+
+
+def test_stitch_tiles_canvas_check_accepts_a_diagonal_strip():
+    """R8-11: a diagonal strip of touching tiles is a legitimate layout and is not refused.
+
+    (+) five 100 x 100 tiles stepping (90, 90) px: a 460 x 460 canvas is stitched (it was
+        refused at 4.23x the summed tile area).
+    (-) the 1000x-too-large stage in test_stitch_tiles_refuses_an_implausibly_large_canvas
+        is still refused.
+    """
+    tiles = np.ones((5, 100, 100), np.uint8)
+    steps = np.arange(5) * 90.0
+    da = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes=(1.0, 1.0, 1.0),
+                                stage_positions={'Y': steps, 'X': steps})
+    out = stitch_tiles(da, register=False)
+    assert out.sizes['Y'] == 460 and out.sizes['X'] == 460

@@ -41,7 +41,8 @@ class PlottingStyle:
         self.restored = False
 
     def restore(self):
-        """Restore every rcParam to its value before :func:`set_plotting_style` was called."""
+        """Restore every rcParam to its value before :func:`set_plotting_style` was called,
+        except ``backend``, which is left as it is (as ``plt.rc_context`` does)."""
         import matplotlib as mpl
 
         # dict.update bypasses re-validation and deprecation warnings, like plt.rc_context
@@ -91,7 +92,10 @@ def set_plotting_style(editable_text=True):
     """
     import matplotlib as mpl
 
-    handle = PlottingStyle(dict(mpl.rcParams.copy()))
+    saved = dict(mpl.rcParams.copy())
+    # like plt.rc_context: never reset the backend (a later plt.switch_backend must survive restore())
+    saved.pop('backend', None)
+    handle = PlottingStyle(saved)
 
     # Load Style
     try:
@@ -585,12 +589,18 @@ def _rgb_plane(image, shape, strict=False):
 def _integer_bin_edges(lo, hi, bins):
     """Level-aligned histogram edges for integers ``lo..hi``: every bin covers the same
     number of levels, ``ceil((hi - lo + 1) / bins)``, edges at half levels (so ``bins``
-    is an upper bound, and each level gets its own bin when there are few)."""
+    is an upper bound, and each level gets its own bin when there are few).
+
+    Ranges of more than 2**53 levels (64-bit data spanning most of the dtype) cannot be
+    resolved level by level in float64, so they get ``bins`` plain equal-width edges."""
     lo, hi = int(lo), int(hi)
     n_levels = hi - lo + 1
+    if n_levels > 2**53:
+        return np.linspace(float(lo), float(hi), int(bins) + 1)
     width = max(1, math.ceil(n_levels / int(bins)))
     n_bins = math.ceil(n_levels / width)
-    return lo - 0.5 + width * np.arange(n_bins + 1)
+    # float arithmetic: an int64 product could overflow
+    return (lo - 0.5) + float(width) * np.arange(n_bins + 1, dtype=np.float64)
 
 
 def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=None, image_size=4.0,

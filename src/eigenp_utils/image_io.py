@@ -350,8 +350,13 @@ def _read_tiff_lazy(path, chosen_index, n_series):
         ) from e
     arrays = []
     for i in chosen_index:
-        store = tifffile.imread(path, series=i, aszarr=True)
-        arrays.append(dsa.from_zarr(zarr.open(store, mode="r")))
+        # level=0: the full resolution only; without it a pyramidal series (sub-resolution
+        # levels, common in large OME-TIFFs) opens as a zarr Group, which dask cannot wrap
+        store = tifffile.imread(path, series=i, level=0, aszarr=True)
+        z = zarr.open(store, mode="r")
+        if isinstance(z, zarr.Group):  # defensive: older tifffile may ignore level for the store
+            z = z["0"]
+        arrays.append(dsa.from_zarr(z))
     return arrays[0] if len(arrays) == 1 else dsa.stack(arrays)
 
 
