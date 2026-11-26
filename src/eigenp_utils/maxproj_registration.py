@@ -19,6 +19,7 @@ import pandas as pd
 from typing import Literal, Optional
 from skimage.registration import phase_cross_correlation
 from scipy.ndimage import shift
+from scipy.ndimage import shift as _ndi_shift
 from scipy.signal import windows
 # from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
@@ -245,6 +246,18 @@ def estimate_shift_1d_iterative(ref_proj, moving_proj, window=None, max_iter=3, 
 
     return current_shift
 
+def _check_max_step(max_step):
+    """Raise ValueError unless `max_step` is None or a finite number > 0."""
+    if max_step is None:
+        return
+    if isinstance(max_step, (bool, np.bool_)) or not np.isscalar(max_step) \
+            or not np.isreal(max_step) or not np.isfinite(max_step) or max_step <= 0:
+        raise ValueError(
+            f"max_step must be None or a finite number > 0 (a fraction of the axis "
+            f"below 1, pixels from 1), got {max_step!r}."
+        )
+
+
 def compute_drift_trajectory(
     projections: list,
     mode: Literal['forward', 'reverse', 'both'] = 'forward',
@@ -266,6 +279,7 @@ def compute_drift_trajectory(
         in pixels; None disables the check. A larger step is treated as an outlier and
         set to 0, with a UserWarning naming the time point, axis and value. The
         trajectory is cumulative, so every later frame then stays offset by that step.
+        Anything else (0, negative, NaN, inf, a string) raises ValueError.
     :param progress: show a tqdm progress bar.
     Returns a DataFrame with columns: ['Time Point', 'dx', 'dy', 'dz', 'cum_dx', 'cum_dy', 'cum_dz']
     where cum_d* are the shifts needed to align the frame to the reference.
@@ -290,6 +304,7 @@ def compute_drift_trajectory(
     # Largest accepted step per axis (None: no limit). A fraction of the axis is
     # floored to whole pixels and is at least 1 px, so short axes (e.g. Z < 5) are
     # still corrected; without shape_limit a fraction has nothing to refer to.
+    _check_max_step(max_step)
     if max_step is None:
         step_limits = [None] * num_dims
     elif max_step < 1:
@@ -404,6 +419,7 @@ def apply_drift_correction(
     """
     if method not in ('integer', 'subpixel'):
         raise ValueError(f"method must be 'integer' or 'subpixel', got {method!r}.")
+    _check_max_step(max_step)
     ndim = video_data.ndim
     if ndim == 3:
         logger.info("Input is 3D (T, Y, X). Proceeding with 2D+t max-projection registration.")
@@ -556,24 +572,37 @@ def apply_drift_correction(
     # Return the corrected video data and the drift table
     return corrected_data, drift_table
 
-def apply_subpixel_drift_correction(image, drift):
+def apply_subpixel_drift_correction(image, shift=None, *, drift=None):
     """
     Applies subpixel drift correction to an image using bicubic interpolation.
 
     Parameters:
     image (np.array): The input image.
-    drift (tuple): The shift to apply, in pixels, in array-axis order ((dy, dx) for 2D,
-        (dz, dy, dx) for 3D): e.g. ``estimate_drift(frame1, frame2, order='zyx')``.
+    shift (tuple): The shift (correction) to apply, in pixels, in array-axis order
+        ((dy, dx) for 2D, (dz, dy, dx) for 3D): e.g.
+        ``estimate_drift(frame1, frame2, order='zyx')``.
+    drift: deprecated keyword alias of `shift`.
 
     Returns:
     np.array: The corrected image.
+
+    Changed (D22, R7-03, 2026-11): the parameter is named `shift` (it is the
+    correction to apply, not the measured drift); ``drift=`` still works and
+    emits a FutureWarning. Positional calls are unchanged.
     """
+    if drift is not None:
+        if shift is not None:
+            raise TypeError("Pass either shift or the deprecated drift, not both.")
+        warn_deprecated("apply_subpixel_drift_correction(drift=...)", "shift=", stacklevel=3)
+        shift = drift
+    if shift is None:
+        raise TypeError("apply_subpixel_drift_correction() missing required argument: 'shift'")
     # Ensure image is a numpy array
     image = np.asarray(image)
     min_value = image.min()
 
     # Efficiently apply subpixel shift using scipy.ndimage.shift
     # This avoids creating a full coordinate grid (O(N) memory savings)
-    corrected_image = shift(image, shift=drift, order=3, mode='constant', cval=min_value)
+    corrected_image = _ndi_shift(image, shift=shift, order=3, mode='constant', cval=min_value)
 
     return corrected_image

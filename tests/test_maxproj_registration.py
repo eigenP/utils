@@ -735,3 +735,43 @@ def test_apply_drift_correction_unknown_method_raises():
     video, _ = _make_drifting_gaussian(n_frames=2, shape=(16, 16))
     with pytest.raises(ValueError, match="method"):
         apply_drift_correction(video, method="bicubic", progress=False)
+
+
+def test_max_step_is_validated():
+    """R7-04 follow-up: max_step must be None or a finite number > 0.
+
+    Strategy: before validation, max_step=-1 or 0 rejected every step (all-zero
+    trajectory, one warning per frame) and NaN silently disabled the check.
+    Expected outcome: 0, -1, NaN, inf, True and a string raise ValueError naming
+    max_step in both compute_drift_trajectory and apply_drift_correction; valid
+    values (0.2, 30, None) still run.
+    """
+    projs = _jump_projections()
+    video = np.repeat(projs[:, None, :], 8, axis=1).astype(np.float32)
+    for bad in (0, 0.0, -1, np.nan, np.inf, True, "0.2"):
+        with pytest.raises(ValueError, match="max_step"):
+            compute_drift_trajectory([projs], shape_limit=(100,), max_step=bad, progress=False)
+        with pytest.raises(ValueError, match="max_step"):
+            apply_drift_correction(video, max_step=bad, progress=False)
+    for ok in (0.2, 30, np.float32(0.5), None):
+        compute_drift_trajectory([projs], shape_limit=(100,), max_step=ok, progress=False)
+
+
+def test_apply_subpixel_drift_correction_shift_keyword_and_drift_alias():
+    """R7-03: the parameter is `shift`; `drift=` is a deprecated keyword alias.
+
+    Expected outcome: positional, shift= and drift= give identical output; drift=
+    emits a FutureWarning naming 'shift=' that points at this file; passing both
+    or neither raises TypeError.
+    """
+    img = gaussian_filter(np.random.default_rng(0).random((32, 32)), 2)
+    ref = apply_subpixel_drift_correction(img, (1.5, -0.5))
+    np.testing.assert_array_equal(apply_subpixel_drift_correction(img, shift=(1.5, -0.5)), ref)
+    with pytest.warns(FutureWarning, match="shift=") as rec:
+        out = apply_subpixel_drift_correction(img, drift=(1.5, -0.5))
+    assert rec[0].filename == __file__
+    np.testing.assert_array_equal(out, ref)
+    with pytest.raises(TypeError):
+        apply_subpixel_drift_correction(img, (1, 1), drift=(1, 1))
+    with pytest.raises(TypeError):
+        apply_subpixel_drift_correction(img)

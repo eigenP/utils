@@ -678,7 +678,9 @@ def test_extract_surface_default_blur_has_small_depth_independent_bias():
     (measured 2.8, was 26). The plan's tighter target, a spread <= 1 voxel, is NOT
     met by the (1, 4, 4) default on this geometry: Otsu's threshold fraction still
     moves with the tissue fraction, times a Z blur of 4 raw slices; the bias grows
-    towards 7Z/8, where the tissue is only 2 binned blocks thick.
+    towards 7Z/8, where the tissue is only 2 binned blocks thick. For reference,
+    (0.5, 4, 4) measures a spread of 1.04 at Z=64 and 0.42 at Z=128; (1, 4, 4)
+    measures 2.77 and 1.20. Tightening needs a decision on the default.
     """
     bias = _median_bias_per_depth()
     assert np.all(np.abs(bias) <= 2.0), bias
@@ -710,18 +712,53 @@ def test_extract_surface_default_sigma_is_per_axis():
     np.testing.assert_array_equal(tiled, h_default)
 
 
-def test_extract_surface_isotropic_unbinned_unchanged():
-    """D19 negative control: isotropic, unbinned input with an explicit sigma is unchanged.
+def test_extract_surface_unbinned_old_sigma_reproduces_base_and_default_changes():
+    """D19 negative control, unbinned input (downscale_factor=1).
 
-    Strategy: downscale_factor=1 with an explicit scalar gaussian_sigma=2 (the new
-    default never applies) against the same call with sigma (2, 2, 2).
-    Expected outcome: bit-identical heights, and a bias below 0.1 voxel.
+    The plan's control "isotropic, unbinned input: unchanged" does not hold for a
+    default call: (1, 4, 4) also lowers the unbinned Z blur from 4 to 1 slice (a
+    tautological comparison of sigma 2.0 with (2, 2, 2) used to stand in for it).
+    Strategy: the depth series of the default-blur test, unbinned. An explicit
+    gaussian_sigma=4.0 must reproduce the base commit's (33bb6ff) default biases,
+    pinned here: +1.03, +0.37, +0.10, -0.06, -0.22, -0.48, -1.26. The default call
+    must differ from that (so the change is visible, and documented in the
+    docstring) and stay within 0.15 voxel of the truth at every depth.
+    Expected outcome: the old-sigma biases match the pinned values within 0.02;
+    the default biases are all <= 0.15 in magnitude and differ from the old ones.
     """
-    vol, h = _tilted_textured_half_space(32, shape=(64, 48, 48))
-    _, a = extract_surface(vol, downscale_factor=1, gaussian_sigma=2.0, return_heightmap=True)
-    _, b = extract_surface(vol, downscale_factor=1, gaussian_sigma=(2.0, 2.0, 2.0), return_heightmap=True)
-    np.testing.assert_array_equal(a, b)
-    assert abs(float(np.median(a - h))) < 0.1
+    old = _median_bias_per_depth(downscale_factor=1, gaussian_sigma=4.0)
+    np.testing.assert_allclose(
+        old, [1.032, 0.368, 0.102, -0.062, -0.215, -0.481, -1.261], atol=0.02
+    )
+    new = _median_bias_per_depth(downscale_factor=1)
+    assert np.all(np.abs(new) <= 0.15), new
+    assert np.max(np.abs(new - old)) > 0.5
+
+
+def test_extract_surface_pixel_sizes_without_sigma_um_warns_and_sigma_um_is_validated():
+    """D19 opt-in follow-up: pixel_sizes alone is not silently ignored; bad sigma_um raises.
+
+    Strategy: pass pixel_sizes without gaussian_sigma_um (it only converts a
+    gaussian_sigma_um, so the blur stays in binned voxels), then malformed
+    gaussian_sigma_um values (a 2-tuple raised numpy's broadcast error).
+    Expected outcome: a UserWarning mentioning gaussian_sigma_um, with heights equal
+    to the call without pixel_sizes; ValueError naming gaussian_sigma_um for a
+    2-tuple, a 4-tuple, a negative and a NaN sigma, in both entry points.
+    """
+    vol, _ = _tilted_textured_half_space(24, shape=(48, 48, 48))
+    _, ref = extract_surface(vol, return_heightmap=True)
+    with pytest.warns(UserWarning, match="gaussian_sigma_um") as rec:
+        _, h = extract_surface(vol, pixel_sizes=(2.0, 0.5, 0.5), return_heightmap=True)
+    assert rec[0].filename == __file__
+    np.testing.assert_array_equal(h, ref)
+    with pytest.warns(UserWarning, match="gaussian_sigma_um"):
+        extract_surface_tiled(vol, pixel_sizes=(2.0, 0.5, 0.5), return_mask=False)
+    ps = (2.0, 0.5, 0.5)
+    for bad in ((1.0, 2.0), (1, 2, 3, 4), -1.0, (1.0, np.nan, 1.0)):
+        with pytest.raises(ValueError, match="gaussian_sigma_um"):
+            extract_surface(vol, gaussian_sigma_um=bad, pixel_sizes=ps)
+        with pytest.raises(ValueError, match="gaussian_sigma_um"):
+            extract_surface_tiled(vol, gaussian_sigma_um=bad, pixel_sizes=ps, return_mask=False)
 
 
 def test_extract_surface_sigma_in_micrometres():

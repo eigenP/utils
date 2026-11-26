@@ -68,6 +68,10 @@ def create_3d_image_from_spline(spline_tck, shape=None, num_points=2500):
 
     Returns:
     - A 3D numpy array representing the image.
+
+    Changed (D23, R7-02, 2026-11): sample points are rounded to the nearest voxel
+    (half up; voxel centres at integer coordinates), not floored, so drawn voxels
+    can move by up to one voxel; see `_mark_points` for the tie rule.
     """
     # Sample points along the spline
     u_fine = np.linspace(0, 1, num_points)
@@ -99,6 +103,10 @@ def create_nd_image_from_spline(spline_tck, shape=None, num_points=2500):
 
     Returns:
     - An n-dimensional numpy array representing the image.
+
+    Changed (D23, R7-02, 2026-11): sample points are rounded to the nearest voxel
+    (half up; voxel centres at integer coordinates), not floored, so drawn voxels
+    can move by up to one voxel; see `_mark_points` for the tie rule.
     """
     # Sample points along the spline
     u_fine = np.linspace(0, 1, num_points)
@@ -170,6 +178,25 @@ def plot_3d_spline(coordinates, spline_tck, num_points=1000, ax=None, title=None
 
 # Function to create and resample spline
 def create_resampled_spline(points, num_points=1000):
+    """
+    Resample the interpolating spline through `points` (N, d) to `num_points` points.
+
+    Repeated consecutive points (common in tracked or pixel-snapped polylines) are
+    dropped first, because splprep rejects them. The degree is min(3, n - 1) for n
+    distinct points; fewer than 2 distinct points raise ValueError.
+
+    Changed (D23, R7-07, 2026-11): repeated consecutive points are dropped instead
+    of making splprep fail with 'Error on input data'.
+    """
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or len(points) == 0:
+        raise ValueError(f"points must be an (N, d) array with N >= 2, got shape {points.shape}.")
+    keep = np.r_[True, np.any(np.diff(points, axis=0) != 0, axis=1)]
+    points = points[keep]
+    if len(points) < 2:
+        raise ValueError(
+            f"A spline needs at least 2 distinct points, got {len(points)}."
+        )
     # splprep needs more points than the spline degree: lower it for 2-3 points
     tck, _ = splprep(points.T, s=0, k=min(3, len(points) - 1))
     u_fine = np.linspace(0, 1, num_points)
@@ -230,7 +257,9 @@ def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=Fal
       points, uniform in the chord-length parameter, so the i-th vectors compare
       corresponding positions along each curve whatever the input sampling. If
       False (and not `overlap_only`), equal-length inputs are paired by index and
-      different lengths raise ValueError.
+      different lengths raise ValueError. Repeated consecutive points are dropped
+      before resampling; a spline with fewer than 2 distinct points raises
+      ValueError (use ``resample=False`` to pair such inputs by index).
 
     Returns:
     - vectors: A (num_points, d) array (N x d when paired by index). With

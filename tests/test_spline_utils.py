@@ -726,6 +726,30 @@ def test_calculate_vector_difference_resamples_equal_length_inputs():
         calculate_vector_difference(uniform, quad[:50], resample=False)
 
 
+def test_calculate_vector_difference_tolerates_repeated_points():
+    """R7-07 follow-up: the default resampling drops repeated consecutive points.
+
+    Strategy: a pixel-snapped polyline with one repeated vertex (splprep rejects
+    repeats, so the new resampling default raised 'Error on input data' where the
+    old index pairing worked), in 3D, 2D and as nested lists; then a single point.
+    Expected outcome: a constant offset of 1 on every axis comes back as all-ones
+    vectors of shape (num_points, d); resample=False keeps the (N, d) index pairing;
+    fewer than 2 distinct points raise a ValueError naming 'distinct points'.
+    """
+    a = np.array([[0, 0, 0], [1, 1, 1], [1, 1, 1], [2, 3, 4], [5, 5, 5.0]])
+    b = a + 1
+    for x, y in ((a, b), (a[:, :2], b[:, :2]), (a.tolist(), b.tolist())):
+        v = calculate_vector_difference(x, y, num_points=7)
+        assert v.shape == (7, np.asarray(x).shape[1])
+        np.testing.assert_allclose(v, 1.0, atol=1e-9)
+    np.testing.assert_array_equal(calculate_vector_difference(a, b, resample=False), b - a)
+    with pytest.raises(ValueError, match="distinct points"):
+        calculate_vector_difference(a[:1], b[:1])
+    with pytest.raises(ValueError, match="distinct points"):
+        create_resampled_spline(np.array([[1.0, 2.0], [1.0, 2.0]]))
+    np.testing.assert_array_equal(calculate_vector_difference(a[:1], b[:1], resample=False), [[1, 1, 1]])
+
+
 def test_fit_cubic_spline_lowers_degree_for_few_points():
     """R7-16: fit_cubic_spline uses k = min(3, n - 1), so 2 and 3 points work.
 

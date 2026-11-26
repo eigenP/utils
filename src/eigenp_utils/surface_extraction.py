@@ -44,8 +44,23 @@ def _binned_sigma(gaussian_sigma, gaussian_sigma_um, pixel_sizes, s_tup, stackle
     taken as 1.0, with a UserWarning.
     """
     if gaussian_sigma_um is None:
+        if pixel_sizes is not None:
+            warnings.warn(
+                "pixel_sizes is only used to convert gaussian_sigma_um; without it the blur "
+                "is gaussian_sigma in binned voxels. Pass gaussian_sigma_um for a blur in µm.",
+                UserWarning, stacklevel=stacklevel
+            )
         return gaussian_sigma
-    sigma_um = np.broadcast_to(np.asarray(gaussian_sigma_um, dtype=np.float64), (3,))
+    sigma_um = np.asarray(gaussian_sigma_um, dtype=np.float64)
+    if sigma_um.ndim == 0:
+        sigma_um = np.full(3, float(sigma_um))
+    elif sigma_um.shape != (3,):
+        raise ValueError(
+            f"gaussian_sigma_um must be a scalar or a (Z, Y, X) triple, got shape "
+            f"{sigma_um.shape}."
+        )
+    if not np.all(np.isfinite(sigma_um) & (sigma_um >= 0)):
+        raise ValueError(f"gaussian_sigma_um must be finite and >= 0, got {gaussian_sigma_um!r}.")
     if pixel_sizes is None:
         warnings.warn(
             "gaussian_sigma_um given without pixel_sizes; using a pixel size of 1.0 "
@@ -410,7 +425,8 @@ def extract_surface(
     tissue, i.e. on the depth of the surface. Alternatively give the blur in µm with
     `gaussian_sigma_um` (scalar or (Z, Y, X)) and `pixel_sizes` (dict, sequence or
     scalar, as everywhere in the package); it is converted per axis to binned
-    voxels and replaces `gaussian_sigma`. `pixel_sizes` is only used for that.
+    voxels and replaces `gaussian_sigma`. `pixel_sizes` is only used for that
+    (passing it without `gaussian_sigma_um` warns).
 
     `threshold` replaces the Otsu threshold with a fixed value in the units of the
     block-averaged, blurred input (no per-call rescaling); it cannot be combined
@@ -424,6 +440,9 @@ def extract_surface(
     (it was an isotropic 4.0, i.e. 16 raw slices along Z at the default binning,
     which put surfaces 8-13 voxels too deep near the top of the stack and too
     shallow near the bottom). Pass ``gaussian_sigma=4.0`` for the old result.
+    This also changes unbinned input (``downscale_factor=1``): the Z blur drops
+    from 4 to 1 raw slice, which moves heights by up to about one voxel (the
+    depth-dependent bias falls from +1.0 ... -1.3 to within +-0.1 voxel).
     New: `gaussian_sigma_um` / `pixel_sizes` for a blur in physical units.
     """
     if threshold is not None and clahe_clip > 0.0:
