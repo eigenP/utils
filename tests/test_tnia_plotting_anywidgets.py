@@ -4885,3 +4885,59 @@ def test_show_zyx_max_slabs_defaults_to_the_full_range_and_clamps_with_a_warning
         warnings.simplefilter("error")
         show_zyx_max_slabs(v, x=[10, 20], y=[0, 30], z=[0, 10])
     assert inspect.signature(show_zyx_max_slabs).parameters["x"].default is None
+
+
+_DISPLAY_KWARGS = {
+    "pixel_sizes", "figsize", "colormap", "vmin", "vmax", "gamma", "opacity", "blending",
+    "rotate_view", "channel_labels", "channel_label_fontsize_pt", "scale_bar_show",
+    "scale_bar_fontsize_pt", "subplot_bg", "use_plt", "channel_axis", "colors",
+}
+
+
+def test_every_static_wrapper_takes_the_same_display_kwargs_and_input_forms():
+    """D12 / R1-16 / R8-08: one keyword set and one input normaliser for every static wrapper.
+
+    Strategy: compare the signatures of show_zyx_slice / _max / _projection /
+    _max_slabs / _projection_slabs; then draw the same two channels as a
+    list, a tuple, a CZYX ndarray with ``channel_axis=0`` and a CZYX
+    DataArray (with a ``color`` coordinate); then a 2D image.
+    Expected outcome: every wrapper takes the shared display kwargs; all
+    input forms give identical panels (the tuple, ndarray and DataArray
+    raised cryptic TypeErrors); a 4D ndarray without ``channel_axis`` raises
+    a ValueError asking for it (no guessing between CZYX and TZYX); a 2D
+    image draws in every wrapper; ``show_zyx_slice`` takes a channel list.
+    """
+    wrappers = [show_zyx_slice, show_zyx_max, show_zyx_projection, show_zyx_max_slabs,
+                tpa.show_zyx_projection_slabs]
+    for f in wrappers:
+        missing = _DISPLAY_KWARGS - set(inspect.signature(f).parameters)
+        assert not missing, (f.__name__, missing)
+    for f in wrappers[1:]:
+        assert {"projection", "attenuation"} <= set(inspect.signature(f).parameters), f.__name__
+
+    rng = np.random.default_rng(0)
+    c0, c1 = (rng.random((4, 12, 10)).astype(np.float32) for _ in range(2))
+    kw = dict(colormap=["cyan", "yellow"], figsize=(4, 4))
+    ref = show_zyx_max([c0, c1], **kw)
+    for im, extra in (((c0, c1), {}), (np.stack([c0, c1]), {"channel_axis": 0}),
+                      (np.stack([c0, c1], axis=-1), {"channel_axis": -1})):
+        fig = show_zyx_max(im, **kw, **extra)
+        np.testing.assert_array_equal(_panel_rgb(fig), _panel_rgb(ref))
+    with pytest.raises(ValueError, match="channel_axis"):
+        show_zyx_max(np.stack([c0, c1]))
+
+    xr = pytest.importorskip("xarray")
+    da = xr.DataArray(np.stack([c0, c1]), dims=("C", "Z", "Y", "X"),
+                      coords={"C": ["a", "b"], "color": ("C", ["cyan", "yellow"])})
+    fig = show_zyx_max(da, figsize=(4, 4))
+    np.testing.assert_array_equal(_panel_rgb(fig), _panel_rgb(ref))
+    assert fig.axLabels is not None  # channel labels from the C coordinate
+    w = TNIASliceWidget(da)
+    assert w.channel_names == ["a", "b"] and w.colors_resolved == ["cyan", "yellow"]
+
+    img2d = rng.random((12, 10)).astype(np.float32)
+    for f, args in ((show_zyx_max, ()), (show_zyx_projection, ()), (show_zyx_max_slabs, ()),
+                    (tpa.show_zyx_projection_slabs, (None, None, None)), (show_zyx_slice, (2, 3, 0))):
+        assert _panel_rgb(f(img2d, *args, figsize=(4, 4))).shape == (12, 10)
+    fig = show_zyx_slice([c0, c1], 2, 3, 1, colormap=["cyan", "yellow"], figsize=(4, 4))
+    assert _panel_rgb(fig).shape == (12, 10, 3)

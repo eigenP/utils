@@ -459,18 +459,49 @@ def resolve_color(c):
 
     return c
 
+def _static_doc(func):
+    """Append the input forms and display keywords shared by the static wrappers to a docstring."""
+    func.__doc__ = (func.__doc__ or '').rstrip() + '\n' + _STATIC_DOC
+    return func
+
+
+_STATIC_DOC = """
+    Input (every static wrapper): a ZYX (or YX) array, a list or tuple of
+    them (one per channel), an ndarray with a channel axis named by
+    ``channel_axis`` (e.g. ``channel_axis=0`` for CZYX; a 4D array without it
+    raises ValueError rather than guessing between CZYX and TZYX), or an
+    ``xarray.DataArray`` with C/Z/Y/X dims (other dims of size 1), whose
+    ``C`` coordinate, ``color`` coordinate and calibrated coordinates give
+    the default ``channel_labels``, ``colormap`` and ``pixel_sizes``.
+
+    Display keyword arguments, shared by every static wrapper (see
+    `show_zyx`): ``pixel_sizes`` ((Z, Y, X) or dict, converted to µm),
+    ``figsize`` (inches), ``colormap`` (per channel), ``vmin`` / ``vmax`` /
+    ``gamma`` / ``opacity`` (scalar or per channel; None takes the default
+    display range of the whole volume), ``blending``, ``rotate_view``
+    (degrees), ``channel_labels``, ``channel_label_fontsize_pt``,
+    ``scale_bar_show``, ``scale_bar_fontsize_pt``, ``subplot_bg``,
+    ``use_plt``; ``colors`` is the deprecated name of ``colormap``.
+    Projecting wrappers also take ``projection`` / ``attenuation``.
+
+    Changed (D12, 2026-11): every static wrapper takes the same display
+    keywords and input forms (DataArrays, tuples, ``channel_axis``, 2D
+    images); they used to differ per wrapper and reject DataArrays.
+"""
+
+
 # Copyright tnia 2021 - BSD License
-def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=False, opacity=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
+@_static_doc
+def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=False, opacity=None, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                   *, colors=None, blending=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
+                   subplot_bg=None, channel_axis=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
-        image_to_show (3d numpy array): image to plot
-        x (int): x position of slice
-        y (int): y position of slice
-        z (int): z position of slice
-        pixel_sizes (tuple or dict, optional): pixel sizes of 3D in physical units. Defaults to None.
-        figsize (tuple, optional): figure size. Defaults to (10,10).
-        colormap (_type_, optional): _description_. Defaults to None.
+        image_to_show: image to plot (see the input forms below)
+        x (int): x index of the ZY slice
+        y (int): y index of the XZ slice
+        z (int): z index of the XY slice
         vmin, vmax (float, optional): display range; a bound left as None
             takes the default display range of the whole volume
             (`_conventions.default_display_range`: 0 or the negative data
@@ -480,73 +511,69 @@ def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), co
     used to be the min/max of the three slices). Changed (D05, 2026-11):
     ``use_plt`` defaults to False (a plain Figure, not registered with pyplot).
     """
+    colormap = _legacy_colors(colors, colormap)
+    im, colormap, channel_labels, pixel_sizes = _ortho_input(
+        image_to_show, colormap, channel_labels, pixel_sizes, channel_axis)
 
-    slice_zy = np.flip(np.rot90(image_to_show[:,:,x],1),0)
-    slice_xz = image_to_show[:,y,:]
-    slice_xy = image_to_show[z,:,:]
-    vmin, vmax = _volume_display_range(image_to_show, vmin, vmax)
+    def _slices(v):
+        return v[z, :, :], v[:, y, :], np.flip(np.rot90(v[:, :, x], 1), 0)
 
-    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    if isinstance(im, list):
+        planes = [_slices(v) for v in im]
+        slice_xy, slice_xz, slice_zy = ([p[k] for p in planes] for k in range(3))
+        vmin, vmax = _channels_display_range(im, vmin, vmax)
+    else:
+        slice_xy, slice_xz, slice_zy = _slices(im)
+        vmin, vmax = _volume_display_range(im, vmin, vmax)
+
+    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap,
+                    vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity, subplot_bg=subplot_bg,
+                    rotate_view=rotate_view, channel_labels=channel_labels,
+                    channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending,
+                    scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
-    """ plots max xy, xz, and zy projections of a 3D image
+@_static_doc
+def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                 *, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, subplot_bg=None,
+                 use_plt=False, channel_axis=None):
+    """ plots max xy, xz, and zy projections of a 3D image (the whole volume)
 
     Args:
-        image_to_show (3d numpy array): image to plot
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple, optional): figure size. Defaults to (10,10).
-        colormap (_type_, optional): _description_. Defaults to None.
-        vmax (float, optional): maximum value for display range. Defaults to None.
-        blending (str, optional): channel compositing mode, see `show_zyx`.
-        projection (str, optional): how each slab is projected along the view
-            axis (napari's rendering names): 'mip' (maximum, the default),
-            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
-        attenuation (float, optional): for 'attenuated_mip', the attenuation per
-            voxel along the ray (napari's default 0.05). Rays enter each slab at
-            its lowest index (z = start for XY, y = start for XZ, x = start for
-            ZY); samples are normalised with the display range (vmin/vmax, or
-            the channel's default range), so bright structures hide dimmer ones
-            behind them.
+        image_to_show: image to plot (see the input forms below)
+        projection, attenuation: see `show_zyx_projection_slabs`.
     """
-    if colors is not None:
-        warn_deprecated("The 'colors' parameter", "'colormap'")
-        if colormap is None:
-            colormap = colors
+    colormap = _legacy_colors(colors, colormap)
+    return show_zyx_projection_slabs(
+        image_to_show, None, None, None, pixel_sizes=pixel_sizes, figsize=figsize, projector=None,
+        colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, opacity=opacity, blending=blending,
+        projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show,
+        scale_bar_fontsize_pt=scale_bar_fontsize_pt, rotate_view=rotate_view, channel_labels=channel_labels,
+        channel_label_fontsize_pt=channel_label_fontsize_pt, subplot_bg=subplot_bg, use_plt=use_plt,
+        channel_axis=channel_axis)
 
-    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
-
-def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
-    """ generates xy, xz, and zy max projections of a 3D image and plots them
+@_static_doc
+def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                        *, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, subplot_bg=None,
+                        use_plt=False, channel_axis=None):
+    """ generates xy, xz, and zy projections of a 3D image (the whole volume) and plots them
 
     Args:
-        image_to_show (3d numpy array, or a list of them for channels): image to plot
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple): size of figure to
+        image_to_show: image to plot (see the input forms below)
         projector: function ``f(volume, axis)`` to project with; None (default)
             is the maximum ignoring NaN voxels, like ``projection='mip'``.
-        colormap (_type_, optional): _description_. Defaults to None.
-        vmax (float, optional): maximum value for display range. Defaults to None.
-        blending (str, optional): channel compositing mode, see `show_zyx`.
-        projection (str, optional): how each slab is projected along the view
-            axis (napari's rendering names): 'mip' (maximum, the default),
-            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
-        attenuation (float, optional): for 'attenuated_mip', the attenuation per
-            voxel along the ray (napari's default 0.05). Rays enter each slab at
-            its lowest index (z = start for XY, y = start for XZ, x = start for
-            ZY); samples are normalised with the display range (vmin/vmax, or
-            the channel's default range), so bright structures hide dimmer ones
-            behind them.
+        projection, attenuation: see `show_zyx_projection_slabs`.
     """
-    if colors is not None:
-        warn_deprecated("The 'colors' parameter", "'colormap'")
-        if colormap is None:
-            colormap = colors
-    full = slice(None)
-    return show_zyx_projection_slabs(image_to_show, full, full, full, pixel_sizes=pixel_sizes, figsize=figsize, projector=projector, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    colormap = _legacy_colors(colors, colormap)
+    return show_zyx_projection_slabs(
+        image_to_show, None, None, None, pixel_sizes=pixel_sizes, figsize=figsize, projector=projector,
+        colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, opacity=opacity, blending=blending,
+        projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show,
+        scale_bar_fontsize_pt=scale_bar_fontsize_pt, rotate_view=rotate_view, channel_labels=channel_labels,
+        channel_label_fontsize_pt=channel_label_fontsize_pt, subplot_bg=subplot_bg, use_plt=use_plt,
+        channel_axis=channel_axis)
 
 # Copyright tnia 2021 - BSD License
 def _draw_channel_label_bar(axLabels, fontsize_pt, as_image=False):
@@ -1049,69 +1076,54 @@ def _slab_slice(rng, n, name):
     return slice(clo, chi)
 
 
-def show_zyx_max_slabs(image_to_show, x=None, y=None, z=None, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
+@_static_doc
+def show_zyx_max_slabs(image_to_show, x=None, y=None, z=None, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                       *, subplot_bg=None, use_plt=False, channel_axis=None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
 
     Args:
-        image_to_show (3d numpy array): image to plot
+        image_to_show: image to plot (see the input forms below)
         x, y, z: half-open index ranges ``[start, stop)`` of the slabs
             (voxel indices, rounded; a zero-width range widens to one
             plane). None (default) is the whole axis, i.e. the full
             projection. Bounds outside the image are clipped with a
             warning; a range entirely outside raises ValueError.
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple, optional): figure size. Defaults to (10,10).
-        colormap (_type_, optional): _description_. Defaults to None.
-        vmax (float, optional): maximum value for display range. Defaults to None.
-        blending (str, optional): channel compositing mode, see `show_zyx`.
-        projection (str, optional): how each slab is projected along the view
-            axis (napari's rendering names): 'mip' (maximum, the default),
-            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
-        attenuation (float, optional): for 'attenuated_mip', the attenuation per
-            voxel along the ray (napari's default 0.05). Rays enter each slab at
-            its lowest index (z = start for XY, y = start for XZ, x = start for
-            ZY); samples are normalised with the display range (vmin/vmax, or
-            the channel's default range), so bright structures hide dimmer ones
-            behind them.
+        projection, attenuation: see `show_zyx_projection_slabs`.
 
     Changed (D12, 2026-11): x, y and z default to None, the whole axis (the
     defaults were [0, 1], the first plane of each axis), and out-of-range
     bounds are clipped with a warning (they raised an opaque 'zero-size
     array' error).
     """
-    if colors is not None:
-        warn_deprecated("The 'colors' parameter", "'colormap'")
-        if colormap is None:
-            colormap = colors
+    colormap = _legacy_colors(colors, colormap)
+    im, colormap, channel_labels, pixel_sizes = _ortho_input(
+        image_to_show, colormap, channel_labels, pixel_sizes, channel_axis)
+    Zn, Yn, Xn = np.shape(im[0] if isinstance(im, list) else im)
+    return show_zyx_projection_slabs(
+        im, _slab_slice(x, Xn, 'x'), _slab_slice(y, Yn, 'y'), _slab_slice(z, Zn, 'z'),
+        pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin=vmin,
+        gamma=gamma, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels,
+        channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection,
+        attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
+        subplot_bg=subplot_bg, use_plt=use_plt)
 
-    shape =np.shape(image_to_show[0] if isinstance(image_to_show, list) else image_to_show)
-    Zn, Yn, Xn = shape[-3:]
-    x_slices = _slab_slice(x, Xn, 'x')
-    y_slices = _slab_slice(y, Yn, 'y')
-    z_slices = _slab_slice(z, Zn, 'z')
 
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
-
-
-### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
-    """ generates xy, xz, and zy max projections of a 3D image and plots them
+@_static_doc
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                              *, subplot_bg=None, use_plt=False, channel_axis=None):
+    """ generates xy, xz, and zy projections of slabs of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
 
     Args:
-        image_to_show (3d numpy array): image to plot
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple): size of figure to
+        image_to_show: image to plot (see the input forms below)
+        x_slices, y_slices, z_slices: index slices (or None for the whole
+            axis) of the slabs projected onto the ZY, XZ and XY panels.
         projector: function ``f(volume, axis)`` to project with (used when
             ``projection`` is None); None (default) is the maximum ignoring NaN
             voxels, like ``projection='mip'``.
-        colormap (_type_, optional): _description_. Defaults to None.
-        vmax (float, optional): maximum value for display range. Defaults to None.
-        blending (str, optional): channel compositing mode, see `show_zyx`.
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
@@ -1131,10 +1143,10 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
     projected panels (single channel) or 0 / the panels' max (channel list),
     so a single hot pixel darkened the whole figure.
     """
-    if colors is not None:
-        warn_deprecated("The 'colors' parameter", "'colormap'")
-        if colormap is None:
-            colormap = colors
+    colormap = _legacy_colors(colors, colormap)
+    image_to_show, colormap, channel_labels, pixel_sizes = _ortho_input(
+        image_to_show, colormap, channel_labels, pixel_sizes, channel_axis)
+    x_slices, y_slices, z_slices = (slice(None) if v is None else v for v in (x_slices, y_slices, z_slices))
     if projection is not None:
         projection = _check_projection(projection, attenuation)
 
@@ -1174,7 +1186,12 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
     else:
         projection_y, projection_x, projection_z = _project(image_to_show, 0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize,
+                    colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, opacity=opacity,
+                    rotate_view=rotate_view, channel_labels=channel_labels,
+                    channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending,
+                    scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
+                    subplot_bg=subplot_bg, use_plt=use_plt)
 
 
 def _finite_min(*arrays):
@@ -2387,11 +2404,15 @@ class TNIASliceWidget(TNIAWidgetBase):
     """
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-                 blending=None, projection=None, attenuation=0.05, bit_depth=None, colors=None, **kwargs):
+                 blending=None, projection=None, attenuation=0.05, bit_depth=None, colors=None, channel_axis=None,
+                 **kwargs):
         if colors is not None:
             warn_deprecated("The 'colors' parameter", "'colormap'")
             if colormap is None:
                 colormap = colors
+        # DataArrays, tuples, channel_axis and 2D images, as in every viewer (D12)
+        im, colormap, channel_labels, pixel_sizes = _ortho_input(
+            im, colormap, channel_labels, pixel_sizes, channel_axis)
 
         self.blending = _check_blending(blending)
         self.projection = None if projection is None else _check_projection(projection, attenuation)
@@ -2752,11 +2773,18 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         self.annotation_mode = bool(value)
 
     def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, annotate=False,
-                 *args, snap_depth=True, **kwargs):
+                 *args, snap_depth=True, channel_axis=None, **kwargs):
         if colors is not None:
             warn_deprecated("The 'colors' parameter", "'colormap'")
             if colormap is None:
                 colormap = colors
+        # DataArrays, tuples, channel_axis and 2D images, as in every viewer (D12)
+        im, colormap, labels, ps = _ortho_input(
+            im, colormap, kwargs.get('channel_labels'), kwargs.get('pixel_sizes'), channel_axis)
+        if labels is not None:
+            kwargs['channel_labels'] = labels
+        if ps is not None:
+            kwargs['pixel_sizes'] = ps
         # Normalize input to list
         if not isinstance(im, list):
             im_list = [im]
@@ -3808,6 +3836,55 @@ def _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes):
         colormap = _channel_colors_from_coord(da.coords["color"].values, stacklevel=4)
     channels = [np.asarray(da.isel(C=i).values) for i in range(da.sizes["C"])]
     return channels, colormap, channel_labels, pixel_sizes
+
+
+def _legacy_colors(colors, colormap, stacklevel=4):
+    """The deprecated ``colors=`` (FutureWarning, D08), used when ``colormap`` is None."""
+    if colors is None:
+        return colormap
+    warn_deprecated("The 'colors' parameter", "'colormap'", stacklevel=stacklevel)
+    return colormap if colormap is not None else colors
+
+
+def _ortho_input(im, colormap=None, channel_labels=None, pixel_sizes=None, channel_axis=None):
+    """
+    One input normaliser for every ortho viewer (D12).
+
+    Returns ``(image, colormap, channel_labels, pixel_sizes)`` where image is
+    a 3D (Z, Y, X) array or a list of them (channels):
+
+    - an ``xarray.DataArray`` goes through `_viewer_input_from_xarray`
+      (channel labels, colours and pixel sizes from its coordinates;
+      explicit arguments win);
+    - a tuple of channels becomes a list;
+    - an ndarray with ``channel_axis`` is split along that axis; a 4D
+      ndarray without it raises ValueError (CZYX or TZYX cannot be told
+      apart, so the channel axis is never guessed);
+    - 2D (YX) images get a Z axis of length 1.
+    """
+    if hasattr(im, "dims") and hasattr(im, "isel") and hasattr(im, "coords"):
+        im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(
+            im, colormap, channel_labels, pixel_sizes)
+    elif isinstance(im, tuple):
+        im = list(im)
+    if not isinstance(im, list):
+        im = np.asarray(im)
+        if channel_axis is not None:
+            im = [np.asarray(c) for c in np.moveaxis(im, channel_axis, 0)]
+        elif im.ndim > 3:
+            raise ValueError(
+                f"got a {im.ndim}D array {im.shape}: pass channel_axis= to split channels "
+                "(e.g. channel_axis=0 for CZYX), or a list of 3D arrays.")
+    if isinstance(im, list):
+        im = [np.asarray(c) for c in im]
+        if any(c.ndim not in (2, 3) for c in im):
+            raise ValueError(f"each channel must be a 2D or 3D array, got shapes {[c.shape for c in im]}")
+        im = [c[np.newaxis] if c.ndim == 2 else c for c in im]
+    elif im.ndim == 2:
+        im = im[np.newaxis]
+    elif im.ndim != 3:
+        raise ValueError(f"expected a 2D or 3D image, got shape {im.shape}")
+    return im, colormap, channel_labels, pixel_sizes
 
 
 def show_zyx_max_slice_interactive(
