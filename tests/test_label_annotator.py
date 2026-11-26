@@ -721,7 +721,7 @@ def test_frontend_maps_alt_arrows_and_track_tools():
     from eigenp_utils.label_annotator import LabelAnnotator as LA
 
     js = LA._esm
-    assert 'ev.altKey && (k === "ArrowLeft" || k === "ArrowRight")' in js
+    assert 'ev.altKey && !ev.ctrlKey && !ev.metaKey && (k === "ArrowLeft" || k === "ArrowRight")' in js
     assert 'stepZ(k === "ArrowRight" ? 1 : -1)' in js and "ev.preventDefault()" in js
     for name in ('"merge"', '"split"', '"show_adjacent"', '"auto_increment", !keepCb.checked', '"track_request"'):
         assert name in js
