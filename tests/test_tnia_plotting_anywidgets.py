@@ -5134,3 +5134,48 @@ def test_scatter_categories_keep_negative_and_sparse_labels():
     assert drawn == 90
     w = show_zyx_max_scatter_interactive(pts, channels=np.repeat(["a", "b", "c"], 30), render="points")
     assert w.mode == "ids" and w.channel_names == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): IsoScatter (D16)
+# ---------------------------------------------------------------------------
+
+def test_iso_scatter_integer_colours_are_categories():
+    """D16 / R2-16: integer (and bool) colour arrays are categories with a legend, not a gradient.
+
+    Strategy: integer cluster labels including -1, and a bool mask; float
+    values as the negative control.
+    Expected outcome: categorical with one legend entry per label (they were
+    drawn as a continuous colormap); floats stay continuous.
+    """
+    X, Y, Z = _iso_points(n=60)
+    w = show_iso_scatter(X, Y, Z, color=np.repeat([-1, 0, 3], 20), figsize=(4, 4))
+    assert w.is_categorical and not w.is_continuous
+    assert list(w.unique_cats) == [-1, 0, 3]
+    w = show_iso_scatter(X, Y, Z, color=np.arange(60) % 2 == 0, figsize=(4, 4))
+    assert w.is_categorical
+    w = show_iso_scatter(X, Y, Z, color=np.linspace(0, 1, 60), figsize=(4, 4))
+    assert w.is_continuous and not w.is_categorical
+
+
+def test_iso_scatter_sxy_sz_are_deprecated_and_still_apply():
+    """D16 / D08 / R2-15 / R8-17: IsoScatter's ``sxy``/``sz`` warn and still apply, also for empty input.
+
+    Strategy: pass ``sxy=0.2, sz=2`` to ``show_iso_scatter`` with points and
+    with empty arrays; then no ``sxy``/``sz`` (negative control).
+    Expected outcome: a FutureWarning naming 'pixel_sizes' and 0.1.0, and
+    the sizes applied (the empty path used 1.0 and nothing warned); no
+    warning without them; one figsize default for widget and factory.
+    """
+    X, Y, Z = _iso_points(n=30)
+    with pytest.warns(FutureWarning, match=r"'sxy'/'sz'.*0\.1\.0.*'pixel_sizes'"):
+        w = show_iso_scatter(X, Y, Z, sxy=0.2, sz=2.0, figsize=(4, 4))
+    assert (w.sx, w.sy, w.sz) == (0.2, 0.2, 2.0)
+    with pytest.warns(FutureWarning, match="'sxy'/'sz'"):
+        w = IsoScatterWidget(np.array([]), np.array([]), np.array([]), sxy=0.2, sz=2.0, figsize=(4, 4))
+    assert (w.sx, w.sz) == (0.2, 2.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        show_iso_scatter(X, Y, Z, figsize=(4, 4))
+    assert (inspect.signature(IsoScatterWidget).parameters["figsize"].default
+            == inspect.signature(show_iso_scatter).parameters["figsize"].default)

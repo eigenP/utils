@@ -4490,10 +4490,23 @@ class IsoScatterWidget(anywidget.AnyWidget):
     save_filename = traitlets.Unicode("iso_scatter.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
 
-    def __init__(self, X, Y, Z, color=None, sxy=1, sz=1, figsize=(12, 10),
+    def __init__(self, X, Y, Z, color=None, sxy=None, sz=None, figsize=(10, 8),
                  point_size=5, alpha=0.6, cmap='viridis', max_points=10000,
                  title=None, pixel_sizes=None, channel_labels=None, seed=0):
+        """
+        Isometric scatter widget of X, Y, Z coordinates (see `show_iso_scatter`).
+
+        Changed (D16, 2026-11): integer and bool ``color`` arrays are
+        categories (they were a continuous gradient); ``sxy``/``sz`` are
+        deprecated (FutureWarning; use ``pixel_sizes``) and now also apply to
+        empty input; ``figsize`` defaults to (10, 8) like ``show_iso_scatter``
+        (it was (12, 10)).
+        """
         super().__init__()
+        if sxy is not None or sz is not None:
+            warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
+            if pixel_sizes is None:
+                pixel_sizes = (1.0 if sz is None else sz, 1.0 if sxy is None else sxy, 1.0 if sxy is None else sxy)
 
         # Store ORIGINAL Data
         self.X_orig = np.asarray(X)
@@ -4525,7 +4538,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         if len(self.X_orig) == 0:
              self.cx, self.cy, self.cz = 0, 0, 0
              self.max_radius = 1.0
-             (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes)
+             (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes)  # sxy/sz apply here too
              self.sx = px
              self.sy = py
              self.sz = pz
@@ -4550,8 +4563,6 @@ class IsoScatterWidget(anywidget.AnyWidget):
             if self.color is not None:
                  self.color = self.color[idx]
 
-        if pixel_sizes is None:
-            pixel_sizes = (sz, sxy, sxy)
         (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes)
         self.sx = px
         self.sy = py
@@ -4580,7 +4591,9 @@ class IsoScatterWidget(anywidget.AnyWidget):
 
         # Analyze color types (after subsampling)
         if self.color is not None:
-            if np.issubdtype(self.color.dtype, np.number):
+            # Floats are continuous; integer labels (cluster ids, -1 noise),
+            # bools and strings are categories (D16)
+            if np.issubdtype(self.color.dtype, np.floating):
                  self.is_continuous = True
             else:
                  self.is_categorical = True
@@ -4771,7 +4784,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
 def show_iso_scatter(
     X, Y, Z,
     color=None,
-    sxy=1, sz=1,
+    sxy=None, sz=None,
     figsize=(10, 8),
     point_size=5,
     alpha=0.6,
@@ -4790,10 +4803,12 @@ def show_iso_scatter(
         Coordinates of points. Points with a non-finite coordinate are
         dropped (with a warning), together with their ``color`` values.
     color : array-like or color, optional
-        Color values (continuous or categorical), one per point, or a single
-        matplotlib colour (e.g. ``'red'``) for every point.
-    sxy, sz : float
-        Scaling factors for XY and Z dimensions (used when ``pixel_sizes`` is None).
+        One value per point: floats are mapped through ``cmap`` (continuous);
+        integers, bools and strings are categories (one colour per distinct
+        label, with a legend). Or a single matplotlib colour (e.g. ``'red'``)
+        for every point.
+    sxy, sz : float, deprecated
+        XY and Z scaling; use ``pixel_sizes=(sz, sxy, sxy)`` (FutureWarning).
     pixel_sizes : tuple or dict, optional
         (Z, Y, X) pixel sizes, or a dict with 'Z', 'Y', 'X' keys. Takes
         precedence over ``sxy``/``sz``.
@@ -4811,12 +4826,17 @@ def show_iso_scatter(
         Plot title.
     seed : int or None
         Seed of the subsampling (default 0, reproducible; None for a fresh draw).
+
+    Changed (D16, 2026-11): integer and bool colours are categories (they
+    were drawn as a continuous gradient); ``sxy``/``sz`` are deprecated.
     """
+    if sxy is not None or sz is not None:
+        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
+        if pixel_sizes is None:
+            pixel_sizes = (1.0 if sz is None else sz, 1.0 if sxy is None else sxy, 1.0 if sxy is None else sxy)
     return IsoScatterWidget(
         X, Y, Z,
         color=color,
-        sxy=sxy,
-        sz=sz,
         figsize=figsize,
         point_size=point_size,
         alpha=alpha,
