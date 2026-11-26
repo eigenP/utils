@@ -159,11 +159,17 @@ def _unpack(image, axes, colors, names, pixel_sizes):
     return czyx, input_axes, colors, names, pixel_sizes
 
 
-def _parse_pixel_sizes(ps) -> dict:
-    """``{'Z', 'Y', 'X', 'unit'}`` in µm (None where unknown), by the package's pixel-size parser."""
+def _parse_pixel_sizes(ps, has_z: bool = True) -> dict:
+    """``{'Z', 'Y', 'X', 'unit'}`` in µm (None where unknown), by the package's pixel-size parser.
+
+    An image without a Z axis also takes a ``(Y, X)`` pair (or a ZYX triple,
+    whose Z is ignored); an image with Z needs ``(Z, Y, X)``.
+    """
     if ps is None:
         return {"Z": None, "Y": None, "X": None, "unit": UM}
-    values, _, unit = resolve_pixel_sizes(ps, 3, fill_z=False, warn=False, stacklevel=4)
+    values, _, unit = resolve_pixel_sizes(ps, 3 if has_z else 2, fill_z=False, warn=False, stacklevel=4)
+    if not has_z:
+        values = (None, *values)
     return {"Z": values[0], "Y": values[1], "X": values[2], "unit": unit}
 
 
@@ -202,6 +208,8 @@ def _slider_range(mn, mx, lo, hi, a_lo, a_hi, integer):
 
 
 def _finite(v, name: str) -> float:
+    if isinstance(v, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a number, not a bool ({v!r})")
     try:
         f = float(v)
     except (TypeError, ValueError):
@@ -209,6 +217,13 @@ def _finite(v, name: str) -> float:
     if not np.isfinite(f):
         raise ValueError(f"{name} must be finite, got {v!r}")
     return f
+
+
+def _colour_list(v, name: str) -> list[str]:
+    """A list of plain colours (``class_colors``, ``instance_palette``); a lone string is refused."""
+    if isinstance(v, (str, bytes)) or not isinstance(v, (Sequence, np.ndarray)):
+        raise ValueError(f"{name} must be a list of colours, got {v!r}")
+    return [_plain_color_hex(c) for c in v]
 
 
 def _plain_color_hex(c) -> str:
@@ -379,12 +394,14 @@ class LabelAnnotator(anywidget.AnyWidget):
         shows an 8-bit slice that spans ``vmin..vmax``; changing the ``vmin``
         / ``vmax`` traits (Python or the channel sliders, which span the data
         range) re-quantises the slice in Python, so the range can be widened
-        as well as narrowed. Double-click a slider to restore the automatic
+        as well as narrowed (a slider drag sends at most one update per
+        100 ms, and its final value). Double-click a slider to restore the automatic
         value.
     gamma : float or list of float, optional, keyword only
         Display gamma per channel (> 0, default 1), applied in the browser.
     pixel_sizes : dict, sequence or float, optional, keyword only
-        ``{'Z', 'Y', 'X', 'unit'}``, ``(Z, Y, X)`` or an isotropic size, in
+        ``{'Z', 'Y', 'X', 'unit'}``, ``(Z, Y, X)`` (``(Y, X)`` also for an
+        image without Z) or an isotropic size, in
         µm unless a ``'unit'`` says otherwise (known length units are
         converted). Stored as :attr:`pixel_sizes` and written by :meth:`save`
         as TIFF resolution. Painting and display stay in pixels.
@@ -393,28 +410,6 @@ class LabelAnnotator(anywidget.AnyWidget):
     auto_fill : bool, optional, keyword only
         Close and fill each brush stroke (default True in instance mode,
         False in semantic mode).
-    **kwargs
-        Any other trait, e.g. ``opacity``, ``display``, ``outline_px``,
-        ``tool``, ``active_label``, ``channel_visible``, ``class_colors``,
-        ``instance_palette``, ``auto_increment``, ``stack``. They are applied
-        after the defaults and validated (``ValueError``); traits the widget
-        computes (``shape_zyx``, ``image_to_js``, ...) and unknown names raise
-        ``TypeError``.
-
-    Changed (D02/D03, 2026-11): the default range was (p0.1, p99.99) with
-    ``lo + 1`` for sparse channels (rendered binary); the default colours
-    were magenta, green, cyan, ... and more than 8 channels raised;
-    RGB-tuple colours in a DataArray ``color`` coordinate were ignored.
-
-    Changed (D18/R4-07, 2026-11): ``vmin``/``vmax`` are data units (they
-    were 0..255 steps of a fixed 8-bit pre-quantisation, so the GUI could
-    only narrow the range); trait kwargs such as ``z``, ``vmin``,
-    ``active_label`` or ``stack`` are honoured (they were overwritten);
-    unknown kwargs raise ``TypeError`` (they were ignored); ``mode`` and
-    ``background`` are read-only after construction; a list of DataArrays
-    keeps the coordinates' names, colours and pixel sizes; ``save`` writes
-    axes and pixel sizes; labels are stored as uint16 internally (the
-    getters still return uint32).
     brush_radius : int
         Brush radius in pixels.
     keep_label : bool
@@ -445,6 +440,17 @@ class LabelAnnotator(anywidget.AnyWidget):
         also be signed (negative values = background). Default False: 65535
         is an ordinary id and nothing changes. ``mode`` and ``background``
         cannot be changed after construction (``TraitError``).
+    **kwargs
+        Any other trait, e.g. ``opacity`` (0..1), ``display``,
+        ``outline_px``, ``tool`` (one of the toolbar's tools),
+        ``active_label``, ``channel_visible`` (bool or list of bools),
+        ``class_colors`` / ``instance_palette`` (lists of colours),
+        ``auto_increment`` (instance mode only), ``stack``. The ones the
+        constructor also sets are applied after its defaults; malformed
+        values of these, of ``opacity`` and of ``tool`` raise ``ValueError``
+        (or ``TraitError``), and the remaining traits get traitlets' type
+        check. Traits the widget computes (``shape_zyx``, ``image_to_js``,
+        ...) and unknown names raise ``TypeError``.
 
     Attributes
     ----------
@@ -494,6 +500,25 @@ class LabelAnnotator(anywidget.AnyWidget):
 
     Changed (D17, 2026-11): handled keys used to bubble to the host, and the
     plain wheel always zoomed (the page could not be scrolled past the widget).
+
+    Changed (D02/D03, 2026-11): the default range was (p0.1, p99.99) with
+    ``lo + 1`` for sparse channels (rendered binary); the default colours
+    were magenta, green, cyan, ... and more than 8 channels raised;
+    RGB-tuple colours in a DataArray ``color`` coordinate were ignored.
+
+    Changed (D18/R4-07, 2026-11): ``vmin``/``vmax`` are data units (they
+    were 0..255 steps of a fixed 8-bit pre-quantisation, so the GUI could
+    only narrow the range); trait kwargs such as ``z``, ``vmin``,
+    ``active_label`` or ``stack`` are honoured (they were overwritten);
+    unknown kwargs raise ``TypeError`` (they were ignored); ``mode`` and
+    ``background`` are read-only after construction; a list of DataArrays
+    keeps the coordinates' names, colours and pixel sizes; ``save`` writes
+    axes and pixel sizes; labels are stored as uint16 internally (the
+    getters still return uint32); ``opacity``, ``tool``,
+    ``channel_visible``, colour lists, bool ``vmin``/``vmax``/``gamma`` and
+    ``auto_increment`` in semantic mode are validated (they were coerced or
+    ignored); a 2D image takes ``pixel_sizes=(Y, X)``; the 8-bit slice is
+    computed in float64 (a narrow window on data far from 0 lost levels).
     """
 
     BACKGROUND_ID = BACKGROUND_ID
@@ -572,6 +597,9 @@ class LabelAnnotator(anywidget.AnyWidget):
     track_request = traitlets.Dict().tag(sync=True)
     # serials of the undoable track operations, oldest first (Python -> JS)
     track_undo_ids = traitlets.List(traitlets.Int()).tag(sync=True)
+
+    # the browser's tools (label_annotator.js ``tools``)
+    _TOOLS = ("brush", "eraser", "fill", "picker", "background", "delete", "merge", "split")
 
     # traits the widget computes: not constructor kwargs
     _COMPUTED = frozenset({
@@ -664,7 +692,7 @@ class LabelAnnotator(anywidget.AnyWidget):
                 input_axes = in_axes
             elif czyx.shape[0] != stacks[0][0].shape[0]:
                 raise ValueError(f"all stacks need the same channels: {stacks[0][0].shape[0]} vs {czyx.shape[0]}")
-            stacks.append((czyx, _parse_pixel_sizes(ps)))
+            stacks.append((czyx, _parse_pixel_sizes(ps, has_z="Z" in in_axes)))
         czyx = stacks[0][0]
         c = czyx.shape[0]
 
@@ -676,20 +704,28 @@ class LabelAnnotator(anywidget.AnyWidget):
         gamma = [_finite(g, "gamma") for g in per_channel(gamma, c, "gamma", default=1.0)]
         if any(g <= 0 for g in gamma):
             raise ValueError(f"gamma must be > 0, got {gamma}")
-        visible = [bool(v) for v in per_channel(managed.pop("channel_visible", None), c, "channel_visible", True)]
+        visible = managed.pop("channel_visible", None)
+        if isinstance(visible, (str, bytes)):
+            raise ValueError(f"channel_visible must be a bool or a list of bools, got {visible!r}")
+        visible = per_channel(visible, c, "channel_visible", True)
+        if not all(isinstance(v, (bool, np.bool_)) for v in visible):
+            raise ValueError(f"channel_visible must be bools, got {visible!r}")
+        visible = [bool(v) for v in visible]
         class_colors = managed.pop("class_colors", None)
         if class_colors is not None:
-            class_colors = [_plain_color_hex(v) for v in class_colors]
+            class_colors = _colour_list(class_colors, "class_colors")
             if len(class_colors) != len(classes):
                 raise ValueError(f"{len(class_colors)} class_colors for {len(classes)} classes")
         palette = managed.pop("instance_palette", None)
         if palette is not None:
-            palette = [_plain_color_hex(v) for v in palette]
+            palette = _colour_list(palette, "instance_palette")
             if not palette:
                 raise ValueError("instance_palette must not be empty")
         auto_increment = managed.pop("auto_increment", None)
         if auto_increment is not None and keep_label and auto_increment:
             raise ValueError("keep_label=True means auto_increment=False; pass one of them")
+        if auto_increment and mode == "semantic":
+            raise ValueError("auto_increment is for instance mode (semantic mode paints fixed class ids)")
         auto_increment = (not keep_label) if auto_increment is None else bool(auto_increment)
         stack = managed.pop("stack", None)
         if stack is not None and not 0 <= int(stack) < len(stacks):
@@ -767,19 +803,35 @@ class LabelAnnotator(anywidget.AnyWidget):
 
     # ------------------------------------------------------------------ sync
     def _slice_u8(self, z: int) -> np.ndarray:
-        """The 8-bit display slice: each channel scaled from ``vmin`` (0) to ``vmax`` (255), in data units."""
+        """The 8-bit display slice: each channel scaled from ``vmin`` (0) to ``vmax`` (255), in data units.
+
+        Computed in float64 (``vmin`` is subtracted before any rounding, so a
+        narrow window on data far from 0 keeps its 256 levels). The last
+        slice is cached per channel: a range change re-reads only the
+        channels whose ``vmin``/``vmax`` changed.
+        """
+        key = (id(self._image), int(z))
+        cache = getattr(self, "_u8_cache", None)
+        if cache is not None and cache[0] != key:
+            cache = None
         out = np.empty(self._image.shape[:1] + self._image.shape[2:], dtype=np.uint8)
+        ranges = []
         for i in range(out.shape[0]):
             lo, hi = float(self.vmin[i]), float(self.vmax[i])
-            s = np.asarray(self._image[i, z], dtype=np.float32)
+            ranges.append((lo, hi))
+            if cache is not None and cache[1][i] == (lo, hi):
+                out[i] = cache[2][i]
+                continue
+            s = np.asarray(self._image[i, z], dtype=np.float64)
             if hi > lo:
                 s = (s - lo) * (255.0 / (hi - lo))
             else:  # crossed sliders: a threshold
-                s = np.where(s > lo, np.float32(255), np.float32(0))
+                s = np.where(s > lo, 255.0, 0.0)
             # NaN survives the clip and would warn in the uint8 cast: show it as 0
             np.nan_to_num(s, copy=False, nan=0.0, posinf=255.0, neginf=0.0)
             np.clip(s, 0, 255, out=s)
             out[i] = s.astype(np.uint8)
+        self._u8_cache = (key, ranges, out)
         return out
 
     @traitlets.validate("vmin", "vmax", "gamma")
@@ -817,6 +869,20 @@ class LabelAnnotator(anywidget.AnyWidget):
             raise traitlets.TraitError(
                 f"{name} is fixed at construction (labels and ids depend on it); create a new LabelAnnotator"
             )
+        return v
+
+    @traitlets.validate("opacity")
+    def _valid_opacity(self, proposal):
+        v = proposal["value"]
+        if not 0.0 <= v <= 1.0:
+            raise traitlets.TraitError(f"opacity must be in [0, 1], got {v}")
+        return v
+
+    @traitlets.validate("tool")
+    def _valid_tool(self, proposal):
+        v = proposal["value"]
+        if v not in self._TOOLS:
+            raise traitlets.TraitError(f"tool must be one of {', '.join(self._TOOLS)}; got {v!r}")
         return v
 
     def _send_slice(self):
@@ -1373,6 +1439,18 @@ class LabelAnnotator(anywidget.AnyWidget):
 
         Warns (and returns ``[]``) when no slice is selected, e.g. nothing is
         annotated yet.
+
+        Both files carry tifffile ``axes`` metadata (``YX`` or ``CYX``) and,
+        when :attr:`pixel_sizes` gives Y and X in µm, the Y/X pixel size as
+        TIFF resolution tags (pixels per cm), which ``image_io.load_image``
+        reads back. Images are written ``photometric="minisblack"``: a 3- or
+        4-channel slice stays channels, never an RGB(A) picture. Plain
+        ``tifffile.imread`` (what Cellpose uses) returns the same arrays.
+
+        Changed (D18/R8-10, 2026-11): the files had no axes or resolution
+        metadata (``load_image`` raised on their 'QYX' axes, and pixel
+        sizes were lost), and a 3- or 4-channel slice was left to tifffile's default,
+        planar RGB(A) with a DeprecationWarning.
         """
         import tifffile
 

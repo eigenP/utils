@@ -948,6 +948,47 @@ def test_channel_rows_follow_python_changes_in_data_units(page, serve):
     assert _get(page, "vmax")[0] == 1999
 
 
+def test_dragging_a_range_slider_coalesces_model_updates(page, serve):
+    """A slider drag sends a few vmin/vmax updates, not one per ``input`` event (R4-07, review fix).
+
+    Strategy: a 12-bit image; fire 50 ``input`` events on the first max
+    slider in one task (a fast drag; each update makes Python re-quantise
+    and re-send the slice), then the closing ``change``; then a second drag
+    on the min slider that ends without ``change``.
+    Expected outcome: (+) the drag sends at most one update while it runs
+    (it sent 50), the readout follows every step, and ``change`` sends the
+    final value; (−) without ``change`` the final value still arrives after
+    the throttle interval, and the min slider stays one step below max.
+    """
+    img = np.zeros((1, H, W), np.uint16)
+    img[0] = np.arange(W) * 100
+    w = LabelAnnotator(img, axes="CYX")
+    _open(page, serve(w))
+    res = page.evaluate(
+        """() => {
+            const hi = document.querySelector('input.lbl-vmax');
+            const n0 = window.sent.length;
+            for (let v = 3000; v > 2950; v--) { hi.value = String(v); hi.dispatchEvent(new Event('input')); }
+            const during = window.sent.length - n0;
+            const text = hi.parentElement.querySelector('.lbl-val').textContent;
+            hi.dispatchEvent(new Event('change'));
+            return [during, text, window.sent.length - n0, window.mockModel.get('vmax')[0]];
+        }"""
+    )
+    assert res[0] <= 1 and res[1] == "2951"
+    assert res[2] <= 2 and res[3] == 2951
+    res = page.evaluate(
+        """() => {
+            const lo = document.querySelector('input.lbl-vmin');
+            const n0 = window.sent.length;
+            for (let v = 10; v < 3000; v += 10) { lo.value = String(v); lo.dispatchEvent(new Event('input')); }
+            return window.sent.length - n0;
+        }"""
+    )
+    assert res <= 1
+    page.wait_for_function("window.mockModel.get('vmin')[0] === 2950")
+
+
 def test_controls_have_accessible_names(page, serve):
     """Every input and select of the widget has an accessible name (R3-13).
 

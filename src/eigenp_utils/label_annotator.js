@@ -208,6 +208,30 @@ function render({ model, el: root }) {
     const a = Math.abs(v);
     return a !== 0 && (a >= 1e5 || a < 1e-2) ? v.toExponential(2) : String(Math.round(v * 100) / 100);
   };
+  // vmin / vmax edits not yet sent: {name: {channel: value}}; sent at most every RANGE_MS
+  const RANGE_MS = 100;
+  const pendingRange = {};
+  let rangeTimer = null, rangeLast = -Infinity;
+  const curRange = (name, i) => pendingRange[name]?.[i] ?? (model.get(name) || [])[i];
+  function flushRange() {
+    if (rangeTimer !== null) { clearTimeout(rangeTimer); rangeTimer = null; }
+    const names = Object.keys(pendingRange);
+    if (!names.length) return;
+    for (const name of names) {
+      const arr = [...(model.get(name) || [])];
+      for (const [i, v] of Object.entries(pendingRange[name])) arr[+i] = v;
+      delete pendingRange[name];
+      model.set(name, arr);
+    }
+    rangeLast = performance.now();
+    model.save_changes();
+  }
+  function queueRange(name, i, v) {
+    (pendingRange[name] = pendingRange[name] || {})[i] = v;
+    const wait = RANGE_MS - (performance.now() - rangeLast);
+    if (wait <= 0) flushRange();
+    else if (rangeTimer === null) rangeTimer = setTimeout(flushRange, wait);
+  }
   function buildChannels() {
     chanPanel.innerHTML = "";
     rows.length = 0;
@@ -222,12 +246,25 @@ function render({ model, el: root }) {
       const ga = el("input", { type: "range", class: "lbl-gamma", min: "10", max: "300", step: "1", title: "gamma", "aria-label": `gamma of channel ${name}` });
       const step = () => ((model.get("data_range") || [])[i] || [0, 255, 1])[2] || 1;
       // the two limits never cross (min stays one step below max)
-      lo.addEventListener("input", () => setListItem("vmin", i, Math.min(parseFloat(lo.value), ((model.get("vmax") || [])[i] ?? Infinity) - step())));
-      hi.addEventListener("input", () => setListItem("vmax", i, Math.max(parseFloat(hi.value), ((model.get("vmin") || [])[i] ?? -Infinity) + step())));
+      // a drag fires many input events and each update makes Python re-quantise
+      // and re-send the slice: the readout follows every step, the model gets a
+      // throttled stream and the final value on change
+      lo.addEventListener("input", () => {
+        const v = Math.min(parseFloat(lo.value), (curRange("vmax", i) ?? Infinity) - step());
+        loTxt.textContent = fmtVal(v);
+        queueRange("vmin", i, v);
+      });
+      hi.addEventListener("input", () => {
+        const v = Math.max(parseFloat(hi.value), (curRange("vmin", i) ?? -Infinity) + step());
+        hiTxt.textContent = fmtVal(v);
+        queueRange("vmax", i, v);
+      });
+      lo.addEventListener("change", flushRange);
+      hi.addEventListener("change", flushRange);
       ga.addEventListener("input", () => setListItem("gamma", i, parseInt(ga.value) / 100));
       // double-click restores the automatic (default display range) value
-      lo.addEventListener("dblclick", () => { const r = (model.get("data_range") || [])[i]; if (r) setListItem("vmin", i, r[3]); });
-      hi.addEventListener("dblclick", () => { const r = (model.get("data_range") || [])[i]; if (r) setListItem("vmax", i, r[4]); });
+      lo.addEventListener("dblclick", () => { const r = (model.get("data_range") || [])[i]; if (r) { queueRange("vmin", i, r[3]); flushRange(); } });
+      hi.addEventListener("dblclick", () => { const r = (model.get("data_range") || [])[i]; if (r) { queueRange("vmax", i, r[4]); flushRange(); } });
       const loTxt = el("span", { class: "lbl-val" }), hiTxt = el("span", { class: "lbl-val" }), gaTxt = el("span", { class: "lbl-val" });
       const slider = (txt, input, val) => el("label", { class: "lbl-sl" }, [el("span", { text: txt }), input, val]);
       chanPanel.appendChild(el("div", { class: "lbl-chan" }, [
@@ -240,14 +277,15 @@ function render({ model, el: root }) {
   }
   function refreshChannels() {
     const vis = model.get("channel_visible") || [], cols = model.get("channel_colors") || [];
-    const vmin = model.get("vmin") || [], vmax = model.get("vmax") || [], gam = model.get("gamma") || [];
+    const gam = model.get("gamma") || [];
     const dr = model.get("data_range") || [];
     rows.forEach((r, i) => {
       r.vis.checked = vis[i] !== false;
       r.col.value = cols[i] || "#ffffff";
       const [lo, hi, st] = dr[i] || [0, 255, 1];
       for (const s of [r.lo, r.hi]) { s.min = String(lo); s.max = String(hi); s.step = String(st || "any"); }
-      const a = vmin[i] ?? lo, b = vmax[i] ?? hi, g = gam[i] ?? 1;
+      // a value still being dragged (not yet sent) wins over the model's
+      const a = curRange("vmin", i) ?? lo, b = curRange("vmax", i) ?? hi, g = gam[i] ?? 1;
       r.lo.value = String(a); r.hi.value = String(b); r.ga.value = String(Math.round(g * 100));
       r.lo.setAttribute("aria-valuetext", fmtVal(a)); r.hi.setAttribute("aria-valuetext", fmtVal(b));
       r.loTxt.textContent = fmtVal(a); r.hiTxt.textContent = fmtVal(b); r.gaTxt.textContent = g.toFixed(2);
@@ -970,7 +1008,13 @@ function render({ model, el: root }) {
     // later: drop the slice snapshots now, so a ctrl+z before Python's answer
     // cannot send the previous stack's slice into the new one (track markers
     // stay; Python refuses a serial that is not its top)
-    ["change:stack", () => { state.undo = state.undo.filter((u) => u.track !== undefined); }],
+    ["change:stack", () => {
+      state.undo = state.undo.filter((u) => u.track !== undefined);
+      // an unsent drag of the old stack's range must not land on the new stack
+      for (const k of Object.keys(pendingRange)) delete pendingRange[k];
+      if (rangeTimer !== null) { clearTimeout(rangeTimer); rangeTimer = null; }
+      refreshChannels();
+    }],
     ["change:labels_from_js", onForeignLabels],
     ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:stack change:stack_names change:shape_zyx change:class_names change:status change:active_label_extent change:counts_text", () => { syncControls(); drawCursor(); }],
     ["change:channel_names", buildChannels],
@@ -998,6 +1042,7 @@ function render({ model, el: root }) {
 
   return () => {
     delete root.__lblDebug;
+    flushRange(); // a drag cut short still reaches Python
     for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.off?.(e, fn);
     // a discarded view must not stay reachable (image, labels, undo snapshots)
     window.removeEventListener("resize", refit);

@@ -1697,3 +1697,104 @@ def test_save_writes_axes_and_pixel_sizes_that_load_image_reads_back(tmp_path):
     d2 = load_image(pi2)
     assert d2.sizes["Y"] == 6 and get_stczyx_pixel_sizes(d2)["X"] is None
     np.testing.assert_array_equal(np.asarray(load_image(pm2).squeeze().values), lab[1])
+
+
+def test_2d_image_takes_a_yx_pixel_size_pair():
+    """A 2D image accepts ``pixel_sizes=(Y, X)``; a 3D one still needs Z, Y, X (D18, review fix).
+
+    Strategy: give a (Y, X) pair to a CYX and a YX widget, a ZYX triple to
+    the CYX widget, and the same pair to a CZYX widget.
+    Expected outcome: (+) the 2D widgets report Y 0.5, X 0.25 µm and Z None
+    (the pair used to raise 'expected 3 (Z, Y, X)'); a triple still works on
+    2D; (−) the pair on a 3D image still raises ``ValueError``.
+    """
+    img = np.zeros((2, 6, 7), np.float32)
+    want = {"Z": None, "Y": 0.5, "X": 0.25, "unit": "µm"}
+    assert LabelAnnotator(img, axes="CYX", pixel_sizes=(0.5, 0.25)).pixel_sizes == want
+    assert LabelAnnotator(img[0], axes="YX", pixel_sizes=[0.5, 0.25]).pixel_sizes == want
+    ps = LabelAnnotator(img, axes="CYX", pixel_sizes=(2.0, 0.5, 0.25)).pixel_sizes
+    assert (ps["Y"], ps["X"]) == (0.5, 0.25)
+    with pytest.raises(ValueError, match="expected 3"):
+        LabelAnnotator(np.zeros((2, 3, 6, 7)), axes="CZYX", pixel_sizes=(0.5, 0.25))
+
+
+def test_malformed_trait_kwargs_are_rejected():
+    """Constructor trait kwargs reject malformed values instead of coercing them (D18/R4-08, review fix).
+
+    Strategy: pass an out-of-range ``opacity``, an unknown ``tool``, a string
+    for ``channel_visible`` / ``instance_palette`` / ``class_colors``, a bool
+    for ``vmin`` / ``vmax`` / ``gamma``, and ``auto_increment=True`` in
+    semantic mode; then valid values of the same kwargs.
+    Expected outcome: (−) each malformed value raises ``ValueError`` or
+    ``TraitError`` (before, ``opacity=5`` and ``tool='nope'`` were kept,
+    ``channel_visible='no'`` became all True, ``instance_palette='red'``
+    failed on ``'e'``, ``vmin=True`` became 1.0 and ``auto_increment`` was
+    silently dropped); (+) valid values are kept, and setting ``opacity``
+    / ``tool`` later is validated the same way.
+    """
+    import traitlets
+
+    v = np.zeros((2, 6, 7), np.float32)
+    bad = [dict(opacity=5), dict(opacity=-0.1), dict(tool="nope"), dict(channel_visible="no"),
+           dict(instance_palette="red"), dict(mode="semantic", classes=["red"], class_colors="red"),
+           dict(vmin=True), dict(vmax=[np.bool_(True)]), dict(gamma=True),
+           dict(mode="semantic", auto_increment=True)]
+    for kw in bad:
+        with pytest.raises((ValueError, traitlets.TraitError)):
+            LabelAnnotator(v, axes="CYX", **kw)
+    w = LabelAnnotator(v, axes="CYX", opacity=1.0, tool="fill", channel_visible=(True, False),
+                       instance_palette=("red",), vmin=0, vmax=[2.5, 3])
+    assert (w.opacity, w.tool, w.channel_visible, w.instance_palette) == (1.0, "fill", [True, False], ["#ff0000"])
+    assert (w.vmin, w.vmax) == ([0.0, 0.0], [2.5, 3.0])
+    assert LabelAnnotator(v, axes="CYX", mode="semantic", auto_increment=False).auto_increment is False
+    for name, val in (("opacity", 2.0), ("tool", "pen")):
+        with pytest.raises(traitlets.TraitError):
+            setattr(w, name, val)
+
+
+def test_narrow_window_on_large_offset_data_keeps_256_levels():
+    """A narrow data-unit window far from zero is quantised without float32 rounding (R4-07, review fix).
+
+    Strategy: an int64 ramp 20_000_000 + 0..255 shown with vmin/vmax at its
+    ends (float32 spacing at 2e7 is 2); a small-offset ramp as control.
+    Expected outcome: (+) both 8-bit slices equal ``0..255`` exactly, 256
+    levels (the offset one had 129 levels).
+    """
+    ramp = np.arange(256, dtype=np.int64).reshape(16, 16)
+    for off in (20_000_000, 0):
+        w = LabelAnnotator(ramp + off, axes="YX", vmin=off, vmax=off + 255)
+        np.testing.assert_array_equal(w._slice_u8(0)[0], ramp.astype(np.uint8))
+
+
+def test_range_change_requantises_only_the_changed_channel():
+    """A vmin/vmax change re-reads only the channels whose range changed (R4-07, review fix).
+
+    Strategy: a 3-channel image whose array records which channels are read;
+    change ``vmax`` of channel 1 only, then of every channel, then move z.
+    Expected outcome: (+) the first change reads channel 1 only (all three
+    were re-quantised before) and the slice equals a fresh full
+    quantisation; (−) a change of every channel, or a new z, reads them all.
+    """
+    class Spy(np.ndarray):
+        reads: list = []
+
+        def __getitem__(self, key):
+            if isinstance(key, tuple) and len(key) == 2:
+                Spy.reads.append(int(key[0]))
+            return np.asarray(super().__getitem__(key))
+
+    img = np.random.default_rng(0).integers(0, 4000, (3, 4, 8, 9)).astype(np.uint16)
+    w = LabelAnnotator(img, axes="CZYX")
+    w._image = w._image.view(Spy)
+    w._slice_u8(w.z)  # fill the cache for this image
+    Spy.reads.clear()
+    w.vmax = [w.vmax[0], 1000.0, w.vmax[2]]
+    assert Spy.reads == [1]
+    fresh = LabelAnnotator(img, axes="CZYX", vmax=w.vmax)._slice_u8(w.z)
+    np.testing.assert_array_equal(w._slice_u8(w.z), fresh)
+    Spy.reads.clear()
+    w.vmax = [500.0, 600.0, 700.0]
+    assert sorted(Spy.reads) == [0, 1, 2]
+    Spy.reads.clear()
+    w.z = (w.z + 1) % 4
+    assert set(Spy.reads) == {0, 1, 2}
