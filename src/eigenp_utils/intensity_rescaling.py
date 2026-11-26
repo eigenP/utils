@@ -726,6 +726,23 @@ def _resize_spatial(images, target_spatial_shape):
         )
     return out
 
+def _reweight_score(S, last_S, D, last_D):
+    """Reweighting convergence score: max relative change of flatfield and darkfield.
+
+    As MATLAB BaSiC: sum|S - last_S| / sum|last_S| and sum|D - last_D| /
+    max(sum|last_D|, 1e-6), the latter 0 when the darkfield moved by < 1e-7
+    in total (always, without darkfield estimation). BaSiCPy computes the
+    darkfield term from the flatfield change instead (R6-17).
+    """
+    mad_flatfield = np.sum(np.abs(S - last_S)) / max(float(np.sum(np.abs(last_S))), 1e-9)
+    temp_diff = float(np.sum(np.abs(D - last_D)))
+    if temp_diff < 1e-7:
+        mad_darkfield = 0.0
+    else:
+        mad_darkfield = temp_diff / max(float(np.sum(np.abs(last_D))), 1e-6)
+    return float(max(mad_flatfield, mad_darkfield))
+
+
 def fit_basic_shading(
     images,
     is_3d=False,
@@ -762,8 +779,13 @@ def fit_basic_shading(
         reweighting_tol (float): Tolerance for reweighting loop convergence.
         smoothness_flatfield (float): Smoothness regularization weight. If None, it is estimated.
         smoothness_darkfield (float): Smoothness regularization weight for darkfield. If None, it is estimated.
-        sparse_cost_darkfield (float): Weight of the darkfield sparse term. If None, it is estimated.
-        get_darkfield (bool): Whether to estimate darkfield.
+        sparse_cost_darkfield (float): 'ladmap' only: weight of the darkfield sparse term.
+            If None, it is estimated. The 'approximate' mode (as MATLAB BaSiC)
+            shrinks the darkfield with smoothness_darkfield only, so a value
+            given there is ignored, with a UserWarning.
+        get_darkfield (bool): Whether to estimate darkfield. Use
+            fitting_mode='approximate' for it: with 'ladmap' the estimate is
+            unreliable (a UserWarning says so; see below).
         fitting_mode (str): Fitting mode, 'approximate' or 'ladmap'.
         epsilon (float): Small value for weight calculation.
         rho (float): ADMM penalty parameter update factor.
@@ -772,13 +794,40 @@ def fit_basic_shading(
 
     Returns:
         dict: Containing 'flatfield', 'darkfield', and 'baseline'.
+
+    Raises:
+        ValueError: for NaN or inf in `images` (the ADMM has no mask support,
+            and one NaN pixel made the SVD fail with LinAlgError). Fill or crop
+            them first.
+
+    Darkfield with 'ladmap': on synthetic images (20 frames, baselines
+    0.5-1.5) with known darkfields of 10, 40 and 100, the 'ladmap' darkfield
+    came out at 0.04, 117 and 268 (the last two above the dimmest pixel,
+    which is impossible), while 'approximate' gives 4.5, 36 and 82. The ladmap
+    estimate is returned as before, with a UserWarning, until it is fixed
+    and validated.
+
+    Changed (R6-17, 2026-11): reweighting convergence uses the darkfield
+    change (as MATLAB BaSiC) instead of repeating the flatfield change (a
+    BaSiCPy quirk); this only affects get_darkfield=True. NaN/inf input
+    raises ValueError (R6-15).
     """
     if fitting_mode not in ('approximate', 'ladmap'):
         raise ValueError(f"fitting_mode '{fitting_mode}' is not valid. Use 'approximate' or 'ladmap'.")
     if max_reweight_iterations < 1:
         raise ValueError("max_reweight_iterations must be >= 1.")
+    if fitting_mode == 'approximate' and sparse_cost_darkfield is not None:
+        warnings.warn(
+            "sparse_cost_darkfield is ignored with fitting_mode='approximate' (which, as "
+            "MATLAB BaSiC, regularises the darkfield with smoothness_darkfield only); "
+            "it applies to fitting_mode='ladmap'.", UserWarning, stacklevel=2)
 
     images, original_shape = _prepare_data_for_basic(images, is_3d)
+    n_bad = int(images.size - np.count_nonzero(np.isfinite(images)))
+    if n_bad:
+        raise ValueError(
+            f"fit_basic_shading needs finite input: the images hold {n_bad} non-finite "
+            "(NaN or inf) values. Fill or crop them first (the fit has no mask support).")
 
     s_s = images.shape[0]
     original_spatial_shape = images.shape[1:]
@@ -797,6 +846,11 @@ def fit_basic_shading(
             stacklevel=2,
         )
         get_darkfield = False
+    if get_darkfield and fitting_mode == 'ladmap':
+        warnings.warn(
+            "get_darkfield=True with fitting_mode='ladmap' gives an unreliable darkfield "
+            "(anywhere from ~0 to ~3x the true offset on synthetic data); use "
+            "fitting_mode='approximate' to estimate the darkfield.", UserWarning, stacklevel=2)
 
     target_spatial_shape = tuple([min(d, working_size) if working_size is not None else d for d in original_spatial_shape])
 
@@ -1073,19 +1127,7 @@ def fit_basic_shading(
             W_D = Ws_D / np.mean(Ws_D)
 
         if last_S is not None:
-            sum_last_S = np.sum(np.abs(last_S))
-            if sum_last_S < 1e-9:
-                sum_last_S = 1e-9
-            mad_flatfield = np.sum(np.abs(S - last_S)) / sum_last_S
-
-            temp_diff = np.sum(np.abs(S - last_S))
-            if temp_diff < 1e-7:
-                mad_darkfield = 0
-            else:
-                mad_darkfield = temp_diff / max(np.sum(np.abs(last_S)), 1e-6)
-
-            reweight_score = max(mad_flatfield, mad_darkfield)
-            if reweight_score <= reweighting_tol:
+            if _reweight_score(S, last_S, D_R, last_D) <= reweighting_tol:
                 break
         last_S = S
         last_D = D_R

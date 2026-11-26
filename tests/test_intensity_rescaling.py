@@ -105,7 +105,11 @@ def test_basic_fit_recovers_shading(fitting_mode, get_darkfield):
     expected = 200.0 * flat_true[None] * gains[:, None, None] + dark_offset
     images = rng.poisson(expected).astype(float)
 
-    res = fit_basic_shading(images, fitting_mode=fitting_mode, get_darkfield=get_darkfield)
+    if fitting_mode == "ladmap" and get_darkfield:
+        with pytest.warns(UserWarning, match="ladmap.*approximate"):
+            res = fit_basic_shading(images, fitting_mode=fitting_mode, get_darkfield=get_darkfield)
+    else:
+        res = fit_basic_shading(images, fitting_mode=fitting_mode, get_darkfield=get_darkfield)
 
     assert res["flatfield"].shape == sizes
     assert res["darkfield"].shape == sizes
@@ -1079,6 +1083,55 @@ def test_z_axis_orientation_check_is_quiet_nan_safe_and_renamed(capsys):
     with pytest.warns(UserWarning, match="NaN"):
         out, flag = _z_orientation(half_nan, return_image=True)
     assert flag is False and out is half_nan
+
+
+def test_basic_rejects_non_finite_input():
+    """R6-15: one NaN (or inf) pixel raises a clear ValueError instead of LinAlgError from the SVD.
+
+    Negative control: the same images without the NaN fit normally.
+    """
+    rng = np.random.default_rng(2)
+    images = rng.poisson(100, (4, 32, 32)).astype(float)
+    fit_basic_shading(images)
+    for bad in (np.nan, np.inf):
+        broken = images.copy()
+        broken[1, 5, 5] = bad
+        with pytest.raises(ValueError, match="1 non-finite"):
+            fit_basic_shading(broken)
+
+
+def test_basic_warns_when_sparse_cost_darkfield_is_ignored():
+    """R6-17: sparse_cost_darkfield only acts in 'ladmap' mode; passing it in 'approximate' mode warns.
+
+    Negative control: the default (None) and 'ladmap' mode do not warn about it.
+    """
+    rng = np.random.default_rng(3)
+    images = rng.poisson(100, (4, 32, 32)).astype(float)
+    with pytest.warns(UserWarning, match="sparse_cost_darkfield"):
+        fit_basic_shading(images, sparse_cost_darkfield=0.5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fit_basic_shading(images)
+        fit_basic_shading(images, fitting_mode="ladmap", sparse_cost_darkfield=0.5)
+
+
+def test_basic_reweight_score_tracks_the_darkfield():
+    """R6-17: the reweighting convergence score includes the darkfield change (as MATLAB BaSiC).
+
+    Before, the 'darkfield' term recomputed the flatfield change (BaSiCPy
+    quirk) and last_D was never read, so a changing darkfield could not
+    keep the reweighting going. Expected outcome: with an unchanged
+    flatfield, a darkfield that changed by 10% scores 0.1; an unchanged
+    darkfield (or none) scores 0.
+    """
+    from eigenp_utils.intensity_rescaling import _reweight_score
+
+    S = np.ones((8, 8))
+    D = np.full((8, 8), 10.0)
+    assert _reweight_score(S, S.copy(), 1.1 * D, D) == pytest.approx(0.1)
+    assert _reweight_score(S, S.copy(), D, D.copy()) == 0.0
+    assert _reweight_score(S, S.copy(), np.zeros((8, 8)), np.zeros((8, 8))) == 0.0
+    assert _reweight_score(1.2 * S, S, D, D.copy()) == pytest.approx(0.2)
 
 
 def test_basic_rejects_zero_reweight_iterations():
