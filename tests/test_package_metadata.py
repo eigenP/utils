@@ -144,6 +144,42 @@ def test_submodules_are_attributes_after_a_bare_import(monkeypatch):
         eigenp_utils.__wrapped__
 
 
+def test_private_submodules_are_not_lazy_attributes(monkeypatch):
+    """Private helper modules (``_median_numba``, ``_clahe_numba``, ...) are never
+    imported by attribute access on the package.
+
+    Regression (Pyodide CI): ``monkeypatch.delattr(eigenp_utils, "_median_numba",
+    raising=False)`` probes the attribute, which went through ``__getattr__`` and
+    imported ``_median_numba``; without numba that raised ModuleNotFoundError
+    instead of AttributeError, so ``hasattr``/``delattr(raising=False)`` blew up.
+    The old eager ``__init__`` never bound private modules either.
+
+    Strategy: forget ``_median_numba`` and block numba (any import raises), as in
+    Pyodide where numba does not exist.
+    (+) ``hasattr(eigenp_utils, "_median_numba")`` is False and imports nothing;
+        attribute access raises AttributeError.
+    (-) a public submodule (``median_filter``) is still a lazy attribute.
+    """
+    import builtins
+
+    monkeypatch.delitem(sys.modules, "eigenp_utils._median_numba", raising=False)
+    monkeypatch.delattr(eigenp_utils, "_median_numba", raising=False)
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "numba" or name.startswith("numba."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    assert not hasattr(eigenp_utils, "_median_numba")
+    assert "eigenp_utils._median_numba" not in sys.modules
+    with pytest.raises(AttributeError):
+        eigenp_utils._clahe_numba_does_not_exist
+    monkeypatch.delattr(eigenp_utils, "median_filter", raising=False)
+    assert eigenp_utils.median_filter is sys.modules["eigenp_utils.median_filter"]
+
+
 def test_real_import_errors_propagate_unchanged(monkeypatch):
     """D06 / R8-12: a genuine import bug is not hidden or turned into an install hint.
 

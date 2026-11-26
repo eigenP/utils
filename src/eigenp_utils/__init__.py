@@ -146,9 +146,13 @@ def _is_submodule(name):
     """True when ``name`` is a submodule of this package (``eigenp_utils.image_io``).
 
     Listed from the package directory (no import, no import-hook lookup).
+    Private modules (``_median_numba``, ``_clahe_numba``, ...) are excluded: the
+    old eager imports never bound them, and importing one from ``__getattr__``
+    would turn ``hasattr`` into an ImportError when its optional dependency is
+    missing (numba in Pyodide).
     """
     global _SUBMODULES
-    if name.startswith("__"):
+    if name.startswith("_"):
         return False
     if _SUBMODULES is None:
         import pkgutil
