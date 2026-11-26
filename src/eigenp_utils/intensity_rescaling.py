@@ -1,5 +1,6 @@
 import numpy as np
 import functools
+import logging
 import warnings
 from skimage.exposure import rescale_intensity
 from scipy.optimize import curve_fit
@@ -7,7 +8,9 @@ import scipy.ndimage as ndimage
 from scipy.fft import dctn, idctn
 import skimage.transform as transform
 
-from ._conventions import robust_range
+from ._conventions import robust_range, warn_deprecated
+
+logger = logging.getLogger(__name__)
 
 
 def _float_to_int(arr, dtype):
@@ -92,40 +95,133 @@ def ensure_float_and_restore_dtype(func):
 
     return wrapper
 
-@ensure_float_and_restore_dtype
-def contrast_stretching(image, p_min=0.0, p_max=99.9):
+# Default (lower, upper) percentiles of the input range for processing (D02 (i),
+# D27): contrast_stretching, normalize_image and clahe_u8 share it. Processing
+# for segmentation tolerates clipping the top 0.1%; the viewers display up to
+# p99.99 instead, so sparse bright signal is not saturated on screen.
+PROCESSING_PERCENTILES = (0.1, 99.9)
+
+
+def _resolve_percentiles(func, percentiles, lo_name, lo, hi_name, hi, stacklevel):
+    """(lo, hi) from ``percentiles`` or from the deprecated per-bound names (R6-21).
+
+    A scalar in the ``percentiles`` slot is the legacy positional lower bound.
+    ``stacklevel`` is passed to warn_deprecated (frames up to the user's call).
     """
-    Stretch the intensity range of the image based on percentiles, to [0, 1]
-    (floats) or [0, dtype max] (integers).
+    if percentiles is not None and np.ndim(percentiles) == 0:
+        if lo is not None:
+            raise TypeError(f"{func}() got multiple values for {lo_name!r}")
+        lo, percentiles = percentiles, None
+    if lo is None and hi is None:
+        pct = PROCESSING_PERCENTILES if percentiles is None else tuple(percentiles)
+        if len(pct) != 2:
+            raise ValueError(f"percentiles must be a (lower, upper) pair, got {percentiles!r}")
+        return pct
+    if percentiles is not None:
+        raise TypeError(f"{func}() got both 'percentiles' and its deprecated aliases "
+                        f"{lo_name!r}/{hi_name!r}")
+    warn_deprecated(f"{func}({lo_name}, {hi_name})", f"{func}(image, percentiles=(lo, hi))",
+                    stacklevel=stacklevel)
+    d_lo, d_hi = PROCESSING_PERCENTILES
+    return (d_lo if lo is None else lo, d_hi if hi is None else hi)
+
+
+@ensure_float_and_restore_dtype
+def contrast_stretching(image, percentiles=None, p_max=None, *, p_min=None):
+    """
+    Stretch the intensity range between two percentiles to [0, 1].
+
+    Parameters
+    ----------
+    image : ndarray
+    percentiles : (float, float), optional
+        Lower and upper percentiles of the input range, default
+        ``PROCESSING_PERCENTILES`` = (0.1, 99.9).
+    p_min, p_max : float, deprecated
+        Old names of the two bounds (also accepted positionally,
+        ``contrast_stretching(image, p_min, p_max)``); FutureWarning, removed
+        in eigenp_utils 0.1.0.
+
+    Returns
+    -------
+    ndarray of the input dtype: floats in [0, 1]; 8/16-bit integers in
+    [0, dtype max]; 32/64-bit integers in [0, data max] (the dtype decorator
+    scales them by the data's own maximum magnitude, see
+    `ensure_float_and_restore_dtype`). Use `normalize_image` for
+    [0, dtype max] with wide integers and for a choice of output dtype.
 
     The percentiles are exact, over the finite values (NaN and inf ignored).
     When they are equal although the image is not constant (signal on fewer than
-    (100 - p_max)% of the pixels), the range falls back to the data maximum
-    (and minimum) with a UserWarning. A constant image is returned unchanged.
+    (100 - upper)% of the pixels), the range falls back to the data maximum
+    (and minimum) with a UserWarning. A constant image gives 0 (NaN stays NaN
+    and +inf gives 1 in float output, as for a non-constant image).
 
     Changed (D02, 2026-11): the degenerate case used to return the input
     unchanged (raw units, not mapped to [0, 1]).
+    Changed (D27, 2026-11): the default lower percentile is 0.1 (was 0.0,
+    so one dead pixel set the floor); a constant image gives 0 (it was
+    returned unchanged, while normalize_image gave 0); the bounds are passed
+    as ``percentiles=(lo, hi)`` (R6-21).
     """
-    v_min, v_max = robust_range(image, p_min, p_max, n=max(np.size(image), 1), stacklevel=3)
+    lo_pct, hi_pct = _resolve_percentiles("contrast_stretching", percentiles,
+                                          "p_min", p_min, "p_max", p_max, stacklevel=5)
+    v_min, v_max = robust_range(image, lo_pct, hi_pct, n=max(np.size(image), 1), stacklevel=3)
     if v_min == v_max:
-        return image
-    return rescale_intensity(image, in_range=(v_min, v_max), out_range=(0.0, 1.0))
+        image = np.asarray(image)
+        # +inf maps to 1 (and -inf to 0), as in the non-degenerate path
+        return np.where(np.isnan(image), image,
+                        np.where(image > v_max, 1, 0)).astype(image.dtype)
+    out = rescale_intensity(image, in_range=(v_min, v_max), out_range=(0.0, 1.0))
+    # float32 rounding of the bounds can leave the top at 0.9999999: pin both ends
+    out[image >= v_max] = 1.0
+    out[image <= v_min] = 0.0
+    return out
 
-def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=None):
+
+def normalize_image(image, percentiles=None, upper_percentile=None, dtype=None, *,
+                    output_dtype=None, lower_percentile=None):
     """
-    Normalize image intensities to lie between 0 and 1 (for float) or 0 and MAX (for int).
+    Normalize intensities between two percentiles to [0, 1] (float) or [0, dtype max] (int).
+
+    Parameters
+    ----------
+    image : ndarray
+    percentiles : (float, float), optional
+        Lower and upper percentiles of the input range, default
+        ``PROCESSING_PERCENTILES`` = (0.1, 99.9).
+    output_dtype : dtype, optional
+        Output dtype, default the input dtype. Integer outputs span
+        [0, dtype max] for every integer width (int64 included).
+    lower_percentile, upper_percentile, dtype : deprecated
+        Old names (also accepted positionally,
+        ``normalize_image(image, lower, upper, dtype)``); FutureWarning,
+        removed in eigenp_utils 0.1.0.
 
     NaN pixels are ignored when computing the percentiles; they stay NaN in float
     outputs and become 0 in integer outputs (inf is ignored too). The
     percentiles are exact. When they are equal although the image is not constant (signal on fewer
-    than (100 - upper_percentile)% of the pixels), the range falls back to the
+    than (100 - upper)% of the pixels), the range falls back to the
     data maximum (and minimum) with a UserWarning. A constant image gives 0.
 
+    Unlike `contrast_stretching` (same mapping), the computation is in float32
+    for float32 input and float64 otherwise, without the dtype decorator.
+
     Changed (D02, 2026-11): the degenerate case used to give an all-zero image.
+    Changed (D27, 2026-11): the default lower percentile is 0.1 (was 0.5),
+    shared with contrast_stretching and clahe_u8; the bounds are passed as
+    ``percentiles=(lo, hi)`` and the dtype as ``output_dtype`` (R6-21).
     """
+    lo_pct, hi_pct = _resolve_percentiles("normalize_image", percentiles, "lower_percentile",
+                                          lower_percentile, "upper_percentile",
+                                          upper_percentile, stacklevel=4)
+    if dtype is not None:
+        if output_dtype is not None:
+            raise TypeError("normalize_image() got both 'output_dtype' and its deprecated alias 'dtype'")
+        warn_deprecated("normalize_image(dtype=...)", "output_dtype=...")
+        output_dtype = dtype
+
     image = np.asarray(image)
-    lower_bound, upper_bound = robust_range(image, lower_percentile, upper_percentile,
-                                            n=max(image.size, 1))
+    lower_bound, upper_bound = robust_range(image, lo_pct, hi_pct, n=max(image.size, 1))
 
     work = image if image.dtype == np.float32 else image.astype(np.float64)
     denom = upper_bound - lower_bound
@@ -134,12 +230,12 @@ def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=No
 
     normalized_image = (np.clip(work, lower_bound, upper_bound) - lower_bound) / denom
 
-    if dtype is None:
-        dtype = image.dtype
+    if output_dtype is None:
+        output_dtype = image.dtype
 
-    if np.issubdtype(dtype, np.integer):
-        return _float_to_int(normalized_image.astype(np.float64) * np.iinfo(dtype).max, dtype)
-    return normalized_image.astype(dtype)
+    if np.issubdtype(output_dtype, np.integer):
+        return _float_to_int(normalized_image.astype(np.float64) * np.iinfo(output_dtype).max, output_dtype)
+    return normalized_image.astype(output_dtype)
 
 def _fit_linear(x_data, y_data):
     """Exact OLS for linear decay (additive noise)."""
@@ -171,118 +267,240 @@ FIT_MODELS = {
     'exponential': _fit_exponential
 }
 
-# Removed @ensure_float_and_restore_dtype to avoid double-decoration
-def adjust_gamma_per_slice(*args, **kwargs):
-    """Deprecated. Use correct_z_intensity_decay with method='gamma' instead."""
-    warnings.warn(
-        "adjust_gamma_per_slice is deprecated. Use correct_z_intensity_decay with method='gamma' instead.",
-        DeprecationWarning, stacklevel=2
-    )
+def _legacy_z_decay_kwargs(kwargs):
+    """Map the deprecated wrappers' keywords onto correct_z_intensity_decay's.
+
+    gamma_fit_func -> fit_model. FLIP_Z_AXIS was dropped silently; it is still
+    ignored (the wrappers never flipped anything), but True now warns (R6-14).
+    """
     if 'gamma_fit_func' in kwargs:
         kwargs['fit_model'] = kwargs.pop('gamma_fit_func')
-    if 'FLIP_Z_AXIS' in kwargs:
-        kwargs.pop('FLIP_Z_AXIS')
+    if kwargs.pop('FLIP_Z_AXIS', False):
+        warnings.warn(
+            "FLIP_Z_AXIS=True is ignored: correct_z_intensity_decay has no flip option. "
+            "Flip the stack yourself (image[::-1]; check_z_axis_orientation tells "
+            "whether it is needed) and flip the result back.",
+            UserWarning, stacklevel=3)
+    return kwargs
+
+
+# Removed @ensure_float_and_restore_dtype to avoid double-decoration
+def adjust_gamma_per_slice(*args, **kwargs):
+    """Deprecated: use ``correct_z_intensity_decay(image, method='gamma', fit_model=...)``.
+
+    Emits a FutureWarning; removed in eigenp_utils 0.1.0 (D08).
+    ``gamma_fit_func`` maps to ``fit_model``; ``FLIP_Z_AXIS=True`` is ignored
+    with a UserWarning.
+    """
+    warn_deprecated("adjust_gamma_per_slice", "correct_z_intensity_decay(image, method='gamma')")
+    kwargs = _legacy_z_decay_kwargs(kwargs)
     return correct_z_intensity_decay(*args, method='gamma', **kwargs)
 
 
 # Removed @ensure_float_and_restore_dtype to avoid double-decoration
 def adjust_brightness_per_slice(*args, **kwargs):
-    """Deprecated. Use correct_z_intensity_decay instead."""
-    warnings.warn(
-        "adjust_brightness_per_slice is deprecated. Use correct_z_intensity_decay instead.",
-        DeprecationWarning, stacklevel=2
-    )
-    if 'gamma_fit_func' in kwargs:
-        kwargs['fit_model'] = kwargs.pop('gamma_fit_func')
-    if 'FLIP_Z_AXIS' in kwargs:
-        kwargs.pop('FLIP_Z_AXIS')
+    """Deprecated: use ``correct_z_intensity_decay`` (``method='gamma'`` or ``'gain'``).
+
+    Emits a FutureWarning; removed in eigenp_utils 0.1.0 (D08). Its default
+    method is 'gamma', as correct_z_intensity_decay's. ``gamma_fit_func``
+    maps to ``fit_model``; ``FLIP_Z_AXIS=True`` is ignored with a UserWarning.
+    """
+    warn_deprecated("adjust_brightness_per_slice", "correct_z_intensity_decay")
+    kwargs = _legacy_z_decay_kwargs(kwargs)
     return correct_z_intensity_decay(*args, **kwargs)
 
 @ensure_float_and_restore_dtype
-def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', final_gamma=0.8, return_diagnostic=False):
+def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', final_gamma=0.8,
+                              return_diagnostic=False, *, exclude_background=True):
     """
     Corrects Z-axis intensity attenuation using statistical decay modeling.
 
-    The per-slice 99th percentile is fitted with `fit_model` and every slice is
-    corrected so that its fitted percentile maps onto the brightest fitted one
-    (y_ref):
+    The per-slice 99th percentile (p99, NaN ignored) is fitted with
+    `fit_model` and every slice is corrected so that its fitted percentile maps
+    onto the brightest fitted one (y_ref):
 
-    - method='gain': multiply slice i by y_ref / y_fit[i].
+    - method='gain': multiply slice i by y_ref / y_fit[i] (clipped to [0.1, 100]).
     - method='gamma': power law on a rescaled intensity, I -> s * (I / s) ** g_i,
-      with g_i = log(t) / log(t * y_fit[i] / y_ref), t = min(y_ref, 0.5) for data in
-      [0, 1] (t = 0.5 otherwise) and s = y_ref / t. This still maps y_fit[i] exactly
-      onto y_ref; for [0, 1] data with y_ref <= 0.5 it is the classic
-      g_i = log(y_ref) / log(y_fit[i]). Anchoring at t <= 0.5 keeps g_i away from 0
-      when y_ref approaches full scale (log(y_ref) -> 0), which used to collapse every
-      factor to the 0.1 clip and flood deep slices.
+      with t = 0.5, s = 2 * y_ref and g_i = log(t) / log(t * y_fit[i] / y_ref)
+      (clipped to [0.1, 10]). This maps y_fit[i] exactly onto y_ref and only
+      depends on ratios, so the same counts give the same result whatever the
+      dtype container (uint8, uint16 or float in raw units), up to clipping.
 
-    Works for integer images (via the dtype decorator), floats in [0, 1] and floats in
-    raw intensity units. Gain output is clipped to [0, 1] only for [0, 1] data.
+    Both methods clip the output to [0, 1] for data in [0, 1] (which includes
+    every integer image, via the dtype decorator); float data in raw units are
+    only clipped at 0 when non-negative. 8/16-bit integers are divided by the
+    dtype maximum, so they saturate at 255/65535, but 32/64-bit integers are
+    divided by their own data maximum, so their output saturates at the
+    input's maximum value (for gamma and gain alike). A UserWarning lists the slices whose
+    factor hit its clip bound.
+
+    Parameters
+    ----------
+    image : (Z, Y, X) ndarray
+    method : {'gamma', 'gain'}
+    fit_model : {'exponential', 'linear'}, callable or None
+        'exponential' fits a * exp(b z) with b <= 0 (non-linear least squares
+        seeded by OLS on log p99); 'linear' is exact OLS. A callable takes
+        (z, p99) of the fitted slices and returns the fitted p99 at those z.
+        None applies the legacy linear ramp of gamma exponents from 1 to
+        `final_gamma` (method='gamma' only).
+    final_gamma : float
+        Last exponent of the fit_model=None ramp; ignored otherwise.
+    return_diagnostic : bool
+        Also return {'x_data', 'y_data_norm', 'y_fit_norm', 'gamma_fit_func'}
+        (every slice; y_data_norm is NaN for all-NaN slices).
+    exclude_background : bool
+        Leave background-only slices out of the fit (default True). The
+        background level B and its spread are the median and MAD of the slice
+        with the lowest p99; a slice is background-only when its p99 is within
+        10 MAD of B **and** less than 5% of the brightest slice's p99 above B.
+        The dimmest slice is only used as a background reference when at
+        least a quarter of the brightest slice (its p25) lies within 10 MAD
+        of B, i.e. the sample is sparse; in dense stacks (signal in every
+        slice) nothing is left out, however strong the decay.
+        In sparse samples, p99 of a slice beyond the specimen measures camera
+        background, and fitting it drags the curve down and amplifies that
+        background 7-285x.
+
+    Slices left out of the fit (background-only or all-NaN) take the fitted
+    curve interpolated between their fitted neighbours, held constant beyond
+    the first/last fitted slice (no extrapolation), so empty slices get the
+    factor of the nearest slice with signal. A UserWarning lists them.
+
+    The exponential model only decays: a stack that gets brighter with Z (by
+    more than 10% over the stack, e.g. acquired from the other side) is left
+    unchanged with a UserWarning; flip it (``image[::-1]``, see
+    `check_z_axis_orientation`) or use fit_model='linear'.
+
+    Changed (D21, 2026-11):
+    (a) background-only and all-NaN slices are left out of the fit (an
+        all-NaN slice used to abort with RuntimeError), and clipped factors
+        are reported;
+    (b) gamma is always anchored at t = 0.5, s = 2 * y_ref, and clipped like
+        gain. Before, [0, 1] data with y_ref <= 0.5 used the classic
+        I ** g (t = y_ref), so uint8 and uint16 holding the same counts
+        differed by up to 61 levels, and bright pixels in dim slices
+        overshot the range;
+    (c) method='gain' with fit_model=None raises ValueError (it multiplied
+        the image by the gamma ramp, darkening deep slices);
+    (d) brightening stacks warn instead of being silently left unchanged.
     """
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
     if method not in ('gamma', 'gain'):
         raise ValueError(f"Unknown correction method: {method}")
+    if fit_model is None and method == 'gain':
+        raise ValueError(
+            "fit_model=None (the final_gamma ramp of gamma exponents) applies to "
+            "method='gamma' only; use fit_model='exponential' or 'linear' with method='gain'.")
 
     num_slices = image.shape[0]
     adjusted_image = np.empty_like(image)
 
-    data_min, data_max = float(np.nanmin(image)), float(np.nanmax(image))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN input
+        data_min, data_max = float(np.nanmin(image)), float(np.nanmax(image))
+    if not np.isfinite(data_min):
+        data_min, data_max = 0.0, 0.0
     unit_range = data_min >= 0.0 and data_max <= 1.0
     if method == 'gamma' and data_min < 0:
         raise ValueError("method='gamma' needs non-negative intensities.")
 
     diagnostic_data = None
     scale = 1.0
+    upper = 1.0 if unit_range else np.inf
+    lower = 0.0 if data_min >= 0 else -np.inf
 
     if fit_model is not None:
         x_data = np.arange(num_slices)
-        y_data = np.array([np.nanpercentile(image[i], 99) for i in range(num_slices)])
-
-        y_data_norm = y_data
+        y_data = _slice_p99(image)
+        fit_idx = np.flatnonzero(np.isfinite(y_data))
+        left_out = {}
+        if fit_idx.size < num_slices:
+            left_out['all-NaN'] = np.flatnonzero(~np.isfinite(y_data))
+        if exclude_background and fit_idx.size > 2:
+            background = _background_only_slices(image, y_data, fit_idx)
+            if background.size and fit_idx.size - background.size >= 2:
+                left_out['background only'] = background
+                fit_idx = np.setdiff1d(fit_idx, background)
+        if fit_idx.size == 0:
+            fit_idx = x_data  # nothing finite: the fit fails with a clear error below
 
         try:
             if isinstance(fit_model, str):
                 if fit_model not in FIT_MODELS:
                     raise ValueError(f"Unknown fit_model: {fit_model}. Available: {list(FIT_MODELS.keys())}")
-                y_fit_norm = FIT_MODELS[fit_model](x_data, y_data_norm)
+                y_fit_sub = FIT_MODELS[fit_model](x_data[fit_idx], y_data[fit_idx])
             elif callable(fit_model):
-                y_fit_norm = fit_model(x_data, y_data_norm)
+                y_fit_sub = fit_model(x_data[fit_idx], y_data[fit_idx])
             else:
                 raise ValueError("fit_model must be a string or callable.")
         except Exception as e:
             raise RuntimeError(f"Z-decay fitting failed: {e}. Pipeline aborted.")
+        y_fit_sub = np.asarray(y_fit_sub, dtype=np.float64)
+        if fit_idx.size == num_slices:
+            y_fit = y_fit_sub
+        else:
+            # no extrapolation: hold the end values, interpolate inner gaps
+            y_fit = np.interp(x_data, x_data[fit_idx], y_fit_sub)
+
+        if left_out:
+            warnings.warn(
+                "correct_z_intensity_decay: slices left out of the fit ("
+                + "; ".join(f"{why}: {idx.tolist()}" for why, idx in left_out.items())
+                + "). They take the fitted value of the nearest fitted slices (no extrapolation).",
+                UserWarning, stacklevel=3)
+
+        if fit_model == 'exponential' and fit_idx.size >= 2:
+            y_pos = np.clip(y_data[fit_idx], 1e-9, None)
+            slope = np.polyfit(x_data[fit_idx], np.log(y_pos), 1)[0]
+            if np.exp(slope * (fit_idx[-1] - fit_idx[0])) > 1.1:
+                warnings.warn(
+                    "correct_z_intensity_decay: intensity increases with Z, but the "
+                    "exponential model only decays, so the stack is left uncorrected. "
+                    "The stack is probably upside down: flip it (image[::-1], see "
+                    "check_z_axis_orientation), or use fit_model='linear'.",
+                    UserWarning, stacklevel=3)
 
         if return_diagnostic:
             diagnostic_data = {
                 "x_data": x_data,
-                "y_data_norm": y_data_norm,
-                "y_fit_norm": y_fit_norm,
+                "y_data_norm": y_data,
+                "y_fit_norm": y_fit,
                 "gamma_fit_func": fit_model if isinstance(fit_model, str) else "custom_callable"
             }
 
-        y_ref = float(np.max(y_fit_norm))
+        y_ref = float(np.max(y_fit))
         if not y_ref > 0:
             factors = np.ones(num_slices)
         else:
             # Ratio of each slice's fitted percentile to the reference (scale-free)
-            ratio = np.clip(np.asarray(y_fit_norm, dtype=np.float64) / y_ref, 1e-9, 1.0)
+            ratio = np.clip(y_fit / y_ref, 1e-9, 1.0)
             if method == 'gamma':
-                t = min(y_ref, 0.5) if unit_range else 0.5
+                t = 0.5
                 scale = y_ref / t
-                factors = np.clip(np.log(t) / np.log(t * ratio), 0.1, 10.0)
+                raw, bounds = np.log(t) / np.log(t * ratio), (0.1, 10.0)
             else:
-                factors = np.clip(1.0 / ratio, 0.1, 100.0)
+                raw, bounds = 1.0 / ratio, (0.1, 100.0)
+            factors = np.clip(raw, *bounds)
+            clipped = np.flatnonzero(factors != raw)
+            if clipped.size:
+                warnings.warn(
+                    f"correct_z_intensity_decay: the {method} factor of slices "
+                    f"{clipped.tolist()} was clipped to [{bounds[0]}, {bounds[1]}]; the "
+                    "fitted curve falls too low there (empty slices or a poor fit).",
+                    UserWarning, stacklevel=3)
     else:
         factors = np.linspace(1.0, final_gamma, num_slices)
-        if method == 'gamma' and not unit_range and data_max > 0:
+        if not unit_range and data_max > 0:
             scale = data_max
 
-    upper = 1.0 if unit_range else np.inf
-    lower = 0.0 if data_min >= 0 else -np.inf
     for i in range(num_slices):
         if method == 'gamma':
-            adjusted_image[i, :, :] = scale * np.power(image[i, :, :] / scale, factors[i])
+            res = scale * np.power(image[i, :, :] / scale, factors[i])
+            if fit_model is not None:
+                res = np.clip(res, lower, upper)
+            adjusted_image[i, :, :] = res
         else:
             adjusted_image[i, :, :] = np.clip(image[i, :, :] * factors[i], lower, upper)
 
@@ -290,25 +508,86 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
         return {"image": adjusted_image, "diagnostic_data": diagnostic_data}
     return adjusted_image
 
-def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z_AXIS=False):
+
+def _slice_p99(image):
+    """Per-slice nanpercentile 99 (NaN for an all-NaN slice, without a RuntimeWarning)."""
+    out = np.full(image.shape[0], np.nan)
+    for i in range(image.shape[0]):
+        if np.isfinite(image[i]).any():
+            out[i] = np.nanpercentile(image[i], 99)
+    return out
+
+
+# A slice is background-only when its p99 is within _BG_MADS MADs of the
+# background level AND less than _BG_FRACTION of the brightest p99 above it.
+# The dimmest slice only counts as a background reference when at least a
+# quarter of the brightest slice (its p25) lies in the same background band,
+# i.e. the sample is sparse; dense stacks (signal everywhere) have none.
+_BG_MADS = 10.0
+_BG_FRACTION = 0.05
+_BG_REF_PERCENTILE = 25.0
+
+
+def _background_only_slices(image, p99, idx):
+    """Indices (within idx) of slices whose p99 measures background only (D21a)."""
+    none = np.array([], dtype=int)
+    j = idx[np.argmin(p99[idx])]
+    ref = image[j][np.isfinite(image[j])]
+    b = float(np.median(ref))
+    mad = float(np.median(np.abs(ref - b)))
+    top = float(np.max(p99[idx])) - b
+    if not (top > 0 and mad > 0):
+        return none
+    # Is the dimmest slice really background? Then the brightest slice's
+    # background pixels (sparse sample) sit at the same level.
+    k = idx[np.argmax(p99[idx])]
+    bright = image[k][np.isfinite(image[k])]
+    if abs(float(np.percentile(bright, _BG_REF_PERCENTILE)) - b) > _BG_MADS * mad:
+        return none
+    sel = (p99[idx] <= b + _BG_MADS * mad) & (p99[idx] - b <= _BG_FRACTION * top)
+    return idx[sel]
+
+def contrast_stretch_per_slice(image, in_min=None, in_max=None, flip_z=False, *,
+                               p_min_array=None, p_max_array=None, FLIP_Z_AXIS=None):
     """
     Adjusts the intensity of each slice in a 3D image along the Z-axis using per-slice min/max intensity values.
 
     Args:
         image (numpy.ndarray): The 3D image array in Z, Y, X order.
-        p_min_array (numpy.ndarray): Array of min intensity values for each slice.
-        p_max_array (numpy.ndarray): Array of max intensity values for each slice.
-        FLIP_Z_AXIS (bool): Whether to flip the order of min/max arrays.
+        in_min (numpy.ndarray): Per-slice lower bound of the input range, in
+            intensity units (not a percentile). None: each slice's own minimum.
+        in_max (numpy.ndarray): Per-slice upper bound, in intensity units.
+            None: each slice's own maximum.
+        flip_z (bool): Reverse in_min / in_max along Z before applying them.
+        p_min_array, p_max_array, FLIP_Z_AXIS: deprecated names of in_min,
+            in_max and flip_z (FutureWarning, removed in eigenp_utils 0.1.0).
+            They were renamed because p_min elsewhere means a percentile.
 
     Returns:
         numpy.ndarray: A new 3D image array with adjusted intensities per slice,
         in [0, 1] for floats and [0, dtype max] for unsigned integers.
+
+    Changed (R6-21, 2026-11): parameters renamed (in_min, in_max, flip_z).
     """
+    renamed = (("in_min", in_min, "p_min_array", p_min_array),
+               ("in_max", in_max, "p_max_array", p_max_array),
+               ("flip_z", flip_z or None, "FLIP_Z_AXIS", FLIP_Z_AXIS))
+    values = []
+    for new, new_value, old, old_value in renamed:
+        if old_value is not None:
+            if new_value is not None:
+                raise TypeError(f"contrast_stretch_per_slice() got both {new!r} and its "
+                                f"deprecated alias {old!r}")
+            warn_deprecated(f"contrast_stretch_per_slice({old}=...)", f"{new}=...")
+            new_value = old_value
+        values.append(new_value)
+    p_min_array, p_max_array, flip = values
+
     # Validate inputs
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
     if p_min_array is None and p_max_array is None:
-        raise ValueError("p_min_array & p_max_array are None, no difference will be produced in the image")
+        raise ValueError("in_min and in_max are both None, no difference will be produced in the image")
 
     # Floats always map to [0, 1]: out_range='dtype' gives [-1, 1] for a float
     # slice whose lower bound is negative (as in contrast_stretching)
@@ -320,7 +599,7 @@ def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z
     # Create an output image array
     adjusted_image = np.empty_like(image)
 
-    if FLIP_Z_AXIS:
+    if flip:
         if p_min_array is not None:
             p_min_array = p_min_array[::-1]
         if p_max_array is not None:
@@ -343,10 +622,18 @@ def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z
 
     return adjusted_image
 
-def test_z_axis_orientation(img, channel=None, return_image=True):
+def check_z_axis_orientation(img, channel=None, return_image=True):
     """
-    Check if the Z-axis needs to be flipped based on brightness metrics of top vs bottom halves.
-    Assumes standard orientation where the ventral side (brighter) should be processed specifically.
+    Check whether the Z axis should be flipped so that the brighter half comes first.
+
+    Compares the 99.99th percentile of the top half (first Z slices) with the
+    bottom half; flag is True when the bottom half is brighter. Z-decay
+    correction (`correct_z_intensity_decay`) assumes intensity falls with Z,
+    so a True flag means the stack is probably upside down for it.
+
+    NaN voxels are ignored. If either half has no finite voxel the halves
+    cannot be compared: a UserWarning is emitted and the flag is False. The
+    two metrics are logged at DEBUG level (module logger).
 
     Args:
         img (numpy.ndarray): Input image (nD). Expected 6D (S,T,C,Z,Y,X) or 3D (Z,Y,X).
@@ -355,6 +642,11 @@ def test_z_axis_orientation(img, channel=None, return_image=True):
 
     Returns:
         tuple or bool: (flipped_image, flag) if return_image is True, else flag.
+
+    Changed (D07/R6-16, 2026-11): renamed from ``test_z_axis_orientation``
+    (pytest collected it as a test; the old name is a deprecated alias); it no
+    longer prints the two metrics; NaN voxels are ignored (one NaN made the
+    comparison silently False).
     """
     # Extract Z-stack for metric calculation
     if img.ndim == 3:
@@ -380,12 +672,18 @@ def test_z_axis_orientation(img, channel=None, return_image=True):
 
     # Compare 99.99th percentile of top vs bottom half of Z
     z_mid = img_Z.shape[0] // 2
-    top_image_metric = np.percentile(img_Z[0:z_mid, :, :], 99.99)
-    bot_image_metric = np.percentile(img_Z[z_mid:, :, :], 99.99)
-    print(top_image_metric, bot_image_metric)
-
-    if top_image_metric < bot_image_metric:
-        FLAG = True
+    halves = (img_Z[0:z_mid, :, :], img_Z[z_mid:, :, :])
+    if not all(np.isfinite(h).any() for h in halves):
+        warnings.warn(
+            "check_z_axis_orientation: one half of the stack has no finite voxel "
+            "(all NaN), so the halves cannot be compared; not flipping.",
+            UserWarning, stacklevel=2)
+    else:
+        top_image_metric, bot_image_metric = (float(np.nanpercentile(h, 99.99)) for h in halves)
+        logger.debug("Z orientation: p99.99 top half %g, bottom half %g",
+                     top_image_metric, bot_image_metric)
+        if top_image_metric < bot_image_metric:
+            FLAG = True
 
     if return_image:
         if FLAG:
@@ -395,6 +693,20 @@ def test_z_axis_orientation(img, channel=None, return_image=True):
         return img, FLAG
     else:
         return FLAG
+
+
+def test_z_axis_orientation(img, channel=None, return_image=True):
+    """Deprecated alias of `check_z_axis_orientation` (FutureWarning; removed in eigenp_utils 0.1.0).
+
+    The ``test_`` prefix made pytest collect this library function as a test
+    whenever a test module imported it under its own name.
+    """
+    warn_deprecated("test_z_axis_orientation", "check_z_axis_orientation")
+    return check_z_axis_orientation(img, channel=channel, return_image=return_image)
+
+
+# Do not let pytest collect the deprecated alias in modules that import it
+test_z_axis_orientation.__test__ = False
 
 
 def _tshrinkage(x, thresh):
@@ -434,6 +746,23 @@ def _resize_spatial(images, target_spatial_shape):
         )
     return out
 
+def _reweight_score(S, last_S, D, last_D):
+    """Reweighting convergence score: max relative change of flatfield and darkfield.
+
+    As MATLAB BaSiC: sum|S - last_S| / sum|last_S| and sum|D - last_D| /
+    max(sum|last_D|, 1e-6), the latter 0 when the darkfield moved by < 1e-7
+    in total (always, without darkfield estimation). BaSiCPy computes the
+    darkfield term from the flatfield change instead (R6-17).
+    """
+    mad_flatfield = np.sum(np.abs(S - last_S)) / max(float(np.sum(np.abs(last_S))), 1e-9)
+    temp_diff = float(np.sum(np.abs(D - last_D)))
+    if temp_diff < 1e-7:
+        mad_darkfield = 0.0
+    else:
+        mad_darkfield = temp_diff / max(float(np.sum(np.abs(last_D))), 1e-6)
+    return float(max(mad_flatfield, mad_darkfield))
+
+
 def fit_basic_shading(
     images,
     is_3d=False,
@@ -470,8 +799,13 @@ def fit_basic_shading(
         reweighting_tol (float): Tolerance for reweighting loop convergence.
         smoothness_flatfield (float): Smoothness regularization weight. If None, it is estimated.
         smoothness_darkfield (float): Smoothness regularization weight for darkfield. If None, it is estimated.
-        sparse_cost_darkfield (float): Weight of the darkfield sparse term. If None, it is estimated.
-        get_darkfield (bool): Whether to estimate darkfield.
+        sparse_cost_darkfield (float): 'ladmap' only: weight of the darkfield sparse term.
+            If None, it is estimated. The 'approximate' mode (as MATLAB BaSiC)
+            shrinks the darkfield with smoothness_darkfield only, so a value
+            given there is ignored, with a UserWarning.
+        get_darkfield (bool): Whether to estimate darkfield. Use
+            fitting_mode='approximate' for it: with 'ladmap' the estimate is
+            unreliable (a UserWarning says so; see below).
         fitting_mode (str): Fitting mode, 'approximate' or 'ladmap'.
         epsilon (float): Small value for weight calculation.
         rho (float): ADMM penalty parameter update factor.
@@ -480,13 +814,42 @@ def fit_basic_shading(
 
     Returns:
         dict: Containing 'flatfield', 'darkfield', and 'baseline'.
+
+    Raises:
+        ValueError: for NaN or inf in `images` (the ADMM has no mask support,
+            and one NaN pixel made the SVD fail with LinAlgError). Fill or crop
+            them first.
+
+    Darkfield with 'ladmap': on synthetic images (20 frames, baselines
+    0.5-1.5) with known darkfields of 10, 40 and 100, the 'ladmap' darkfield
+    came out at 0.04, 117 and 268 (the last two above the dimmest pixel,
+    which is impossible), while 'approximate' gives 4.5, 36 and 82. The ladmap
+    estimate is returned as before, with a UserWarning, until it is fixed
+    and validated.
+
+    Changed (R6-17, 2026-11): reweighting convergence uses the darkfield
+    change (as MATLAB BaSiC) instead of repeating the flatfield change (a
+    BaSiCPy quirk); this only affects get_darkfield=True. NaN/inf input
+    raises ValueError (R6-15). New UserWarnings: sparse_cost_darkfield is
+    ignored in fitting_mode='approximate' (it only acts in 'ladmap'), and
+    get_darkfield=True with 'ladmap' gives an unreliable darkfield (R6-07).
     """
     if fitting_mode not in ('approximate', 'ladmap'):
         raise ValueError(f"fitting_mode '{fitting_mode}' is not valid. Use 'approximate' or 'ladmap'.")
     if max_reweight_iterations < 1:
         raise ValueError("max_reweight_iterations must be >= 1.")
+    if fitting_mode == 'approximate' and sparse_cost_darkfield is not None:
+        warnings.warn(
+            "sparse_cost_darkfield is ignored with fitting_mode='approximate' (which, as "
+            "MATLAB BaSiC, regularises the darkfield with smoothness_darkfield only); "
+            "it applies to fitting_mode='ladmap'.", UserWarning, stacklevel=2)
 
     images, original_shape = _prepare_data_for_basic(images, is_3d)
+    n_bad = int(images.size - np.count_nonzero(np.isfinite(images)))
+    if n_bad:
+        raise ValueError(
+            f"fit_basic_shading needs finite input: the images hold {n_bad} non-finite "
+            "(NaN or inf) values. Fill or crop them first (the fit has no mask support).")
 
     s_s = images.shape[0]
     original_spatial_shape = images.shape[1:]
@@ -505,6 +868,11 @@ def fit_basic_shading(
             stacklevel=2,
         )
         get_darkfield = False
+    if get_darkfield and fitting_mode == 'ladmap':
+        warnings.warn(
+            "get_darkfield=True with fitting_mode='ladmap' gives an unreliable darkfield "
+            "(anywhere from ~0 to ~3x the true offset on synthetic data); use "
+            "fitting_mode='approximate' to estimate the darkfield.", UserWarning, stacklevel=2)
 
     target_spatial_shape = tuple([min(d, working_size) if working_size is not None else d for d in original_spatial_shape])
 
@@ -781,19 +1149,7 @@ def fit_basic_shading(
             W_D = Ws_D / np.mean(Ws_D)
 
         if last_S is not None:
-            sum_last_S = np.sum(np.abs(last_S))
-            if sum_last_S < 1e-9:
-                sum_last_S = 1e-9
-            mad_flatfield = np.sum(np.abs(S - last_S)) / sum_last_S
-
-            temp_diff = np.sum(np.abs(S - last_S))
-            if temp_diff < 1e-7:
-                mad_darkfield = 0
-            else:
-                mad_darkfield = temp_diff / max(np.sum(np.abs(last_S)), 1e-6)
-
-            reweight_score = max(mad_flatfield, mad_darkfield)
-            if reweight_score <= reweighting_tol:
+            if _reweight_score(S, last_S, D_R, last_D) <= reweighting_tol:
                 break
         last_S = S
         last_D = D_R

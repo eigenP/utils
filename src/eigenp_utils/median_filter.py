@@ -25,6 +25,8 @@ The networks are data (`_COLSORT3`, `_NET3`, `_COLSORT5`, `_NET5`) checked by
 the 0-1 principle in ``tests/test_median_filter.py``; the NumPy backend applies
 them to whole row blocks, and ``_median_numba.py`` has them unrolled.
 """
+import warnings
+
 import numpy as np
 
 __all__ = ["median_filter_fast"]
@@ -209,9 +211,14 @@ def median_filter_fast(image, size=3, axes=(-2, -1), backend='auto'):
     image : ndarray, at least 2D
         Axis order is free: ``axes`` names the two filtered (spatial) axes,
         by default the last two, i.e. (..., Y, X). All other axes (Z, C, T)
-        are independent slices. Supported dtypes: uint8, uint16, float32
-        and float64, plus the other integer types. bool, float16 and complex
-        raise TypeError (convert explicitly).
+        are independent slices, so the package's channel-first convention
+        (C, ..., Y, X) needs no option. A channel-last (Y, X, 3/4) image
+        needs ``axes=(0, 1)``: with the default axes its colour axis is
+        filtered as if it were spatial, and a UserWarning says so (C-07).
+        Changed (C-07, 2026-11): that UserWarning is new; the output is
+        unchanged. Supported dtypes: uint8, uint16, float32 and float64,
+        plus the other integer types. bool, float16 and complex raise
+        TypeError (convert explicitly).
     size : int
         Odd window side k (default 3). 3 and 5 use sorting networks; other
         odd k fall back to a per-pixel selection, O(k^2) per pixel. 1 returns
@@ -273,6 +280,15 @@ def median_filter_fast(image, size=3, axes=(-2, -1), backend='auto'):
     ax = tuple(_normalize_axis(a, image.ndim) for a in ax)
     if ax[0] == ax[1]:
         raise ValueError(f"`axes` must be two distinct axes, got {axes!r}")
+    last = image.ndim - 1
+    if (image.ndim >= 3 and image.shape[-1] in (3, 4) and last in ax
+            and k > 1 and image.size):
+        warnings.warn(
+            f"median_filter_fast filters axes {tuple(ax)} of this {image.shape} "
+            f"image, including its trailing axis of length {image.shape[-1]}: if "
+            "it holds colour channels (channel-last RGB/RGBA), they are mixed. "
+            "Use axes=(0, 1) for a (Y, X, C) image, or put channels first.",
+            UserWarning, stacklevel=2)
 
     kernels = None
     if backend != 'numpy':
