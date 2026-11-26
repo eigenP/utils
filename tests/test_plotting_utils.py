@@ -781,6 +781,18 @@ def test_raincloud_plot_raster_threshold():
         plt.close(res_large["fig"])
 
 
+def test_raincloud_and_savefig_svg_agree_at_the_raster_threshold(tmp_path):
+    """R5-05: both rasterize at exactly the threshold (>=): 1000 points with threshold 1000."""
+    data = pd.DataFrame({"group": ["A"] * 1000, "value": np.arange(1000.0)})
+    res = raincloud_plot(data=data, x="group", y="value", raster_threshold=1000)
+    rain = [c for c in res["axes"].collections if isinstance(c, PathCollection) and len(c.get_offsets()) == 1000]
+    assert rain and all(c.get_rasterized() is True for c in rain)
+    fig, ax = plt.subplots()
+    ax.scatter(np.arange(1000), np.arange(1000))
+    savefig_svg(tmp_path / "s.svg", fig=fig, scatter_raster_threshold=1000)
+    assert "<image" in (tmp_path / "s.svg").read_text()
+
+
 def test_raincloud_accepts_series_and_tuple():
     """Verify raincloud_plot accepts a named pd.Series and a plain tuple of floats.
 

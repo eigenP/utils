@@ -1107,8 +1107,9 @@ def raincloud_plot(data,
         When hue is nested, whether to draw elements at different positions.
         If None, defaults to True unless hue matches x or y variable.
     raster_threshold : int, optional
-        If the total number of scatter points across all groups exceeds this threshold,
-        the jittered scatter points will be rasterized. This is useful for keeping SVG
+        If the total number of scatter points across all groups reaches this threshold,
+        the jittered scatter points will be rasterized. Changed (R5-05, 2026-11):
+        rasterizes at exactly the threshold too (``>=``, as ``savefig_svg``). This is useful for keeping SVG
         file sizes small when there are many points.
     outlier_method : str, optional
         Method to use for identifying outliers to exclude from the violin KDE estimation
@@ -1386,7 +1387,7 @@ def raincloud_plot(data,
     # --- 2. Calculate Total Points for Rasterization ---
     total_points = sum(len(item['values']) for item in plot_items)
     rasterize_scatter = False
-    if raster_threshold is not None and total_points > raster_threshold:
+    if raster_threshold is not None and total_points >= raster_threshold:  # as savefig_svg
         rasterize_scatter = True
 
     # --- 3. Setup Figure/Axes ---
