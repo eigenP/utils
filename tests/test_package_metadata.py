@@ -149,6 +149,9 @@ def test_import_is_lazy_and_works_without_scikit_image():
         loaded = [m for m in ("skimage", "xarray", "tifffile", "eigenp_utils.image_io")
                   if m in sys.modules]
         assert not loaded, loaded
+        # as before the lazy __init__: the package's colormaps are usable by name
+        import matplotlib
+        assert {"labels_cmap", "labels_cmap_black", "i_blue"} <= set(matplotlib.colormaps)
 
         class Block(importlib.abc.MetaPathFinder):
             def find_spec(self, name, path, target=None):

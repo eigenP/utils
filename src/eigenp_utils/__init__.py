@@ -1,8 +1,9 @@
 """Utility functions for eigenp workflows.
 
 The top-level names are resolved lazily (PEP 562): ``import eigenp_utils`` imports
-no submodule, and ``eigenp_utils.load_image`` imports :mod:`eigenp_utils.image_io`
-on first access. When an optional package is missing, the access raises an
+only :mod:`eigenp_utils.plotting_utils` (core dependencies; it registers the
+package colormaps by name), and ``eigenp_utils.load_image`` imports
+:mod:`eigenp_utils.image_io` on first access. When an optional package is missing, the access raises an
 ImportError naming the extra to install (``pip install "eigenp-utils[image-analysis]"``);
 any other import error propagates unchanged, so a genuine bug is not hidden.
 
@@ -17,6 +18,11 @@ on any import error. ``__all__`` now lists the image API.
 
 import importlib
 import importlib.util
+
+# Imported eagerly (core dependencies only) so that the package's colormaps
+# ('labels_cmap', 'labels_cmap_black', the I-series) are registered with
+# matplotlib on `import eigenp_utils`, as before the lazy attributes.
+from . import plotting_utils as _plotting_utils  # noqa: F401
 
 # module -> extra that provides its optional packages (None: core dependencies only)
 _EXTRA_OF_MODULE = {
