@@ -13,7 +13,6 @@
 # https://forum.image.sc/t/surface-peeler-fiji-macro-for-fast-near-real-time-3d-surface-identification-and-extraction/61966
 ##################
 
-import logging
 import warnings
 
 import numpy as np
@@ -25,8 +24,6 @@ from skimage import filters
 from .clahe_equalize_adapthist import clahe_u8
 from ._conventions import UM, resolve_pixel_sizes, warn_deprecated
 from typing import Optional, Sequence, Union, Tuple
-
-logger = logging.getLogger(__name__)
 
 #: Default blur of `extract_surface`, in binned voxels (Z, Y, X)
 DEFAULT_GAUSSIAN_SIGMA = (1.0, 4.0, 4.0)
