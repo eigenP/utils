@@ -310,7 +310,7 @@ def test_ensure_float_and_restore_dtype_decorator():
 def test_contrast_stretching_uint8_preserves_dynamic_range():
     """Stretching a uint8 gradient preserves smooth dynamic range across [0, 255]."""
     img_uint8 = np.linspace(20, 200, 10000, dtype=np.uint8).reshape(100, 100)
-    stretched = contrast_stretching(img_uint8, p_min=0.0, p_max=100.0)
+    stretched = contrast_stretching(img_uint8, percentiles=(0.0, 100.0))
 
     assert stretched.dtype == np.uint8
     assert len(np.unique(stretched)) > 100
@@ -364,6 +364,19 @@ def test_large_images_keep_exact_percentiles():
     np.testing.assert_allclose(contrast_stretching(img), np.clip((img - lo) / (hi - lo), 0, 1), atol=1e-5)
 
 
+def test_contrast_stretching_constant_image_maps_inf_like_the_general_path():
+    """R6-11/D27: in a constant image, +inf maps to 1 and -inf to 0, as in a non-constant image; NaN stays NaN.
+
+    Strategy: [2, 2, nan, inf, -inf]. Before the fix the constant branch
+    mapped +/-inf to 0. Negative control (-): a non-constant image already
+    maps +inf to 1 and -inf to 0.
+    """
+    out = contrast_stretching(np.array([2.0, 2.0, np.nan, np.inf, -np.inf]))
+    np.testing.assert_array_equal(out, [0.0, 0.0, np.nan, 1.0, 0.0])
+    out = contrast_stretching(np.array([1.0, 2.0, 3.0, np.nan, np.inf, -np.inf]), percentiles=(0, 100))
+    np.testing.assert_array_equal(out[[3, 4, 5]], [np.nan, 1.0, 0.0])
+
+
 def test_contrast_stretching_and_normalize_image_constant_and_dtypes():
     """Constant images map to 0 in both functions, without NaNs, and normalize_image converts dtypes.
 
@@ -388,16 +401,16 @@ def test_contrast_stretching_and_normalize_image_constant_and_dtypes():
 
     # Explicit dtype conversions in normalize_image
     ramp_f32 = np.linspace(10.0, 210.0, 256, dtype=np.float32).reshape(16, 16)
-    norm_u8 = normalize_image(ramp_f32, lower_percentile=0.0, upper_percentile=100.0, dtype=np.uint8)
+    norm_u8 = normalize_image(ramp_f32, percentiles=(0.0, 100.0), output_dtype=np.uint8)
     assert norm_u8.dtype == np.uint8
     assert norm_u8.min() == 0 and norm_u8.max() == 255
 
-    norm_u16 = normalize_image(ramp_f32, lower_percentile=0.0, upper_percentile=100.0, dtype=np.uint16)
+    norm_u16 = normalize_image(ramp_f32, percentiles=(0.0, 100.0), output_dtype=np.uint16)
     assert norm_u16.dtype == np.uint16
     assert norm_u16.min() == 0 and norm_u16.max() == 65535
 
     ramp_u16 = np.linspace(100, 50000, 256, dtype=np.uint16).reshape(16, 16)
-    norm_f32 = normalize_image(ramp_u16, lower_percentile=0.0, upper_percentile=100.0, dtype=np.float32)
+    norm_f32 = normalize_image(ramp_u16, percentiles=(0.0, 100.0), output_dtype=np.float32)
     assert norm_f32.dtype == np.float32
     np.testing.assert_allclose([norm_f32.min(), norm_f32.max()], [0.0, 1.0], atol=1e-6)
 
@@ -466,8 +479,9 @@ def test_contrast_stretch_per_slice_names_and_deprecated_aliases():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         new = contrast_stretch_per_slice(img, in_min=lo, in_max=hi, flip_z=True)
-    with pytest.warns(FutureWarning, match="in_min"):
+    with pytest.warns(FutureWarning, match="deprecated") as rec:
         old = contrast_stretch_per_slice(img, p_min_array=lo, p_max_array=hi, FLIP_Z_AXIS=True)
+    assert any("in_min" in str(w.message) for w in rec)
     np.testing.assert_array_equal(old, new)
     np.testing.assert_allclose(new, contrast_stretch_per_slice(img, lo[::-1], hi[::-1]))
     with pytest.raises(TypeError, match="p_min_array"):
@@ -706,7 +720,7 @@ def test_basic_identical_samples_darkfield_stays_finite():
 def test_dtype_roundtrip_preserves_wide_integer_images(dtype):
     """32/64-bit integer images keep all 4096 ramp levels without collapsing or wrapping."""
     ramp = np.arange(4096).reshape(64, 64).astype(dtype)
-    out = contrast_stretching(ramp, 0, 100)
+    out = contrast_stretching(ramp, percentiles=(0, 100))
     assert out.dtype == dtype
     assert len(np.unique(out)) == 4096
     assert out.min() == 0 and out.max() == out.flat[-1]
@@ -720,7 +734,7 @@ def test_signed_integer_zero_background_stays_zero():
     stack[:, :4, :4] = 0
     for method in ("gain", "gamma"):
         assert correct_z_intensity_decay(stack, method=method)[:, :4, :4].max() == 0
-    assert contrast_stretching(stack, 0, 100).min() >= 0
+    assert contrast_stretching(stack, percentiles=(0, 100)).min() >= 0
 
 
 def test_normalize_image_wide_ints_and_nans():
@@ -748,7 +762,7 @@ def test_gamma_correction_near_full_scale_does_not_flood():
     """Gamma correction stays well-behaved when the reference percentile is near 1.0."""
     rng = np.random.default_rng(0)
     decay = np.exp(np.log(0.5) * np.arange(10) / 9)[:, None, None]
-    stack = normalize_image(rng.uniform(0, 1, (10, 32, 32)) * decay, 0.5, 99.9)
+    stack = normalize_image(rng.uniform(0, 1, (10, 32, 32)) * decay, percentiles=(0.5, 99.9))
     out = correct_z_intensity_decay(stack, method="gamma")
     p99 = np.array([np.percentile(out[i], 99) for i in range(10)])
     assert np.allclose(p99, p99[0], rtol=0.05)
@@ -798,6 +812,29 @@ def test_gamma_correction_is_independent_of_the_dtype_container():
         for dt in (np.uint8, np.uint16):
             d = np.abs(outs[dt, method] - ref).max()
             assert d <= 1.0, (method, dt, d)
+
+
+@pytest.mark.parametrize("dt", [np.int32, np.int64, np.uint32])
+def test_wide_integer_z_decay_saturates_at_the_input_maximum(dt):
+    """D21(b): 32/64-bit integers saturate at the input data maximum, for gamma and gain alike.
+
+    Strategy: the dtype decorator scales 32/64-bit integers by their data
+    maximum, so their [0, 1] working range is [0, data max] and the output is
+    clipped there, while uint8 can reach 255. Expected outcome: the wide
+    integer output equals the uint8 output clipped at the input maximum
+    (within 1 count), with both methods. This pins the documented behaviour.
+    """
+    rng = np.random.default_rng(1)
+    m = 200 * np.exp(-np.arange(12) / 6)
+    counts = np.stack([rng.poisson(mi * rng.uniform(0.2, 1, (32, 32))) for mi in m]).clip(0, 255)
+    for method in ("gamma", "gain"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            ref = correct_z_intensity_decay(counts.astype(np.uint8), method=method).astype(np.float64)
+            out = correct_z_intensity_decay(counts.astype(dt), method=method).astype(np.float64)
+        assert out.max() <= counts.max()
+        d = np.abs(out - np.minimum(ref, counts.max())).max()
+        assert d <= 1.0, (method, d)
 
 
 def test_gamma_correction_is_clipped_like_gain():
@@ -873,6 +910,65 @@ def test_z_decay_dense_stacks_keep_every_slice_in_the_fit():
             np.testing.assert_array_equal(out, ref)
 
 
+def _dense_strong_decay_stacks():
+    """Dense stacks (signal in every slice) with 10x-50x decays, as (name, stack) pairs."""
+    rng = np.random.default_rng(1)
+    z40 = np.arange(40)
+    z20 = np.arange(20)
+    stacks = []
+    for L in (10, 15):  # 49x and 13x over 40 slices, noise 0.1 m + 2 (raw float units)
+        m = 1000 * np.exp(-z40 / L)
+        stacks.append((f"gauss_raw_L{L}", np.stack(
+            [rng.normal(mi, 0.1 * mi + 2, (64, 64)) for mi in m]).clip(0).astype(np.float32)))
+    for decay in (10, 33):  # low-texture unit-range signal, 0.5 +- 0.05 times the decay
+        f = np.exp(-np.log(decay) * z20 / 19)
+        stacks.append((f"gauss_unit_{decay}x", (rng.normal(0.5, 0.05, (20, 64, 64))
+                                               * f[:, None, None]).clip(0, 1).astype(np.float32)))
+    f = np.exp(-np.log(33) * z20 / 19)
+    stacks.append(("uniform_unit_33x", (rng.uniform(0, 1, (20, 64, 64))
+                                        * f[:, None, None]).astype(np.float32)))
+    return stacks
+
+
+@pytest.mark.parametrize("method", ["gain", "gamma"])
+def test_z_decay_dense_strongly_decaying_stacks_keep_every_slice_in_the_fit(method):
+    """D21(a) (-): dense stacks with strong (10-50x) decay keep every slice in the fit.
+
+    Strategy: stacks with signal in every slice whose intensity decays 10x,
+    13x, 33x and 49x along Z (Gaussian texture in raw and unit range, and
+    uniform texture). They contain no background-only slice, so the
+    background reference (the dimmest slice) is signal. Before the fix, the
+    deepest slices were compared against their own median, called
+    'background only', and held at the last fitted factor (up to 40%
+    under-corrected). Expected outcome: no 'background only' warning, and the
+    output identical to exclude_background=False.
+    """
+    for name, stack in _dense_strong_decay_stacks():
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            out = correct_z_intensity_decay(stack, method=method)
+        msgs = [str(w.message) for w in rec if "background only" in str(w.message)]
+        assert not msgs, (name, msgs)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ref = correct_z_intensity_decay(stack, method=method, exclude_background=False)
+        np.testing.assert_array_equal(out, ref, err_msg=name)
+
+
+def test_z_decay_constant_slices_are_not_background():
+    """D21(a) (-): flat slices with zero MAD are not called background when brighter slices are flat too.
+
+    Strategy: a brightening stack of constant slices 0.2/0.3/0.4/0.5. Before,
+    MAD = 0 made slice 0 'background only'. Expected outcome: the brightening
+    warning only, no 'background only' warning.
+    """
+    stack = np.stack([np.full((8, 8), v, np.float32) for v in (0.2, 0.3, 0.4, 0.5)])
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        correct_z_intensity_decay(stack, method="gain")
+    assert not [w for w in rec if "background only" in str(w.message)]
+
+
 def test_z_decay_warns_when_a_factor_hits_its_bound():
     """D21(a): a correction factor clipped to its bound is reported with the slice indices.
 
@@ -943,19 +1039,19 @@ def test_z_decay_rejects_unknown_method():
 
 
 def test_contrast_stretch_per_slice_single_bound():
-    """Passing only p_max_array or only p_min_array stretches against each slice's own other bound."""
+    """Passing only in_max or only in_min stretches against each slice's own other bound."""
     base = np.array([[0.0, 250.0], [500.0, 1000.0]], dtype=np.float64)
     img = np.stack([base, base, base], axis=0)
 
     p_max = np.array([500.0, 1000.0, 250.0])
-    out_max = contrast_stretch_per_slice(img, p_max_array=p_max)
+    out_max = contrast_stretch_per_slice(img, in_max=p_max)
     assert out_max.shape == img.shape
     np.testing.assert_allclose(out_max[0], [[0.0, 0.5], [1.0, 1.0]])
     np.testing.assert_allclose(out_max[1], [[0.0, 0.25], [0.5, 1.0]])
     np.testing.assert_allclose(out_max[2], [[0.0, 1.0], [1.0, 1.0]])
 
     p_min = np.array([0.0, 200.0, 500.0])
-    out_min = contrast_stretch_per_slice(img, p_min_array=p_min)
+    out_min = contrast_stretch_per_slice(img, in_min=p_min)
     assert out_min.shape == img.shape
     np.testing.assert_allclose(out_min[0], [[0.0, 0.25], [0.5, 1.0]])
     np.testing.assert_allclose(out_min[1], [[0.0, 50.0 / 800.0], [300.0 / 800.0, 1.0]])
@@ -963,18 +1059,18 @@ def test_contrast_stretch_per_slice_single_bound():
 
 
 def test_contrast_stretch_per_slice_flip_z_axis_and_errors():
-    """FLIP_Z_AXIS=True reverses p_min_array/p_max_array along Z; missing bounds or non-3D raise."""
+    """flip_z=True reverses in_min/in_max along Z; missing bounds or non-3D raise."""
     base = np.array([[0.0, 100.0], [200.0, 400.0]], dtype=np.float64)
     img = np.stack([base, base, base], axis=0)
     p_min = np.array([0.0, 50.0, 100.0])
     p_max = np.array([100.0, 200.0, 400.0])
 
-    flipped = contrast_stretch_per_slice(img, p_min_array=p_min, p_max_array=p_max, FLIP_Z_AXIS=True)
-    direct = contrast_stretch_per_slice(img, p_min_array=p_min[::-1], p_max_array=p_max[::-1], FLIP_Z_AXIS=False)
+    flipped = contrast_stretch_per_slice(img, in_min=p_min, in_max=p_max, flip_z=True)
+    direct = contrast_stretch_per_slice(img, in_min=p_min[::-1], in_max=p_max[::-1], flip_z=False)
     np.testing.assert_allclose(flipped, direct)
 
     with pytest.raises(ValueError, match="3D numpy array"):
-        contrast_stretch_per_slice(base, p_max_array=p_max)
+        contrast_stretch_per_slice(base, in_max=p_max)
     with pytest.raises(ValueError, match="no difference"):
         contrast_stretch_per_slice(img)
 
@@ -984,7 +1080,7 @@ def test_contrast_stretch_per_slice_float_with_negative_lower_bound_maps_to_unit
 
     Strategy: stretch a float32 ramp from -1 to 9 between explicit bounds
     (-1, 9), and stack it with the same ramp shifted to 0..10; with only
-    p_max_array given, each slice's own minimum (-1 or 0) is the lower bound.
+    in_max given, each slice's own minimum (-1 or 0) is the lower bound.
     The sibling ``contrast_stretching`` already maps such data to [0, 1].
     Expected outcome: every slice spans exactly [0, 1] and equals
     (v - lower) / (upper - lower), so the shifted slices are identical whether
@@ -995,8 +1091,8 @@ def test_contrast_stretch_per_slice_float_with_negative_lower_bound_maps_to_unit
     expected = (ramp.astype(np.float64) + 1.0) / 10.0
     img = np.stack([ramp, ramp + 1.0])
 
-    both = contrast_stretch_per_slice(img, p_min_array=np.array([-1.0, 0.0]), p_max_array=np.array([9.0, 10.0]))
-    only_max = contrast_stretch_per_slice(img, p_max_array=np.array([9.0, 10.0]))
+    both = contrast_stretch_per_slice(img, in_min=np.array([-1.0, 0.0]), in_max=np.array([9.0, 10.0]))
+    only_max = contrast_stretch_per_slice(img, in_max=np.array([9.0, 10.0]))
     for out in (both, only_max):
         assert out.dtype == np.float32
         for z in range(2):
@@ -1004,7 +1100,7 @@ def test_contrast_stretch_per_slice_float_with_negative_lower_bound_maps_to_unit
             np.testing.assert_allclose(out[z], expected, atol=1e-6)
 
     u16 = np.stack([np.linspace(100, 1000, 64).reshape(8, 8)] * 2).astype(np.uint16)
-    out_u16 = contrast_stretch_per_slice(u16, p_min_array=np.array([100, 100]), p_max_array=np.array([1000, 1000]))
+    out_u16 = contrast_stretch_per_slice(u16, in_min=np.array([100, 100]), in_max=np.array([1000, 1000]))
     assert out_u16.dtype == np.uint16
     assert out_u16.min() == 0 and out_u16.max() == 65535
 

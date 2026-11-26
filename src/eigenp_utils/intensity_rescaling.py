@@ -154,7 +154,7 @@ def contrast_stretching(image, percentiles=None, p_max=None, *, p_min=None):
     When they are equal although the image is not constant (signal on fewer than
     (100 - upper)% of the pixels), the range falls back to the data maximum
     (and minimum) with a UserWarning. A constant image gives 0 (NaN stays NaN
-    in float output).
+    and +inf gives 1 in float output, as for a non-constant image).
 
     Changed (D02, 2026-11): the degenerate case used to return the input
     unchanged (raw units, not mapped to [0, 1]).
@@ -168,7 +168,9 @@ def contrast_stretching(image, percentiles=None, p_max=None, *, p_min=None):
     v_min, v_max = robust_range(image, lo_pct, hi_pct, n=max(np.size(image), 1), stacklevel=3)
     if v_min == v_max:
         image = np.asarray(image)
-        return np.where(np.isnan(image), image, 0).astype(image.dtype)
+        # +inf maps to 1 (and -inf to 0), as in the non-degenerate path
+        return np.where(np.isnan(image), image,
+                        np.where(image > v_max, 1, 0)).astype(image.dtype)
     out = rescale_intensity(image, in_range=(v_min, v_max), out_range=(0.0, 1.0))
     # float32 rounding of the bounds can leave the top at 0.9999999: pin both ends
     out[image >= v_max] = 1.0
@@ -322,11 +324,14 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
       with t = 0.5, s = 2 * y_ref and g_i = log(t) / log(t * y_fit[i] / y_ref)
       (clipped to [0.1, 10]). This maps y_fit[i] exactly onto y_ref and only
       depends on ratios, so the same counts give the same result whatever the
-      dtype container (uint8, uint16 or float in raw units).
+      dtype container (uint8, uint16 or float in raw units), up to clipping.
 
     Both methods clip the output to [0, 1] for data in [0, 1] (which includes
     every integer image, via the dtype decorator); float data in raw units are
-    only clipped at 0 when non-negative. A UserWarning lists the slices whose
+    only clipped at 0 when non-negative. 8/16-bit integers are divided by the
+    dtype maximum, so they saturate at 255/65535, but 32/64-bit integers are
+    divided by their own data maximum, so their output saturates at the
+    input's maximum value (for gamma and gain alike). A UserWarning lists the slices whose
     factor hit its clip bound.
 
     Parameters
@@ -349,6 +354,10 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
         background level B and its spread are the median and MAD of the slice
         with the lowest p99; a slice is background-only when its p99 is within
         10 MAD of B **and** less than 5% of the brightest slice's p99 above B.
+        The dimmest slice is only used as a background reference when at
+        least a quarter of the brightest slice (its p25) lies within 10 MAD
+        of B, i.e. the sample is sparse; in dense stacks (signal in every
+        slice) nothing is left out, however strong the decay.
         In sparse samples, p99 of a slice beyond the specimen measures camera
         background, and fitting it drags the curve down and amplifies that
         background 7-285x.
@@ -511,19 +520,30 @@ def _slice_p99(image):
 
 # A slice is background-only when its p99 is within _BG_MADS MADs of the
 # background level AND less than _BG_FRACTION of the brightest p99 above it.
+# The dimmest slice only counts as a background reference when at least a
+# quarter of the brightest slice (its p25) lies in the same background band,
+# i.e. the sample is sparse; dense stacks (signal everywhere) have none.
 _BG_MADS = 10.0
 _BG_FRACTION = 0.05
+_BG_REF_PERCENTILE = 25.0
 
 
 def _background_only_slices(image, p99, idx):
     """Indices (within idx) of slices whose p99 measures background only (D21a)."""
+    none = np.array([], dtype=int)
     j = idx[np.argmin(p99[idx])]
     ref = image[j][np.isfinite(image[j])]
     b = float(np.median(ref))
     mad = float(np.median(np.abs(ref - b)))
     top = float(np.max(p99[idx])) - b
-    if not top > 0:
-        return np.array([], dtype=int)
+    if not (top > 0 and mad > 0):
+        return none
+    # Is the dimmest slice really background? Then the brightest slice's
+    # background pixels (sparse sample) sit at the same level.
+    k = idx[np.argmax(p99[idx])]
+    bright = image[k][np.isfinite(image[k])]
+    if abs(float(np.percentile(bright, _BG_REF_PERCENTILE)) - b) > _BG_MADS * mad:
+        return none
     sel = (p99[idx] <= b + _BG_MADS * mad) & (p99[idx] - b <= _BG_FRACTION * top)
     return idx[sel]
 
@@ -810,7 +830,9 @@ def fit_basic_shading(
     Changed (R6-17, 2026-11): reweighting convergence uses the darkfield
     change (as MATLAB BaSiC) instead of repeating the flatfield change (a
     BaSiCPy quirk); this only affects get_darkfield=True. NaN/inf input
-    raises ValueError (R6-15).
+    raises ValueError (R6-15). New UserWarnings: sparse_cost_darkfield is
+    ignored in fitting_mode='approximate' (it only acts in 'ladmap'), and
+    get_darkfield=True with 'ladmap' gives an unreliable darkfield (R6-07).
     """
     if fitting_mode not in ('approximate', 'ladmap'):
         raise ValueError(f"fitting_mode '{fitting_mode}' is not valid. Use 'approximate' or 'ladmap'.")

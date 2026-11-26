@@ -333,7 +333,8 @@ def test_clahe_u8_axis_permutation_equivariance():
     and Y/X keep OpenCV's (i / k - 0.5), so a permutation that moves an axis
     into the leading position is no longer equivariant to 2 levels (it was
     when every axis used the OpenCV shift). Expected outcome: Y/X transpose
-    max <= 2; other permutations mean |diff| < 2.5 grey levels.
+    max <= 2; other permutations mean |diff| < 2.0 and max <= 12 grey levels
+    (measured after D20: mean 1.69 / 1.80, max 10 / 11, on both backends).
     """
     from scipy import ndimage
 
@@ -348,7 +349,7 @@ def test_clahe_u8_axis_permutation_equivariance():
         if perm == (0, 2, 1):
             assert d.max() <= 2, (perm, d.max())
         else:
-            assert d.mean() < 2.5, (perm, d.mean())
+            assert d.mean() < 2.0 and d.max() <= 12, (perm, d.mean(), d.max())
 
 
 def test_clahe_u8_z_constant_volume_equals_2d():

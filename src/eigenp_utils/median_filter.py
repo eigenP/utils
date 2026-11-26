@@ -214,9 +214,11 @@ def median_filter_fast(image, size=3, axes=(-2, -1), backend='auto'):
         are independent slices, so the package's channel-first convention
         (C, ..., Y, X) needs no option. A channel-last (Y, X, 3/4) image
         needs ``axes=(0, 1)``: with the default axes its colour axis is
-        filtered as if it were spatial, and a UserWarning says so (C-07). Supported dtypes: uint8, uint16, float32
-        and float64, plus the other integer types. bool, float16 and complex
-        raise TypeError (convert explicitly).
+        filtered as if it were spatial, and a UserWarning says so (C-07).
+        Changed (C-07, 2026-11): that UserWarning is new; the output is
+        unchanged. Supported dtypes: uint8, uint16, float32 and float64,
+        plus the other integer types. bool, float16 and complex raise
+        TypeError (convert explicitly).
     size : int
         Odd window side k (default 3). 3 and 5 use sorting networks; other
         odd k fall back to a per-pixel selection, O(k^2) per pixel. 1 returns

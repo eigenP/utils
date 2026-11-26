@@ -661,6 +661,9 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
     which blended 50% of the previous slice's (or channel's) LUT into each
     slice when the tile was 1 voxel thick, and made the result depend on the
     Z direction (up to 64 grey levels). 2D output is unchanged, bit for bit.
+    Changed (C-07 / R6-15, 2026-11): a UserWarning is now emitted for a
+    trailing axis of length 3 or 4 (a likely channel-last colour axis) and
+    for NaN input (mapped to 0, as before); the output is unchanged.
 
     Two backends give bit-identical results:
 
