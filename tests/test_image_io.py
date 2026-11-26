@@ -1,5 +1,6 @@
 """Tests for ``eigenp_utils.image_io``: STCZYX conversion, pixel sizes, channel metadata, TIFF I/O, and ``load_image``."""
 import sys
+import warnings
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -1063,6 +1064,43 @@ def test_check_zyx_input_rejects_only_dataarrays_above_3d():
         check_zyx_input(da, "my_func")
     for ok in (np.zeros((2, 3, 4, 5)), da.isel(S=0, T=0, C=0), da.isel(S=0, T=0, C=0, Z=0)):
         assert check_zyx_input(ok, "my_func") is ok
+
+
+_GUARDED = [
+    ("eigenp_utils.image_and_labels_utils", "windowed_slice_projection"),
+    ("eigenp_utils.image_and_labels_utils", "voronoi_otsu_labeling"),
+    ("eigenp_utils.surface_extraction", "extract_surface"),
+    ("eigenp_utils.surface_extraction", "extract_surface_tiled"),
+    ("eigenp_utils.intensity_rescaling", "correct_z_intensity_decay"),
+    ("eigenp_utils.clahe_equalize_adapthist", "clahe_u8"),
+    ("eigenp_utils.extended_depth_of_focus", "best_focus_image"),
+]
+
+
+@pytest.mark.parametrize("module, func", _GUARDED, ids=[f for _, f in _GUARDED])
+def test_processing_entry_points_reject_stczyx_dataarrays(module, func):
+    """D31: the (Z)YX processing entry points call check_zyx_input first.
+
+    (+) a 6-D STCZYX DataArray raises TypeError naming the function and to_zyx,
+        instead of being projected along S or failing with an unrelated shape error.
+    (-) the ZYX DataArray of one channel (da.isel(S=0, T=0, C=0)) is not rejected by
+        the guard (it may still fail on later, function-specific checks, but not
+        with the to_zyx TypeError).
+    """
+    import importlib
+
+    f = getattr(importlib.import_module(module), func)
+    da = _stczyx(nz=8, ny=32, nx=32)
+    with pytest.raises(TypeError, match=rf"{func}.*to_zyx"):
+        f(da)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            f(da.isel(S=0, T=0, C=0))
+    except TypeError as e:  # pragma: no cover - the (-) control
+        assert "to_zyx" not in str(e)
+    except Exception:
+        pass
 
 
 @pytest.mark.skipif(sys.platform == "emscripten", reason="no reliable mmap in Pyodide")

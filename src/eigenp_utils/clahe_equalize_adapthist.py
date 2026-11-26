@@ -27,7 +27,8 @@ import warnings
 import numpy as np
 
 try:
-    from ._conventions import _degenerate_fallback, robust_range, sample_values, warn_deprecated
+    from ._conventions import (
+        _degenerate_fallback, check_zyx_input, robust_range, sample_values, warn_deprecated)
 except ImportError:  # run as a standalone script: load _conventions.py from next to this file
     import importlib.util as _ilu
     import pathlib as _pathlib
@@ -36,9 +37,9 @@ except ImportError:  # run as a standalone script: load _conventions.py from nex
         "_eigenp_conventions", _pathlib.Path(__file__).resolve().with_name("_conventions.py"))
     _conv = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_conv)
-    _degenerate_fallback, robust_range, sample_values, warn_deprecated = (
-        _conv._degenerate_fallback, _conv.robust_range, _conv.sample_values,
-        _conv.warn_deprecated)
+    _degenerate_fallback, check_zyx_input, robust_range, sample_values, warn_deprecated = (
+        _conv._degenerate_fallback, _conv.check_zyx_input, _conv.robust_range,
+        _conv.sample_values, _conv.warn_deprecated)
 
 # scikit-image is imported inside the legacy `_my_clahe_` only, so `clahe_u8`
 # (numba / NumPy) works in minimal environments without scikit-image.
@@ -708,7 +709,12 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
     Returns
     -------
     out : ndarray of uint8, same shape as ``image``.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image, "clahe_u8")
     if backend not in ('auto', 'numba', 'numpy'):
         raise ValueError(f'Unknown backend: {backend!r}')
     image = np.asarray(image)

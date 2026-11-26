@@ -8,7 +8,7 @@ import scipy.ndimage as ndimage
 from scipy.fft import dctn, idctn
 import skimage.transform as transform
 
-from ._conventions import robust_range, warn_deprecated
+from ._conventions import check_zyx_input, robust_range, warn_deprecated
 
 logger = logging.getLogger(__name__)
 
@@ -384,7 +384,12 @@ def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', fi
     (c) method='gain' with fit_model=None raises ValueError (it multiplied
         the image by the gamma ramp, darkening deep slices);
     (d) brightening stacks warn instead of being silently left unchanged.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image, "correct_z_intensity_decay")
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
     if method not in ('gamma', 'gain'):
