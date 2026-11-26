@@ -199,96 +199,224 @@ def adjust_brightness_per_slice(*args, **kwargs):
     return correct_z_intensity_decay(*args, **kwargs)
 
 @ensure_float_and_restore_dtype
-def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', final_gamma=0.8, return_diagnostic=False):
+def correct_z_intensity_decay(image, method='gamma', fit_model='exponential', final_gamma=0.8,
+                              return_diagnostic=False, *, exclude_background=True):
     """
     Corrects Z-axis intensity attenuation using statistical decay modeling.
 
-    The per-slice 99th percentile is fitted with `fit_model` and every slice is
-    corrected so that its fitted percentile maps onto the brightest fitted one
-    (y_ref):
+    The per-slice 99th percentile (p99, NaN ignored) is fitted with
+    `fit_model` and every slice is corrected so that its fitted percentile maps
+    onto the brightest fitted one (y_ref):
 
-    - method='gain': multiply slice i by y_ref / y_fit[i].
+    - method='gain': multiply slice i by y_ref / y_fit[i] (clipped to [0.1, 100]).
     - method='gamma': power law on a rescaled intensity, I -> s * (I / s) ** g_i,
-      with g_i = log(t) / log(t * y_fit[i] / y_ref), t = min(y_ref, 0.5) for data in
-      [0, 1] (t = 0.5 otherwise) and s = y_ref / t. This still maps y_fit[i] exactly
-      onto y_ref; for [0, 1] data with y_ref <= 0.5 it is the classic
-      g_i = log(y_ref) / log(y_fit[i]). Anchoring at t <= 0.5 keeps g_i away from 0
-      when y_ref approaches full scale (log(y_ref) -> 0), which used to collapse every
-      factor to the 0.1 clip and flood deep slices.
+      with t = 0.5, s = 2 * y_ref and g_i = log(t) / log(t * y_fit[i] / y_ref)
+      (clipped to [0.1, 10]). This maps y_fit[i] exactly onto y_ref and only
+      depends on ratios, so the same counts give the same result whatever the
+      dtype container (uint8, uint16 or float in raw units).
 
-    Works for integer images (via the dtype decorator), floats in [0, 1] and floats in
-    raw intensity units. Gain output is clipped to [0, 1] only for [0, 1] data.
+    Both methods clip the output to [0, 1] for data in [0, 1] (which includes
+    every integer image, via the dtype decorator); float data in raw units are
+    only clipped at 0 when non-negative. A UserWarning lists the slices whose
+    factor hit its clip bound.
+
+    Parameters
+    ----------
+    image : (Z, Y, X) ndarray
+    method : {'gamma', 'gain'}
+    fit_model : {'exponential', 'linear'}, callable or None
+        'exponential' fits a * exp(b z) with b <= 0 (non-linear least squares
+        seeded by OLS on log p99); 'linear' is exact OLS. A callable takes
+        (z, p99) of the fitted slices and returns the fitted p99 at those z.
+        None applies the legacy linear ramp of gamma exponents from 1 to
+        `final_gamma` (method='gamma' only).
+    final_gamma : float
+        Last exponent of the fit_model=None ramp; ignored otherwise.
+    return_diagnostic : bool
+        Also return {'x_data', 'y_data_norm', 'y_fit_norm', 'gamma_fit_func'}
+        (every slice; y_data_norm is NaN for all-NaN slices).
+    exclude_background : bool
+        Leave background-only slices out of the fit (default True). The
+        background level B and its spread are the median and MAD of the slice
+        with the lowest p99; a slice is background-only when its p99 is within
+        10 MAD of B **and** less than 5% of the brightest slice's p99 above B.
+        In sparse samples, p99 of a slice beyond the specimen measures camera
+        background, and fitting it drags the curve down and amplifies that
+        background 7-285x.
+
+    Slices left out of the fit (background-only or all-NaN) take the fitted
+    curve interpolated between their fitted neighbours, held constant beyond
+    the first/last fitted slice (no extrapolation), so empty slices get the
+    factor of the nearest slice with signal. A UserWarning lists them.
+
+    The exponential model only decays: a stack that gets brighter with Z (by
+    more than 10% over the stack, e.g. acquired from the other side) is left
+    unchanged with a UserWarning; flip it (``image[::-1]``, see
+    `check_z_axis_orientation`) or use fit_model='linear'.
+
+    Changed (D21, 2026-11):
+    (a) background-only and all-NaN slices are left out of the fit (an
+        all-NaN slice used to abort with RuntimeError), and clipped factors
+        are reported;
+    (b) gamma is always anchored at t = 0.5, s = 2 * y_ref, and clipped like
+        gain. Before, [0, 1] data with y_ref <= 0.5 used the classic
+        I ** g (t = y_ref), so uint8 and uint16 holding the same counts
+        differed by up to 61 levels, and bright pixels in dim slices
+        overshot the range;
+    (c) method='gain' with fit_model=None raises ValueError (it multiplied
+        the image by the gamma ramp, darkening deep slices);
+    (d) brightening stacks warn instead of being silently left unchanged.
     """
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
     if method not in ('gamma', 'gain'):
         raise ValueError(f"Unknown correction method: {method}")
+    if fit_model is None and method == 'gain':
+        raise ValueError(
+            "fit_model=None (the final_gamma ramp of gamma exponents) applies to "
+            "method='gamma' only; use fit_model='exponential' or 'linear' with method='gain'.")
 
     num_slices = image.shape[0]
     adjusted_image = np.empty_like(image)
 
-    data_min, data_max = float(np.nanmin(image)), float(np.nanmax(image))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN input
+        data_min, data_max = float(np.nanmin(image)), float(np.nanmax(image))
+    if not np.isfinite(data_min):
+        data_min, data_max = 0.0, 0.0
     unit_range = data_min >= 0.0 and data_max <= 1.0
     if method == 'gamma' and data_min < 0:
         raise ValueError("method='gamma' needs non-negative intensities.")
 
     diagnostic_data = None
     scale = 1.0
+    upper = 1.0 if unit_range else np.inf
+    lower = 0.0 if data_min >= 0 else -np.inf
 
     if fit_model is not None:
         x_data = np.arange(num_slices)
-        y_data = np.array([np.nanpercentile(image[i], 99) for i in range(num_slices)])
-
-        y_data_norm = y_data
+        y_data = _slice_p99(image)
+        fit_idx = np.flatnonzero(np.isfinite(y_data))
+        left_out = {}
+        if fit_idx.size < num_slices:
+            left_out['all-NaN'] = np.flatnonzero(~np.isfinite(y_data))
+        if exclude_background and fit_idx.size > 2:
+            background = _background_only_slices(image, y_data, fit_idx)
+            if background.size and fit_idx.size - background.size >= 2:
+                left_out['background only'] = background
+                fit_idx = np.setdiff1d(fit_idx, background)
+        if fit_idx.size == 0:
+            fit_idx = x_data  # nothing finite: the fit fails with a clear error below
 
         try:
             if isinstance(fit_model, str):
                 if fit_model not in FIT_MODELS:
                     raise ValueError(f"Unknown fit_model: {fit_model}. Available: {list(FIT_MODELS.keys())}")
-                y_fit_norm = FIT_MODELS[fit_model](x_data, y_data_norm)
+                y_fit_sub = FIT_MODELS[fit_model](x_data[fit_idx], y_data[fit_idx])
             elif callable(fit_model):
-                y_fit_norm = fit_model(x_data, y_data_norm)
+                y_fit_sub = fit_model(x_data[fit_idx], y_data[fit_idx])
             else:
                 raise ValueError("fit_model must be a string or callable.")
         except Exception as e:
             raise RuntimeError(f"Z-decay fitting failed: {e}. Pipeline aborted.")
+        y_fit_sub = np.asarray(y_fit_sub, dtype=np.float64)
+        if fit_idx.size == num_slices:
+            y_fit = y_fit_sub
+        else:
+            # no extrapolation: hold the end values, interpolate inner gaps
+            y_fit = np.interp(x_data, x_data[fit_idx], y_fit_sub)
+
+        if left_out:
+            warnings.warn(
+                "correct_z_intensity_decay: slices left out of the fit ("
+                + "; ".join(f"{why}: {idx.tolist()}" for why, idx in left_out.items())
+                + "). They take the fitted value of the nearest fitted slices (no extrapolation).",
+                UserWarning, stacklevel=3)
+
+        if fit_model == 'exponential' and fit_idx.size >= 2:
+            y_pos = np.clip(y_data[fit_idx], 1e-9, None)
+            slope = np.polyfit(x_data[fit_idx], np.log(y_pos), 1)[0]
+            if np.exp(slope * (fit_idx[-1] - fit_idx[0])) > 1.1:
+                warnings.warn(
+                    "correct_z_intensity_decay: intensity increases with Z, but the "
+                    "exponential model only decays, so the stack is left uncorrected. "
+                    "The stack is probably upside down: flip it (image[::-1], see "
+                    "check_z_axis_orientation), or use fit_model='linear'.",
+                    UserWarning, stacklevel=3)
 
         if return_diagnostic:
             diagnostic_data = {
                 "x_data": x_data,
-                "y_data_norm": y_data_norm,
-                "y_fit_norm": y_fit_norm,
+                "y_data_norm": y_data,
+                "y_fit_norm": y_fit,
                 "gamma_fit_func": fit_model if isinstance(fit_model, str) else "custom_callable"
             }
 
-        y_ref = float(np.max(y_fit_norm))
+        y_ref = float(np.max(y_fit))
         if not y_ref > 0:
             factors = np.ones(num_slices)
         else:
             # Ratio of each slice's fitted percentile to the reference (scale-free)
-            ratio = np.clip(np.asarray(y_fit_norm, dtype=np.float64) / y_ref, 1e-9, 1.0)
+            ratio = np.clip(y_fit / y_ref, 1e-9, 1.0)
             if method == 'gamma':
-                t = min(y_ref, 0.5) if unit_range else 0.5
+                t = 0.5
                 scale = y_ref / t
-                factors = np.clip(np.log(t) / np.log(t * ratio), 0.1, 10.0)
+                raw, bounds = np.log(t) / np.log(t * ratio), (0.1, 10.0)
             else:
-                factors = np.clip(1.0 / ratio, 0.1, 100.0)
+                raw, bounds = 1.0 / ratio, (0.1, 100.0)
+            factors = np.clip(raw, *bounds)
+            clipped = np.flatnonzero(factors != raw)
+            if clipped.size:
+                warnings.warn(
+                    f"correct_z_intensity_decay: the {method} factor of slices "
+                    f"{clipped.tolist()} was clipped to [{bounds[0]}, {bounds[1]}]; the "
+                    "fitted curve falls too low there (empty slices or a poor fit).",
+                    UserWarning, stacklevel=3)
     else:
         factors = np.linspace(1.0, final_gamma, num_slices)
-        if method == 'gamma' and not unit_range and data_max > 0:
+        if not unit_range and data_max > 0:
             scale = data_max
 
-    upper = 1.0 if unit_range else np.inf
-    lower = 0.0 if data_min >= 0 else -np.inf
     for i in range(num_slices):
         if method == 'gamma':
-            adjusted_image[i, :, :] = scale * np.power(image[i, :, :] / scale, factors[i])
+            res = scale * np.power(image[i, :, :] / scale, factors[i])
+            if fit_model is not None:
+                res = np.clip(res, lower, upper)
+            adjusted_image[i, :, :] = res
         else:
             adjusted_image[i, :, :] = np.clip(image[i, :, :] * factors[i], lower, upper)
 
     if return_diagnostic:
         return {"image": adjusted_image, "diagnostic_data": diagnostic_data}
     return adjusted_image
+
+
+def _slice_p99(image):
+    """Per-slice nanpercentile 99 (NaN for an all-NaN slice, without a RuntimeWarning)."""
+    out = np.full(image.shape[0], np.nan)
+    for i in range(image.shape[0]):
+        if np.isfinite(image[i]).any():
+            out[i] = np.nanpercentile(image[i], 99)
+    return out
+
+
+# A slice is background-only when its p99 is within _BG_MADS MADs of the
+# background level AND less than _BG_FRACTION of the brightest p99 above it.
+_BG_MADS = 10.0
+_BG_FRACTION = 0.05
+
+
+def _background_only_slices(image, p99, idx):
+    """Indices (within idx) of slices whose p99 measures background only (D21a)."""
+    j = idx[np.argmin(p99[idx])]
+    ref = image[j][np.isfinite(image[j])]
+    b = float(np.median(ref))
+    mad = float(np.median(np.abs(ref - b)))
+    top = float(np.max(p99[idx])) - b
+    if not top > 0:
+        return np.array([], dtype=int)
+    sel = (p99[idx] <= b + _BG_MADS * mad) & (p99[idx] - b <= _BG_FRACTION * top)
+    return idx[sel]
 
 def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z_AXIS=False):
     """

@@ -660,16 +660,184 @@ def test_gamma_correction_near_full_scale_does_not_flood():
     assert means.max() < 1.5 * means[0]
 
 
-def test_gamma_correction_unchanged_for_mid_range_unit_data():
-    """For [0, 1] data with reference percentile <= 0.5, the classic power formula is preserved."""
+def test_gamma_correction_is_anchored_at_half_of_twice_the_reference():
+    """D21(b): gamma always uses t = 0.5, s = 2 * y_ref, I -> s * (I / s) ** g, g = log(0.5) / log(0.5 * y_fit / y_ref).
+
+    Changed (D21b, 2026-11): replaces test_gamma_correction_unchanged_for_mid_range_unit_data,
+    which pinned the classic I ** g formula for [0, 1] data with y_ref <= 0.5
+    (t = min(y_ref, 0.5)); that branch made the result depend on the dtype
+    container. The decision breaks that test on purpose.
+    """
     rng = np.random.default_rng(1)
     decay = np.exp(np.log(0.5) * np.arange(6) / 5)[:, None, None]
     stack = (rng.uniform(0, 0.4, (6, 16, 16)) * decay).astype(np.float32)
     out = correct_z_intensity_decay(stack, method="gamma", return_diagnostic=True)
-    y_fit = np.clip(out["diagnostic_data"]["y_fit_norm"], 1e-9, 1.0)
-    g = np.clip(np.log(y_fit.max()) / np.log(y_fit), 0.1, 10.0)
-    expected = np.stack([stack[i] ** g[i] for i in range(6)])
+    y_fit = np.asarray(out["diagnostic_data"]["y_fit_norm"], np.float64)
+    y_ref = y_fit.max()
+    g = np.clip(np.log(0.5) / np.log(0.5 * y_fit / y_ref), 0.1, 10.0)
+    s = 2 * y_ref
+    expected = np.stack([s * (stack[i] / s) ** g[i] for i in range(6)])
     np.testing.assert_allclose(out["image"], expected, rtol=1e-5, atol=1e-6)
+
+
+def test_gamma_correction_is_independent_of_the_dtype_container():
+    """D21(b) (+): the same counts stored as uint8, uint16 and float32 give the same gamma correction.
+
+    Strategy: a decaying stack of 8-bit counts (p99 ~ 100, max < 128, so no
+    container clips), stored in three dtypes; compare outputs in counts.
+    Before D21(b) uint16 took the classic I ** g branch (values ~ 0.002 after
+    the decorator) and differed by up to 61 levels. Expected outcome: max
+    |difference| <= 1 count (rounding). Negative control (-): gain was already
+    container-independent and stays so.
+    """
+    rng = np.random.default_rng(3)
+    decay = np.exp(np.log(0.4) * np.arange(8) / 7)[:, None, None]
+    counts = np.round(rng.uniform(0, 120, (8, 24, 24)) * decay)
+    outs = {}
+    for dt in (np.uint8, np.uint16, np.float32):
+        for method in ("gamma", "gain"):
+            outs[dt, method] = correct_z_intensity_decay(counts.astype(dt), method=method).astype(np.float64)
+    for method in ("gamma", "gain"):
+        ref = outs[np.float32, method]
+        for dt in (np.uint8, np.uint16):
+            d = np.abs(outs[dt, method] - ref).max()
+            assert d <= 1.0, (method, dt, d)
+
+
+def test_gamma_correction_is_clipped_like_gain():
+    """D21(b): gamma output stays within [0, 1] for [0, 1] data and does not trip the integer clip warning.
+
+    Strategy: a decaying uint8 stack with one bright object deep in Z (its
+    slice gets a strong gamma). Before, s * (I / s) ** g exceeded the dtype
+    for that object and the decorator clipped it with a RuntimeWarning; float
+    [0, 1] data came back up to ~1.5. Expected outcome: no 'Values outside'
+    RuntimeWarning, float output <= 1.
+    """
+    rng = np.random.default_rng(4)
+    decay = np.exp(np.log(0.3) * np.arange(10) / 9)[:, None, None]
+    stack = np.round(rng.uniform(0, 200, (10, 32, 32)) * decay).astype(np.uint8)
+    stack[9, :3, :3] = 250
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        out = correct_z_intensity_decay(stack, method="gamma")
+    assert out.dtype == np.uint8
+    out_f = correct_z_intensity_decay(stack.astype(np.float32) / 255, method="gamma")
+    assert float(out_f.max()) <= 1.0
+
+
+def _sparse_stack_with_empty_slices(seed=0):
+    """uint16 (20, 64, 64): background 100 +- 5 everywhere; 3% bright objects decaying with Z in z < 14 only."""
+    rng = np.random.default_rng(seed)
+    stack = rng.normal(100, 5, (20, 64, 64))
+    for z in range(14):
+        mask = rng.random((64, 64)) < 0.03
+        stack[z][mask] += 1000 * np.exp(-0.1 * z)
+    return np.round(stack).astype(np.uint16)
+
+
+@pytest.mark.parametrize("fit_model", ["exponential", "linear"])
+@pytest.mark.parametrize("method", ["gamma", "gain"])
+def test_z_decay_leaves_background_only_slices_out_of_the_fit(fit_model, method):
+    """D21(a) (+): background-only slices are left out of the fit, with a warning, and not amplified.
+
+    Strategy: the R6-03 case, a sparse stack whose slices 14-19 hold camera
+    background only. Before, their p99 (background) dragged the fit down and
+    the factors amplified that background 7-285x (linear gamma 285x).
+    Expected outcome: a UserWarning naming slices 14-19; those slices get
+    the factor of the deepest fitted slice (no extrapolation), so their
+    background comes out no brighter than slice 13's background.
+    """
+    stack = _sparse_stack_with_empty_slices()
+    with pytest.warns(UserWarning, match=r"background only.*\[14, 15, 16, 17, 18, 19\]"):
+        out = correct_z_intensity_decay(stack, method=method, fit_model=fit_model)
+    out = out.astype(np.float64)
+    bg13 = np.median(out[13])
+    for z in range(14, 20):
+        assert np.median(out[z]) <= 1.05 * bg13, (z, np.median(out[z]), bg13)
+    # the signal slices are still equalised: p99 of slice 13 close to slice 0's
+    p99 = [np.percentile(out[z], 99) for z in (0, 13)]
+    assert 0.7 < p99[1] / p99[0] < 1.3, p99
+
+
+def test_z_decay_dense_stacks_keep_every_slice_in_the_fit():
+    """D21(a) (-): dense stacks (every slice holds signal) are fitted on every slice, without a warning.
+
+    Strategy: the synthetic decay stacks of the restoration tests, uniform
+    intensities that decay 6.7x along Z (exp(-0.1 z)), and a 5x decay.
+    Expected outcome: no warning, and the same output as fitting all slices
+    (exclude_background=False).
+    """
+    for f in (lambda z: np.exp(-0.1 * z), lambda z: np.exp(np.log(0.2) * z / 19)):
+        stack, _ = _generate_trend_stack(shape=(20, 50, 50), decay_func=f)
+        for method in ("gain", "gamma"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                out = correct_z_intensity_decay(stack, method=method)
+            ref = correct_z_intensity_decay(stack, method=method, exclude_background=False)
+            np.testing.assert_array_equal(out, ref)
+
+
+def test_z_decay_warns_when_a_factor_hits_its_bound():
+    """D21(a): a correction factor clipped to its bound is reported with the slice indices.
+
+    Strategy: a custom fit_model whose fitted curve falls to 1e-4 of the top,
+    so the gain for the last slices would exceed 100x. Expected outcome: a
+    UserWarning naming the clipped slices; gains are capped at 100.
+    """
+    stack = np.full((5, 8, 8), 0.005, np.float32)
+
+    def steep(x, y):
+        return np.array([1.0, 0.5, 0.1, 1e-3, 1e-4])[: len(x)]
+
+    with pytest.warns(UserWarning, match=r"slices \[3, 4\] was clipped"):
+        out = correct_z_intensity_decay(stack, method="gain", fit_model=steep)
+    np.testing.assert_allclose(out[4], 0.5, rtol=1e-5)
+
+
+def test_z_decay_gain_with_linear_ramp_raises():
+    """D21(c): method='gain' with fit_model=None raises instead of using gamma exponents as gains.
+
+    Before, the final_gamma ramp (1 -> 0.8) multiplied the image, darkening
+    deep slices further. Negative control: method='gamma' with fit_model=None
+    still works.
+    """
+    stack = np.random.default_rng(0).uniform(0.1, 0.8, (5, 8, 8)).astype(np.float32)
+    with pytest.raises(ValueError, match="fit_model=None"):
+        correct_z_intensity_decay(stack, method="gain", fit_model=None)
+    assert correct_z_intensity_decay(stack, method="gamma", fit_model=None).shape == stack.shape
+
+
+def test_z_decay_warns_on_a_brightening_stack():
+    """D21(d): the exponential model keeps decay <= 0, and warns when intensity rises with Z.
+
+    Strategy: a stack whose p99 rises 2.5x along Z (acquired upside down).
+    Expected outcome: a UserWarning suggesting a flip; the output is
+    unchanged (factors 1). Negative control: the flipped stack corrects
+    without that warning.
+    """
+    stack, _ = _generate_trend_stack(shape=(10, 32, 32), decay_func=lambda z: 0.4 * np.exp(0.1 * z))
+    with pytest.warns(UserWarning, match="increases with Z"):
+        out = correct_z_intensity_decay(stack, method="gain")
+    np.testing.assert_allclose(out, stack, rtol=1e-6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        correct_z_intensity_decay(np.ascontiguousarray(stack[::-1]), method="gain")
+
+
+def test_z_decay_skips_all_nan_slices():
+    """R6-15: an all-NaN slice is left out of the fit instead of aborting with RuntimeError.
+
+    Expected outcome: the other slices are corrected as if the NaN slice were
+    absent (p99 equalised), and the NaN slice stays NaN.
+    """
+    stack, _ = _generate_trend_stack(shape=(10, 32, 32), decay_func=lambda z: np.exp(-0.1 * z))
+    stack[4] = np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        out = correct_z_intensity_decay(stack, method="gain")
+    assert np.isnan(out[4]).all()
+    p99 = np.array([np.percentile(out[z], 99) for z in range(10) if z != 4])
+    assert np.std(p99) / np.mean(p99) < 0.02
 
 
 def test_z_decay_rejects_unknown_method():
