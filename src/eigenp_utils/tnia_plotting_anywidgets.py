@@ -2668,6 +2668,14 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     screen pixels (at least the marker's size) among the points inside the
     panel's drawn slab. Clicks on the padding of a rotated panel are ignored.
 
+    ``snap_depth`` (default True): a click on a projection stores, as the
+    out-of-plane coordinate, the depth of the voxel the projection shows
+    there (argmax of the summed visible channels inside the slab, argmin for
+    'minip'), falling back to the slab centre for a flat profile or the
+    'average' projection. False stores the slab centre.
+
+    Changed (D11, 2026-11): the slab centre was always stored, up to half
+    the slab thickness away from the clicked object.
     Changed (D10, 2026-11): the delete radius was 20 voxel indices mixed
     across axes, and the visible slab was the (x_s, x_t) form, which drops
     one plane of an even-width slab.
@@ -2723,7 +2731,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     def annotate(self, value):
         self.annotation_mode = bool(value)
 
-    def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, annotate=False, *args, **kwargs):
+    def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, annotate=False,
+                 *args, snap_depth=True, **kwargs):
         if colors is not None:
             warn_deprecated("The 'colors' parameter", "'colormap'")
             if colormap is None:
@@ -2789,6 +2798,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             bd_list = [bit_depth] * n_img
         kwargs['bit_depth'] = bd_list + [8]
 
+        self.snap_depth = bool(snap_depth)
+
         # Initialize superclass
         super().__init__(im_list, colormap=colors_list, opacity=opacity_list, *args, **kwargs)
 
@@ -2853,6 +2864,11 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         # it must not be clamped onto the border and added as a real point.
         extent = {'x': X, 'y': Y, 'z': Z}
         outside = any(not 0 <= i < extent[axis] for axis, i in idx.items())
+        # The out-of-plane coordinate: the depth of what the projection shows
+        # at the clicked pixel (D11), else the slab centre
+        normal = next(a for a in 'xyz' if a not in idx)
+        if not outside:
+            idx[normal] = self._snap_depth(normal, idx)
         data_x = idx.get('x', self.x_s)
         data_y = idx.get('y', self.y_s)
         data_z = idx.get('z', self.z_s)
@@ -2867,6 +2883,40 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             self.add_point(data_z, data_y, data_x)
         elif self.annotation_action == 'delete':
             self._delete_near(plane, frac_x, frac_y, info)
+
+    def _snap_depth(self, axis, idx):
+        """
+        Index along ``axis`` (the panel's normal) of the voxel the projection
+        shows at the in-plane indices ``idx`` (D11).
+
+        With ``snap_depth`` the visible image channels (opacity > 0, the
+        annotation channel excluded), each normalised by its display range,
+        are summed along the ray inside the drawn slab; the argmax ('mip',
+        'attenuated_mip') or argmin ('minip') is returned. A flat profile, the
+        'average' projection or ``snap_depth=False`` give the slab centre.
+        """
+        centre = getattr(self, f'{axis}_s')
+        if not self.snap_depth or self.projection == 'average':
+            return centre
+        lo, hi = getattr(self, f'{axis}_start'), getattr(self, f'{axis}_end')
+        if hi <= lo:
+            return centre
+        sl = {a: idx.get(a) for a in 'xyz'}
+        sl[axis] = slice(lo, hi + 1)
+        profile = None
+        n_img = self.num_channels - 1  # the last channel holds the annotations
+        for i in range(n_img):
+            if float(self.opacity_list[i]) <= 0:
+                continue
+            vmin = self._auto_vmin[i] if self.vmin_list[i] == "" else float(self.vmin_list[i])
+            vmax = self._auto_vmax[i] if self.vmax_list[i] == "" else float(self.vmax_list[i])
+            ray = np.asarray(self.im_orig[i][sl['z'], sl['y'], sl['x']], dtype=np.float64)
+            ray = np.nan_to_num((ray - vmin) / max(vmax - vmin, 1e-12), nan=0.0, posinf=0.0, neginf=0.0)
+            profile = ray if profile is None else profile + ray
+        if profile is None or profile.size == 0 or np.all(profile == profile[0]):
+            return centre
+        k = np.argmin(profile) if self.projection == 'minip' else np.argmax(profile)
+        return lo + int(k)
 
     # Delete radius in rendered (PNG) pixels (D10): fixed on screen, whatever
     # the voxel size or the panel's zoom.
@@ -3900,6 +3950,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     colors=None, opacity=None,
     point_size_scale=0.01,
     annotate=False,
+    snap_depth=True,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
@@ -4024,7 +4075,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     w = TNIAAnnotatorWidget(
         im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
         vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
-        point_size_scale=point_size_scale, annotate=annotate,
+        point_size_scale=point_size_scale, annotate=annotate, snap_depth=snap_depth,
         slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
         channel_label_fontsize_pt=channel_label_fontsize_pt,
         blending=blending, projection=projection, attenuation=attenuation,

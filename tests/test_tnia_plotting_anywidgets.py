@@ -4790,3 +4790,64 @@ def test_half_voxel_slab_kwargs_select_even_widths():
     assert (w.x_start, w.x_end) == (10, 13)
     w = show_zyx_max_slice_interactive(vol, slabs_position=(8, 24, 11), slabs_thickness=(1, 1, 1), figsize=(4, 4))
     assert (w.x_start, w.x_end) == (10, 12)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): depth of annotated points (D11)
+# ---------------------------------------------------------------------------
+
+def _click_voxel(w, plane, z, y, x, t):
+    fig = w._render()
+    ax = getattr(fig, f"ax{plane.upper()}")
+    a, b = {"xy": (x, y), "zy": (z, y), "xz": (x, z)}[plane]
+    sa, sb = {"xy": (w.sx, w.sy), "zy": (w.sz, w.sy), "xz": (w.sx, w.sz)}[plane]
+    fx, fy = _fig_frac(fig, ax, (a + 0.5) * sa, (b + 0.5) * sb)
+    w.click_coords = {"plane": plane, "x": fx, "y": fy, "t": t}
+
+
+@pytest.mark.parametrize("plane", ["xy", "zy", "xz"])
+def test_annotation_on_a_projection_snaps_to_the_depth_of_the_clicked_object(plane):
+    """D11 / R2-08: a click on a thick-slab MIP stores the depth of the bright voxel, not the slab centre.
+
+    Strategy: a spot at (z, y, x) = (5, 30, 40) in a 40 x 64 x 64 volume,
+    full-volume slabs, click the spot on each panel; then the same with
+    ``snap_depth=False``, and a hidden (opacity 0) bright channel elsewhere
+    on the same ray.
+    Expected outcome: the stored point is (5, 30, 40) (the slab centre used
+    to be stored: e.g. z = 20 on XY); with ``snap_depth=False`` the
+    out-of-plane coordinate is the slab centre; the hidden channel is
+    ignored.
+    """
+    vol = np.zeros((40, 64, 64), np.float32)
+    vol[5, 30, 40] = 100.0
+    other = np.zeros_like(vol)
+    other[30, 30, 40] = other[25, 30, 40] = 1000.0
+    other[5, 50, 40] = other[5, 30, 60] = 1000.0
+    full = dict(slabs_thickness=(1000, 1000, 1000), figsize=(4, 4))
+
+    w = show_zyx_max_slice_interactive_point_annotator([vol, other], opacity=[1, 0], annotate=True, **full)
+    _click_voxel(w, plane, 5, 30, 40, 1)
+    assert w.points == [[5, 30, 40]]
+
+    w = show_zyx_max_slice_interactive_point_annotator(vol, annotate=True, snap_depth=False, **full)
+    _click_voxel(w, plane, 5, 30, 40, 1)
+    centre = {"xy": [20, 30, 40], "zy": [5, 30, 32], "xz": [5, 32, 40]}[plane]
+    assert w.points == [centre]
+
+
+def test_snap_depth_falls_back_to_the_centre_for_flat_profiles_and_average():
+    """D11 negative controls: a flat ray and the 'average' projection keep the slab centre.
+
+    Strategy: click an all-zero volume (flat profile), and a spot volume drawn
+    with ``projection='average'`` (no single voxel is shown).
+    Expected outcome: the stored depth is the slab centre in both cases.
+    """
+    vol = np.zeros((40, 64, 64), np.float32)
+    w = show_zyx_max_slice_interactive_point_annotator(vol, annotate=True, slabs_thickness=(1000, 1000, 1000))
+    _click_voxel(w, "xy", 5, 30, 40, 1)
+    assert w.points == [[20, 30, 40]]
+    vol[5, 30, 40] = 1.0
+    w = show_zyx_max_slice_interactive_point_annotator(vol, annotate=True, projection="average",
+                                                       slabs_thickness=(1000, 1000, 1000))
+    _click_voxel(w, "xy", 5, 30, 40, 1)
+    assert w.points == [[20, 30, 40]]
