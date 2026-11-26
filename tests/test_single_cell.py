@@ -360,15 +360,18 @@ def test_check_gene_adata():
 
 
 def test_pflogpf_import_error(capsys, monkeypatch):
-    """pflogpf without scclr installed prints the docstring and raises ImportError."""
+    """pflogpf without scclr installed raises ImportError with the install steps, printing nothing.
+
+    Changed (D07, 2026-11): the docstring is no longer printed; the error message
+    carries the install instructions instead.
+    """
     adata = AnnData(X=np.array([[1.0, 2.0], [3.0, 4.0]]))
     monkeypatch.setitem(sys.modules, "scclr", None)
 
-    with pytest.raises(ImportError, match="The 'scclr' package is required"):
+    with pytest.raises(ImportError, match="The 'scclr' package is required.*maturin develop"):
         pflogpf(adata)
 
-    captured = capsys.readouterr()
-    assert "Computes the PFlogPF (shifted-CLR) normalization" in captured.out
+    assert capsys.readouterr().out == ""
 
 
 def test_pflogpf_non_integer_counts():
@@ -1497,7 +1500,8 @@ def test_annotate_clusters_validation_and_deprecation():
     with pytest.raises(ValueError, match="Provide `cell_type_markers_dict`"):
         annotate_clusters_by_markers(adata, cluster_key="leiden", scores=None)
 
-    with pytest.warns(DeprecationWarning, match="beta.*deprecated"):
+    # Changed (D08): FutureWarning naming the removal version (was DeprecationWarning).
+    with pytest.warns(FutureWarning, match="beta.*deprecated.*0.1.0"):
         annotate_clusters_by_markers(
             adata,
             cluster_key="leiden",

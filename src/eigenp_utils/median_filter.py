@@ -2,6 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "numpy",
+#     "numba",  # optional accelerator (the [fast] extra); NumPy fallback otherwise
 # ]
 # ///
 """Fast k x k median filter over two axes of an N-D stack (numba or NumPy).

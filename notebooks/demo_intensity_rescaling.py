@@ -100,7 +100,7 @@ def _(mo):
 
     Showcasing:
     * `contrast_stretching`
-    * `adjust_brightness_per_slice` (correcting Z-decay)
+    * `correct_z_intensity_decay` (correcting Z-decay)
     * `normalize_image`
     """)
     return
@@ -114,14 +114,18 @@ def _():
     from eigenp_utils.io import download_file_async
     from eigenp_utils.intensity_rescaling import (
         contrast_stretching,
-        adjust_brightness_per_slice,
+        correct_z_intensity_decay,
         normalize_image
     )
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
+    # skimage.data.cells3d: voxel size (Z, Y, X) = (0.29, 0.26, 0.26) µm
+    CELLS3D_PIXEL_SIZES = {'Z': 0.29, 'Y': 0.26, 'X': 0.26, 'unit': 'µm'}
+
     return (
-        adjust_brightness_per_slice,
+        CELLS3D_PIXEL_SIZES,
         contrast_stretching,
+        correct_z_intensity_decay,
         download_file_async,
         imread,
         np,
@@ -152,10 +156,10 @@ def _(cells_path, imread, np):
 
 
 @app.cell
-def _(cells, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
-    show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colormap=['lime', 'magenta'], pixel_sizes=CELLS3D_PIXEL_SIZES)
     return
 
 
@@ -172,13 +176,13 @@ def _(mo):
 def _(contrast_stretching, decayed_stack, p_max, p_min):
     # Just show middle slice
     mid_slice = decayed_stack[30]
-    stretched = contrast_stretching(mid_slice, p_min=p_min.value, p_max=p_max.value)
+    stretched = contrast_stretching(mid_slice, percentiles=(p_min.value, p_max.value))
     return mid_slice, stretched
 
 
 @app.cell
-def _(decayed_stack, show_zyx_max_slice_interactive):
-    show_zyx_max_slice_interactive(decayed_stack)
+def _(CELLS3D_PIXEL_SIZES, decayed_stack, show_zyx_max_slice_interactive):
+    show_zyx_max_slice_interactive(decayed_stack, pixel_sizes=CELLS3D_PIXEL_SIZES)
     return
 
 
@@ -196,42 +200,47 @@ def _(mid_slice, plt, stretched):
 
 @app.cell
 def _(mo):
-    mo.md("## Z-Decay Correction (`adjust_brightness_per_slice`)")
+    mo.md("## Z-Decay Correction (`correct_z_intensity_decay`)")
     fit_dropdown = mo.ui.dropdown(
         options={'Linear Ramp': None, 'Exponential Fit': 'exponential', 'Linear Fit': 'linear'},
         value='Exponential Fit',
-        label="Fit Method"
+        label="Fit Model"
     )
+    return (fit_dropdown,)
 
+
+@app.cell
+def _(fit_dropdown, mo):
+    # 'gain' needs a fitted model: with the linear ramp (fit_model=None) it raises
     correction_method = mo.ui.radio(
-        options=['gamma', 'gain'],
+        options=['gamma'] if fit_dropdown.value is None else ['gamma', 'gain'],
         value='gamma',
         label="Correction Mode"
     )
 
     mo.vstack([fit_dropdown, correction_method])
-    return correction_method, fit_dropdown
+    return (correction_method,)
 
 
 @app.cell
 def _(
-    adjust_brightness_per_slice,
+    correct_z_intensity_decay,
     correction_method,
     decayed_stack,
     fit_dropdown,
 ):
-    corrected_stack = adjust_brightness_per_slice(
+    corrected_stack = correct_z_intensity_decay(
         decayed_stack,
-        gamma_fit_func=fit_dropdown.value,
         method=correction_method.value,
-        final_gamma=0.5 # Used if None (manual ramp)
+        fit_model=fit_dropdown.value,
+        final_gamma=0.5 # Used if fit_model is None (manual ramp)
     )
     return (corrected_stack,)
 
 
 @app.cell
-def _(corrected_stack, show_zyx_max_slice_interactive):
-    show_zyx_max_slice_interactive(corrected_stack)
+def _(CELLS3D_PIXEL_SIZES, corrected_stack, show_zyx_max_slice_interactive):
+    show_zyx_max_slice_interactive(corrected_stack, pixel_sizes=CELLS3D_PIXEL_SIZES)
     return
 
 

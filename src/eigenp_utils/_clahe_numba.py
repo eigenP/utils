@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "numba",
+# ]
+# ///
 """numba kernels for `clahe_equalize_adapthist.clahe_u8` (imported lazily).
 
 Importing this module raises ImportError when numba is missing, which makes

@@ -100,8 +100,9 @@ def _(mo):
     Demonstrating `clahe_u8` from `eigenp_utils.clahe_equalize_adapthist`:
     fast N-D 8-bit CLAHE for segmentation preprocessing (uint8 output), on a
     2D slice and on the whole 3D stack. It replaces the deprecated
-    `_my_clahe_` (same `clip_limit` scale; float output in [0, 1]), which is
-    shown only for the timing comparison below.
+    `_my_clahe_`; the reference below is scikit-image's
+    `skimage.exposure.equalize_adapthist`, the algorithm `_my_clahe_` was
+    adapted from (same `clip_limit` scale; float output in [0, 1]).
     """)
     return
 
@@ -115,23 +116,24 @@ def _():
     import numpy as np
     from skimage.io import imread
     from eigenp_utils.io import download_file_async
-    import warnings
-    # marimo keeps names starting with "_" private to their cell: alias it
-    from eigenp_utils.clahe_equalize_adapthist import _my_clahe_ as my_clahe
+    from skimage.exposure import equalize_adapthist
     from eigenp_utils.clahe_equalize_adapthist import clahe_u8
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
+    # skimage.data.cells3d: voxel size (Z, Y, X) = (0.29, 0.26, 0.26) µm
+    CELLS3D_PIXEL_SIZES = {'Z': 0.29, 'Y': 0.26, 'X': 0.26, 'unit': 'µm'}
+
     return (
+        CELLS3D_PIXEL_SIZES,
         clahe_u8,
         download_file_async,
+        equalize_adapthist,
         imread,
         importlib,
-        my_clahe,
         np,
         plt,
         show_zyx_max_slice_interactive,
         time,
-        warnings,
     )
 
 
@@ -154,10 +156,10 @@ def _(cells_path, imread):
 
 
 @app.cell
-def _(cells, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
-    show_zyx_max_slice_interactive([nuclei, membrane], colormap=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colormap=['lime', 'magenta'], pixel_sizes=CELLS3D_PIXEL_SIZES)
     return
 
 
@@ -205,7 +207,7 @@ def _(mo):
     not quantitative intensities. Non-uint8 input (here the raw uint16 stack)
     is mapped to 8 bits between the 0.1 and 99.9 percentiles, so a few hot or
     dead pixels do not set the range (this is why it looks brighter than
-    `_my_clahe_`, which maps the stack's min/max). Contextual regions are 3D, so contrast
+    `equalize_adapthist`, which maps the stack's min/max). Contextual regions are 3D, so contrast
     varies smoothly along Z too, without slice-to-slice banding (XZ views).
     The sliders above set the clip limit and the Y/X tile size; the Z tile is
     1/8 of the stack.
@@ -222,11 +224,10 @@ def _(
     cells,
     clahe_u8,
     clip_slider,
+    equalize_adapthist,
     importlib,
     kernel_size_slider,
-    my_clahe,
     time,
-    warnings,
 ):
     membrane_stack = cells[:, 0, :, :]
     kernel_3d = (max(membrane_stack.shape[0] // 8, 1),) + (kernel_size_slider.value,) * 2
@@ -234,12 +235,10 @@ def _(
     # warm-up: excludes numba's one-off compilation / cache load from the timing
     clahe_u8(membrane_stack[:2, :16, :16])
 
-    # _my_clahe_ is deprecated: run here only as the timing reference
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "_my_clahe_ is deprecated", DeprecationWarning)
-        _t0 = time.perf_counter()
-        volume_ref = my_clahe(membrane_stack, clip_limit=clip_slider.value, kernel_size=kernel_3d)
-        t_ref = time.perf_counter() - _t0
+    # scikit-image's CLAHE (what the deprecated _my_clahe_ wrapped): timing reference
+    _t0 = time.perf_counter()
+    volume_ref = equalize_adapthist(membrane_stack, clip_limit=clip_slider.value, kernel_size=kernel_3d)
+    t_ref = time.perf_counter() - _t0
 
     _t0 = time.perf_counter()
     volume_fast = clahe_u8(membrane_stack, clip_limit=clip_slider.value, kernel_size=kernel_3d)
@@ -251,31 +250,33 @@ def _(
 def _(clahe_backend, kernel_3d, membrane_stack, mo, t_fast, t_ref):
     mo.md(f"""
     3D CLAHE of the {membrane_stack.shape} membrane stack, tiles {kernel_3d}:
-    `_my_clahe_` (deprecated) **{t_ref * 1e3:.0f} ms**, `clahe_u8` ({clahe_backend} backend)
+    scikit-image `equalize_adapthist` **{t_ref * 1e3:.0f} ms**, `clahe_u8` ({clahe_backend} backend)
     **{t_fast * 1e3:.0f} ms** (**{t_ref / t_fast:.0f}x** faster).
     """)
     return
 
 
 @app.cell
-def _(clip_slider, membrane_stack, np, plt, volume_fast, volume_ref):
+def _(CELLS3D_PIXEL_SIZES, clip_slider, membrane_stack, np, plt, volume_fast, volume_ref):
     z_show = membrane_stack.shape[0] // 2
     y_show = membrane_stack.shape[1] // 2
+    # cells3d's Z step / XY pixel size: 0.29 / 0.26 = 1.12
+    z_aspect = CELLS3D_PIXEL_SIZES['Z'] / CELLS3D_PIXEL_SIZES['X']
     panels = [
         ("Original", membrane_stack),
-        ("_my_clahe_ (deprecated)", volume_ref),
+        ("skimage equalize_adapthist", volume_ref),
         ("clahe_u8", volume_fast),
     ]
     fig_3d, axes_3d = plt.subplots(
         2, 3, figsize=(12, 6),
-        height_ratios=[membrane_stack.shape[1], 2 * membrane_stack.shape[0]],
+        height_ratios=[membrane_stack.shape[1], z_aspect * membrane_stack.shape[0]],
     )
     for col, (name, vol) in enumerate(panels):
         axes_3d[0, col].imshow(vol[z_show], cmap="gray")
         axes_3d[0, col].set_title(f"{name}: XY, z={z_show}")
-        # aspect=2: cells3d's Z step is about twice its XY pixel size
+        # physical aspect: one Z step is z_aspect XY pixels tall
         axes_3d[1, col].imshow(
-            np.asarray(vol[:, y_show, :], dtype=np.float32), cmap="gray", aspect=2
+            np.asarray(vol[:, y_show, :], dtype=np.float32), cmap="gray", aspect=z_aspect
         )
         axes_3d[1, col].set_title(f"XZ, y={y_show}")
     for ax in axes_3d.ravel():

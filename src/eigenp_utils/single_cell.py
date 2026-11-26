@@ -1,3 +1,22 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "pandas",
+#     "scipy",
+#     "matplotlib",
+#     "scikit-learn",
+#     "seaborn",
+#     "scanpy",
+#     "anndata",
+#     "pacmap>=0.7.3",  # optional from here on: the [single-cell] extra
+#     "esda",
+#     "libpysal",
+#     "triku",
+#     "leidenalg",
+#     "adjustText",
+# ]
+# ///
 from __future__ import annotations
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any, Union
 import contextlib
@@ -22,6 +41,7 @@ from matplotlib.lines import Line2D
 import re
 from .plotting_utils import get_nice_number
 from .stats import robust_standardize
+from ._conventions import warn_deprecated
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +392,9 @@ def pflogpf(
     Optional[sc.AnnData]
         If `copy` is True, returns a new AnnData object with PFlogPF values in `.layers[key_added]`.
         Otherwise, modifies `adata` in-place and returns `None`.
+
+    Changed (D07, 2026-11): when scclr is missing, the ImportError carries the
+    install steps; the docstring is no longer printed.
     """
     if not _has_integer_like_counts(adata.X):
         raise ValueError(
@@ -382,12 +405,12 @@ def pflogpf(
 
     try:
         import scclr
-    except ImportError:
-        print(pflogpf.__doc__)
+    except ImportError as e:
         raise ImportError(
-            "The 'scclr' package is required for this function. "
-            "Please install it using the instructions in the docstring above."
-        )
+            "The 'scclr' package is required for this function. It is a Rust extension "
+            "(https://github.com/cleartools/scclr): clone it, then `uv pip install maturin` "
+            "and `uv run maturin develop --release` in the clone. See help(pflogpf)."
+        ) from e
 
     # Work on a copy if requested
     A = adata.copy() if copy else adata
@@ -1023,6 +1046,10 @@ def import_obs_to_adata_from_csv(
         '{obs_key}_imported' (or '{obs_key}_imported_2', ... if that name is taken too).
     to_category
         If True, convert object-type columns in the imported data to categorical.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     # Read the table (auto-detects comma vs tab)
     df = pd.read_csv(path, index_col=index_col, sep=sep, engine=engine)
@@ -1032,9 +1059,9 @@ def import_obs_to_adata_from_csv(
     df.columns = df.columns.str.strip()
 
     if obs_key not in df.columns:
-        print("HEAD OF CSV:")
-        print(df.head())
-        print(f"\nAvailable columns in the CSV are: {df.columns.tolist()}")
+        logger.debug("HEAD OF CSV:")
+        logger.debug("%s", df.head())
+        logger.debug(f"Available columns in the CSV are: {df.columns.tolist()}")
         raise ValueError(f"Observation key '{obs_key}' not found in CSV. Available columns: {df.columns.tolist()}")
 
     # Check for colors
@@ -1056,7 +1083,7 @@ def import_obs_to_adata_from_csv(
     target_col = obs_key
     if overwrite_existing:
         if overlapping_cols:
-            print(f"Overwriting column in adata.obs: {obs_key}")
+            logger.info(f"Overwriting column in adata.obs: {obs_key}")
             adata.obs = adata.obs.drop(columns=overlapping_cols)
 
         # Join
@@ -1071,7 +1098,7 @@ def import_obs_to_adata_from_csv(
             while target_col in adata.obs.columns:
                 target_col = f"{obs_key}{suffix}_{n}"
                 n += 1
-            print(f"Column {obs_key} exists. Storing the imported data as '{target_col}'.")
+            logger.info(f"Column {obs_key} exists. Storing the imported data as '{target_col}'.")
             df_join = df_join.rename(columns={obs_key: target_col})
         adata.obs = adata.obs.join(df_join, how="left")
 
@@ -1101,7 +1128,7 @@ def import_obs_to_adata_from_csv(
             # Store the list of colors in adata.uns
             target_color_key = f"{target_col}_colors"
             adata.uns[target_color_key] = colors_list
-            print(f"Imported colors for '{target_col}' into adata.uns['{target_color_key}'].")
+            logger.info(f"Imported colors for '{target_col}' into adata.uns['{target_color_key}'].")
         else:
             warnings.warn(f"'{target_col}' is not categorical. Colors from '{color_key}' not imported.")
     else:
@@ -1109,7 +1136,7 @@ def import_obs_to_adata_from_csv(
 
     # Quick sanity check
     n_common = adata.obs_names.isin(df.index).sum()
-    print(f"Annotated {n_common}/{adata.n_obs} cells from CSV.")
+    logger.info(f"Annotated {n_common}/{adata.n_obs} cells from CSV.")
 
 
 def plot_marker_genes_dict_on_embedding(
@@ -1172,6 +1199,8 @@ def plot_marker_genes_dict_on_embedding(
     Notes:
         Supports passing a list of `score_method`s to compute and dynamically append multiple
         types of cell type scores (e.g., standard vs. net scores) to the visualized embedding.
+
+    Changed (D07, 2026-11): messages that used to be printed are UserWarnings.
     """
 
     # 1. Validate Basis
@@ -1255,7 +1284,7 @@ def plot_marker_genes_dict_on_embedding(
 
     for idx_i, (tissue, genes) in enumerate(marker_genes.items()):
         if not genes:
-            print(f"Skipping {tissue}: No valid marker genes found.")
+            warnings.warn(f"Skipping {tissue}: No valid marker genes found.", UserWarning, stacklevel=2)
             continue
 
         current_cmap = colormaps[idx_i % len(colormaps)]
@@ -1299,16 +1328,12 @@ def plot_marker_genes_dict_on_embedding(
                         adata.obs[score_name] = score_col.values
                         computed_score_names.append(score_name)
                     else:
-                        print(
-                            f"Could not compute score for {tissue} ({method}): Not enough markers found."
-                        )
+                        warnings.warn(f"Could not compute score for {tissue} ({method}): Not enough markers found.", UserWarning, stacklevel=2)
                 else:
-                    print(
-                        f"Could not compute score for {tissue} ({method}): Tissue missing from results."
-                    )
+                    warnings.warn(f"Could not compute score for {tissue} ({method}): Tissue missing from results.", UserWarning, stacklevel=2)
 
             except Exception as e:
-                print(f"Could not compute score for {tissue} ({method}): {e}")
+                warnings.warn(f"Could not compute score for {tissue} ({method}): {e}", UserWarning, stacklevel=2)
 
         # Add all computed scores to the plot list
         items_to_plot.extend(computed_score_names)
@@ -1391,6 +1416,8 @@ def check_gene_adata(adata, gene, use_raw: bool = False):
 
     Returns:
     - A sanitized version of the input 'gene', containing only genes present in adata.
+
+    Changed (D07, 2026-11): messages that used to be printed are UserWarnings.
     """
     var_names = (
         adata.raw.var_names if use_raw and adata.raw is not None else adata.var_names
@@ -1400,14 +1427,14 @@ def check_gene_adata(adata, gene, use_raw: bool = False):
         if gene in var_names:
             return gene
         else:
-            print(f"Gene '{gene}' not found in adata.")
+            warnings.warn(f"Gene '{gene}' not found in adata.", UserWarning, stacklevel=2)
             return None  # Or you could raise an exception here
 
     elif isinstance(gene, list):
         sanitized_genes = [g for g in gene if g in var_names]
         not_found_genes = [g for g in gene if g not in var_names]
         for g in not_found_genes:
-            print(f"Gene '{g}' not found in adata.")
+            warnings.warn(f"Gene '{g}' not found in adata.", UserWarning, stacklevel=2)
         return sanitized_genes
 
     elif isinstance(gene, dict):
@@ -1418,7 +1445,7 @@ def check_gene_adata(adata, gene, use_raw: bool = False):
             sanitized_genes = [g for g in genes if g in var_names]
             not_found_genes = [g for g in genes if g not in var_names]
             for g in not_found_genes:
-                print(f"Gene '{g}' not found in adata (key: '{key}').")
+                warnings.warn(f"Gene '{g}' not found in adata (key: '{key}').", UserWarning, stacklevel=2)
             sanitized_dict[key] = sanitized_genes
         return sanitized_dict
 
@@ -2040,8 +2067,12 @@ def find_expression_archetypes(
         - 'gene_list': The list of gene names used, in the same order as 'clusters'
                        and 'gene_corrs'.
         - 'linkage_matrix': The (n_genes-1, 4) linkage matrix from hierarchy.ward.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
-    print("Finding gene archetypes ... ", flush=True, end="")
+    logger.info("Finding gene archetypes ...")
 
     gene_list = [str(g) for g in gene_list]  # accepts pd.Series / ndarray
     if len(gene_list) == 0:
@@ -2206,7 +2237,7 @@ def find_expression_archetypes(
     gene_corrs = all_corrs[gene_indices, cluster_indices]
     gene_corrs = np.clip(gene_corrs, -1.0, 1.0).astype(np.float32)
 
-    print("done")
+    logger.info("Finding gene archetypes: done")
 
     return {
         "archetypes": archetypes,
@@ -2506,6 +2537,10 @@ def run_triku(
          `max_genes_for_triku` by total counts).
       2. Runs Triku on this subset (using a copy to protect the original adata).
       3. Maps the results back to `adata.var` (setting unselected genes to False/NaN).
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if n_neighbors is None:
         n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
@@ -2532,9 +2567,7 @@ def run_triku(
     # Step B: If still too many genes, keep top `max_genes_for_triku` by total counts
     n_remaining = np.sum(keep_mask)
     if n_remaining > max_genes_for_triku:
-        print(
-            f"Filtering genes for Triku: reducing from {n_remaining} to {max_genes_for_triku} by total counts."
-        )
+        logger.info(f"Filtering genes for Triku: reducing from {n_remaining} to {max_genes_for_triku} by total counts.")
         # Get indices of genes that passed the first mask
         valid_indices = np.where(keep_mask)[0]
         # Get their counts
@@ -2688,6 +2721,10 @@ def filter_marker_dict_by_triku(
 def save_pacmap_model(model: Any, filepath: str) -> None:
     """
     Saves a fitted PaCMAP model to disk using joblib.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     try:
         import joblib
@@ -2697,12 +2734,16 @@ def save_pacmap_model(model: Any, filepath: str) -> None:
         )
 
     joblib.dump(model, filepath)
-    print(f"PaCMAP model saved to {filepath}")
+    logger.info(f"PaCMAP model saved to {filepath}")
 
 
 def load_pacmap_model(filepath: str) -> Any:
     """
     Loads a saved PaCMAP model from disk using joblib.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     try:
         import joblib
@@ -2712,7 +2753,7 @@ def load_pacmap_model(filepath: str) -> Any:
         )
 
     model = joblib.load(filepath)
-    print(f"PaCMAP model loaded from {filepath}")
+    logger.info(f"PaCMAP model loaded from {filepath}")
     return model
 
 
@@ -2822,6 +2863,10 @@ def tl_pacmap(
     -------
     None
         Updates adata.obsm['X_pacmap'] with the embedding.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     try:
         import pacmap
@@ -2831,27 +2876,27 @@ def tl_pacmap(
         )
 
     # 1. Print Parameters
-    print("Computing PaCMAP with parameters:")
+    logger.info("Computing PaCMAP with parameters:")
     if n_neighbors is None:
         computed_n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
-        print(f"  n_neighbors: {n_neighbors} (heuristic: {computed_n_neighbors})")
+        logger.info(f"  n_neighbors: {n_neighbors} (heuristic: {computed_n_neighbors})")
     else:
-        print(f"  n_neighbors: {n_neighbors}")
-    print(f"  MN_ratio: {MN_ratio}")
-    print(f"  FP_ratio: {FP_ratio}")
-    print(f"  n_components: {n_components}")
-    print(f"  use_rep: {use_rep}")
-    print(f"  random_state: {random_state}")
+        logger.info(f"  n_neighbors: {n_neighbors}")
+    logger.info(f"  MN_ratio: {MN_ratio}")
+    logger.info(f"  FP_ratio: {FP_ratio}")
+    logger.info(f"  n_components: {n_components}")
+    logger.info(f"  use_rep: {use_rep}")
+    logger.info(f"  random_state: {random_state}")
     if kwargs:
-        print(f"  kwargs: {kwargs}")
+        logger.info(f"  kwargs: {kwargs}")
 
     # 2. Extract Data
     if use_rep in adata.obsm:
         X_in = adata.obsm[use_rep]
-        print(f"Using representation '{use_rep}' from adata.obsm.")
+        logger.info(f"Using representation '{use_rep}' from adata.obsm.")
     elif use_rep == "X":
         X_in = adata.X
-        print("Using adata.X directly.")
+        logger.info("Using adata.X directly.")
     else:
         warnings.warn(
             f"Representation '{use_rep}' not found in adata.obsm. Falling back to adata.X."
@@ -2860,7 +2905,7 @@ def tl_pacmap(
 
     # PaCMAP's numba kernels need a dense numpy array
     if sp.issparse(X_in):
-        print("Input is sparse, converting to dense array for PaCMAP...")
+        logger.info("Input is sparse, converting to dense array for PaCMAP...")
         X_in = X_in.toarray()
 
     # 3. Initialize and Fit
@@ -2998,11 +3043,9 @@ def tl_pacmap(
         )
 
     if isinstance(init_method, np.ndarray):
-        print(
-            f"Fitting PaCMAP using user-provided {init_method.shape} array for init..."
-        )
+        logger.info(f"Fitting PaCMAP using user-provided {init_method.shape} array for init...")
     else:
-        print(f"Fitting PaCMAP using init='{init_method}'...")
+        logger.info(f"Fitting PaCMAP using init='{init_method}'...")
 
     X_embedded = embedder.fit_transform(X_in, init=init_method)
 
@@ -3012,7 +3055,7 @@ def tl_pacmap(
         key_added = f"X_pacmap_{n_components}"
 
     adata.obsm[key_added] = X_embedded
-    print(f"PaCMAP embedding finished. Result stored in `adata.obsm['{key_added}']`.")
+    logger.info(f"PaCMAP embedding finished. Result stored in `adata.obsm['{key_added}']`.")
 
 
 # ------------------------- Lineage -------------------------
@@ -3054,6 +3097,10 @@ def calculate_lineage_coupling(
         Z-scores of co-occurrence.
     p_values : pd.DataFrame
         Right-tailed P-values of co-occurrence.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     # 1. Prepare Data
     # Create a binary matrix: Clones (rows) x Cell Types (columns)
@@ -3077,7 +3124,7 @@ def calculate_lineage_coupling(
         # match binary_matrix.columns, or every null matrix is all zeros.
         labels_array = np.array(df[label_key].to_numpy(dtype=object))
 
-        print(f"Running {n_permutations} permutations...")
+        logger.info(f"Running {n_permutations} permutations...")
         for _ in range(n_permutations):
             np.random.shuffle(labels_array)
             shuffled_df = pd.DataFrame(
@@ -3356,6 +3403,10 @@ def multiscale_coarsening(
             - 'purity': Mapping of {(fine_res, coarse_res): {fine_cluster: purity_score}}.
               Purity is the fraction of cells in the fine cluster that belong to the assigned coarse cluster.
         - 'consistency': DataFrame flagging clusters with lineage inconsistencies (direct vs indirect parent mismatch).
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
 
     # 1. Validation & Setup
@@ -3376,7 +3427,7 @@ def multiscale_coarsening(
     # otherwise a dedicated graph is built under 'multiscale_neighbors'.
     neighbors_key = None
     if "connectivities" not in adata.obsp:
-        print("Computing neighbors for Leiden clustering...")
+        logger.info("Computing neighbors for Leiden clustering...")
         sc.pp.neighbors(adata, use_rep=use_rep)
     else:
         graph_rep = adata.uns.get("neighbors", {}).get("params", {}).get("use_rep")
@@ -3393,7 +3444,7 @@ def multiscale_coarsening(
     clustering_results = {}
     obs_keys = []
 
-    print(f"Running multiscale clustering on resolutions: {resolutions}")
+    logger.info(f"Running multiscale clustering on resolutions: {resolutions}")
     for res in resolutions:
         key = f"leiden_res_{res}"
         sc.tl.leiden(adata, resolution=res, key_added=key, random_state=random_state, flavor='igraph', n_iterations=2, directed=False, neighbors_key=neighbors_key)
@@ -3624,7 +3675,9 @@ def filter_markers_to_adata(
     extra_cols
         List of column names in `adata.var` to check for alternative gene symbols.
     verbose
-        Whether to print a summary of removed/replaced markers.
+        Whether to log a summary of removed/replaced markers (logger
+        ``eigenp_utils.single_cell``, level INFO).
+        Changed (D07, 2026-11): logged instead of printed.
 
     Returns
     -------
@@ -3661,19 +3714,15 @@ def filter_markers_to_adata(
 
     if verbose:
         total_removed = sum(len(v) for v in removed.values())
-        print(
-            f"[marker filter] {total_removed} markers removed across {len(removed)} categories."
-        )
+        logger.info(f"[marker filter] {total_removed} markers removed across {len(removed)} categories.")
         if replacements:
-            print(
-                "[marker filter] Case/alias replacements (original -> adata var_name):"
-            )
+            logger.info("[marker filter] Case/alias replacements (original -> adata var_name):")
             for k, m in replacements.items():
-                print(f"  - {k}: {m}")
+                logger.info(f"  - {k}: {m}")
         if removed:
-            print("[marker filter] Removed (not found in adata):")
+            logger.info("[marker filter] Removed (not found in adata):")
             for k, lost in removed.items():
-                print(f"  - {k} ({len(lost)}): {lost}")
+                logger.info(f"  - {k} ({len(lost)}): {lost}")
 
     return cleaned, removed, replacements
 
@@ -3706,6 +3755,10 @@ def filter_markers_by_moran(
         {category: [genes]}
     report : dict
         Per-category details: missing_in_df, below_threshold, used_fallback
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
 
     # Build score lookup
@@ -3782,14 +3835,12 @@ def filter_markers_by_moran(
     if verbose:
         total_missing = sum(len(r["missing_in_df"]) for r in report.values())
         total_below = sum(len(r["below_threshold"]) for r in report.values())
-        print(f"[moran filter] threshold={threshold}, top_k={top_k}, min_k={min_k}")
-        print(
-            f"[moran filter] Missing in df_top_dict: {total_missing} genes across categories."
-        )
-        print(f"[moran filter] Below threshold: {total_below} genes across categories.")
+        logger.info(f"[moran filter] threshold={threshold}, top_k={top_k}, min_k={min_k}")
+        logger.info(f"[moran filter] Missing in df_top_dict: {total_missing} genes across categories.")
+        logger.info(f"[moran filter] Below threshold: {total_below} genes across categories.")
         fb_cats = [k for k, r in report.items() if r["used_fallback"]]
         if fb_cats:
-            print(f"[moran filter] Fallback to min_k used for: {fb_cats}")
+            logger.info(f"[moran filter] Fallback to min_k used for: {fb_cats}")
 
     return filtered_by_moran, report
 
@@ -4086,12 +4137,14 @@ def annotate_clusters_by_markers(
         have finite differences. `uncertainty = 1 - softmax_p * consensus_frac`, where
         `consensus_frac` is the fraction of the cluster's cells whose own best type is the
         assigned type.
+
+    Changed (D08, 2026-11): passing the ignored `beta` emits a FutureWarning (removal in
+    eigenp_utils 0.1.0); it was a DeprecationWarning.
     """
     if beta is not None:
-        warnings.warn(
-            "The `beta` parameter is deprecated and ignored. `annotate_clusters_by_markers` now uses a parameter-free probabilistic confidence score.",
-            DeprecationWarning,
-            stacklevel=2,
+        warn_deprecated(
+            "The `beta` parameter of annotate_clusters_by_markers (ignored: the "
+            "confidence score is parameter-free)"
         )
 
     # Get per-cell scores S only if not provided
@@ -4283,6 +4336,10 @@ def sweep_leiden_and_annotate(
     per-cell assigned cell types across adjacent resolutions.
 
     Scores are computed ONCE and reused across all resolutions.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if not neighbors_already_computed and "connectivities" not in adata.obsp:
         raise ValueError(
@@ -4328,7 +4385,7 @@ def sweep_leiden_and_annotate(
         # But earlier "multiscale_coarsening" computes it.
         # Let's compute it if missing, as it is helpful.
         if key not in adata.obs:
-            print(f"Computing Leiden resolution {r:g}...")
+            logger.info(f"Computing Leiden resolution {r:g}...")
             sc.tl.leiden(adata, resolution=r, key_added=key, random_state=random_state, flavor='igraph', n_iterations=2, directed=False)
 
         cdf = annotate_clusters_by_markers(
@@ -4427,6 +4484,10 @@ def export_obs_from_adata_to_csv(
 ) -> None:
     """
     Export a single adata.obs column (e.g. cell type annotations) to CSV, optionally including its colors.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     from pathlib import Path
 
@@ -4472,11 +4533,11 @@ def export_obs_from_adata_to_csv(
             # append, not replace: 'run_2024.10' must not become 'run_2024.csv'
             out_file = out_file.with_name(out_file.name + ".csv")
 
-    print(f"Saving at {out_file.resolve()}")
+    logger.info(f"Saving at {out_file.resolve()}")
     df_export.to_csv(out_file)
 
     # Verify the output
-    print(df_export.head())
+    logger.info("%s", df_export.head())
 
 
 def plot_volcano_adata(
@@ -4520,6 +4581,8 @@ def plot_volcano_adata(
     Notes:
         This function requires the 'adjustText' library to be installed
         (`pip install adjustText`) for non-overlapping gene labels.
+
+    Changed (D07, 2026-11): messages that used to be printed are UserWarnings.
     """
     if adjust_text is None:
         raise ImportError(
@@ -4553,9 +4616,7 @@ def plot_volcano_adata(
         pvals_adj = comparison_uns["pvals_adj"][group]
         names = comparison_uns["names"][group]
     except KeyError:
-        print(
-            f"Error: Could not find rank_genes_key='{rank_genes_key}' or group='{group}' in adata.uns."
-        )
+        warnings.warn(f"Could not find rank_genes_key='{rank_genes_key}' or group='{group}' in adata.uns.", UserWarning, stacklevel=2)
         return
 
     # --- 2. Data Preparation ---
@@ -4978,6 +5039,10 @@ def compute_kknn_neighbors(
     Returns:
         A tuple of (pruned_distances, pruned_indices) where each element is a list of arrays
         (one array per query cell).
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if query_use_rep is None:
         query_use_rep = use_rep
@@ -5007,9 +5072,7 @@ def compute_kknn_neighbors(
     max_neighbors = min(max_neighbors, N_ref)
     min_neighbors = min(min_neighbors, max_neighbors)
 
-    print(
-        f"kkNN: Querying up to {max_neighbors} neighbors, pruning down to {min_neighbors} (P={P})..."
-    )
+    logger.info(f"kkNN: Querying up to {max_neighbors} neighbors, pruning down to {min_neighbors} (P={P})...")
 
     # 1. Fit Nearest Neighbors on Reference
     nn = NearestNeighbors(n_neighbors=max_neighbors, algorithm="auto", n_jobs=-1)
@@ -5033,7 +5096,7 @@ def compute_kknn_neighbors(
     ):
         lower_bound, upper_bound = (float(b) for b in np.asarray(cached)[:2])
     else:
-        print("kkNN: Computing and caching reference curvature bounds...")
+        logger.info("kkNN: Computing and caching reference curvature bounds...")
         # Get neighbors for the reference dataset itself
         # If the query and reference are identical arrays, reuse the already computed indices
         if X_query is X_ref:
@@ -5109,6 +5172,10 @@ def _project_onto_reference_pca(adata_query, adata_fit) -> np.ndarray:
     2. If the PCA was zero-centred, the column means of the fitted matrix are
        subtracted. The query's own mean is never used: it depends on the query's
        cell-type composition.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if not adata_query.var_names.equals(adata_fit.var_names):
         raise ValueError(
@@ -5135,9 +5202,7 @@ def _project_onto_reference_pca(adata_query, adata_fit) -> np.ndarray:
     X_fit = adata_fit.X[:, cols]
 
     if "std" in adata_fit.var:
-        print(
-            "kkNN Ingest: Reference features were scaled. Scaling query features with the reference statistics..."
-        )
+        logger.info("kkNN Ingest: Reference features were scaled. Scaling query features with the reference statistics...")
         if "mean" in adata_fit.var:
             x -= adata_fit.var["mean"].to_numpy(dtype=np.float64)[cols]
         std = adata_fit.var["std"].to_numpy(dtype=np.float64)[cols]
@@ -5285,6 +5350,10 @@ def kknn_ingest(
           reference's `.obs` and `.obsm` keys with a `_kknn` suffix, and setting ground-truth reference
           tracking metadata (like `kknn_k` and `mapping_confidence`) to `NaN`. This ensures keys align
           perfectly when preserving non-overlapping metadata via outer join.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if isinstance(obs_keys, str):
         obs_keys = [obs_keys]
@@ -5295,7 +5364,7 @@ def kknn_ingest(
     obsm_keys = obsm_keys or []
 
     if not obs_keys and not obsm_keys:
-        print("No keys specified to transfer.")
+        warnings.warn("No keys specified to transfer.", UserWarning, stacklevel=2)
         return
 
     # Verify keys exist in reference
@@ -5349,10 +5418,8 @@ def kknn_ingest(
                     "fit on (adata_ref.obsm['X_pca']), but adata_ref has no stored PCA "
                     "(uns['pca'], varm['PCs'])."
                 )
-            print(
-                "Warning: recompute_ref_PCA is True, but this function will not mutate your reference object in place."
-            )
-            print("Creating a shallow copy of reference to recompute PCA...")
+            logger.info("recompute_ref_PCA=True: the reference object is not mutated in place.")
+            logger.info("Creating a shallow copy of reference to recompute PCA...")
 
             # Create a shallow copy to prevent overwriting the user's reference PCA
             adata_ref_copy = adata_ref.copy()
@@ -5477,14 +5544,14 @@ def kknn_ingest(
 
         # 2. Map .obsm (Embeddings)
         for key in obsm_keys:
-            print(f"Mapping obsm: '{key}'...")
+            logger.info(f"Mapping obsm: '{key}'...")
             ref_coords = adata_ref.obsm[key]
             emb_dim = ref_coords.shape[1]
 
             if barycenter == "transform":
                 if embedding_models is not None and key in embedding_models:
                     model = embedding_models[key]
-                    print(f"Using provided model's .transform() for '{key}'...")
+                    logger.info(f"Using provided model's .transform() for '{key}'...")
 
                     # The model maps from the space it was fit on: adata_ref.obsm[original_use_rep]
                     if model_X_query is not None:
@@ -5535,7 +5602,7 @@ def kknn_ingest(
 
         # 3. Map .obs (Labels) and compute confidence
         for key in obs_keys:
-            print(f"Mapping obs: '{key}'...")
+            logger.info(f"Mapping obs: '{key}'...")
             ref_labels = adata_ref.obs[key].values
             ref_col = adata_ref.obs[key]
 
@@ -5614,7 +5681,7 @@ def kknn_ingest(
             if temp_ref_rep_key in adata_ref.obsm:
                 del adata_ref.obsm[temp_ref_rep_key]
 
-    print("kkNN Ingest mapping complete!")
+    logger.info("kkNN Ingest mapping complete!")
 
 
 def find_correlated_features(

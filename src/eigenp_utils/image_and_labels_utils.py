@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "scipy",
+#     "scikit-image",
+# ]
+# ///
 import inspect
 import logging
 import warnings
@@ -14,7 +22,7 @@ from scipy.interpolate import RegularGridInterpolator
 from skimage import filters, feature, segmentation
 from skimage.segmentation import expand_labels
 
-from ._conventions import UM, resolve_pixel_sizes, warn_deprecated
+from ._conventions import UM, check_zyx_input, resolve_pixel_sizes, warn_deprecated
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +111,12 @@ def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pi
 
     Changed (D08, 2026-11): `spacing=` emits a FutureWarning (it was a
     DeprecationWarning, which Python hides when attributed to library code).
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image, "voronoi_otsu_labeling")
     if spacing is not None:
         _warn_spacing_alias(stacklevel=4)
         if pixel_sizes is None:
@@ -203,7 +216,12 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
     the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
     count as unknown, strings / booleans raise ValueError, and a scalar means
     isotropic voxels.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(nuclei_image, "windowed_slice_projection")
     if operation not in ('max', 'average'):
         raise ValueError(f"operation must be 'max' or 'average', got {operation!r}.")
 

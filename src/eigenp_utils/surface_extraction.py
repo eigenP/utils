@@ -22,7 +22,7 @@ from scipy.interpolate import RegularGridInterpolator
 from skimage import filters
 
 from .clahe_equalize_adapthist import clahe_u8
-from ._conventions import UM, resolve_pixel_sizes, warn_deprecated
+from ._conventions import UM, check_zyx_input, resolve_pixel_sizes, warn_deprecated
 from typing import Optional, Sequence, Union, Tuple
 
 #: Default blur of `extract_surface`, in binned voxels (Z, Y, X)
@@ -444,7 +444,12 @@ def extract_surface(
     from 4 to 1 raw slice, which moves heights by up to about one voxel (the
     depth-dependent bias falls from +1.0 ... -1.3 to within +-0.1 voxel).
     New: `gaussian_sigma_um` / `pixel_sizes` for a blur in physical units.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image, "extract_surface")
     if threshold is not None and clahe_clip > 0.0:
         raise ValueError("`threshold` cannot be combined with CLAHE (clahe_clip > 0).")
     s_tup = _parse_factors(downscale_factor)
@@ -505,7 +510,12 @@ def extract_surface_tiled(
 
     Changed (D19, 2026-11): the default `gaussian_sigma` is (1, 4, 4) binned voxels
     (was 4.0); see `extract_surface`.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image, "extract_surface_tiled")
     if threshold is not None and clahe_clip > 0.0:
         raise ValueError("`threshold` cannot be combined with CLAHE (clahe_clip > 0).")
     s_tup = _parse_factors(downscale_factor)

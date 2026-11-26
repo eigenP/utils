@@ -1,3 +1,12 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "xarray",
+#     "scikit-image",
+#     "tifffile",  # imported by image_io
+# ]
+# ///
 """Minimal 2D tile stitching for STCZYX xarray images (see :func:`stitch_tiles`)."""
 
 import warnings

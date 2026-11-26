@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "numpy",
 #     "scipy",
@@ -40,6 +40,7 @@ Bonsai is licensed CC BY-NC 4.0 (non-commercial use only); it is not redistribut
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -54,6 +55,8 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from scipy.sparse.csgraph import dijkstra
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "BonsaiTree",
@@ -602,7 +605,9 @@ def run_bonsai(
         Dataset identifier written to Bonsai's metadata.
     verbose
         Bonsai's verbose flag. Bonsai's output goes to ``bonsai_run.log`` in
-        ``results_folder`` either way.
+        ``results_folder`` either way. With ``verbose=True`` a one-line summary
+        goes to the ``eigenp_utils.bonsai_tree`` logger (INFO).
+        Changed (D07, 2026-11): the summary used to be printed.
     timeout
         Seconds before the run is killed (``subprocess.TimeoutExpired``).
     n_threads
@@ -719,10 +724,8 @@ def run_bonsai(
     tree = BonsaiTree.from_folder(final, cell_ids=cell_ids)
     tree.folder = str(final)
     if verbose:
-        print(
-            f"Bonsai finished in {elapsed:.1f} s: {tree.n_cells} cells, "
-            f"{tree.n_vertices} vertices. Results in {final}."
-        )
+        logger.info(f"Bonsai finished in {elapsed:.1f} s: {tree.n_cells} cells, "
+            f"{tree.n_vertices} vertices. Results in {final}.")
     return tree
 
 
@@ -862,6 +865,10 @@ def tl_bonsai(
     Returns
     -------
     BonsaiTree whose ``cell_ids`` are ``adata.obs_names``.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.bonsai_tree`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if "sanity_dir" in run_kwargs:
         raise ValueError(
@@ -880,7 +887,7 @@ def tl_bonsai(
                 "No input given and found neither layers['counts'] nor integer counts in X. "
                 "Pass counts_layer= (raw counts) or use_rep= (+ stds=)."
             )
-        print(f"tl_bonsai: using raw counts from {'layers[counts]' if counts_layer == 'counts' else 'X'}.")
+        logger.info(f"tl_bonsai: using raw counts from {'layers[counts]' if counts_layer == 'counts' else 'X'}.")
 
     feature_ids = None
     if counts_layer is not None:
@@ -920,9 +927,7 @@ def tl_bonsai(
     params["n_features"] = int(X.shape[1])
     params["results_folder"] = str(tree.folder)
     adata.uns[key_added] = {**tree.to_dict(), "params": params}
-    print(
-        f"Bonsai tree with {tree.n_vertices} vertices stored in `adata.uns['{key_added}']`."
-    )
+    logger.info(f"Bonsai tree with {tree.n_vertices} vertices stored in `adata.uns['{key_added}']`.")
     return tree
 
 
@@ -987,6 +992,10 @@ def bonsai_neighbors(
         ``adata.uns`` key of the tree.
     key_added
         ``uns`` key of the graph description and prefix of the two ``obsp`` keys.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.bonsai_tree`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if key_added == key:
         raise ValueError("key_added must differ from key (it would overwrite the tree).")
@@ -1015,7 +1024,5 @@ def bonsai_neighbors(
             "random_state": 0,
         },
     }
-    print(
-        f"Bonsai neighbour graph stored in adata.obsp['{dists_key}'] / ['{conns_key}']; "
-        f"use neighbors_key='{key_added}'."
-    )
+    logger.info(f"Bonsai neighbour graph stored in adata.obsp['{dists_key}'] / ['{conns_key}']; "
+        f"use neighbors_key='{key_added}'.")

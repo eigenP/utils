@@ -112,7 +112,11 @@ def _():
     from eigenp_utils.extended_depth_of_focus import best_focus_image
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
+    # skimage.data.cells3d: voxel size (Z, Y, X) = (0.29, 0.26, 0.26) µm
+    CELLS3D_PIXEL_SIZES = {'Z': 0.29, 'Y': 0.26, 'X': 0.26, 'unit': 'µm'}
+
     return (
+        CELLS3D_PIXEL_SIZES,
         best_focus_image,
         download_file_async,
         imread,
@@ -141,10 +145,10 @@ def _(cells_path, imread):
 
 
 @app.cell
-def _(cells, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
-    show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colormap=['lime', 'magenta'], pixel_sizes=CELLS3D_PIXEL_SIZES)
     return (membrane,)
 
 

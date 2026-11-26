@@ -483,3 +483,28 @@ def test_module_is_wasm_safe(monkeypatch):
     mod = importlib.import_module("eigenp_utils._conventions")
     assert mod.default_display_range(np.arange(10)) == (0.0, 9.0)
     assert mod.channel_color_hex("lime") == "#00ff00"
+
+
+def test_check_zyx_input_is_duck_typed_and_wasm_safe():
+    """D31: the (Z)YX guard lives in ``_conventions`` (no xarray import) and is re-exported by image_io.
+
+    (+) an object with dims/isel/coords and more than 3 dims raises TypeError naming
+        the function and ``to_zyx``.
+    (-) ndarrays of any rank and 3-D duck DataArrays pass through unchanged (same object).
+    """
+
+    class Duck:
+        def __init__(self, dims, shape):
+            self.dims, self.shape, self.coords = dims, shape, {}
+
+        def isel(self, **kw):
+            return self
+
+    big = Duck(("S", "T", "C", "Z", "Y", "X"), (1, 1, 2, 3, 4, 5))
+    with pytest.raises(TypeError, match=r"my_func takes a \(Z\)YX array.*C=2.*to_zyx"):
+        conv.check_zyx_input(big, "my_func")
+    for ok in (np.zeros((2, 3, 4, 5)), Duck(("Z", "Y", "X"), (3, 4, 5))):
+        assert conv.check_zyx_input(ok, "my_func") is ok
+    from eigenp_utils import image_io
+
+    assert image_io.check_zyx_input is conv.check_zyx_input

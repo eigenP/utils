@@ -18,7 +18,7 @@ from scipy.interpolate import RegularGridInterpolator
 from skimage.filters import median
 from skimage.morphology import disk
 
-from ._conventions import warn_deprecated
+from ._conventions import check_zyx_input, warn_deprecated
 
 #: Default lateral patch size of `best_focus_image`, in pixels
 DEFAULT_PATCH_SIZE = 32
@@ -160,7 +160,12 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
     Changed (D08, R7-15, 2026-11): passing `test` emits a FutureWarning; it will be
     removed in eigenp_utils 0.1.0.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image_or_path, "best_focus_image")
     if test is not None:
         warn_deprecated("best_focus_image(test=...)")
 
