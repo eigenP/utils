@@ -476,7 +476,8 @@ _STATIC_DOC = """
 
     Display keyword arguments, shared by every static wrapper (see
     `show_zyx`): ``pixel_sizes`` ((Z, Y, X) or dict, converted to µm),
-    ``figsize`` (inches), ``colormap`` (per channel), ``vmin`` / ``vmax`` /
+    ``figsize`` (inches; None, the default, sizes the figure from the
+    physical extents to fit a 10-inch box), ``colormap`` (per channel), ``vmin`` / ``vmax`` /
     ``gamma`` / ``opacity`` (scalar or per channel; None takes the default
     display range of the whole volume), ``blending``, ``rotate_view``
     (degrees), ``channel_labels``, ``channel_label_fontsize_pt``,
@@ -487,12 +488,16 @@ _STATIC_DOC = """
     Changed (D12, 2026-11): every static wrapper takes the same display
     keywords and input forms (DataArrays, tuples, ``channel_axis``, 2D
     images); they used to differ per wrapper and reject DataArrays.
+    ``figsize`` defaults to None (automatic from the physical extents; it
+    was a fixed 10 x 10, mostly empty for elongated volumes), and the
+    automatic font size of labels and scale bar is 3% of the figure width
+    (two formulas used 3.5% and 3% of the height).
 """
 
 
 # Copyright tnia 2021 - BSD License
 @_static_doc
-def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=False, opacity=None, scale_bar_show=True, scale_bar_fontsize_pt=None,
+def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=None, colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=False, opacity=None, scale_bar_show=True, scale_bar_fontsize_pt=None,
                    *, colors=None, blending=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
                    subplot_bg=None, channel_axis=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
@@ -535,7 +540,7 @@ def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), co
 
 # Copyright tnia 2021 - BSD License
 @_static_doc
-def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+def show_zyx_max(image_to_show, pixel_sizes=None, figsize=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
                  *, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, subplot_bg=None,
                  use_plt=False, channel_axis=None):
     """ plots max xy, xz, and zy projections of a 3D image (the whole volume)
@@ -555,7 +560,7 @@ def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None
 
 
 @_static_doc
-def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=None, projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
                         *, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, subplot_bg=None,
                         use_plt=False, channel_axis=None):
     """ generates xy, xz, and zy projections of a 3D image (the whole volume) and plots them
@@ -609,7 +614,63 @@ def _draw_channel_label_bar(axLabels, fontsize_pt, as_image=False):
         ))
 
 
-def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=False, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
+_GAP_IN = 1.0 / 16.0   # gap between the ortho panels (inches)
+_MARGIN_IN = 0.05      # figure margin (inches)
+
+
+def _auto_fontsize_pt(fig_w_in):
+    """
+    The one automatic font size (pt) of channel labels and scale-bar labels:
+    3% of the figure width (2.16 pt per inch), clipped to [8, 24] (R1-23).
+    Width, not height, so thin volumes (short auto figures) keep readable text.
+    """
+    return float(max(8.0, min(24.0, float(fig_w_in) * 72 * 0.03)))
+
+
+def _label_row_in(fontsize_pt):
+    """Height (inches) of the channel-label row for a font size."""
+    return 0.10 + fontsize_pt / 72.0
+
+
+def _rotated_extent(w, h, angle_deg):
+    """Bounding box (width, height) of a w x h panel rotated by ``angle_deg``."""
+    if not angle_deg:
+        return float(w), float(h)
+    t = np.radians(angle_deg)
+    c, s = abs(np.cos(t)), abs(np.sin(t))
+    return float(w * c + h * s), float(w * s + h * c)
+
+
+def _ortho_extents(wx, wy, wz, rotate_view=None):
+    """Physical (column widths, row heights) of the ortho layout for extents X, Y, Z (after rotation)."""
+    rz, ry, rx = _parse_rotate_view(rotate_view)
+    xy = _rotated_extent(wx, wy, rz)
+    xz = _rotated_extent(wx, wz, ry)
+    zy = _rotated_extent(wz, wy, rx)
+    return (max(xy[0], xz[0]), zy[0]), (max(xy[1], zy[1]), xz[1])
+
+
+def _auto_figsize(cols, rows, has_labels, box=(10.0, 10.0), gap_in=_GAP_IN, label_fontsize_pt=None):
+    """
+    Automatic figure size (inches) for the ortho layout: the largest figure
+    inside ``box`` whose panels keep their physical aspect and fill it, with
+    the gaps, margins and (``has_labels``) the channel-label row (D12, R2-22).
+    ``cols`` / ``rows`` are the physical (col1, col2) widths and (row1, row2)
+    heights, e.g. from `_ortho_extents`.
+    """
+    W = max(float(cols[0]) + float(cols[1]), 1e-12)
+    H = max(float(rows[0]) + float(rows[1]), 1e-12)
+    fig_w = float(box[0])
+    for _ in range(4):  # the label row depends on the font size, which depends on the width
+        fs = label_fontsize_pt if label_fontsize_pt is not None else _auto_fontsize_pt(fig_w)
+        extra_w = gap_in + 2.0 * _MARGIN_IN
+        extra_h = (2 if has_labels else 1) * gap_in + 2.0 * _MARGIN_IN + (_label_row_in(fs) if has_labels else 0.0)
+        scale = max(1e-6, min((box[0] - extra_w) / W, (box[1] - extra_h) / H))
+        fig_w, fig_h = W * scale + extra_w, H * scale + extra_h
+    return (float(fig_w), float(fig_h))
+
+
+def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, use_plt=False, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
@@ -687,8 +748,6 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     uses up 'white'), and None entries in a colormap list take a palette
     colour, as in LabelAnnotator.
     """
-    if figsize is None:
-        figsize = (10, 10)
     if colors is not None:
         warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
@@ -783,6 +842,12 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
     xy, xz, zy = _warp(g_xy, xy), _warp(g_xz, xz), _warp(g_zy, zy)
     (sxy_h, sxy_w), (sxz_h, sxz_w), (szy_h, szy_w) = g_xy.p_out, g_xz.p_out, g_zy.p_out
+    if figsize is None:
+        # From the physical extents of the (rotated) panels (D12)
+        figsize = _auto_figsize(
+            (max(xy.shape[1] * sxy_w, xz.shape[1] * sxz_w), zy.shape[1] * szy_w),
+            (max(xy.shape[0] * sxy_h, zy.shape[0] * szy_h), xz.shape[0] * sxz_h),
+            channel_labels is not None, gap_in=gap_in, label_fontsize_pt=channel_label_fontsize_pt)
 
     if use_plt:
         import matplotlib.pyplot as plt  # only on request: library figures stay out of pyplot (D05)
@@ -800,14 +865,12 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     col2_w = zy_w
     row1_h = max(xy_h, zy_h)
     row2_h = xz_h
-    fig_h_in = figH
-    fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
     if channel_label_fontsize_pt is None:
-        channel_label_fontsize_pt = fontsize_pt
+        channel_label_fontsize_pt = _auto_fontsize_pt(figW)
 
-    hl_in = (0.10 + (channel_label_fontsize_pt / 72.0)) if channel_labels is not None else 0.0
+    hl_in = _label_row_in(channel_label_fontsize_pt) if channel_labels is not None else 0.0
 
-    margin_in = 0.05
+    margin_in = _MARGIN_IN
     avail_w_in = figW - gap_in - 2.0 * margin_in
     num_v_gaps = 2 if channel_labels is not None else 1
     avail_h_in = figH - num_v_gaps * gap_in - 2.0 * margin_in - hl_in
@@ -1015,9 +1078,8 @@ def _add_scale_bar(ax_line, ax_physical_width_um, pixel_sizes_given, figsize, un
 
     # pick fontsize and line width to scale with figure size
     if fontsize_pt is None:
-        fig_h_in = figsize[1] if figsize is not None else 10
-        fontsize_pt = max(8, min(24, fig_h_in * 72 * 0.03))
-    linewidth = max(1, fontsize_pt * 0.2 / (72 * 0.03))  # = 0.2 pt per inch of figure height at the auto size
+        fontsize_pt = _auto_fontsize_pt(figsize[0] if figsize is not None else 10)
+    linewidth = max(1, fontsize_pt * 0.2 / (72 * 0.03))  # = 0.2 pt per inch of figure width at the auto size
 
     ### Draw
     # Put the line at the bottom right of ax_line
@@ -1077,7 +1139,7 @@ def _slab_slice(rng, n, name):
 
 
 @_static_doc
-def show_zyx_max_slabs(image_to_show, x=None, y=None, z=None, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+def show_zyx_max_slabs(image_to_show, x=None, y=None, z=None, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
                        *, subplot_bg=None, use_plt=False, channel_axis=None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
@@ -1111,7 +1173,7 @@ def show_zyx_max_slabs(image_to_show, x=None, y=None, z=None, pixel_sizes=None, 
 
 
 @_static_doc
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=None, projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
                               *, subplot_bg=None, use_plt=False, channel_axis=None):
     """ generates xy, xz, and zy projections of slabs of a 3D image and plots them
 
@@ -2450,6 +2512,12 @@ class TNIASliceWidget(TNIAWidgetBase):
 
         self.im_orig = im
 
+        if figsize is None:
+            # The widgets' automatic size: physical extents in an 8-inch box,
+            # with the channel-label row the slice viewers always draw (D12)
+            figsize = _auto_figsize(_ortho_extents(X * px, Y * py, Z * pz, rotate_view)[0],
+                                    _ortho_extents(X * px, Y * py, Z * pz, rotate_view)[1],
+                                    True, box=(8.0, 8.0), label_fontsize_pt=channel_label_fontsize_pt)
         self.figsize = figsize
         self.colormap = colormap
         self.colors_orig = colormap
@@ -2580,7 +2648,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 
             if not visible_indices:
                 # Create a placeholder figure
-                fig = _new_figure(figsize=self.figsize if self.figsize else (10, 10))
+                fig = _new_figure(figsize=self.figsize if self.figsize else (8, 8))
                 fig.text(0.5, 0.5, "No Channels Visible", ha='center', va='center', color='white')
                 fig.patch.set_facecolor('black')
                 return fig
@@ -2626,7 +2694,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             opacity_val = float(self.opacity_list[0])
 
             if opacity_val <= 0:
-                fig = _new_figure(figsize=self.figsize if self.figsize else (10, 10))
+                fig = _new_figure(figsize=self.figsize if self.figsize else (8, 8))
                 fig.text(0.5, 0.5, "No Channels Visible", ha='center', va='center', color='white')
                 fig.patch.set_facecolor('black')
                 return fig
@@ -3076,6 +3144,14 @@ def _int_bounds(a):
     return float(np.floor(np.min(a))), float(np.ceil(np.max(a)))
 
 
+def _scatter_auto_figsize(xb, yb, zb, sizes, rotate_view, has_labels, label_fontsize_pt=None):
+    """Automatic scatter figure size: the data box ``[min - 0.5, max + 0.5)`` per axis, in physical units."""
+    pz, py, px = sizes
+    (x0, x1), (y0, y1), (z0, z1) = xb, yb, zb
+    cols, rows = _ortho_extents((x1 + 1 - x0) * px, (y1 + 1 - y0) * py, (z1 + 1 - z0) * pz, rotate_view)
+    return _auto_figsize(cols, rows, has_labels, box=(8.0, 8.0), label_fontsize_pt=label_fontsize_pt)
+
+
 def _finite_points(X, Y, Z, channels=None):
     """
     Drop points with a non-finite coordinate (with a warning), together with
@@ -3156,6 +3232,9 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.point_size = point_size
         self.alpha = alpha
         self.colors = colors
+        if figsize is None:
+            figsize = _scatter_auto_figsize((xmin, xmax), (ymin, ymax), (zmin, zmax), (pz, py, px),
+                                            rotate_view, channel_labels is not None, channel_label_fontsize_pt)
         self.figsize = figsize
 
         self.xmin = xmin
@@ -3583,17 +3662,16 @@ class TNIAScatterWidget(TNIAWidgetBase):
             row1_h = max(w_y_xy, w_y_zy)
             row2_h = w_z_xz
 
-            figW, figH = self.figsize if self.figsize is not None else (10, 10)
-            gap_in = 1.0 / 16.0
-            margin_in = 0.05
+            figW, figH = self.figsize
+            gap_in = _GAP_IN
+            margin_in = _MARGIN_IN
 
-            fontsize_pt = max(10, min(24, figH * 72 * 0.035))
             if self.channel_label_fontsize_pt is not None:
                 channel_label_fontsize_pt = self.channel_label_fontsize_pt
             else:
-                channel_label_fontsize_pt = fontsize_pt
+                channel_label_fontsize_pt = _auto_fontsize_pt(figW)
 
-            hl_in = (0.10 + (channel_label_fontsize_pt / 72.0)) if channel_labels is not None else 0.0
+            hl_in = _label_row_in(channel_label_fontsize_pt) if channel_labels is not None else 0.0
             num_v_gaps = 2 if channel_labels is not None else 1
 
             avail_w_in = figW - gap_in - 2.0 * margin_in
@@ -3994,16 +4072,11 @@ def show_zyx_max_slice_interactive(
     Z, Y, X = im_shape
 
     # Calculate physical layout dimensions (microns)
-    phys_w = X * px + Z * pz
-    phys_h = Y * py + Z * pz
-    if channel_labels is not None:
-        phys_h += phys_h * 0.05
-
     if figsize is None:
-        divisor = max(phys_w / 8.0, phys_h / 8.0)
-        w, h = float(phys_w / divisor), float(phys_h / divisor)
-        figsize = (w * figsize_scale, h * figsize_scale)
-    elif figsize_scale != 1.0:
+        # The class's automatic size (physical extents, label row, 8-inch box)
+        cols, rows = _ortho_extents(X * px, Y * py, Z * pz, rotate_view)
+        figsize = _auto_figsize(cols, rows, True, box=(8.0, 8.0), label_fontsize_pt=channel_label_fontsize_pt)
+    if figsize_scale != 1.0:
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, n // 64)
@@ -4138,16 +4211,11 @@ def show_zyx_max_slice_interactive_point_annotator(
     im_shape = (im[0].shape if isinstance(im, list) else im.shape)
     Z, Y, X = im_shape
 
-    phys_w = X * px + Z * pz
-    phys_h = Y * py + Z * pz
-    if channel_labels is not None:
-        phys_h += phys_h * 0.05
-
     if figsize is None:
-        divisor = max(phys_w / 8.0, phys_h / 8.0)
-        w, h = float(phys_w / divisor), float(phys_h / divisor)
-        figsize = (w * figsize_scale, h * figsize_scale)
-    elif figsize_scale != 1.0:
+        # The class's automatic size (physical extents, label row, 8-inch box)
+        cols, rows = _ortho_extents(X * px, Y * py, Z * pz, rotate_view)
+        figsize = _auto_figsize(cols, rows, True, box=(8.0, 8.0), label_fontsize_pt=channel_label_fontsize_pt)
+    if figsize_scale != 1.0:
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     def _default_t(n): return max(1, n // 64)
@@ -4296,18 +4364,11 @@ def show_zyx_max_scatter_interactive(
 
     (xmin, xmax), (ymin, ymax), (zmin, zmax) = (_int_bounds(a) for a in (X, Y, Z))
 
-    XN = xmax - xmin + 1
-    YN = ymax - ymin + 1
-    ZN = zmax - zmin + 1
-    z_xy_ratio = (pz / px) if px != pz else 1
-
     if figsize is None:
-        width_px  = XN + ZN * z_xy_ratio
-        height_px = YN + ZN * z_xy_ratio
-        divisor = max(width_px / 8, height_px / 8)
-        w, h = float(width_px / divisor), float(height_px / divisor)
-        figsize = (w * figsize_scale, h * figsize_scale)
-    elif figsize_scale != 1.0:
+        # The class's automatic size, from the physical extents of the data box
+        figsize = _scatter_auto_figsize(_int_bounds(X), _int_bounds(Y), _int_bounds(Z), (pz, py, px),
+                                        rotate_view, channel_labels is not None, channel_label_fontsize_pt)
+    if figsize_scale != 1.0:
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     w = TNIAScatterWidget(

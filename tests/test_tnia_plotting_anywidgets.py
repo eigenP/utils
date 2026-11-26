@@ -1513,25 +1513,26 @@ def test_scatter_widget_physical_axes_gap(render_mode):
 
 
 def test_channel_label_height_and_fontsize_invariants():
-    """Verify ``axLabels`` height and font size respond to figure height, explicit pt size, and stay anisotropy-invariant.
+    """Verify ``axLabels`` height and font size respond to figure width, explicit pt size, and stay anisotropy-invariant.
 
-    Strategy: (a) compare auto label sizing on ``(8, 4)`` vs ``(8, 12)`` figures;
+    Strategy: (a) compare auto label sizing on ``(4, 8)`` vs ``(12, 8)`` figures
+    (changed by D12 / R1-23: the auto font follows the width, not the height);
     (b) compare explicit ``channel_label_fontsize_pt`` 12 vs 24; (c) compare a
     highly anisotropic ``(5, 10, 500)`` volume against an isotropic ``(5, 50, 50)``
     volume at the same ``figsize`` and font size; (d) verify propagation through
     interactive slice and scatter factories.
-    Expected outcome: taller figures and larger font sizes strictly increase
+    Expected outcome: wider figures and larger font sizes strictly increase
     both rendered font size and ``axLabels`` physical height in inches; height is
     independent of image aspect ratio; interactive wrappers honour the kwarg.
     """
     im = np.zeros((10, 20, 20), dtype=np.float32)
     labels = ["Ch0", "Ch1"]
 
-    fig_small = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(8, 4), channel_labels=labels)
-    fig_large = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(8, 12), channel_labels=labels)
+    fig_small = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(4, 8), channel_labels=labels)
+    fig_large = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(12, 8), channel_labels=labels)
     try:
-        h_small_in = fig_small.axLabels.get_position().height * 4.0
-        h_large_in = fig_large.axLabels.get_position().height * 12.0
+        h_small_in = fig_small.axLabels.get_position().height * 8.0
+        h_large_in = fig_large.axLabels.get_position().height * 8.0
         fs_small = _label_fontsize(fig_small)
         fs_large = _label_fontsize(fig_large)
         assert 0 < h_small_in < h_large_in
@@ -4941,3 +4942,79 @@ def test_every_static_wrapper_takes_the_same_display_kwargs_and_input_forms():
         assert _panel_rgb(f(img2d, *args, figsize=(4, 4))).shape == (12, 10)
     fig = show_zyx_slice([c0, c1], 2, 3, 1, colormap=["cyan", "yellow"], figsize=(4, 4))
     assert _panel_rgb(fig).shape == (12, 10, 3)
+
+
+def _panel_block_fraction(fig):
+    """Fraction of the figure height and width spanned by the ortho panels (and label row)."""
+    axes = [fig.axXY, fig.axXZ, fig.axZY] + ([fig.axLabels] if fig.axLabels is not None else [])
+    boxes = [a.get_position() for a in axes]
+    return (max(b.y1 for b in boxes) - min(b.y0 for b in boxes),
+            max(b.x1 for b in boxes) - min(b.x0 for b in boxes))
+
+
+def test_auto_figsize_follows_the_physical_extents():
+    """D12 / R1-18: ``figsize=None`` (now the default) sizes the figure from the data's physical extents.
+
+    Strategy: a flat 20 x 100 x 1000 volume and a cube through ``show_zyx_max``
+    (default figsize); the flat volume again with channel labels.
+    Expected outcome: the panels fill the figure (> 90% of its height and
+    width; they filled 12% of a fixed 10 x 10 figure); the figure fits a 10 in
+    box; an explicit figsize is kept.
+    """
+    flat = np.zeros((20, 100, 1000), np.uint8)
+    for im, labels in ((flat, None), (flat, ["a"]), (np.zeros((30, 30, 30), np.uint8), None)):
+        fig = show_zyx_max([im] if labels else im, channel_labels=labels)
+        fh, fw = _panel_block_fraction(fig)
+        assert fh > 0.9 and fw > 0.9, (im.shape, labels, fh, fw)
+        assert max(fig.get_size_inches()) == pytest.approx(10.0)
+    assert tuple(show_zyx_max(flat, figsize=(6, 5)).get_size_inches()) == (6, 5)
+    for f in (show_zyx_slice, show_zyx_max, show_zyx_projection, show_zyx_max_slabs, tpa.show_zyx_projection_slabs, show_zyx):
+        assert inspect.signature(f).parameters["figsize"].default is None, f.__name__
+
+
+def test_one_auto_font_size_tied_to_the_figure_width():
+    """R1-23 / D12: channel labels and the scale bar share one auto font size, set by the figure width.
+
+    Strategy: draw the same volume with channel labels at figsize (8, 3) and
+    (8, 12), and at (4, 8) and (12, 8).
+    Expected outcome: the label and the scale-bar text have the same size;
+    it does not change with the height (thin volumes keep readable text) and
+    grows with the width. (The two formulas differed, 10-24 pt from 3.5% vs
+    8-24 pt from 3% of the height.)
+    """
+    vol = np.random.default_rng(0).random((10, 40, 40)).astype(np.float32)
+
+    def sizes(figsize):
+        fig = show_zyx_max([vol], channel_labels=["a"], pixel_sizes=(1, 1, 1), figsize=figsize)
+        return _label_fontsize(fig), _scale_bar_artists(fig)[1].get_fontsize()
+
+    a, b = sizes((8, 3)), sizes((8, 12))
+    assert a[0] == a[1] and a == b
+    narrow, wide = sizes((4, 8)), sizes((12, 8))
+    assert narrow[0] == narrow[1] and narrow[0] < wide[0]
+
+
+def test_widget_auto_figsize_uses_physical_extents_and_classes_match_factories():
+    """D12 / R2-22 / R2-13: every viewer uses one auto-figsize rule, from physical extents.
+
+    Strategy: points covering X 0..500 and Y 0..500 with pixel sizes
+    (1, 4, 1) (Y physically 4x longer), through the scatter factory; an
+    image of the same physical shape through the slice factory; the classes
+    built directly without ``figsize``.
+    Expected outcome: both factory figures are about 4x taller than wide
+    (the scatter one ignored py and was square); a class built without
+    figsize gets the same figure size as its factory (the classes used to
+    draw at 10 x 10).
+    """
+    rng = np.random.default_rng(0)
+    pts = np.vstack([[0, 0, 0], [10, 500, 500], rng.uniform(0, 1, (50, 3)) * [10, 500, 500]])
+    ws = show_zyx_max_scatter_interactive(pts, pixel_sizes=(1, 4, 1), render="points")
+    w_h = ws.figsize[1] / ws.figsize[0]
+    assert 3.0 < w_h < 4.5, ws.figsize
+    wi = show_zyx_max_slice_interactive(np.zeros((11, 501, 501), np.uint8), pixel_sizes=(1, 4, 1))
+    assert 3.0 < wi.figsize[1] / wi.figsize[0] < 4.5, wi.figsize
+
+    cls = tpa.TNIAScatterWidget(pts[:, 2], pts[:, 1], pts[:, 0], pixel_sizes=(1, 4, 1))
+    np.testing.assert_allclose(cls.figsize, ws.figsize)
+    vol = _structured_volume()
+    np.testing.assert_allclose(TNIASliceWidget(vol).figsize, show_zyx_max_slice_interactive(vol).figsize)
