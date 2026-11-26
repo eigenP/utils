@@ -686,9 +686,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=None, colormap=None, vmin=Non
         xy (2d numpy array): xy projection
         xz (2d numpy array): xz projection
         zy (2d numpy array): zy projection
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple, optional): figure size. Defaults to (10,10).
-        colormap (_type_, optional): _description_. Defaults to None.
+        figsize ((width, height) in inches, optional): None (default) fits
+            the physical extents of the (rotated) panels, the gaps and the
+            label row in a 10-inch box. Changed (D12, 2026-11): it was a
+            fixed (10, 10).
         pixel_sizes (dict or (Z, Y, X) sequence, optional): converted to µm
             (a dict's 'unit'); a missing Z with known X/Y takes the finest of
             them; without X and Y sizes the scale bar is labelled in pixels.
