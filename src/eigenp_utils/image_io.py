@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 
 from ._conventions import (
     UM, is_inch_unit, is_length_unit, is_pixel_unit, resolve_pixel_sizes, to_um, warn_deprecated,
+    _is_dataarray, check_zyx_input,  # noqa: F401  (re-exported; WASM-safe guard, D31)
 )
 
 
@@ -246,32 +247,6 @@ def channels_by(da: xr.DataArray, field: str, values, allow_missing: bool = Fals
             raise KeyError(f"no channel with {field}={v!r}; present: {present}")
         out.extend(names)
     return out
-
-
-def _is_dataarray(obj) -> bool:
-    """Duck-typed test for an ``xarray.DataArray`` (no xarray import needed)."""
-    return hasattr(obj, "dims") and hasattr(obj, "isel") and hasattr(obj, "coords")
-
-
-def check_zyx_input(image, func_name: str = "this function"):
-    """Return ``image`` unchanged, or raise a TypeError for an xarray DataArray above 3-D.
-
-    The (Z)YX processing functions take NumPy-like arrays; a 2-D or 3-D
-    DataArray works as one, but an STCZYX DataArray from :func:`load_image`
-    would be projected or broadcast along S/T/C. The message points to
-    :func:`to_zyx`. Plain arrays of any shape pass (their own checks apply).
-
-    Added (D31, 2026-11). Duck-typed: it does not import xarray.
-    """
-    if _is_dataarray(image) and len(image.dims) > 3:
-        sizes = ", ".join(f"{d}={n}" for d, n in zip(image.dims, image.shape))
-        raise TypeError(
-            f"{func_name} takes a (Z)YX array, got a {len(image.dims)}-D xarray.DataArray ({sizes}). "
-            "Select one scene, time point and channel first: "
-            "arr, pixel_sizes = eigenp_utils.image_io.to_zyx(da, C=0), then pass arr "
-            "(and pixel_sizes=pixel_sizes)."
-        )
-    return image
 
 
 def to_zyx(da, *, S=0, T=0, C=None):

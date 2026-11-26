@@ -25,7 +25,9 @@ One place for the rules every viewer, reader and processing function follows
 - **Compositing (D04).** :func:`resolve_blending` is the single rule for
   ``blending=None``.
 - :func:`per_channel` broadcasts per-channel parameters;
-  :func:`warn_deprecated` emits the package's deprecation warnings.
+  :func:`warn_deprecated` emits the package's deprecation warnings;
+  :func:`check_zyx_input` rejects >3-D DataArrays in the (Z)YX processing
+  functions (D31).
 
 WASM-safe: imports only numpy and the standard library at module level;
 matplotlib is imported inside the colour functions.
@@ -753,3 +755,30 @@ def warn_deprecated(old, new=None, *, removal="0.1.0", stacklevel=3):
     msg = f"{old} is deprecated and will be removed in eigenp_utils {removal}"
     msg += f"; use {new} instead." if new else "."
     warnings.warn(msg, FutureWarning, stacklevel=stacklevel)
+
+
+def _is_dataarray(obj) -> bool:
+    """Duck-typed test for an ``xarray.DataArray`` (no xarray import needed)."""
+    return hasattr(obj, "dims") and hasattr(obj, "isel") and hasattr(obj, "coords")
+
+
+def check_zyx_input(image, func_name: str = "this function"):
+    """Return ``image`` unchanged, or raise a TypeError for an xarray DataArray above 3-D.
+
+    The (Z)YX processing functions take NumPy-like arrays; a 2-D or 3-D
+    DataArray works as one, but an STCZYX DataArray from :func:`load_image`
+    would be projected or broadcast along S/T/C. The message points to
+    :func:`to_zyx`. Plain arrays of any shape pass (their own checks apply).
+
+    Added (D31, 2026-11). Duck-typed: it does not import xarray. Lives here
+    (WASM-safe) and is re-exported by :mod:`eigenp_utils.image_io`.
+    """
+    if _is_dataarray(image) and len(image.dims) > 3:
+        sizes = ", ".join(f"{d}={n}" for d, n in zip(image.dims, image.shape))
+        raise TypeError(
+            f"{func_name} takes a (Z)YX array, got a {len(image.dims)}-D xarray.DataArray ({sizes}). "
+            "Select one scene, time point and channel first: "
+            "arr, pixel_sizes = eigenp_utils.image_io.to_zyx(da, C=0), then pass arr "
+            "(and pixel_sizes=pixel_sizes)."
+        )
+    return image
