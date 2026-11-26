@@ -5240,6 +5240,8 @@ def test_exports_report_through_warnings_and_the_module_logger_not_print(tmp_pat
     with pytest.warns(UserWarning, match="Error saving"):
         w.save_filename = str(tmp_path / "missing" / "x.svg")
         w.save_trigger += 1
+    # The CSV is now written even without points (D15): keep it in tmp_path
+    w.save_csv_filename = str(tmp_path / "points.csv")
     with pytest.warns(UserWarning, match="No points"):
         w.save_csv_trigger += 1
     assert capsys.readouterr().out == ""
