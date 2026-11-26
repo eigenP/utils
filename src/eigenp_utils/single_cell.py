@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any, Union
 import contextlib
 import importlib
+import logging
 import warnings
 from collections import defaultdict
 from uuid import uuid4
@@ -17,9 +18,12 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import adjusted_rand_score
 import matplotlib.colors as mcolors
 import matplotlib.patheffects as m_fx
+from matplotlib.lines import Line2D
 import re
 from .plotting_utils import get_nice_number
 from .stats import robust_standardize
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -608,6 +612,10 @@ def plot_clustering_tree(
 
     Returns:
         matplotlib.figure.Figure: The figure (call ``plt.show()`` yourself in scripts).
+
+    Changed (C-05, 2026-11): a colour map that cannot be built gives a
+    UserWarning (it was printed), and the legend uses ``Line2D`` proxy handles,
+    so no empty scatter collections are added to the current pyplot axes.
     """
 
     # 0. Validate Keys
@@ -808,7 +816,7 @@ def plot_clustering_tree(
                         # Node labels are strings (see above), so key the map by str
                         specific_colors_map = dict(zip(map(str, categories), colors_list))
             except Exception as e:
-                print(f"Warning: Could not map colors for {key}: {e}")
+                warnings.warn(f"Could not map colors for {key}: {e}", stacklevel=2)
 
         layer_labels = layer_order[i]
         fallback_color = mcolors.to_hex(fallback_cmap(i))
@@ -931,11 +939,14 @@ def plot_clustering_tree(
 
     legend_handles = []
     for s_val in nice_sizes:
-        # Calculate size in points for the scatter marker
+        # Scatter size s is an area in pt^2; a Line2D marker size is a diameter in pt.
+        # Proxy artists: plt.scatter([], []) added empty collections to the current axes.
         s_point = (s_val / max_count) * size_scale
         legend_handles.append(
-            plt.scatter(
-                [], [], s=s_point, c="gray", alpha=0.5, label=f"{s_val:,} cells"
+            Line2D(
+                [], [], linestyle="none", marker="o", markersize=np.sqrt(s_point),
+                markerfacecolor="gray", markeredgecolor="gray", alpha=0.5,
+                label=f"{s_val:,} cells",
             )
         )
 
@@ -954,7 +965,7 @@ def plot_clustering_tree(
     prop_handles = []
     for p in props:
         line_color = edge_cmap(p)
-        line = plt.Line2D(
+        line = Line2D(
             [0], [0], color=line_color, alpha=p, lw=1 + (p * 4), label=f"{p:.1f}"
         )
         prop_handles.append(line)
@@ -2206,6 +2217,15 @@ def find_expression_archetypes(
     }
 
 
+def _figure_of(axes):
+    """The Figure of what ``sc.pl.*(show=False)`` returned (an Axes or a list of Axes), else None."""
+    if axes is None:
+        return None
+    if isinstance(axes, (list, tuple)):
+        axes = axes[0] if len(axes) else None
+    return getattr(axes, "figure", None)
+
+
 @contextlib.contextmanager
 def _temporary_obs_columns(adata, columns: Dict[str, np.ndarray]):
     """Set ``adata.obs`` columns for the duration of a plot, then restore any
@@ -2233,9 +2253,16 @@ def plot_archetype_summary(
     cmap: Optional[str] = "Purples",
     archetype_cmap: str = "PiYG",
     **kwargs,
-) -> None:
+):
     """
     Plots an archetype's score and its top k genes on an embedding.
+
+    Returns ``None`` when scanpy shows the plots (its default); with
+    ``show=False`` returns ``(score_figure, top_genes_figure)`` (the second is
+    None when the archetype has no genes).
+
+    Changed (C-05, 2026-11): returns the figures with ``show=False`` (it
+    returned None); progress messages go to the module logger (they were printed).
 
     Args:
         adata: The annotated data matrix.
@@ -2294,9 +2321,10 @@ def plot_archetype_summary(
     # 3. Plotting
     basis = use_rep.replace("X_", "")  # sc.pl.embedding wants 'umap', not 'X_umap'
 
-    print(f"Plotting Archetype {archetype_id} Score")
+    logger.info("Plotting Archetype %s Score", archetype_id)
+    figs = [None, None]
     with _temporary_obs_columns(adata, {profile_name: archetype_profile}):
-        sc.pl.embedding(
+        figs[0] = sc.pl.embedding(
             adata,
             basis=basis,
             color=profile_name,
@@ -2306,8 +2334,8 @@ def plot_archetype_summary(
         )
 
     if top_k_genes:
-        print(f"Plotting Top {len(top_k_genes)} Genes for Archetype {archetype_id}")
-        sc.pl.embedding(
+        logger.info("Plotting Top %d Genes for Archetype %s", len(top_k_genes), archetype_id)
+        figs[1] = sc.pl.embedding(
             adata,
             basis=basis,
             color=top_k_genes,
@@ -2316,6 +2344,10 @@ def plot_archetype_summary(
             **kwargs,
         )
 
+    if kwargs.get("show") is False:
+        return tuple(_figure_of(r) for r in figs)
+    return None
+
 
 def plot_archetype_assignments(
     adata: sc.AnnData,
@@ -2323,9 +2355,15 @@ def plot_archetype_assignments(
     *,
     use_rep: str = "X_umap",
     **kwargs,
-) -> None:
+):
     """
     Plots each archetype's score on its own subplot on an embedding.
+
+    Returns ``None`` when scanpy shows the plot (its default); with
+    ``show=False`` returns the Figure.
+
+    Changed (C-05, 2026-11): returns the Figure with ``show=False`` (it
+    returned None); the progress message goes to the module logger.
 
     This helps visualize the "spatial" or "latent space" distribution
     of all archetypes simultaneously.
@@ -2345,7 +2383,7 @@ def plot_archetype_assignments(
 
     basis = use_rep.replace("X_", "")
 
-    print(f"Plotting {num_clusters} Archetype Scores per Cell")
+    logger.info("Plotting %d Archetype Scores per Cell", num_clusters)
 
     # Set a default `cmap` if not provided, as it looks better for continuous values
     if "cmap" not in kwargs:
@@ -2353,13 +2391,16 @@ def plot_archetype_assignments(
 
     # Plotting all archetypes as subplots
     with _temporary_obs_columns(adata, profiles):
-        sc.pl.embedding(
+        res = sc.pl.embedding(
             adata,
             basis=basis,
             color=obs_names,  # Pass the list of names
             title="Archetype Scores per Cell",  # Title will be adapted by scanpy
             **kwargs,
         )
+    if kwargs.get("show") is False:
+        return _figure_of(res)
+    return None
 
 
 def plot_archetype_hierarchy(
@@ -3147,6 +3188,12 @@ def calculate_lineage_coupling(
 def plot_coupling_heatmap(observed, z_scores, p_values, title="Lineage Coupling"):
     """
     Plots the lower-triangular clustermap matching the provided image style.
+
+    Returns the Figure (the heatmap is ``fig.axes[0]``, its colorbar the last axes).
+
+    Changed (C-05, 2026-11): draws on its own Figure/Axes and returns it; it
+    used pyplot's current figure and axes (``plt.title``, ``plt.legend``,
+    ``plt.gcf()``).
     """
     import seaborn as sns
     from matplotlib.patches import Rectangle
@@ -3156,13 +3203,14 @@ def plot_coupling_heatmap(observed, z_scores, p_values, title="Lineage Coupling"
     mask = np.triu(np.ones_like(z_scores, dtype=bool), k=1)
 
     # 2. Setup Figure
-    plt.figure(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(10, 8))
 
     # 3. Plot Heatmap (Z-scores)
     # Using 'vlag' or 'RdBu_r' to match the Blue-White-Red scheme
     # vmin/vmax set to -10/10 to match the scale in your image
-    ax = sns.heatmap(
+    sns.heatmap(
         z_scores,
+        ax=ax,
         mask=mask,
         cmap="RdBu_r",
         center=0,
@@ -3227,9 +3275,12 @@ def plot_coupling_heatmap(observed, z_scores, p_values, title="Lineage Coupling"
                     ax.add_patch(rect)
 
     # 6. Formatting
-    plt.title(title)
-    plt.xticks(rotation=45, ha="right")
-    plt.yticks(rotation=0)
+    ax.set_title(title)
+    for lab in ax.get_xticklabels():
+        lab.set_rotation(45)
+        lab.set_horizontalalignment("right")
+    for lab in ax.get_yticklabels():
+        lab.set_rotation(0)
 
     # Custom Legend for P-values
     legend_elements = [
@@ -3237,9 +3288,9 @@ def plot_coupling_heatmap(observed, z_scores, p_values, title="Lineage Coupling"
         Line2D([0], [0], color="black", lw=2.5, label="p ≤ 0.001"),
     ]
     # Add legend outside the plot
-    plt.legend(handles=legend_elements, loc="upper left", bbox_to_anchor=(1.2, 1))
+    ax.legend(handles=legend_elements, loc="upper left", bbox_to_anchor=(1.2, 1))
 
-    return plt.gcf()
+    return fig
 
 
 # ------------------------- Multiscale Coarsening -------------------------
@@ -4346,7 +4397,7 @@ def plot_celltype_ari(all_pair_ARI: pd.DataFrame) -> Tuple[plt.Figure, plt.Axes]
     # Add colorbar
     fig.colorbar(im, ax=ax)
 
-    plt.tight_layout()
+    fig.tight_layout()  # this function's own figure, not pyplot's current one
     return fig, ax
 
 
@@ -4363,7 +4414,7 @@ def barplot_cluster_uncertainty(
     ax.set_xlabel("Uncertainty (lower is better)")
     ax.set_ylabel("Cluster")
     ax.set_title("Cluster annotation uncertainty")
-    plt.tight_layout()
+    fig.tight_layout()  # this function's own figure, not pyplot's current one
     return fig, ax
 
 

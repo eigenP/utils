@@ -1,4 +1,5 @@
 """Tests for ``eigenp_utils.image_io``: STCZYX conversion, pixel sizes, channel metadata, TIFF I/O, and ``load_image``."""
+import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -253,15 +254,15 @@ def test_array_to_stczyx_xarray_validation_errors(image, kwargs, match):
 
 
 def test_numpy_to_stczyx_xarray_is_deprecated_alias():
-    """Verify ``numpy_to_stczyx_xarray`` emits ``DeprecationWarning`` and matches the new API.
+    """Verify ``numpy_to_stczyx_xarray`` emits a ``FutureWarning`` naming 0.1.0 and matches the new API.
 
-    Strategy: invoke both the deprecated alias and ``array_to_stczyx_xarray`` on
-    identical inputs.
-    Expected outcome: emits ``DeprecationWarning`` naming ``array_to_stczyx_xarray``
-    and returns an identical ``DataArray``.
+    Changed deliberately (D08): the warning was a ``DeprecationWarning``, hidden by default
+    when attributed to library code; it is now a visible ``FutureWarning``.
+    Expected outcome: the warning names ``array_to_stczyx_xarray`` and the removal version,
+    and the alias returns an identical ``DataArray``.
     """
     arr = np.arange(3 * 10 * 20).reshape(3, 10, 20)
-    with pytest.warns(DeprecationWarning, match="array_to_stczyx_xarray"):
+    with pytest.warns(FutureWarning, match=r"will be removed in eigenp_utils 0\.1\.0; use array_to_stczyx_xarray"):
         old = numpy_to_stczyx_xarray(arr, "CYX", channel_names=["a", "b", "c"])
     new = array_to_stczyx_xarray(arr, "CYX", channel_names=["a", "b", "c"])
     xr.testing.assert_identical(old, new)
@@ -1003,3 +1004,133 @@ def test_imagej_inch_and_pixel_units_report_none(tmp_path):
     tifffile.imwrite(p_um, vol, imagej=True, resolution=(2.0, 2.0),
                      metadata={"axes": "ZYX", "spacing": 1.5, "unit": "micron"})
     assert get_tiff_voxel_size(p_um) == {"X": 0.5, "Y": 0.5, "Z": 1.5, "unit": "micron"}
+
+
+# ---------------------------------------------------------------------------
+# D31: to_zyx, the DataArray guard, and lazy loading
+# ---------------------------------------------------------------------------
+
+
+def _stczyx(nz=4, ny=6, nx=5, nc=2, nt=1, ns=1, dz=2.0, dxy=0.5):
+    from eigenp_utils.image_io import array_to_stczyx_xarray as conv
+
+    data = np.arange(ns * nt * nc * nz * ny * nx, dtype=np.uint16).reshape(ns, nt, nc, nz, ny, nx)
+    return conv(data, "STCZYX", channel_names=[f"c{i}" for i in range(nc)],
+                pixel_sizes={"Z": dz, "Y": dxy, "X": dxy, "unit": "µm"})
+
+
+def test_to_zyx_squeezes_stczyx_to_zyx_with_pixel_sizes():
+    """D31: to_zyx(da, C=...) gives the (Z, Y, X) array of one S/T/C entry plus its µm pixel sizes.
+
+    (+) a 2-channel STCZYX image: C by index or by name gives that channel's ZYX block;
+        pixel_sizes {'Z': 2, 'Y': .5, 'X': .5, 'unit': 'µm'} come from the coordinates.
+    (-) a single-Z image gives a YX array; a single-channel image needs no C.
+    """
+    from eigenp_utils.image_io import to_zyx
+
+    da = _stczyx()
+    arr, ps = to_zyx(da, C=1)
+    assert isinstance(arr, np.ndarray) and arr.shape == (4, 6, 5)
+    np.testing.assert_array_equal(arr, da.values[0, 0, 1])
+    np.testing.assert_array_equal(to_zyx(da, C="c1")[0], arr)
+    assert ps == {"Z": 2.0, "Y": 0.5, "X": 0.5, "unit": "µm"}
+
+    yx, ps2 = to_zyx(_stczyx(nz=1, nc=1))
+    assert yx.shape == (6, 5)
+    assert ps2["Y"] == 0.5 and ps2["X"] == 0.5
+
+    with pytest.raises(ValueError, match="C="):
+        to_zyx(da)  # two channels: which one?
+    with pytest.raises(ValueError, match="T"):
+        to_zyx(_stczyx(nt=3), C=0, T=None)
+    # a 3-D DataArray (e.g. da.isel(S=0, T=0, C=0)) is accepted as well
+    arr3, _ = to_zyx(da.isel(S=0, T=0, C=0))
+    np.testing.assert_array_equal(arr3, da.values[0, 0, 0])
+    with pytest.raises(TypeError, match="DataArray"):
+        to_zyx(np.zeros((2, 3, 4)))
+
+
+def test_check_zyx_input_rejects_only_dataarrays_above_3d():
+    """D31: the shared guard raises a TypeError naming to_zyx for >3-D DataArrays only.
+
+    (+) a 6-D STCZYX DataArray raises TypeError mentioning 'to_zyx'.
+    (-) ndarrays of any shape and 2-D / 3-D DataArrays pass unchanged (they work today).
+    """
+    from eigenp_utils.image_io import check_zyx_input
+
+    da = _stczyx()
+    with pytest.raises(TypeError, match="to_zyx"):
+        check_zyx_input(da, "my_func")
+    for ok in (np.zeros((2, 3, 4, 5)), da.isel(S=0, T=0, C=0), da.isel(S=0, T=0, C=0, Z=0)):
+        assert check_zyx_input(ok, "my_func") is ok
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no reliable mmap in Pyodide")
+def test_load_image_lazy_tiff_is_memory_mapped(tmp_path):
+    """D31: load_image(path, lazy=True) does not read the pixels: an uncompressed TIFF is memory-mapped.
+
+    (+) lazy=True: the DataArray's data is a numpy memmap, values equal the eager read,
+        calibration is kept.
+    (-) lazy=False (default): an ordinary in-memory ndarray.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    data = np.arange(3 * 8 * 9, dtype=np.uint16).reshape(3, 8, 9)
+    path = tmp_path / "zyx.tif"
+    tifffile.imwrite(path, data, imagej=True, resolution=(2.0, 2.0),
+                     metadata={"spacing": 1.5, "unit": "um", "axes": "ZYX"})
+    eager = load_image(path)
+    lazy = load_image(path, lazy=True)
+    assert not isinstance(eager.data, np.memmap)
+    assert isinstance(lazy.data, np.memmap)
+    xr.testing.assert_equal(lazy, eager)
+    assert get_stczyx_pixel_sizes(lazy) == get_stczyx_pixel_sizes(eager)
+
+
+def test_load_image_lazy_compressed_tiff_needs_dask(tmp_path):
+    """D31: a compressed TIFF cannot be memory-mapped; lazy=True uses tifffile's zarr store with dask,
+    or raises a clear ImportError when dask is missing."""
+    tifffile = pytest.importorskip("tifffile")
+    pytest.importorskip("zarr")
+    data = np.arange(2 * 8 * 9, dtype=np.uint16).reshape(2, 8, 9)
+    path = tmp_path / "zyx_zlib.tif"
+    tifffile.imwrite(path, data, compression="zlib", metadata={"axes": "ZYX"})
+    try:
+        import dask.array as dsa
+    except ImportError:
+        with pytest.raises(ImportError, match="dask"):
+            load_image(path, lazy=True)
+        return
+    lazy = load_image(path, lazy=True)
+    assert isinstance(lazy.data, dsa.Array)
+    np.testing.assert_array_equal(lazy.values[0, 0, 0], data)
+
+
+def test_load_image_lazy_pyramidal_tiff_reads_full_resolution(tmp_path):
+    """D31: lazy=True on a pyramidal (multi-resolution) compressed TIFF gives the full-resolution
+    level as a dask array.
+
+    (+) a 2-level zlib pyramid (SubIFDs, as in large OME-TIFFs): dask array equal to the eager
+        read of level 0 (tifffile's zarr store for such a series is a Group, which dsa.from_zarr
+        could not wrap).
+    (-) the single-level compressed case is covered by the test above.
+    """
+    tifffile = pytest.importorskip("tifffile")
+    pytest.importorskip("zarr")
+    dsa = pytest.importorskip("dask.array")
+    data = np.arange(32 * 40, dtype=np.uint16).reshape(32, 40)
+    path = tmp_path / "pyramid.tif"
+    with tifffile.TiffWriter(path) as tw:
+        tw.write(data, subifds=1, compression="zlib", metadata={"axes": "YX"})
+        tw.write(data[::2, ::2], subfiletype=1, compression="zlib")
+    eager = load_image(path)
+    lazy = load_image(path, lazy=True)
+    assert isinstance(lazy.data, dsa.Array)
+    assert lazy.shape == eager.shape
+    np.testing.assert_array_equal(lazy.values, eager.values)
+    np.testing.assert_array_equal(lazy.values[0, 0, 0, 0], data)
+
+
+def test_load_image_lazy_needs_a_path():
+    """lazy=True only applies to files; arrays are already in memory (or lazy themselves)."""
+    with pytest.raises(ValueError, match="lazy"):
+        load_image(np.zeros((2, 3)), input_axes="YX", lazy=True)

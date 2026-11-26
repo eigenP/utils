@@ -37,7 +37,6 @@ Repository = "https://github.com/eigenP/utils.git"
 
 [project.optional-dependencies]
 plotting = [
-    "plotly",
     "statannotations",
     # statannotations imports statsmodels lazily for multiple-comparison
     # corrections (add_stat_annotations defaults to Holm-Bonferroni)

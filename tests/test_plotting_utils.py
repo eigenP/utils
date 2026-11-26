@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+import sys
+import warnings
 import xml.etree.ElementTree as ET
 
 import matplotlib as mpl
@@ -112,7 +114,7 @@ def test_savefig_svg_metadata_and_title_fallback(tmp_path, suptitle):
             fig.suptitle(suptitle)
 
         svg_stem = tmp_path / ("with_title" if suptitle else "no_title")
-        savefig_svg(svg_stem, bgnd_color=(1, 0, 0, 0.5), pad_inches=0.2)
+        savefig_svg(svg_stem, fig=fig, bgnd_color=(1, 0, 0, 0.5), pad_inches=0.2)
 
         svg_file = svg_stem.with_suffix(".svg")
         assert svg_file.exists()
@@ -149,7 +151,7 @@ def test_savefig_svg_custom_metadata_extension_and_no_mutation(tmp_path):
     try:
         ax.plot([0, 1], [0, 1])
         svg_path = tmp_path / "already_suffixed.svg"
-        savefig_svg(svg_path, metadata=md)
+        savefig_svg(svg_path, fig=fig, metadata=md)
 
         assert svg_path.exists()
         assert not (tmp_path / "already_suffixed.svg.svg").exists()
@@ -202,14 +204,14 @@ def test_savefig_svg_editable_text(tmp_path):
             ax.text(0.5, 0.5, "Test Editable Text")
 
             svg_path_true = tmp_path / "editable_true"
-            savefig_svg(svg_path_true)
+            savefig_svg(svg_path_true, fig=fig)
             assert plt.rcParams["svg.fonttype"] == "path"
             assert plt.rcParams["axes.unicode_minus"] is True
             content_true = svg_path_true.with_suffix(".svg").read_text()
             assert "<text" in content_true
 
             svg_path_false = tmp_path / "editable_false"
-            savefig_svg(svg_path_false, editable_text=False)
+            savefig_svg(svg_path_false, fig=fig, editable_text=False)
             assert plt.rcParams["svg.fonttype"] == "path"
             content_false = svg_path_false.with_suffix(".svg").read_text()
             assert "<text" not in content_false
@@ -234,12 +236,12 @@ def test_savefig_svg_editable_text_false_outlines_glyphs_after_set_plotting_styl
             ax.text(0.5, 0.5, "Outlined Text")
 
             svg_outlined = tmp_path / "outlined"
-            savefig_svg(svg_outlined, editable_text=False)
+            savefig_svg(svg_outlined, fig=fig, editable_text=False)
             assert "<text" not in svg_outlined.with_suffix(".svg").read_text()
             assert plt.rcParams["svg.fonttype"] == "none"
 
             svg_editable = tmp_path / "editable"
-            savefig_svg(svg_editable)
+            savefig_svg(svg_editable, fig=fig)
             assert "<text" in svg_editable.with_suffix(".svg").read_text()
         finally:
             plt.close(fig)
@@ -251,8 +253,9 @@ def test_savefig_svg_raster_threshold_and_file_size(tmp_path):
     Strategy: first check rasterized state transitions on a 100-point scatter for threshold
     None (disabled), 500 (unmet), and 50 (met); then save a seeded 2000-point scatter as
     vector (threshold=3000) vs rasterized (threshold=1000) and compare file sizes on disk.
-    Expected: PathCollection rasterization flips only when point count >= threshold,
-    threshold=None never rasterizes, and rasterized SVG is strictly smaller than vector SVG.
+    Expected: the saved SVG embeds a raster <image> only when point count >= threshold,
+    threshold=None never rasterizes, the figure's rasterized flag is restored after the
+    save (changed deliberately, D05), and rasterized SVG is strictly smaller than vector SVG.
     """
     fig, ax = plt.subplots()
     try:
@@ -261,19 +264,22 @@ def test_savefig_svg_raster_threshold_and_file_size(tmp_path):
         assert scatter_col.get_rasterized() is False
 
         out_none = tmp_path / "test_none_threshold.svg"
-        savefig_svg(out_none, scatter_raster_threshold=None)
+        savefig_svg(out_none, fig=fig, scatter_raster_threshold=None)
         assert scatter_col.get_rasterized() is False
         assert out_none.exists()
 
         out_no_raster = tmp_path / "test_no_raster.svg"
-        savefig_svg(out_no_raster, scatter_raster_threshold=500)
+        savefig_svg(out_no_raster, fig=fig, scatter_raster_threshold=500)
         assert scatter_col.get_rasterized() is False
         assert out_no_raster.exists()
 
         out_raster = tmp_path / "test_raster.svg"
-        savefig_svg(out_raster, scatter_raster_threshold=50)
-        assert scatter_col.get_rasterized() is True
-        assert out_raster.exists()
+        savefig_svg(out_raster, fig=fig, scatter_raster_threshold=50)
+        # changed on purpose (D05): the flag is restored after the save; the SVG
+        # embeds the scatter as an <image>
+        assert scatter_col.get_rasterized() is False
+        assert "<image" in out_raster.read_text()
+        assert "<image" not in out_no_raster.read_text()
     finally:
         plt.close(fig)
 
@@ -284,11 +290,133 @@ def test_savefig_svg_raster_threshold_and_file_size(tmp_path):
         out_vector = tmp_path / "size_vector.svg"
         out_raster_size = tmp_path / "size_raster.svg"
 
-        savefig_svg(out_vector, scatter_raster_threshold=3000, dpi=100)
-        savefig_svg(out_raster_size, scatter_raster_threshold=1000, dpi=100)
+        savefig_svg(out_vector, fig=fig_size, scatter_raster_threshold=3000, dpi=100)
+        savefig_svg(out_raster_size, fig=fig_size, scatter_raster_threshold=1000, dpi=100)
         assert out_raster_size.stat().st_size < out_vector.stat().st_size
     finally:
         plt.close(fig_size)
+
+
+def test_savefig_svg_saves_the_given_oo_figure(tmp_path):
+    """D05 (b): fig= saves that figure, even a pyplot-free Figure() while another pyplot figure is current."""
+    oo = Figure()
+    oo.add_subplot().set_title("oo figure")
+    other, ax = plt.subplots()
+    ax.set_title("other pyplot figure")
+    out = tmp_path / "oo.svg"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        savefig_svg(out, fig=oo)
+    text = out.read_text()
+    assert "oo figure" in text and "other pyplot figure" not in text
+
+
+def test_savefig_svg_without_fig_warns_or_raises(tmp_path, capsys):
+    """D05 (b): omitting fig gives a FutureWarning naming 0.1.0; with no open figure a ValueError,
+    and no figure is created. Nothing is printed."""
+    plt.close("all")
+    with pytest.raises(ValueError, match="no open figure; pass fig="):
+        savefig_svg(tmp_path / "none.svg")
+    assert plt.get_fignums() == []
+
+    fig, ax = plt.subplots()
+    ax.set_title("current figure")
+    with pytest.warns(FutureWarning, match=r"will be removed in eigenp_utils 0\.1\.0"):
+        savefig_svg(tmp_path / "cur.svg")
+    assert "current figure" in (tmp_path / "cur.svg").read_text()
+    assert capsys.readouterr().out == ""
+
+
+def test_savefig_svg_default_background_is_opaque_white(tmp_path):
+    """D05 (d): the default background is opaque white (was 80%-opaque white: 'opacity: 0.8')."""
+    fig, ax = plt.subplots()
+    savefig_svg(tmp_path / "w.svg", fig=fig, bbox_inches=None)
+    root = ET.parse(tmp_path / "w.svg").getroot()
+    patch = root.find(".//svg:g[@id='figure_1']/svg:g[@id='patch_1']/svg:path", SVG_NAMESPACES)
+    style = patch.get("style")
+    assert "fill: #ffffff" in style and "opacity" not in style
+
+
+def test_savefig_svg_restores_rasterization_even_if_saving_fails(tmp_path):
+    """D05 (c): flags set for the save are restored, also when savefig raises; flags set by the caller stay."""
+    fig, ax = plt.subplots()
+    big = ax.scatter(range(2000), range(2000))
+    mine = ax.scatter(range(3000), range(3000))
+    mine.set_rasterized(True)
+    with pytest.raises(Exception):
+        savefig_svg(tmp_path / "x.svg", fig=fig, not_a_savefig_kwarg=1)
+    assert big.get_rasterized() is False
+    savefig_svg(tmp_path / "y.svg", fig=fig)
+    assert big.get_rasterized() is False and mine.get_rasterized() is True
+
+
+def test_set_plotting_style_returns_a_restoring_handle_and_context_manager():
+    """D05 (e): set_plotting_style() returns a handle; .restore() and `with` put every rcParam back."""
+    before = dict(mpl.rcParams)
+    with plt.rc_context():
+        handle = set_plotting_style()
+        assert mpl.rcParams["svg.fonttype"] == "none"
+        handle.restore()
+        assert {k for k, v in before.items() if mpl.rcParams[k] != v} == set()
+
+        with set_plotting_style(editable_text=False) as h:
+            assert mpl.rcParams["svg.fonttype"] == "path"
+            assert h is not None
+        assert {k for k, v in before.items() if mpl.rcParams[k] != v} == set()
+
+
+def test_set_plotting_style_restore_keeps_a_later_backend_switch():
+    """D05 (e): like plt.rc_context, restore() never resets the backend.
+
+    (+) a backend switched after set_plotting_style() survives restore() (it went back to
+        the old backend or the auto sentinel).
+    (-) the other rcParams are still restored.
+    """
+    original = mpl.get_backend()
+    try:
+        with plt.rc_context():
+            fonttype_before = mpl.rcParams["svg.fonttype"]
+            handle = set_plotting_style(editable_text=fonttype_before != "none")
+            assert mpl.rcParams["svg.fonttype"] != fonttype_before
+            plt.switch_backend("svg")
+            handle.restore()
+            assert mpl.rcParams["backend"] == "svg"
+            assert mpl.rcParams["svg.fonttype"] == fonttype_before
+    finally:
+        plt.switch_backend(original)
+
+
+def test_set_plotting_style_warns_instead_of_printing(monkeypatch, capsys):
+    """Missing style/font files give UserWarnings, not prints."""
+    import eigenp_utils.plotting_utils as pu
+
+    monkeypatch.setattr(pu, "style_path", pu.ROOT_DIR / "missing.mplstyle")
+    monkeypatch.setattr(pu, "font_path", pu.ROOT_DIR / "missing.ttf")
+    with plt.rc_context():
+        with pytest.warns(UserWarning) as rec:
+            set_plotting_style()
+    msgs = " ".join(str(r.message) for r in rec)
+    assert "Style file not found" in msgs and "Font file not found" in msgs
+    assert capsys.readouterr().out == ""
+
+
+def test_set_plotting_style_math_in_dejavu_sans_with_fallback(tmp_path):
+    """D30: math text in DejaVu Sans and Inter falls back to DejaVu Sans; no Computer Modern in SVGs.
+
+    (+) '$\\mu$m' and '$R^2$' in an editable SVG reference no cmr10/cmmi10 font.
+    (-) plain text still uses Inter (the first sans-serif entry).
+    """
+    with plt.rc_context():
+        set_plotting_style()
+        assert mpl.rcParams["mathtext.fontset"] == "dejavusans"
+        assert mpl.rcParams["font.sans-serif"][:2] == ["Inter", "DejaVu Sans"]
+        fig, ax = plt.subplots()
+        ax.set_xlabel(r"Distance ($\mu$m)")
+        ax.set_ylabel(r"$R^2$")
+        savefig_svg(tmp_path / "m.svg", fig=fig)
+        text = (tmp_path / "m.svg").read_text()
+    assert "cmmi10" not in text and "cmr10" not in text
+    assert "Inter" in text
 
 
 # =========================================
@@ -672,6 +800,18 @@ def test_raincloud_plot_raster_threshold():
         assert all(c.get_rasterized() is True for c in scatter_large)
     finally:
         plt.close(res_large["fig"])
+
+
+def test_raincloud_and_savefig_svg_agree_at_the_raster_threshold(tmp_path):
+    """R5-05: both rasterize at exactly the threshold (>=): 1000 points with threshold 1000."""
+    data = pd.DataFrame({"group": ["A"] * 1000, "value": np.arange(1000.0)})
+    res = raincloud_plot(data=data, x="group", y="value", raster_threshold=1000)
+    rain = [c for c in res["axes"].collections if isinstance(c, PathCollection) and len(c.get_offsets()) == 1000]
+    assert rain and all(c.get_rasterized() is True for c in rain)
+    fig, ax = plt.subplots()
+    ax.scatter(np.arange(1000), np.arange(1000))
+    savefig_svg(tmp_path / "s.svg", fig=fig, scatter_raster_threshold=1000)
+    assert "<image" in (tmp_path / "s.svg").read_text()
 
 
 def test_raincloud_accepts_series_and_tuple():
@@ -1160,6 +1300,121 @@ def test_labels_cmap_low_ids_stay_opaque_with_many_labels():
     np.testing.assert_allclose(labels_cmap(np.arange(256) / 255), np.asarray(labels_cmap.colors))
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide")
+def test_import_prints_nothing():
+    """Importing the package writes nothing to stdout (the labels_cmap hint is gone, D06 / R5-11)."""
+    import subprocess
+
+    out = subprocess.run(
+        [sys.executable, "-c", "import eigenp_utils.plotting_utils"],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout == ""
+
+
+def test_labels_cmap_black_is_registered_and_opaque():
+    """labels_cmap_black: entry 0 opaque black, labels as in labels_cmap; usable by name (D06).
+
+    (+) the registered copy (cmap='labels_cmap_black') has an opaque black background.
+    (-) labels_cmap itself keeps its transparent entry 0 and the same label colours.
+    """
+    from eigenp_utils.plotting_utils import labels_cmap_black
+
+    assert labels_cmap_black.name == "labels_cmap_black"
+    np.testing.assert_allclose(mpl_colormaps["labels_cmap_black"](0.0), (0, 0, 0, 1))
+    np.testing.assert_allclose(labels_cmap_black(0.0), (0, 0, 0, 1))
+    np.testing.assert_allclose(np.asarray(labels_cmap_black.colors)[1:], np.asarray(labels_cmap.colors)[1:])
+    assert mpl_colormaps["labels_cmap"](0.0) == (0.0, 0.0, 0.0, 0.0)
+    # still keeps the low-id bump of _LabelsColormap
+    np.testing.assert_allclose(labels_cmap_black(0.001), labels_cmap.colors[1])
+
+
+def test_make_labels_cmap_background_returns_a_fresh_copy():
+    """make_labels_cmap(background=...) sets entry 0 on a new object; the shared labels_cmap is untouched."""
+    from eigenp_utils.plotting_utils import make_labels_cmap
+
+    white = make_labels_cmap(background="white")
+    np.testing.assert_allclose(white(0.0), (1, 1, 1, 1))
+    assert white is not labels_cmap
+    np.testing.assert_allclose(np.asarray(white.colors)[1:], np.asarray(labels_cmap.colors)[1:])
+    np.testing.assert_allclose(make_labels_cmap()(0.0), (0, 0, 0, 0))  # default: transparent
+    np.testing.assert_allclose(make_labels_cmap((0, 0, 0, 1))(0.0), (0, 0, 0, 1))
+    assert labels_cmap(0.0) == (0.0, 0.0, 0.0, 0.0)
+    with pytest.raises(ValueError):
+        make_labels_cmap(background="not-a-colour")
+
+
+def test_label_rgba_matches_label_annotator_and_cycles():
+    """label_rgba(ids): id k -> palette[(k - 1) % 255], 0 -> background, independent of the image's max (D28).
+
+    (+) ids 256, 300, 400 get three different colours (they used to clip to one), and id k and
+        k + 255 share a colour; each matches LabelAnnotator's instance_palette entry.
+    (-) ids 1..255 give labels_cmap.colors[k] exactly (the existing LUT identity).
+    """
+    from eigenp_utils.plotting_utils import label_rgba
+
+    _rgb_hex = pytest.importorskip("eigenp_utils.label_annotator")._rgb_hex
+
+    ids = np.arange(0, 256)
+    np.testing.assert_allclose(label_rgba(ids), np.asarray(labels_cmap.colors))
+    annot = [_rgb_hex(c) for c in LABELS_CMAP_COLORS]  # LabelAnnotator.instance_palette
+    for k in (1, 10, 255, 256, 300, 511, 1000, 65535):
+        assert mpl.colors.to_hex(label_rgba(k)) == annot[(k - 1) % len(annot)]
+    big = label_rgba(np.array([256, 300, 400]))
+    assert len({tuple(c) for c in big}) == 3
+    np.testing.assert_allclose(label_rgba(7), label_rgba(7 + 255))
+    # 2-D input keeps its shape and adds an RGBA axis; background as given
+    lab = np.array([[0, 1], [2, 0]], dtype=np.uint16)
+    out = label_rgba(lab, background="black")
+    assert out.shape == (2, 2, 4)
+    np.testing.assert_allclose(out[0, 0], (0, 0, 0, 1))
+    np.testing.assert_allclose(out[1, 0], labels_cmap.colors[2])
+    # a label's colour does not depend on the other labels present
+    np.testing.assert_allclose(label_rgba(np.array([1, 10]))[0], label_rgba(np.array([1, 1000]))[0])
+    with pytest.raises(ValueError, match="negative"):
+        label_rgba(np.array([-1, 2]))
+
+
+def test_label_norm_gives_label_rgba_through_imshow():
+    """imshow(lab, cmap=labels_cmap, norm=LabelNorm()) draws every id with label_rgba's colour (D28)."""
+    from eigenp_utils.plotting_utils import LabelNorm, label_rgba
+
+    lab = np.array([[0, 1, 2, 255], [256, 300, 511, 1000]])
+    fig, ax = plt.subplots()
+    im = ax.imshow(lab, cmap=labels_cmap, norm=LabelNorm(), interpolation="nearest")
+    np.testing.assert_allclose(im.to_rgba(lab), label_rgba(lab))
+    # the registered name works too
+    im2 = ax.imshow(lab, cmap="labels_cmap", norm=LabelNorm(), interpolation="nearest")
+    np.testing.assert_allclose(im2.to_rgba(lab), label_rgba(lab))
+
+
+def test_colormap_maker_rejects_builtin_names_but_re_registers_own():
+    """colormap_maker(cmap_name=<builtin>) raises a clear ValueError; re-registering one's own name works (R5-22)."""
+    with pytest.raises(ValueError, match="built-in"):
+        colormap_maker(["k", "w"], cmap_name="gray")
+    name = "eigenp_test_rereg"
+    try:
+        colormap_maker(["k", "r"], cmap_name=name)
+        cmap = colormap_maker(["k", "b"], cmap_name=name)  # re-running a notebook cell
+        np.testing.assert_allclose(mpl_colormaps[name](1.0), (0, 0, 1, 1))
+        assert cmap.name == name
+    finally:
+        if name in mpl_colormaps:
+            mpl_colormaps.unregister(name)
+
+
+def test_plotting_utils_imports_scipy_stats_lazily():
+    """plotting_utils does not import eigenp_utils.stats (and so scipy.stats) at import time (R5-22)."""
+    import inspect
+
+    import eigenp_utils.plotting_utils as pu
+
+    src = inspect.getsource(pu)
+    head = src.split("def set_plotting_style")[0]
+    assert "remove_outliers" not in head and "scipy" not in head
+    assert "register_cmap" not in src  # dead pre-3.7 fallbacks removed
+
+
 # =========================================
 # color_coded_projection
 # =========================================
@@ -1240,6 +1495,134 @@ def test_color_coded_projection_single_frame():
     """Verify a 1-frame 3D stack projects cleanly without dividing by zero."""
     out = color_coded_projection(np.random.default_rng(0).random((1, 8, 8)))
     assert out.shape == (8, 8, 3) and np.isfinite(out).all()
+
+
+def _noise_stack_with_object(frame_with_object=0, seed=0):
+    """(5, 64, 64) camera noise N(100, 2), plus +1000 on a 16 x 16 square in one frame only."""
+    rng = np.random.default_rng(seed)
+    stack = rng.normal(100.0, 2.0, (5, 64, 64))
+    stack[frame_with_object, 8:24, 8:24] += 1000.0
+    return stack
+
+
+def test_color_coded_projection_global_normalisation_keeps_noise_frames_dark():
+    """D25 (+): frames without signal stay at the noise level of the global range.
+
+    Strategy: N(100, 2) noise in 5 frames and a bright square in frame 0 only (R5-01 repro).
+    Per-frame min-max stretched each noise frame to full scale (mean brightness of the
+    background about 0.56 here, max 0.84). With one robust range for the whole stack, a
+    noise-only pixel's brightness is (noise - lo) / (hi - lo): with lo at the stack's 0.1th
+    percentile, that is at most a few sigma_noise / (hi - lo) ~ 0.002 each.
+    Expected: background brightness <= 10 sigma / (hi - lo) (about 0.02), object stays bright.
+    """
+    stack = _noise_stack_with_object()
+    out = color_coded_projection(stack)
+    bg = out[32:, 32:].max(axis=-1)
+    obj = out[10:22, 10:22].max(axis=-1)
+    sigma_rel = 2.0 / (1100.0 - 94.0)
+    assert bg.mean() <= 10 * sigma_rel
+    assert bg.max() <= 20 * sigma_rel
+    assert obj.min() > 0.4
+
+
+def _old_color_coded_projection(image, color_map="plasma"):
+    """Frozen copy of the pre-D25 algorithm (per-frame min-max), the reference for the (-) control."""
+    cmap = mpl_colormaps[color_map]
+    n = image.shape[0]
+    out = np.zeros(image.shape[1:] + (3,), np.float32)
+    for t in range(n):
+        frame = image[t].astype(np.float32)
+        lo, hi = np.nanmin(frame), np.nanmax(frame)
+        norm = (frame - lo) / (hi - lo) if hi > lo else np.clip(frame, 0.0, 1.0)
+        col = cmap(t / max(n - 1, 1))[:3]
+        for c in range(3):
+            np.maximum(out[..., c], norm * col[c], out=out[..., c])
+    return out
+
+
+def test_color_coded_projection_frames_spanning_unit_range_unchanged():
+    """D25 (-): frames that already span their full range give the output of the old per-frame code.
+
+    Reference: a frozen copy of the pre-D25 per-frame min-max algorithm.
+    - binary 0/1 frames and uint8 frames spanning 0..255: identical (atol 1e-6);
+    - continuous float frames spanning exactly [0, 1]: equal up to the robust percentile
+      clipping (0.1 / 99.99 %), which changes only the most extreme pixels: atol 1e-3.
+    """
+    rng = np.random.default_rng(1)
+    binary = (rng.random((4, 16, 16)) > 0.5).astype(float)
+    np.testing.assert_allclose(color_coded_projection(binary), _old_color_coded_projection(binary), atol=1e-6)
+
+    u8 = rng.integers(0, 256, (4, 64, 64)).astype(np.uint8)
+    u8[:, 0, 0], u8[:, 0, 1] = 0, 255
+    np.testing.assert_allclose(color_coded_projection(u8), _old_color_coded_projection(u8), atol=1e-6)
+
+    cont = rng.random((4, 64, 64))
+    cont[:, 0, 0], cont[:, 0, 1] = 0.0, 1.0
+    np.testing.assert_allclose(color_coded_projection(cont), _old_color_coded_projection(cont), atol=1e-3)
+
+
+def test_color_coded_projection_constant_frame_does_not_flood():
+    """A constant (blank or padded) frame no longer paints every pixel with its colour (R5-01)."""
+    stack = _noise_stack_with_object(frame_with_object=1)
+    stack[3] = 7.0  # constant frame below the noise floor
+    out = color_coded_projection(stack)
+    far = out[50, 50]
+    # the constant frame lowers the stack's floor to 7, so the noise (~100) sits at
+    # (100 - 7) / (1100 - 7) ~ 0.09; per-frame scaling gave plasma(3/4) ~ (0.99, 0.65, 0.25)
+    assert np.max(far) < 0.15
+    # per-frame mode maps a constant frame to 0 too (it has no contrast)
+    out_f = color_coded_projection(stack, normalize="frame")
+    plasma_frame3 = np.asarray(mpl_colormaps["plasma"](3 / 4)[:3])
+    assert not np.allclose(out_f[50, 50], plasma_frame3, atol=0.05)
+
+
+def test_color_coded_projection_vmin_vmax_pin_the_range():
+    """vmin/vmax replace the automatic range: values map to (v - vmin) / (vmax - vmin), clipped."""
+    img = np.zeros((2, 1, 3))
+    img[1, 0] = [10.0, 30.0, 50.0]
+    out = color_coded_projection(img, vmin=10.0, vmax=50.0)
+    c1 = np.asarray(mpl_colormaps["plasma"](1.0)[:3])
+    np.testing.assert_allclose(out[0, 0], 0.0, atol=1e-6)
+    np.testing.assert_allclose(out[0, 1], 0.5 * c1, atol=1e-6)
+    np.testing.assert_allclose(out[0, 2], c1, atol=1e-6)
+    # only vmax given: vmin stays automatic
+    out2 = color_coded_projection(img, vmax=100.0)
+    np.testing.assert_allclose(out2[0, 2], 0.5 * c1, atol=1e-6)
+    with pytest.raises(ValueError, match="vmin"):
+        color_coded_projection(img, vmin=5.0, vmax=5.0)
+    with pytest.raises(ValueError, match="normalize"):
+        color_coded_projection(img, normalize="frame", vmax=3.0)
+    with pytest.raises(ValueError, match="normalize"):
+        color_coded_projection(img, normalize="bogus")
+
+
+def test_color_coded_projection_argmax_keeps_colours_in_the_colormap():
+    """combine='argmax': a pixel takes the colour of its brightest frame, scaled by that intensity.
+
+    (+) bright at t=0 (0.6) and t=1 (1.0): argmax gives plasma(1) exactly, max mixes channels.
+    (-) a pixel bright in one frame only: argmax == max.
+    """
+    cmap = mpl_colormaps["plasma"]
+    img = np.zeros((2, 1, 2))
+    img[0, 0, 0] = 0.6
+    img[1, 0, 0] = 1.0
+    img[1, 0, 1] = 1.0
+    arg = color_coded_projection(img, combine="argmax")
+    mx = color_coded_projection(img, combine="max")
+    np.testing.assert_allclose(arg[0, 0], cmap(1.0)[:3], atol=1e-6)
+    assert not np.allclose(mx[0, 0], cmap(1.0)[:3], atol=1e-3)
+    np.testing.assert_allclose(arg[0, 1], mx[0, 1], atol=1e-6)
+    with pytest.raises(ValueError, match="combine"):
+        color_coded_projection(img, combine="mean")
+
+
+def test_color_coded_projection_default_cmap_is_plasma():
+    """User override of D25: the default colormap stays 'plasma' (time -> brightness, documented)."""
+    import inspect
+
+    sig = inspect.signature(color_coded_projection)
+    assert sig.parameters["color_map"].default == "plasma"
+    assert "brightness" in color_coded_projection.__doc__
 
 
 # =========================================
@@ -1465,19 +1848,153 @@ def test_describe_image_channel_table_swatches_and_shown_row():
 
 
 def test_hist_imshow_is_a_deprecated_alias_of_describe_image():
-    """Verify hist_imshow emits DeprecationWarning and delegates identically to describe_image."""
+    """Verify hist_imshow emits a FutureWarning naming 0.1.0 and delegates identically to describe_image.
+
+    Changed deliberately (D08): the warning was a DeprecationWarning, hidden by default
+    when attributed to library code; it is now a visible FutureWarning.
+    """
     img = np.random.default_rng(0).random((8, 9))
-    with pytest.warns(DeprecationWarning, match="describe_image"):
+    with pytest.warns(FutureWarning, match=r"hist_imshow is deprecated and will be removed in eigenp_utils 0\.1\.0; use describe_image"):
         res = hist_imshow(img, bins=16)
     ref = describe_image(img, bins=16)
     try:
         assert res["info"] == ref["info"] and res["info_html"] == ref["info_html"]
         assert list(res["axes"]) == list(ref["axes"])
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(FutureWarning):
             np.testing.assert_array_equal(hist_imshow(img, return_image_only=True), img)
     finally:
         plt.close(res["fig"])
         plt.close(ref["fig"])
+
+
+def test_describe_image_draws_row_zero_at_the_top():
+    """D26: origin='upper' by default (row 0 at the top, as the ortho viewers, Fiji, napari).
+
+    (+) default: origin 'upper', y axis inverted (ylim (H - 0.5, -0.5)).
+    (-) an explicit origin='lower' is still honoured.
+    """
+    img = np.arange(6.0).reshape(2, 3)
+    res = describe_image(img)
+    im = res["axes"]["Image"].images[0]
+    assert im.origin == "upper"
+    assert res["axes"]["Image"].get_ylim() == (1.5, -0.5)
+    res2 = describe_image(img, origin="lower")
+    assert res2["axes"]["Image"].images[0].origin == "lower"
+
+
+def test_describe_image_shows_rgb_images_as_rgb():
+    """D26 / R5-08: rgb='auto' shows a trailing 3/4 axis of uint8 or [0, 1] floats as colour.
+
+    (+) (20, 30, 3) uint8 and (20, 30, 4) float in [0, 1]: the whole image is drawn, one
+        histogram per colour channel, the info says RGB / RGBA.
+    (-) a (20, 30, 3) uint16 stack (3 slices) and a float stack with values above 1 are
+        still sliced along the leading axis; rgb=False forces slicing.
+    """
+    rng = np.random.default_rng(0)
+    rgb8 = rng.integers(0, 256, (20, 30, 3), dtype=np.uint8)
+    res = describe_image(rgb8)
+    shown = res["axes"]["Image"].images[0].get_array()
+    assert shown.shape == (20, 30, 3)
+    np.testing.assert_array_equal(np.asarray(shown), rgb8)
+    assert "shown: RGB" in res["info"]
+    assert len(res["axes"]["Histogram"].patches) == 3  # one step histogram per channel
+    np.testing.assert_array_equal(describe_image(rgb8, return_image_only=True), rgb8)
+
+    rgba = rng.random((20, 30, 4))
+    res = describe_image(rgba)
+    assert res["axes"]["Image"].images[0].get_array().shape == (20, 30, 4)
+    assert "shown: RGBA" in res["info"]
+
+    u16 = rng.integers(0, 4000, (20, 30, 3), dtype=np.uint16)
+    assert describe_image(u16, return_image_only=True).shape == (30, 3)
+    big = rng.random((20, 30, 3)) * 5
+    assert describe_image(big, return_image_only=True).shape == (30, 3)
+    assert describe_image(rgb8, rgb=False, return_image_only=True).shape == (30, 3)
+    with pytest.raises(ValueError, match="rgb"):
+        describe_image(u16[..., :2], rgb=True)
+    with pytest.raises(ValueError, match="RGB"):
+        describe_image(rgb8, gamma=2)
+
+
+def test_describe_image_dataarray_picks_y_x_by_name():
+    """R5-08: a channel-last DataArray (Y, X, C) shows a Y x X plane, not an X x C strip."""
+    xr = pytest.importorskip("xarray")
+    da = xr.DataArray(np.arange(4 * 5 * 3).reshape(4, 5, 3), dims=("Y", "X", "C"))
+    plane = describe_image(da, return_image_only=True)
+    np.testing.assert_array_equal(plane, da.isel(C=1).values)
+    res = describe_image(da)
+    assert "shown: C=1" in res["info"]
+    # dims ending in Y, X (STCZYX) are unchanged
+    da2 = xr.DataArray(np.arange(2 * 4 * 5).reshape(2, 4, 5), dims=("Z", "Y", "X"))
+    np.testing.assert_array_equal(describe_image(da2, return_image_only=True), da2.values[1])
+
+
+def _hist_counts(monkeypatch, *args, **kwargs):
+    """Run describe_image and return the (counts, edges) of its histogram, captured from Axes.hist."""
+    calls = []
+    orig = Axes.hist
+
+    def spy(self, *a, **k):
+        out = orig(self, *a, **k)
+        calls.append((np.asarray(out[0]), np.asarray(out[1])))
+        return out
+
+    monkeypatch.setattr(Axes, "hist", spy)
+    describe_image(*args, **kwargs)
+    monkeypatch.setattr(Axes, "hist", orig)
+    assert len(calls) == 1
+    return calls[0]
+
+
+def test_describe_image_integer_histograms_have_level_aligned_bins(monkeypatch):
+    """R5-09: integer data get bins of equal level counts, so flat data give flat histograms.
+
+    (+) uniform uint8 0..39 with bins=64: 40 bins, one per level, none empty (was 24 empty);
+        uniform uint16 0..299 with bins=64: every bin holds the same count (was 479..718),
+        edges at half levels.
+    (-) float data keep exactly ``bins`` equal bins over the data range.
+    """
+    img = np.tile(np.arange(40, dtype=np.uint8), (10, 1))
+    counts, edges = _hist_counts(monkeypatch, img, bins=64)
+    assert len(counts) == 40 and np.all(counts > 0) and np.ptp(counts) < 1e-12
+    np.testing.assert_allclose(edges[[0, -1]], [-0.5, 39.5])
+
+    img16 = np.tile(np.arange(300, dtype=np.uint16), (10, 1))
+    counts, edges = _hist_counts(monkeypatch, img16, bins=64)
+    assert len(counts) <= 64
+    assert np.allclose(np.diff(edges), np.diff(edges)[0]) and np.diff(edges)[0] == 5
+    assert np.ptp(counts) < 1e-12
+
+    flt = np.tile(np.arange(64.0), (4, 1))
+    counts, edges = _hist_counts(monkeypatch, flt, bins=16)
+    assert len(counts) == 16
+    np.testing.assert_allclose(edges[[0, -1]], [0.0, 63.0])
+
+
+@pytest.mark.parametrize("dtype", [np.int64, np.uint64])
+def test_describe_image_full_range_64bit_integers_still_plot(monkeypatch, dtype):
+    """R5-09: 64-bit integers spanning (most of) the dtype do not overflow the bin edges.
+
+    (+) [[min, max]] of int64 / uint64: monotonic edges, ``bins`` of them (the int64 product
+        overflowed and np.histogram raised 'bins must increase monotonically').
+    (-) the small-range integer case keeps its level-aligned bins (test above).
+    """
+    info = np.iinfo(dtype)
+    img = np.array([[info.min, info.max]], dtype=dtype)
+    counts, edges = _hist_counts(monkeypatch, img, bins=64)
+    assert np.all(np.diff(edges) > 0) and len(counts) == 64
+    assert counts[0] > 0 and counts[-1] > 0 and np.all(counts[1:-1] == 0)
+
+
+def test_color_coded_projection_output_is_shown_by_describe_image_as_rgb():
+    """Seam (C-09): color_coded_projection -> describe_image shows the (Y, X, 3) colour image whole."""
+    rng = np.random.default_rng(0)
+    rgb = color_coded_projection(rng.random((5, 20, 30)))
+    res = describe_image(rgb)
+    shown = res["axes"]["Image"].images[0].get_array()
+    assert shown.shape == (20, 30, 3)
+    np.testing.assert_allclose(np.asarray(shown), rgb)
+    assert "shown: RGB" in res["info"]
 
 
 def test_describe_image_passes_norm_and_interpolation_to_imshow():
@@ -1649,103 +2166,40 @@ def test_brightness_diagnostic_plotter_labels_the_per_slice_p99_truthfully():
 # =========================================
 
 
-def test_plotly_scatter_3d_containers_options_and_validation():
-    """Verify plotly_scatter_3d with DataFrame/dict/array inputs, colors, labels, camera, and errors.
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: plotly_scatter_3d(x=[0, 1, 2], y=[0, 1, 2], z=[0, 1, 2], color=[0.1, 0.5, 100.0]),
+        lambda: plotly_scatter_3d(data=pd.DataFrame({"a": [0, 1]}), x="a", y="a", z="a"),
+        lambda: plotly_scatter_3d(),
+        lambda: plotly_scatter_3d_from_adata_obsm(SimpleNamespace(obsm={}, obs={}), "X_umap", color_key="c"),
+    ],
+)
+def test_plotly_scatter_3d_stubs_raise_and_point_to_the_scatter_widget(call):
+    """D29 (user override): both plotly helpers are stubs that raise NotImplementedError.
 
-    Strategy: test numeric and categorical color lists, DataFrame and dict column resolution,
-    hover labels, initial_view camera settings, color=None, and missing-axis ValueErrors.
-    Expected: numeric color values are preserved, categorical colors map to integer codes,
-    labels/camera/titles are configured on the Plotly figure, color=None omits the colorbar,
-    and omitting x, y, or z raises ValueError.
+    Replaces the former plotly tests (test_plotly_scatter_3d_containers_options_and_validation,
+    test_plotly_scatter_3d_from_adata_obsm). Expected: NotImplementedError whose message names
+    the scatter anywidget (show_zyx_max_scatter_interactive / TNIAScatterWidget).
     """
-    pytest.importorskip("plotly")
-
-    # Numeric vs categorical list colors
-    fig_num = plotly_scatter_3d(x=[0, 1, 2], y=[0, 1, 2], z=[0, 1, 2], color=[0.1, 0.5, 100.0])
-    np.testing.assert_allclose(np.asarray(fig_num.data[0].marker.color, dtype=float), [0.1, 0.5, 100.0])
-    assert fig_num.data[0].marker.showscale is True
-
-    fig_cat = plotly_scatter_3d(x=[0, 1, 2], y=[0, 1, 2], z=[0, 1, 2], color=["b", "a", "b"])
-    assert list(fig_cat.data[0].marker.color) == [1, 0, 1]
-
-    # DataFrame + labels + initial_view
-    df = pd.DataFrame(
-        {"cx": [1.0, 2.0], "cy": [3.0, 4.0], "cz": [5.0, 6.0], "score": [0.2, 0.8], "name": ["p1", "p2"]}
-    )
-    cam = {"eye": {"x": 1.5, "y": 2.0, "z": 2.5}}
-    fig_df = plotly_scatter_3d(data=df, x="cx", y="cy", z="cz", color="score", labels="name", initial_view=cam)
-    trace = fig_df.data[0]
-    np.testing.assert_allclose(trace.x, [1.0, 2.0])
-    assert list(trace.text) == ["p1", "p2"]
-    assert "<b>Label:</b> %{text}" in trace.hovertemplate
-    assert "<b>Color:</b>" in trace.hovertemplate
-    assert fig_df.layout.scene.xaxis.title.text == "cx"
-    assert fig_df.layout.scene.yaxis.title.text == "cy"
-    assert fig_df.layout.scene.zaxis.title.text == "cz"
-    assert fig_df.layout.scene.camera.eye.x == pytest.approx(1.5)
-
-    # Dict data + color=None omits colorbar and color hover field
-    d = {"a": [0, 1], "b": [1, 2], "c": [2, 3], "lbl": ["u", "v"]}
-    fig_dict = plotly_scatter_3d(data=d, x="a", y="b", z="c", labels="lbl", color=None)
-    assert not fig_dict.data[0].marker.showscale
-    assert "<b>Color:</b>" not in fig_dict.data[0].hovertemplate
-    assert list(fig_dict.data[0].text) == ["u", "v"]
-
-    # Missing coordinate raises ValueError
-    with pytest.raises(ValueError, match="x, y, and z coordinates must be provided"):
-        plotly_scatter_3d(x=[0, 1], y=[0, 1])
-    with pytest.raises(ValueError, match="x, y, and z coordinates must be provided"):
-        plotly_scatter_3d(x=[0, 1], z=[0, 1])
-    with pytest.raises(ValueError, match="x, y, and z coordinates must be provided"):
-        plotly_scatter_3d(y=[0, 1], z=[0, 1])
+    with pytest.raises(NotImplementedError, match="show_zyx_max_scatter_interactive") as exc:
+        call()
+    assert "TNIAScatterWidget" in str(exc.value)
 
 
-def test_plotly_scatter_3d_from_adata_obsm(capsys):
-    """Verify plotly_scatter_3d_from_adata_obsm handles 3D, 2D zero-pad, obs keys, and errors.
+def test_plotly_stubs_keep_their_signatures_and_do_not_import_plotly():
+    """The stubs keep the old signatures (old calls fail with the message, not a TypeError) and never import plotly."""
+    import inspect
 
-    Strategy: construct a lightweight SimpleNamespace mimicking AnnData (.obsm and .obs),
-    then exercise 3D coordinates with valid color_key/label_key, 2D coordinates (warning +
-    zero Z padding), missing obs keys (warning), and missing obsm_key (ValueError).
-    Expected: axis titles reflect obsm_key dimensions (or 'Zero' when padded), obs color and
-    labels propagate when present, and missing keys warn or raise as documented.
-    """
-    pytest.importorskip("plotly")
+    import eigenp_utils.plotting_utils as pu
 
-    coords_3d = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
-    coords_2d = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    obs = pd.DataFrame({"cluster": [0.1, 0.5, 0.9], "cell": ["c1", "c2", "c3"]})
-    adata = SimpleNamespace(obsm={"X_umap": coords_3d, "X_pca2d": coords_2d}, obs=obs)
-
-    # 3D obsm with valid color_key and label_key
-    fig3 = plotly_scatter_3d_from_adata_obsm(adata, "X_umap", color_key="cluster", label_key="cell")
-    np.testing.assert_allclose(fig3.data[0].x, coords_3d[:, 0])
-    np.testing.assert_allclose(fig3.data[0].y, coords_3d[:, 1])
-    np.testing.assert_allclose(fig3.data[0].z, coords_3d[:, 2])
-    np.testing.assert_allclose(np.asarray(fig3.data[0].marker.color, dtype=float), [0.1, 0.5, 0.9])
-    assert list(fig3.data[0].text) == ["c1", "c2", "c3"]
-    assert fig3.layout.scene.xaxis.title.text == "X_umap_0"
-    assert fig3.layout.scene.yaxis.title.text == "X_umap_1"
-    assert fig3.layout.scene.zaxis.title.text == "X_umap_2"
-
-    # 2D obsm pads Z with zeros and prints a warning
-    fig2 = plotly_scatter_3d_from_adata_obsm(adata, "X_pca2d")
-    np.testing.assert_array_equal(fig2.data[0].z, np.zeros(3))
-    assert fig2.layout.scene.zaxis.title.text == "Zero"
-    assert "Padding with zeros for Z-axis" in capsys.readouterr().out
-
-    # Missing color_key and label_key warn gracefully without crashing
-    fig_missing_obs = plotly_scatter_3d_from_adata_obsm(
-        adata, "X_umap", color_key="no_color", label_key="no_label"
-    )
-    out = capsys.readouterr().out
-    assert "'no_color' not found in adata.obs" in out
-    assert "'no_label' not found in adata.obs" in out
-    assert not fig_missing_obs.data[0].marker.showscale
-    assert fig_missing_obs.data[0].text is None
-
-    # Missing obsm_key raises ValueError
-    with pytest.raises(ValueError, match="'X_missing' not found in adata.obsm"):
-        plotly_scatter_3d_from_adata_obsm(adata, "X_missing")
+    assert list(inspect.signature(plotly_scatter_3d).parameters) == [
+        "data", "x", "y", "z", "color", "labels", "marker_size", "opacity", "colorscale", "initial_view", "kwargs",
+    ]
+    assert list(inspect.signature(plotly_scatter_3d_from_adata_obsm).parameters) == [
+        "adata", "obsm_key", "color_key", "label_key", "kwargs",
+    ]
+    assert "import plotly" not in inspect.getsource(pu)
 
 
 # =========================================
