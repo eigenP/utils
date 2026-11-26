@@ -56,7 +56,7 @@
 * **Channel colours**: one default palette for every viewer and `LabelAnnotator` (white, lime, magenta, yellow, cyan, red, blue); `blending=None` picks additive for colours, maximum for colormaps, and minimum for colormaps that start at white.
 * **Deprecations**: legacy names keep working and emit a `FutureWarning` saying they will be removed in eigenp_utils 0.1.0.
 * **Output**: library code never prints. Information goes to module loggers (`logging.getLogger("eigenp_utils.<module>")`, nothing is configured on the root logger) and anything you can act on is a `UserWarning`. The drift functions take `progress=` to switch off their progress bars.
-* **Imports**: `import eigenp_utils` is lazy: each top-level name imports its module on first use. A name whose optional dependencies are missing raises an ImportError naming the extra to install (e.g. `pip install "eigenp-utils[image-analysis]"`); other import errors are not hidden.
+* **Imports**: `import eigenp_utils` is lazy: apart from `plotting_utils` (which registers the package colormaps by name), each top-level name imports its module on first use. A name whose optional dependencies are missing raises an ImportError naming the extra to install (e.g. `pip install "eigenp-utils[image-analysis]"`); other import errors are not hidden.
 
 ### Examples
 * **Notebooks**: The `notebooks/` directory contains Marimo notebooks demonstrating package functionalities, such as using statistical utilities with classic datasets.
