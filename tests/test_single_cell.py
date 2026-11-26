@@ -3202,3 +3202,84 @@ def test_plot_volcano_adata_lays_out_only_the_figure_it_creates():
         assert not np.allclose(ax_new.get_position().bounds, default_pos)
     finally:
         plt.close("all")
+
+
+_PYPLOT_GLOBALS = ("gcf", "gca", "tight_layout", "title", "xticks", "yticks", "legend", "scatter", "sca")
+
+
+@pytest.fixture
+def no_pyplot_globals(monkeypatch):
+    """Make the pyplot state-machine calls that act on the current figure/axes fail (C-05).
+
+    plt.subplots (and the plt.figure it calls) stays allowed: a helper may create its own figure.
+    """
+    def boom(name):
+        def _f(*a, **k):
+            raise AssertionError(f"plt.{name} used: helpers must work on their own Figure/Axes")
+        return _f
+
+    for name in _PYPLOT_GLOBALS:
+        monkeypatch.setattr(scmod.plt, name, boom(name))
+
+
+def test_plot_coupling_heatmap_is_object_oriented(no_pyplot_globals):
+    """C-05: plot_coupling_heatmap builds its own Figure/Axes (no plt.figure/title/xticks/legend/gcf).
+
+    Expected: the returned Figure's first axes is the heatmap, with the title, rotated x tick
+    labels and the p-value legend; a figure that was current before is left untouched.
+    """
+    other, ax_other = plt.subplots()
+    pos = ax_other.get_position().bounds
+    labels = ["A", "B"]
+    obs = pd.DataFrame([[3, 1], [1, 4]], index=labels, columns=labels)
+    z = pd.DataFrame([[1.0, 0.5], [0.5, 2.0]], index=labels, columns=labels)
+    p = pd.DataFrame([[0.0001, 0.5], [0.5, 0.005]], index=labels, columns=labels)
+    fig = plot_coupling_heatmap(obs, z, p, title="T")
+    ax = fig.axes[0]
+    assert fig is not other and ax.get_title() == "T"
+    assert ax.get_legend() is not None
+    assert [t.get_text() for t in ax.get_legend().get_texts()] == ["p ≤ 0.01", "p ≤ 0.001"]
+    assert all(t.get_rotation() == 45 for t in ax.get_xticklabels())
+    assert ax_other.get_position().bounds == pos and ax_other.get_legend() is None
+
+
+def test_plot_clustering_tree_legend_handles_add_nothing_to_axes(no_pyplot_globals):
+    """C-05: the size-legend handles are Line2D proxies, not empty scatters on the current axes."""
+    import matplotlib.legend
+
+    adata = AnnData(X=np.zeros((60, 3)))
+    adata.obs["leiden_0.5"] = pd.Categorical(np.repeat(["0", "1"], 30))
+    adata.obs["leiden_1.0"] = pd.Categorical(np.repeat(["0", "1", "2"], 20))
+    fig = plot_clustering_tree(adata, ["leiden_0.5", "leiden_1.0"])
+    ax = fig.axes[0]
+    assert all(len(c.get_offsets()) > 0 for c in ax.collections if hasattr(c, "get_offsets"))
+    legends = [a for a in ax.get_children() if isinstance(a, matplotlib.legend.Legend)]
+    titles = {lg.get_title().get_text() for lg in legends}
+    assert {"Cluster Size", "In-Proportion"} <= titles
+
+
+def test_ari_and_uncertainty_plots_lay_out_their_own_figure(no_pyplot_globals):
+    """C-05: plot_celltype_ari / barplot_cluster_uncertainty use fig.tight_layout, not plt.tight_layout."""
+    ari = pd.DataFrame([[1.0, 0.5], [0.5, 1.0]], index=[0.5, 1.0], columns=[0.5, 1.0])
+    fig, ax = plot_celltype_ari(ari)
+    assert ax.figure is fig and len(ax.images) == 1
+    fig2, ax2 = barplot_cluster_uncertainty(pd.DataFrame({"uncertainty": [0.3, 0.1]}, index=["a", "b"]))
+    assert ax2.figure is fig2 and len(ax2.patches) == 2
+
+
+def test_archetype_plots_return_figures_and_do_not_print(capsys):
+    """C-05: with show=False the archetype plots return their figures; progress goes to the logger.
+
+    plot_archetype_summary -> (score figure, top-genes figure); plot_archetype_assignments -> Figure.
+    With the default show (scanpy autoshow) they return None as before, so notebook output is unchanged.
+    """
+    a = _typed_log(n_per_type=30)
+    a.obsm["X_umap"] = np.random.default_rng(0).normal(size=(a.n_obs, 2))
+    res = find_expression_archetypes(a, [f"G{i}" for i in range(20)], 2)
+    capsys.readouterr()
+    fig_score, fig_genes = plot_archetype_summary(a, res, archetype_id=1, k=2, show=False)
+    assert isinstance(fig_score, plt.Figure) and isinstance(fig_genes, plt.Figure)
+    assert any(ax.get_title() == "Archetype 1 Score" for ax in fig_score.axes)
+    fig = plot_archetype_assignments(a, res, show=False)
+    assert isinstance(fig, plt.Figure) and len([ax for ax in fig.axes if ax.get_title()]) >= 2
+    assert capsys.readouterr().out == ""
