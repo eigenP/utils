@@ -1,4 +1,5 @@
 """Tests for ``eigenp_utils.image_io``: STCZYX conversion, pixel sizes, channel metadata, TIFF I/O, and ``load_image``."""
+import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -1064,6 +1065,7 @@ def test_check_zyx_input_rejects_only_dataarrays_above_3d():
         assert check_zyx_input(ok, "my_func") is ok
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no reliable mmap in Pyodide")
 def test_load_image_lazy_tiff_is_memory_mapped(tmp_path):
     """D31: load_image(path, lazy=True) does not read the pixels: an uncompressed TIFF is memory-mapped.
 

@@ -337,8 +337,8 @@ def _read_tiff_lazy(path, chosen_index, n_series):
     if n_series == 1:
         try:
             return tifffile.memmap(path, series=chosen_index[0], mode="r")
-        except ValueError:
-            pass  # compressed or not contiguous: not memory-mappable
+        except (ValueError, OSError):
+            pass  # compressed or not contiguous (or no mmap, e.g. Pyodide): not memory-mappable
     try:
         import dask.array as dsa
         import zarr
