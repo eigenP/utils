@@ -1440,3 +1440,240 @@ def test_labels_are_stored_as_uint16_and_returned_as_uint32(tmp_path):
     _, idx, old, *_ = w._track_undo[-1]
     assert idx.dtype == np.int32 and old.dtype == np.uint16
     assert w.undo_track_op() and (w.labels[1] == 9).all() and w._labels.dtype == np.uint16
+
+
+def _u8(w):
+    """The 8-bit image slice the widget last sent, as ``(C, Y, X)``."""
+    z, c, y, x = _img_header(w)
+    return np.frombuffer(bytes(w.image_to_js), dtype=np.uint8, offset=_IMG_HDR.size).reshape(c, y, x)
+
+
+def test_trait_kwargs_are_honoured_and_validated():
+    """Display and labelling kwargs given at construction are kept, not overwritten (D18, R4-08).
+
+    Strategy: pass ``z``, ``auto_fill``, ``vmin``/``vmax``/``gamma`` (data
+    units), ``active_label``, ``channel_visible``, ``class_colors``,
+    ``auto_increment`` and ``stack``; then invalid values of each, a trait
+    the widget computes (``shape_zyx``) and an unknown name.
+    Expected outcome: every given value survives construction (before, z
+    became nz // 2, vmin/vmax 0/255, gamma 1, active_label 1, auto_fill
+    True); ``stack=1`` gives the geometry, labels and z of stack 1 (it used
+    to keep stack 0's shape); invalid values raise ``ValueError``, computed
+    traits and unknown names ``TypeError`` (unknown names were silently
+    ignored).
+    """
+    v = np.arange(5 * 6 * 7, dtype=np.float32).reshape(5, 6, 7)
+    w = LabelAnnotator(v, axes="ZYX", z=1, auto_fill=False, vmin=[50], vmax=[100], gamma=[0.5], active_label=7,
+                       channel_visible=[False], opacity=0.3)
+    assert (w.z, w.auto_fill, w.vmin, w.vmax, w.gamma, w.active_label) == (1, False, [50.0], [100.0], [0.5], 7)
+    assert w.channel_visible == [False] and w.opacity == 0.3
+    assert _img_header(w)[0] == 1, "the slice sent is the requested z"
+    w = LabelAnnotator(v, axes="ZYX", vmin=10, vmax=20.5, gamma=2)  # scalars broadcast over channels
+    assert (w.vmin, w.vmax, w.gamma) == ([10.0], [20.5], [2.0])
+    w = LabelAnnotator(v, axes="ZYX", mode="semantic", classes=["a", "b"], class_colors=["red", "#00ff00"],
+                       active_label=2, auto_fill=True)
+    assert w.class_colors == ["#ff0000", "#00ff00"] and w.active_label == 2 and w.auto_fill is True
+    w = LabelAnnotator(v, axes="ZYX", auto_increment=False)
+    assert w.auto_increment is False
+
+    a, b = np.zeros((3, 8, 9), np.float32), np.zeros((2, 6, 7), np.float32)
+    lb = np.zeros((2, 6, 7), np.uint32)
+    lb[1] = 4
+    w = LabelAnnotator([a, b], axes="ZYX", labels=[None, lb], stack=1)
+    assert w.stack == 1 and w.shape_zyx == [2, 6, 7] and w.labels.shape == (2, 6, 7) and w.labels.max() == 4
+    assert _img_header(w)[2:] == (6, 7) and w.active_label == 5
+    w.stack = 0
+    assert w.shape_zyx == [3, 8, 9] and not w.labels.any()
+
+    bad = [dict(z=5), dict(z=-1), dict(vmin=5, vmax=5), dict(vmin=[1, 2]), dict(gamma=0), dict(gamma=[np.nan]),
+           dict(channel_visible=[True, True]), dict(stack=1),
+           dict(mode="semantic", classes=["a"], class_colors=["red", "blue"]),
+           dict(mode="semantic", classes=["a"], active_label=2), dict(keep_label=True, auto_increment=True)]
+    for kw in bad:
+        with pytest.raises(ValueError):
+            LabelAnnotator(v, axes="ZYX", **kw)
+    with pytest.raises(Exception, match="reserved"):
+        LabelAnnotator(v, axes="ZYX", background=True, active_label=65535)
+    for kw in (dict(shape_zyx=[1, 2, 3]), dict(image_to_js=b""), dict(colour="red")):
+        with pytest.raises(TypeError):
+            LabelAnnotator(v, axes="ZYX", **kw)
+
+
+def test_mode_and_background_are_read_only_after_construction():
+    """``mode`` and ``background`` cannot change after construction (D18, R4-08).
+
+    Strategy: set ``background = True`` on a widget whose labels hold 65535
+    and whose active id is 65535, and switch ``mode``.
+    Expected outcome: both raise (``TraitError``) and leave the state alone;
+    before, ``background = True`` silently turned cell 65535 into annotated
+    background with the reserved id still active, and switching mode left
+    no classes. Setting the current value again is allowed.
+    """
+    import traitlets
+
+    lab = np.zeros((6, 7), np.uint32)
+    lab[0, 0] = 65535
+    w = LabelAnnotator(np.zeros((6, 7)), labels=lab)
+    w.active_label = 65535
+    with pytest.raises(traitlets.TraitError, match="construction"):
+        w.background = True
+    with pytest.raises(traitlets.TraitError, match="construction"):
+        w.mode = "semantic"
+    assert w.background is False and w.mode == "instance" and w.active_label == 65535
+    w.mode = "instance"
+    w.background = False
+
+
+def test_tnia_style_aliases_colormap_and_channel_labels():
+    """``colormap=`` and ``channel_labels=`` are aliases of ``channel_colors=`` / ``channel_names=`` (D18, R4-15).
+
+    Strategy: build a 2-channel widget with the tnia names, then with both
+    spellings of the same argument.
+    Expected outcome: the aliases set the same traits as the original names;
+    giving both spellings raises ``TypeError``.
+    """
+    img = np.zeros((2, 6, 7))
+    w = LabelAnnotator(img, axes="CYX", colormap=["red", "gray"], channel_labels=["a", "b"])
+    ref = LabelAnnotator(img, axes="CYX", channel_colors=["red", "gray"], channel_names=["a", "b"])
+    assert w.channel_colors == ref.channel_colors == ["#ff0000", "#ffffff"]
+    assert w.channel_names == ref.channel_names == ["a", "b"]
+    with pytest.raises(TypeError, match="colormap"):
+        LabelAnnotator(img, axes="CYX", colormap=["red", "gray"], channel_colors=["red", "gray"])
+    with pytest.raises(TypeError, match="channel_labels"):
+        LabelAnnotator(img, axes="CYX", channel_labels=["a", "b"], channel_names=["a", "b"])
+
+
+def test_vmin_vmax_are_data_units_and_requantise_the_slice():
+    """``vmin``/``vmax`` are in data units; changing them re-quantises the 8-bit slice in Python (D02, R4-07).
+
+    Strategy: a 0..4095 ramp with 4 hot pixels at 60000 (12-bit camera).
+    Read the default range, then set ``vmax = [900]`` from Python; then
+    change only ``gamma``; then switch between two stacks with different
+    ranges.
+    Expected outcome: the defaults are the package's default display range
+    in data units (``vmin`` 0, ``vmax`` the robust p99.99); after
+    ``vmax = [900]`` the sent slice equals ``floor(255 * v / 900)`` clipped
+    (+): the part of the ramp below 900 gets 255 levels, which the fixed
+    8-bit pre-quantisation could not give (the GUI could only narrow it).
+    Gamma is applied in the browser, so it does not change the bytes (−),
+    and the labels are not re-sent. ``data_range`` spans the data so the
+    sliders can also widen the range. Each stack keeps its own range.
+    """
+    from eigenp_utils._conventions import default_display_range
+
+    ramp = np.tile(np.arange(4096, dtype=np.uint16), (4, 1)).reshape(1, 64, 256)
+    ramp = np.concatenate([ramp, ramp])  # 2 z-slices
+    ramp[1, 0, :4] = 60000
+    w = LabelAnnotator(ramp, axes="ZYX")
+    assert (w.vmin[0], w.vmax[0]) == default_display_range(ramp)
+    lo, hi, step, auto_lo, auto_hi = w.data_range[0]
+    assert (lo, hi) == (0.0, 60000.0) and step == 1.0 and (auto_lo, auto_hi) == (w.vmin[0], w.vmax[0])
+    w.z = 0
+    w.vmax = [900]
+    expect = np.clip(np.floor(ramp[0].astype(np.float32) * np.float32(255.0 / 900.0)), 0, 255).astype(np.uint8)
+    np.testing.assert_array_equal(_u8(w)[0], expect)
+    assert np.unique(_u8(w)[0][ramp[0] < 900]).size == 255
+    sent = bytes(w.image_to_js)
+    labels_sent = bytes(w.labels_to_js)
+    w.vmin = [1.0]
+    w.vmin = [0.0]
+    assert bytes(w.labels_to_js) == labels_sent, "a range change re-sends only the image"
+    w.gamma = [0.5]
+    assert bytes(w.image_to_js) == sent, "gamma is applied in the browser"
+
+    dark = np.full((2, 6, 7), 10, np.uint16)
+    dark[0, 0, 0] = 20
+    w2 = LabelAnnotator([ramp, dark], axes="ZYX")
+    first = (list(w2.vmin), list(w2.vmax))
+    w2.vmax = [1234.0]
+    w2.stack = 1
+    assert (w2.vmin, w2.vmax) == ([0.0], [20.0])
+    w2.stack = 0
+    assert (w2.vmin, w2.vmax) == (first[0], [1234.0])
+
+
+def test_list_of_dataarrays_keeps_names_colours_and_pixel_sizes():
+    """xarray input goes through the viewers' unpacking, also inside a list of stacks (D18, R4-13).
+
+    Strategy: a 2-channel DataArray with names, a ``color`` coordinate with
+    one empty entry, and calibrated coordinates (Z 2 µm, Y 0.5 µm, X 0.25
+    µm); pass it alone and as a list of two stacks.
+    Expected outcome: in both cases the names come from the ``C``
+    coordinate, the given colour is kept and only the empty entry takes a
+    palette colour (a list used to fall back to ch0/ch1 and default colours,
+    and one empty entry dropped all colours); ``pixel_sizes`` holds the
+    calibrated sizes in µm (they used to be ignored). Explicit sizes win.
+    """
+    pytest.importorskip("xarray")
+    from eigenp_utils.image_io import array_to_stczyx_xarray, set_channel_info
+
+    arr = np.random.default_rng(0).random((2, 3, 6, 7)).astype(np.float32)
+    da = array_to_stczyx_xarray(arr, input_axes="CZYX", channel_names=["DAPI", "GFP"],
+                                pixel_sizes={"Z": 2.0, "Y": 0.5, "X": 0.25, "unit": "µm"})
+    da = set_channel_info(da, {"DAPI": {"color": "blue"}, "GFP": {"color": ""}}, strict=False)
+    for w in (LabelAnnotator(da), LabelAnnotator([da, da])):
+        assert w.channel_names == ["DAPI", "GFP"]
+        assert w.channel_colors[0] == "#0000ff" and w.channel_colors[1] not in ("#0000ff", "")
+        assert {k: w.pixel_sizes[k] for k in "ZYX"} == pytest.approx({"Z": 2.0, "Y": 0.5, "X": 0.25})
+        assert w.pixel_sizes["unit"] == "µm"
+    w = LabelAnnotator(da, pixel_sizes=(1.0, 0.3, 0.3))
+    assert (w.pixel_sizes["Y"], w.pixel_sizes["X"]) == (0.3, 0.3)
+
+
+def test_pixel_sizes_are_parsed_to_um_and_validated():
+    """``pixel_sizes=`` uses the package parser: µm out, known units converted, bad input rejected (D01, D18).
+
+    Strategy: give sizes as a (Z, Y, X) tuple, a dict in nm, a scalar, None
+    and invalid values.
+    Expected outcome: µm values (nm divided by 1000), None where unknown,
+    ``ValueError`` for non-positive sizes or a wrong length.
+    """
+    img = np.zeros((3, 6, 7))
+    assert LabelAnnotator(img, axes="ZYX", pixel_sizes=(2, 0.5, 0.25)).pixel_sizes == {
+        "Z": 2.0, "Y": 0.5, "X": 0.25, "unit": "µm"}
+    ps = LabelAnnotator(img, axes="ZYX", pixel_sizes={"Y": 500, "X": 250, "unit": "nm"}).pixel_sizes
+    assert ps == {"Z": None, "Y": 0.5, "X": 0.25, "unit": "µm"}
+    assert LabelAnnotator(img, axes="ZYX", pixel_sizes=0.2).pixel_sizes["X"] == 0.2
+    assert LabelAnnotator(img, axes="ZYX").pixel_sizes == {"Z": None, "Y": None, "X": None, "unit": "µm"}
+    for bad in (-1, (1, 2), {"X": 0}):
+        with pytest.raises(ValueError):
+            LabelAnnotator(img, axes="ZYX", pixel_sizes=bad)
+
+
+def test_save_writes_axes_and_pixel_sizes_that_load_image_reads_back(tmp_path):
+    """Saved training pairs carry axes and calibration, so ``image_io.load_image`` reads them back (R8-10).
+
+    Strategy: save a 2-channel 3D widget with ``pixel_sizes`` (Y 0.5 µm,
+    X 0.25 µm) and a 1-channel 2D widget without sizes; read every file
+    with ``load_image`` and with plain ``tifffile.imread`` (what Cellpose
+    uses).
+    Expected outcome: images come back as C/Y/X with the original values,
+    masks as Y/X; the calibrated pair reports Y 0.5 and X 0.25 µm, the
+    uncalibrated one None (before, ``load_image`` raised on the files' 'QYX'
+    axes). ``tifffile.imread`` still returns the plain arrays.
+    """
+    pytest.importorskip("xarray")
+    tifffile = pytest.importorskip("tifffile")
+    from eigenp_utils.image_io import get_stczyx_pixel_sizes, load_image
+
+    img = np.random.default_rng(0).integers(0, 4000, (2, 3, 6, 7)).astype(np.uint16)
+    lab = np.zeros((3, 6, 7), np.uint32)
+    lab[1, 2:4, 2:5] = 3
+    w = LabelAnnotator(img, axes="CZYX", labels=lab, pixel_sizes={"Z": 2, "Y": 0.5, "X": 0.25})
+    pi, pm = w.save(tmp_path, "cal")
+    da = load_image(pi)
+    assert da.sizes["C"] == 2 and da.sizes["Y"] == 6 and da.sizes["X"] == 7
+    np.testing.assert_array_equal(np.asarray(da.isel(S=0, T=0, Z=0).values), img[:, 1])
+    ps = get_stczyx_pixel_sizes(da)
+    assert ps["Y"] == pytest.approx(0.5, rel=1e-6) and ps["X"] == pytest.approx(0.25, rel=1e-6)
+    dm = load_image(pm)
+    np.testing.assert_array_equal(np.asarray(dm.squeeze().values), lab[1])
+    assert get_stczyx_pixel_sizes(dm)["X"] == pytest.approx(0.25, rel=1e-6)
+    np.testing.assert_array_equal(tifffile.imread(pi), img[:, 1])
+    np.testing.assert_array_equal(tifffile.imread(pm), lab[1])
+
+    w2 = LabelAnnotator(img[0, 0], labels=lab[1])
+    pi2, pm2 = w2.save(tmp_path, "raw")
+    d2 = load_image(pi2)
+    assert d2.sizes["Y"] == 6 and get_stczyx_pixel_sizes(d2)["X"] is None
+    np.testing.assert_array_equal(np.asarray(load_image(pm2).squeeze().values), lab[1])

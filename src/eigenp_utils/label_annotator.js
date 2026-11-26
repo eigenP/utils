@@ -135,18 +135,18 @@ function render({ model, el: root }) {
     toolBtns[t] = el("button", { class: "lbl-btn", "data-tool": t, text: t, title: toolTitles[t] || `${t} (${t[0]})`, onclick: () => { model.set("tool", t); model.save_changes(); } });
     toolbar.appendChild(toolBtns[t]);
   }
-  const labelInput = el("input", { type: "number", min: "0", max: String(MAX_LABEL), class: "lbl-label", title: "active label" });
+  const labelInput = el("input", { type: "number", min: "0", max: String(MAX_LABEL), class: "lbl-label", title: "active label", "aria-label": "active label id" });
   labelInput.addEventListener("change", () => {
     const v = Math.min(maxCellId(), Math.max(0, parseInt(labelInput.value || "0") || 0));
     labelInput.value = String(v);
     model.set("active_label", v); model.save_changes();
   });
-  const classSelect = el("select", { class: "lbl-class" });
+  const classSelect = el("select", { class: "lbl-class", "aria-label": "active class" });
   classSelect.addEventListener("change", () => { model.set("active_label", parseInt(classSelect.value)); model.save_changes(); });
   const newBtn = el("button", { class: "lbl-btn", text: "new", title: "new label id (n)", onclick: () => { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); } });
-  const radius = el("input", { type: "range", min: "0", max: "50", class: "lbl-radius", title: "brush radius ([ / ])" });
+  const radius = el("input", { type: "range", min: "0", max: "50", class: "lbl-radius", title: "brush radius ([ / ])", "aria-label": "brush radius" });
   radius.addEventListener("input", () => { model.set("brush_radius", parseInt(radius.value)); model.save_changes(); });
-  const opacity = el("input", { type: "range", min: "0", max: "100", class: "lbl-opacity", title: "label opacity" });
+  const opacity = el("input", { type: "range", min: "0", max: "100", class: "lbl-opacity", title: "label opacity", "aria-label": "label opacity" });
   opacity.addEventListener("input", () => { model.set("opacity", parseInt(opacity.value) / 100); model.save_changes(); });
   const mkToggle = (name, label, title) => {
     const cb = el("input", { type: "checkbox", class: `lbl-${name}` });
@@ -181,14 +181,14 @@ function render({ model, el: root }) {
     el("span", { class: "lbl-help", text: "?", title: KEY_HELP }),
   );
 
-  const zSlider = el("input", { type: "range", min: "0", max: "0", class: "lbl-z" });
+  const zSlider = el("input", { type: "range", min: "0", max: "0", class: "lbl-z", "aria-label": "z slice" });
   const zLabel = el("span", { class: "lbl-zlabel" });
   zSlider.addEventListener("input", () => { model.set("z", parseInt(zSlider.value)); model.save_changes(); });
   const zPrev = el("button", { class: "lbl-btn lbl-step", text: "‹", title: "previous slice (ArrowDown)", onclick: () => stepZ(-1) });
   const zNext = el("button", { class: "lbl-btn lbl-step", text: "›", title: "next slice (ArrowUp)", onclick: () => stepZ(1) });
   const zGroup = el("span", { class: "lbl-group" }, [el("span", { text: "z" }), zPrev, zSlider, zNext, zLabel]);
   // stack selector (several 3D stacks, e.g. one per cage / field of view)
-  const stackSel = el("select", { class: "lbl-stack", title: "stack (PageUp / PageDown)" });
+  const stackSel = el("select", { class: "lbl-stack", title: "stack (PageUp / PageDown)", "aria-label": "stack" });
   stackSel.addEventListener("change", () => { model.set("stack", parseInt(stackSel.value)); model.save_changes(); });
   const sPrev = el("button", { class: "lbl-btn lbl-step", text: "‹", title: "previous stack (PageUp)", onclick: () => stepStack(-1) });
   const sNext = el("button", { class: "lbl-btn lbl-step", text: "›", title: "next stack (PageDown)", onclick: () => stepStack(1) });
@@ -196,26 +196,59 @@ function render({ model, el: root }) {
   zRow.append(stackGroup, zGroup);
 
   // ------------------------------------------------------------ channels UI
+  // One row per channel. vmin / vmax are in DATA units (data_range gives each
+  // slider's extent, step and automatic values); Python re-quantises the slice
+  // when they change, the browser applies gamma and colour. Rows are built on
+  // change:channel_names only and refreshed in place on every other change, so
+  // Python-side edits of vmin / vmax / gamma / colours / visibility show up.
+  const rows = [];
+  const fmtVal = (v) => {
+    const a = Math.abs(v);
+    return a !== 0 && (a >= 1e5 || a < 1e-2) ? v.toExponential(2) : String(Math.round(v * 100) / 100);
+  };
   function buildChannels() {
     chanPanel.innerHTML = "";
+    rows.length = 0;
     const names = model.get("channel_names") || [];
     names.forEach((name, i) => {
-      const vis = el("input", { type: "checkbox" });
-      vis.checked = (model.get("channel_visible") || [])[i] !== false;
+      const vis = el("input", { type: "checkbox", "aria-label": `show channel ${name}` });
       vis.addEventListener("change", () => setListItem("channel_visible", i, vis.checked));
-      const col = el("input", { type: "color", value: (model.get("channel_colors") || [])[i] || "#ffffff" });
+      const col = el("input", { type: "color", "aria-label": `colour of channel ${name}` });
       col.addEventListener("input", () => setListItem("channel_colors", i, col.value));
-      const lo = el("input", { type: "range", min: "0", max: "255", value: String((model.get("vmin") || [])[i] ?? 0), title: "min" });
-      const hi = el("input", { type: "range", min: "0", max: "255", value: String((model.get("vmax") || [])[i] ?? 255), title: "max" });
-      const ga = el("input", { type: "range", min: "10", max: "300", value: String(Math.round(((model.get("gamma") || [])[i] ?? 1) * 100)), title: "gamma" });
-      lo.addEventListener("input", () => setListItem("vmin", i, parseInt(lo.value)));
-      hi.addEventListener("input", () => setListItem("vmax", i, parseInt(hi.value)));
+      const lo = el("input", { type: "range", class: "lbl-vmin", title: "min (data units; double-click: automatic)", "aria-label": `minimum of channel ${name}, data units` });
+      const hi = el("input", { type: "range", class: "lbl-vmax", title: "max (data units; double-click: automatic)", "aria-label": `maximum of channel ${name}, data units` });
+      const ga = el("input", { type: "range", class: "lbl-gamma", min: "10", max: "300", step: "1", title: "gamma", "aria-label": `gamma of channel ${name}` });
+      const step = () => ((model.get("data_range") || [])[i] || [0, 255, 1])[2] || 1;
+      // the two limits never cross (min stays one step below max)
+      lo.addEventListener("input", () => setListItem("vmin", i, Math.min(parseFloat(lo.value), ((model.get("vmax") || [])[i] ?? Infinity) - step())));
+      hi.addEventListener("input", () => setListItem("vmax", i, Math.max(parseFloat(hi.value), ((model.get("vmin") || [])[i] ?? -Infinity) + step())));
       ga.addEventListener("input", () => setListItem("gamma", i, parseInt(ga.value) / 100));
-      const slider = (txt, input) => el("label", { class: "lbl-sl" }, [el("span", { text: txt }), input]);
+      // double-click restores the automatic (default display range) value
+      lo.addEventListener("dblclick", () => { const r = (model.get("data_range") || [])[i]; if (r) setListItem("vmin", i, r[3]); });
+      hi.addEventListener("dblclick", () => { const r = (model.get("data_range") || [])[i]; if (r) setListItem("vmax", i, r[4]); });
+      const loTxt = el("span", { class: "lbl-val" }), hiTxt = el("span", { class: "lbl-val" }), gaTxt = el("span", { class: "lbl-val" });
+      const slider = (txt, input, val) => el("label", { class: "lbl-sl" }, [el("span", { text: txt }), input, val]);
       chanPanel.appendChild(el("div", { class: "lbl-chan" }, [
         el("div", { class: "lbl-chan-head" }, [vis, col, el("span", { class: "lbl-cname", text: name, title: name })]),
-        slider("min", lo), slider("max", hi), slider("γ", ga),
+        slider("min", lo, loTxt), slider("max", hi, hiTxt), slider("γ", ga, gaTxt),
       ]));
+      rows.push({ vis, col, lo, hi, ga, loTxt, hiTxt, gaTxt });
+    });
+    refreshChannels();
+  }
+  function refreshChannels() {
+    const vis = model.get("channel_visible") || [], cols = model.get("channel_colors") || [];
+    const vmin = model.get("vmin") || [], vmax = model.get("vmax") || [], gam = model.get("gamma") || [];
+    const dr = model.get("data_range") || [];
+    rows.forEach((r, i) => {
+      r.vis.checked = vis[i] !== false;
+      r.col.value = cols[i] || "#ffffff";
+      const [lo, hi, st] = dr[i] || [0, 255, 1];
+      for (const s of [r.lo, r.hi]) { s.min = String(lo); s.max = String(hi); s.step = String(st || "any"); }
+      const a = vmin[i] ?? lo, b = vmax[i] ?? hi, g = gam[i] ?? 1;
+      r.lo.value = String(a); r.hi.value = String(b); r.ga.value = String(Math.round(g * 100));
+      r.lo.setAttribute("aria-valuetext", fmtVal(a)); r.hi.setAttribute("aria-valuetext", fmtVal(b));
+      r.loTxt.textContent = fmtVal(a); r.hiTxt.textContent = fmtVal(b); r.gaTxt.textContent = g.toFixed(2);
     });
   }
   function setListItem(name, i, v) {
@@ -223,7 +256,6 @@ function render({ model, el: root }) {
     arr[i] = v;
     model.set(name, arr);
     model.save_changes();
-    if (name !== "channel_colors" && name !== "channel_visible") return;
   }
 
   // -------------------------------------------------------------- drawing
@@ -236,17 +268,16 @@ function render({ model, el: root }) {
     }
     const vis = model.get("channel_visible") || [];
     const cols = model.get("channel_colors") || [];
-    const vmin = model.get("vmin") || [];
-    const vmax = model.get("vmax") || [];
     const gam = model.get("gamma") || [];
     const n = im.x * im.y;
     const acc = new Float32Array(n * 3);
     for (let c = 0; c < im.c; c++) {
       if (vis[c] === false) continue;
       const [r, g, b] = hexToRgb(cols[c]);
-      const lo = vmin[c] ?? 0, hi = Math.max((vmax[c] ?? 255), lo + 1), gm = gam[c] ?? 1;
+      // the 8-bit slice already spans vmin..vmax (quantised in Python): only gamma here
+      const gm = gam[c] ?? 1;
       const lut = new Float32Array(256);
-      for (let k = 0; k < 256; k++) lut[k] = Math.pow(Math.min(Math.max((k - lo) / (hi - lo), 0), 1), gm);
+      for (let k = 0; k < 256; k++) lut[k] = Math.pow(k / 255, gm);
       const off = c * n;
       for (let p = 0; p < n; p++) {
         const v = lut[im.data[off + p]];
@@ -830,7 +861,9 @@ function render({ model, el: root }) {
   const handlers = [
     ["change:image_to_js", onImage],
     ["change:labels_to_js change:labels_rev", onLabels],
-    ["change:channel_visible change:channel_colors change:vmin change:vmax change:gamma", compose],
+    ["change:channel_visible change:channel_colors change:gamma", () => { compose(); refreshChannels(); }],
+    // a new range arrives as a re-quantised image_to_js; only the controls change here
+    ["change:vmin change:vmax change:data_range", refreshChannels],
     ["change:labels_prev_to_js change:labels_next_to_js", onAdjacent],
     ["change:opacity change:outline_only change:display change:outline_px change:outline_border_px change:class_colors change:instance_palette change:mode change:background", () => { drawLabels(); drawAdjacent(); syncControls(); }],
     ["change:show_adjacent", () => { drawAdjacent(); syncControls(); }],

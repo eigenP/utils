@@ -900,3 +900,68 @@ def test_view_cleanup_removes_window_listener_and_resize_observer(page, serve):
     }"""
     )
     assert out == [1, 1, True, 1]
+
+
+# ------------------------------------------------- stage 2: channel controls, keys, wheel, paint cost
+def _push_traits(page, w, names):
+    """Copy Python traits into the mock model (what the host would sync), one ``set`` per trait."""
+    for name in names:
+        page.evaluate(f"window.mockModel.set({json.dumps(name)}, {json.dumps(getattr(w, name))})")
+
+
+def test_channel_rows_follow_python_changes_in_data_units(page, serve):
+    """Channel controls refresh in place on Python-side changes and work in data units (R4-20, R4-07).
+
+    Strategy: a 2-channel 12-bit image; read the min/max sliders; change
+    ``vmin``/``vmax``/``gamma``/``channel_colors``/``channel_visible`` in
+    Python and push them to the page; then drag the first max slider with
+    the keyboard (focus + ArrowLeft).
+    Expected outcome: the sliders span the data (0..4095, step 1) and start
+    at the default range; after the push every control shows the new value
+    without the rows being rebuilt (the same DOM nodes; before, only the
+    image re-composited and the controls stayed stale); ArrowLeft lowers
+    ``vmax`` by one data unit (keyboard operable).
+    """
+    img = np.zeros((2, H, W), np.uint16)
+    img[0] = np.arange(W) * 100
+    img[1, ::2] = 4095
+    w = LabelAnnotator(img, axes="CYX")
+    _open(page, serve(w))
+    rows = page.locator(".lbl-chan")
+    assert rows.count() == 2
+    hi0 = page.locator("input.lbl-vmax").first
+    assert hi0.get_attribute("max") == "3900" and hi0.get_attribute("step") == "1"
+    assert float(hi0.input_value()) == w.vmax[0]
+    page.evaluate("window.firstRow = document.querySelector('.lbl-chan')")
+    w.vmin, w.vmax, w.gamma = [100.0, 0.0], [2000.0, 4095.0], [0.5, 1.0]
+    w.channel_colors = ["#ff0000", w.channel_colors[1]]
+    w.channel_visible = [True, False]
+    _push_traits(page, w, ["vmin", "vmax", "gamma", "channel_colors", "channel_visible", "data_range"])
+    assert page.evaluate("window.firstRow === document.querySelector('.lbl-chan')"), "rows are refreshed, not rebuilt"
+    assert page.locator("input.lbl-vmin").first.input_value() == "100"
+    assert hi0.input_value() == "2000"
+    assert page.locator("input.lbl-gamma").first.input_value() == "50"
+    assert page.locator(".lbl-chan input[type=color]").first.input_value() == "#ff0000"
+    assert page.locator(".lbl-chan input[type=checkbox]").nth(1).is_checked() is False
+    hi0.focus()
+    page.keyboard.press("ArrowLeft")
+    assert _get(page, "vmax")[0] == 1999
+
+
+def test_controls_have_accessible_names(page, serve):
+    """Every input and select of the widget has an accessible name (R3-13).
+
+    Strategy: render a 2-channel 3D widget with two stacks and list each
+    input/select without an ``aria-label`` and outside a ``<label>``.
+    Expected outcome: none (the channel sliders and toolbar boxes used to be
+    announced without names).
+    """
+    img = np.zeros((2, 3, H, W), np.float32)
+    w = LabelAnnotator([img, img], axes="CZYX")
+    _open(page, serve(w))
+    unnamed = page.evaluate(
+        """() => [...document.querySelectorAll('#c input, #c select')]
+            .filter((e) => !e.getAttribute('aria-label') && !e.closest('label'))
+            .map((e) => e.className || e.type)"""
+    )
+    assert unnamed == []
