@@ -1,12 +1,14 @@
 """Tests for the package surface: ``eigenp_utils.__init__`` (D06), the deprecations (D08)
 and the PEP 723 headers of ``src/eigenp_utils/*.py`` (D09 = A)."""
 
+import ast
 import importlib
 import importlib.abc
 import subprocess
 import sys
 import textwrap
 import warnings
+from pathlib import Path
 
 import pytest
 
@@ -163,3 +165,41 @@ def test_import_is_lazy_and_works_without_scikit_image():
     """)
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
+
+
+# ---------------------------------------------------------------------------
+# D07: output policy
+# ---------------------------------------------------------------------------
+
+REPO = Path(__file__).resolve().parents[1]
+SRC = REPO / "src" / "eigenp_utils"
+# a marimo notebook kept in src/ (user decision: leave it alone)
+NOT_LIBRARY = {"task_calendar_scheduler.py"}
+ROOT_LOGGER_CALLS = {"basicConfig", "debug", "info", "warning", "error", "exception", "critical", "log"}
+
+
+def _library_modules():
+    return [p for p in sorted(SRC.glob("*.py")) if p.name not in NOT_LIBRARY]
+
+
+def test_library_code_neither_prints_nor_uses_the_root_logger():
+    """D07 / R8-13 / R7-09: no ``print`` and no root-logger call in library code.
+
+    (+) every ``print(...)`` call and every ``logging.<level>()`` /
+        ``logging.basicConfig()`` / ``logging.getLogger()`` (no name) call is reported.
+    (-) module loggers (``logging.getLogger(__name__)``) and ``logger.info`` pass;
+        ``print`` inside docstrings (examples) is not a call and passes.
+    """
+    offenders = []
+    for path in _library_modules():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if isinstance(f, ast.Name) and f.id == "print":
+                offenders.append(f"{path.name}:{node.lineno} print")
+            elif (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                  and f.value.id == "logging"):
+                if f.attr in ROOT_LOGGER_CALLS or (f.attr == "getLogger" and not node.args):
+                    offenders.append(f"{path.name}:{node.lineno} logging.{f.attr}")
+    assert not offenders, offenders
