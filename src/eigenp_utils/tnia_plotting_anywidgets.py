@@ -590,7 +590,7 @@ def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=None, projector
         channel_axis=channel_axis)
 
 # Copyright tnia 2021 - BSD License
-def _draw_channel_label_bar(axLabels, fontsize_pt, as_image=False):
+def _draw_channel_label_bar(axLabels, fontsize_pt, as_image=False, x_ref=None):
     """Grey bar under the channel labels, exactly as wide as the XY panel.
 
     ``axLabels`` has the same x-position and width as the XY axes, so the bar
@@ -602,22 +602,47 @@ def _draw_channel_label_bar(axLabels, fontsize_pt, as_image=False):
     nearest pixel edges. ``as_image=True`` draws the bar as a 1x1 image (for
     panels filled by ``imshow``); otherwise it is a snapped rectangle (for
     panels whose frame is the axes background patch, e.g. the scatter viewer).
+
+    ``x_ref`` (the XY axes) supplies the bar's x transform. Its final,
+    aspect-adjusted position can differ from ``axLabels`` in the last bits, and
+    when the panel edge falls on a half pixel (0.05 in at 150 dpi) that flips
+    the rounding by a whole pixel on some platforms (Pyodide). Going through
+    ``x_ref.transAxes`` gives x coordinates bit-identical to the panel's.
     """
+    from matplotlib.transforms import blended_transform_factory
+    x_ax = axLabels if x_ref is None else x_ref
+    trans = blended_transform_factory(x_ax.transAxes, axLabels.transAxes)
+    # An image bar spans the XY data limits through the XY data transform,
+    # read at draw time, so both of its edges match an imshow panel whose
+    # extent equals the limits bit for bit.
+    data_trans = blended_transform_factory(x_ax.transData, axLabels.transAxes)
     thickness_in = max(1.0, fontsize_pt * 0.15) / 72.0
     ax_h_in = axLabels.get_position().height * axLabels.figure.get_figheight()
     h = thickness_in / ax_h_in  # thickness in axes fraction, centred on y = 0
     grey = (0.85, 0.85, 0.85)
     if as_image:
         from matplotlib.image import AxesImage
-        im = AxesImage(axLabels, interpolation='nearest', extent=(0.0, 1.0, -h / 2.0, h / 2.0))
+
+        class _BarImage(AxesImage):
+            def get_extent(self):
+                x0, x1 = x_ax.get_xlim()
+                self._extent = (x0, x1, -h / 2.0, h / 2.0)
+                return self._extent
+
+            def get_window_extent(self, renderer=None):
+                self.get_extent()
+                return super().get_window_extent(renderer)
+
+        im = _BarImage(axLabels, interpolation='nearest')
+        im.get_extent()
         im.set_data(np.array([[grey]], dtype=float))
-        im.set_transform(axLabels.transAxes)
+        im.set_transform(data_trans)
         im.set_clip_on(False)
         axLabels.add_artist(im)
     else:
         from matplotlib.patches import Rectangle
         axLabels.add_patch(Rectangle(
-            (0.0, -h / 2.0), 1.0, h, transform=axLabels.transAxes,
+            (0.0, -h / 2.0), 1.0, h, transform=trans,
             facecolor=grey, edgecolor='none', linewidth=0,
             clip_on=False, snap=True,
         ))
@@ -931,7 +956,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=None, colormap=None, vmin=Non
         for spine in axLabels.spines.values():
             spine.set_visible(False)
 
-        _draw_channel_label_bar(axLabels, channel_label_fontsize_pt, as_image=True)
+        _draw_channel_label_bar(axLabels, channel_label_fontsize_pt, as_image=True, x_ref=axXY)
 
         n_labels = len(channel_labels)
         if n_labels > 0:
@@ -3917,7 +3942,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 for spine in axLabels.spines.values():
                     spine.set_visible(False)
 
-                _draw_channel_label_bar(axLabels, channel_label_fontsize_pt)
+                _draw_channel_label_bar(axLabels, channel_label_fontsize_pt, x_ref=axXY)
 
                 n_labels = len(channel_labels)
                 if n_labels > 0:
