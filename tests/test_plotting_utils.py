@@ -1983,103 +1983,40 @@ def test_brightness_diagnostic_plotter_labels_the_per_slice_p99_truthfully():
 # =========================================
 
 
-def test_plotly_scatter_3d_containers_options_and_validation():
-    """Verify plotly_scatter_3d with DataFrame/dict/array inputs, colors, labels, camera, and errors.
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: plotly_scatter_3d(x=[0, 1, 2], y=[0, 1, 2], z=[0, 1, 2], color=[0.1, 0.5, 100.0]),
+        lambda: plotly_scatter_3d(data=pd.DataFrame({"a": [0, 1]}), x="a", y="a", z="a"),
+        lambda: plotly_scatter_3d(),
+        lambda: plotly_scatter_3d_from_adata_obsm(SimpleNamespace(obsm={}, obs={}), "X_umap", color_key="c"),
+    ],
+)
+def test_plotly_scatter_3d_stubs_raise_and_point_to_the_scatter_widget(call):
+    """D29 (user override): both plotly helpers are stubs that raise NotImplementedError.
 
-    Strategy: test numeric and categorical color lists, DataFrame and dict column resolution,
-    hover labels, initial_view camera settings, color=None, and missing-axis ValueErrors.
-    Expected: numeric color values are preserved, categorical colors map to integer codes,
-    labels/camera/titles are configured on the Plotly figure, color=None omits the colorbar,
-    and omitting x, y, or z raises ValueError.
+    Replaces the former plotly tests (test_plotly_scatter_3d_containers_options_and_validation,
+    test_plotly_scatter_3d_from_adata_obsm). Expected: NotImplementedError whose message names
+    the scatter anywidget (show_zyx_max_scatter_interactive / TNIAScatterWidget).
     """
-    pytest.importorskip("plotly")
-
-    # Numeric vs categorical list colors
-    fig_num = plotly_scatter_3d(x=[0, 1, 2], y=[0, 1, 2], z=[0, 1, 2], color=[0.1, 0.5, 100.0])
-    np.testing.assert_allclose(np.asarray(fig_num.data[0].marker.color, dtype=float), [0.1, 0.5, 100.0])
-    assert fig_num.data[0].marker.showscale is True
-
-    fig_cat = plotly_scatter_3d(x=[0, 1, 2], y=[0, 1, 2], z=[0, 1, 2], color=["b", "a", "b"])
-    assert list(fig_cat.data[0].marker.color) == [1, 0, 1]
-
-    # DataFrame + labels + initial_view
-    df = pd.DataFrame(
-        {"cx": [1.0, 2.0], "cy": [3.0, 4.0], "cz": [5.0, 6.0], "score": [0.2, 0.8], "name": ["p1", "p2"]}
-    )
-    cam = {"eye": {"x": 1.5, "y": 2.0, "z": 2.5}}
-    fig_df = plotly_scatter_3d(data=df, x="cx", y="cy", z="cz", color="score", labels="name", initial_view=cam)
-    trace = fig_df.data[0]
-    np.testing.assert_allclose(trace.x, [1.0, 2.0])
-    assert list(trace.text) == ["p1", "p2"]
-    assert "<b>Label:</b> %{text}" in trace.hovertemplate
-    assert "<b>Color:</b>" in trace.hovertemplate
-    assert fig_df.layout.scene.xaxis.title.text == "cx"
-    assert fig_df.layout.scene.yaxis.title.text == "cy"
-    assert fig_df.layout.scene.zaxis.title.text == "cz"
-    assert fig_df.layout.scene.camera.eye.x == pytest.approx(1.5)
-
-    # Dict data + color=None omits colorbar and color hover field
-    d = {"a": [0, 1], "b": [1, 2], "c": [2, 3], "lbl": ["u", "v"]}
-    fig_dict = plotly_scatter_3d(data=d, x="a", y="b", z="c", labels="lbl", color=None)
-    assert not fig_dict.data[0].marker.showscale
-    assert "<b>Color:</b>" not in fig_dict.data[0].hovertemplate
-    assert list(fig_dict.data[0].text) == ["u", "v"]
-
-    # Missing coordinate raises ValueError
-    with pytest.raises(ValueError, match="x, y, and z coordinates must be provided"):
-        plotly_scatter_3d(x=[0, 1], y=[0, 1])
-    with pytest.raises(ValueError, match="x, y, and z coordinates must be provided"):
-        plotly_scatter_3d(x=[0, 1], z=[0, 1])
-    with pytest.raises(ValueError, match="x, y, and z coordinates must be provided"):
-        plotly_scatter_3d(y=[0, 1], z=[0, 1])
+    with pytest.raises(NotImplementedError, match="show_zyx_max_scatter_interactive") as exc:
+        call()
+    assert "TNIAScatterWidget" in str(exc.value)
 
 
-def test_plotly_scatter_3d_from_adata_obsm(capsys):
-    """Verify plotly_scatter_3d_from_adata_obsm handles 3D, 2D zero-pad, obs keys, and errors.
+def test_plotly_stubs_keep_their_signatures_and_do_not_import_plotly():
+    """The stubs keep the old signatures (old calls fail with the message, not a TypeError) and never import plotly."""
+    import inspect
 
-    Strategy: construct a lightweight SimpleNamespace mimicking AnnData (.obsm and .obs),
-    then exercise 3D coordinates with valid color_key/label_key, 2D coordinates (warning +
-    zero Z padding), missing obs keys (warning), and missing obsm_key (ValueError).
-    Expected: axis titles reflect obsm_key dimensions (or 'Zero' when padded), obs color and
-    labels propagate when present, and missing keys warn or raise as documented.
-    """
-    pytest.importorskip("plotly")
+    import eigenp_utils.plotting_utils as pu
 
-    coords_3d = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
-    coords_2d = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    obs = pd.DataFrame({"cluster": [0.1, 0.5, 0.9], "cell": ["c1", "c2", "c3"]})
-    adata = SimpleNamespace(obsm={"X_umap": coords_3d, "X_pca2d": coords_2d}, obs=obs)
-
-    # 3D obsm with valid color_key and label_key
-    fig3 = plotly_scatter_3d_from_adata_obsm(adata, "X_umap", color_key="cluster", label_key="cell")
-    np.testing.assert_allclose(fig3.data[0].x, coords_3d[:, 0])
-    np.testing.assert_allclose(fig3.data[0].y, coords_3d[:, 1])
-    np.testing.assert_allclose(fig3.data[0].z, coords_3d[:, 2])
-    np.testing.assert_allclose(np.asarray(fig3.data[0].marker.color, dtype=float), [0.1, 0.5, 0.9])
-    assert list(fig3.data[0].text) == ["c1", "c2", "c3"]
-    assert fig3.layout.scene.xaxis.title.text == "X_umap_0"
-    assert fig3.layout.scene.yaxis.title.text == "X_umap_1"
-    assert fig3.layout.scene.zaxis.title.text == "X_umap_2"
-
-    # 2D obsm pads Z with zeros and prints a warning
-    fig2 = plotly_scatter_3d_from_adata_obsm(adata, "X_pca2d")
-    np.testing.assert_array_equal(fig2.data[0].z, np.zeros(3))
-    assert fig2.layout.scene.zaxis.title.text == "Zero"
-    assert "Padding with zeros for Z-axis" in capsys.readouterr().out
-
-    # Missing color_key and label_key warn gracefully without crashing
-    fig_missing_obs = plotly_scatter_3d_from_adata_obsm(
-        adata, "X_umap", color_key="no_color", label_key="no_label"
-    )
-    out = capsys.readouterr().out
-    assert "'no_color' not found in adata.obs" in out
-    assert "'no_label' not found in adata.obs" in out
-    assert not fig_missing_obs.data[0].marker.showscale
-    assert fig_missing_obs.data[0].text is None
-
-    # Missing obsm_key raises ValueError
-    with pytest.raises(ValueError, match="'X_missing' not found in adata.obsm"):
-        plotly_scatter_3d_from_adata_obsm(adata, "X_missing")
+    assert list(inspect.signature(plotly_scatter_3d).parameters) == [
+        "data", "x", "y", "z", "color", "labels", "marker_size", "opacity", "colorscale", "initial_view", "kwargs",
+    ]
+    assert list(inspect.signature(plotly_scatter_3d_from_adata_obsm).parameters) == [
+        "adata", "obsm_key", "color_key", "label_key", "kwargs",
+    ]
+    assert "import plotly" not in inspect.getsource(pu)
 
 
 # =========================================
