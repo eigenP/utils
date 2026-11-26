@@ -53,7 +53,7 @@ def _binned_sigma(gaussian_sigma, gaussian_sigma_um, pixel_sizes, s_tup, stackle
         )
         sizes = (1.0, 1.0, 1.0)
     else:
-        values, _, unit = resolve_pixel_sizes(pixel_sizes, 3, stacklevel=stacklevel + 1)
+        values, _, unit = resolve_pixel_sizes(pixel_sizes, 3, stacklevel=stacklevel)
         if unit != UM:
             warnings.warn(
                 f"pixel_sizes unit {unit!r} is not a length unit; its values are used as µm.",

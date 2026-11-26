@@ -6,6 +6,7 @@ import pytest
 from scipy.interpolate import splev, splprep
 
 from eigenp_utils.spline_utils import (
+    _mark_points,
     calculate_spline_length,
     calculate_tangent_vectors,
     calculate_vector_difference,
@@ -17,6 +18,7 @@ from eigenp_utils.spline_utils import (
     normalize_vectors,
     plot_3d_spline,
     project_onto_plane,
+    spline_length,
 )
 
 
@@ -73,12 +75,14 @@ def test_fit_cubic_spline():
 def test_create_3d_image_from_spline():
     """Verify 3D spline voxelization along a diagonal, auto-sizing, and upper-bound clipping.
 
-    Strategy: fit a straight diagonal 3D spline from 10.5 to 40.5 and voxelize
-    with an explicit shape, with `shape=None`, and with a smaller clipping shape.
+    Strategy: fit a straight diagonal 3D spline through the integer voxel centres
+    10, 20, 30, 40 and voxelize with an explicit shape, with `shape=None`, and with
+    a smaller clipping shape. (D23: coordinates are rounded, voxel centres at
+    integers; this test used x.5 knots while coordinates were floored.)
     Expected outcome: marks the exact diagonal voxels `[10..40]`, auto-sizes to
-    `ceil(40.5 * 1.2) = 49` cubed, and clips points >= 30 cleanly without error.
+    `ceil(40 * 1.2) = 48` cubed, and clips points >= 29.5 cleanly without error.
     """
-    diag = np.tile(np.array([10.5, 20.5, 30.5, 40.5])[:, None], (1, 3))
+    diag = np.tile(np.array([10.0, 20.0, 30.0, 40.0])[:, None], (1, 3))
     tck = fit_cubic_spline(diag)
 
     img = create_3d_image_from_spline(tck, shape=(50, 50, 50), num_points=500)
@@ -87,12 +91,12 @@ def test_create_3d_image_from_spline():
     expected_voxels = np.tile(np.arange(10, 41)[:, None], (1, 3))
     np.testing.assert_array_equal(np.argwhere(img == 1), expected_voxels)
 
-    # shape=None allocates a cube of ceil(max_extent * 1.2) = ceil(48.6) = 49 per axis
+    # shape=None allocates a cube of ceil(max_extent * 1.2) = ceil(48.0) = 48 per axis
     img_auto = create_3d_image_from_spline(tck, shape=None, num_points=500)
-    assert img_auto.shape == (49, 49, 49)
+    assert img_auto.shape == (48, 48, 48)
     np.testing.assert_array_equal(np.argwhere(img_auto == 1), expected_voxels)
 
-    # Upper-bound clipping skips coordinates >= shape without raising IndexError
+    # Upper-bound clipping skips coordinates that round to >= shape without raising IndexError
     img_clipped = create_3d_image_from_spline(tck, shape=(30, 30, 30), num_points=500)
     expected_clipped = np.tile(np.arange(10, 30)[:, None], (1, 3))
     np.testing.assert_array_equal(np.argwhere(img_clipped == 1), expected_clipped)
@@ -101,12 +105,13 @@ def test_create_3d_image_from_spline():
 def test_create_nd_image_from_spline():
     """Verify nD spline voxelization in 2D and 4D, per-axis auto-sizing, and clipping.
 
-    Strategy: voxelize diagonal 2D and 4D splines with explicit and clipping
-    shapes, plus a rectangular 2D spline with `shape=None`.
+    Strategy: voxelize diagonal 2D and 4D splines through integer voxel centres with
+    explicit and clipping shapes, plus a rectangular 2D spline with `shape=None`.
+    (D23: rewritten from x.5 knots, which are rounding ties now.)
     Expected outcome: marks exact diagonal hypervoxels, clips out-of-bounds
     upper coordinates, and auto-sizes each axis independently by `ceil(max * 1.2)`.
     """
-    pts_2d = np.tile(np.array([5.5, 10.5, 15.5, 20.5])[:, None], (1, 2))
+    pts_2d = np.tile(np.array([5.0, 10.0, 15.0, 20.0])[:, None], (1, 2))
     tck_2d, _ = splprep(pts_2d.T, s=0)
 
     img_2d = create_nd_image_from_spline(tck_2d, shape=(25, 25), num_points=400)
@@ -119,15 +124,15 @@ def test_create_nd_image_from_spline():
     expected_2d_clip = np.tile(np.arange(5, 15)[:, None], (1, 2))
     np.testing.assert_array_equal(np.argwhere(img_2d_clip == 1), expected_2d_clip)
 
-    # Non-square 2D auto-sizing: ceil([8.5, 40.5] * 1.2) = [11, 49]
-    pts_rect = np.column_stack([np.array([2.5, 4.5, 6.5, 8.5]), np.array([10.5, 20.5, 30.5, 40.5])])
+    # Non-square 2D auto-sizing: ceil([8, 40] * 1.2) = [10, 48]
+    pts_rect = np.column_stack([np.array([2.0, 4.0, 6.0, 8.0]), np.array([10.0, 20.0, 30.0, 40.0])])
     tck_rect, _ = splprep(pts_rect.T, s=0)
     img_auto = create_nd_image_from_spline(tck_rect, shape=None, num_points=400)
-    assert img_auto.shape == (11, 49)
+    assert img_auto.shape == (10, 48)
     assert img_auto[2, 10] == 1 and img_auto[8, 40] == 1
 
     # 4D diagonal hypergrid
-    pts_4d = np.tile(np.array([1.5, 2.5, 3.5, 4.5])[:, None], (1, 4))
+    pts_4d = np.tile(np.array([1.0, 2.0, 3.0, 4.0])[:, None], (1, 4))
     tck_4d, _ = splprep(pts_4d.T, s=0)
     img_4d = create_nd_image_from_spline(tck_4d, shape=(6, 6, 6, 6), num_points=200)
     assert img_4d.shape == (6, 6, 6, 6)
@@ -173,8 +178,10 @@ def test_calculate_vector_difference():
     """Verify full-length vector difference between two parallel shifted splines.
 
     Strategy: construct two parallel 2D lines offset by +1 along Y and compute
-    their difference with `overlap_only=False`.
-    Expected outcome: returns exact `[0.0, 1.0]` at every sample point.
+    their difference with `overlap_only=False`, resampled (default) and paired by
+    index (`resample=False`). Rewritten for D23 (resampling became the default).
+    Expected outcome: returns exact `[0.0, 1.0]` at every sample point; `num_points`
+    rows when resampled, the input length when paired.
     """
     line1 = np.array([[0, 0], [5, 5], [10, 10], [15, 15]], dtype=float)
     line2 = np.array([[0, 1], [5, 6], [10, 11], [15, 16]], dtype=float)
@@ -182,19 +189,27 @@ def test_calculate_vector_difference():
     resampled1 = create_resampled_spline(line1, num_points=5)
     resampled2 = create_resampled_spline(line2, num_points=5)
 
+    # D23: the splines are resampled to num_points by default (equal shapes used to
+    # be paired by index, ignoring num_points)
     vectors = calculate_vector_difference(resampled1, resampled2)
-    assert vectors.shape == (5, 2)
-    np.testing.assert_allclose(vectors, np.tile([0.0, 1.0], (5, 1)), atol=1e-12)
+    assert vectors.shape == (1000, 2)
+    np.testing.assert_allclose(vectors, np.tile([0.0, 1.0], (1000, 1)), atol=1e-9)
+
+    # resample=False keeps the index pairing of equal-length inputs
+    paired = calculate_vector_difference(resampled1, resampled2, resample=False)
+    assert paired.shape == (5, 2)
+    np.testing.assert_allclose(paired, np.tile([0.0, 1.0], (5, 1)), atol=1e-12)
 
 
 def test_calculate_vector_difference_overlap():
-    """Verify exact box-clipped overlap difference and disjoint zero fallback.
+    """Verify exact box-clipped overlap difference and the NaN result without overlap.
 
     Strategy: compute `overlap_only=True` difference between two partially
     overlapping diagonal lines (`y = x` and `y = x + 1`), then repeat with a
     disjoint shifted copy.
     Expected outcome: overlapping segments clip exactly to box faces yielding
-    `[-1.0, 0.0]` everywhere, while disjoint curves return the zero fallback.
+    `[-1.0, 0.0]` everywhere, while disjoint curves return NaN (rewritten for D23:
+    the fallback used to be zeros).
     """
     line1 = np.array([[0, 0], [5, 5], [10, 10], [15, 15], [20, 20]], dtype=float)
     line2 = np.array([[10, 11], [15, 16], [20, 21], [25, 26], [30, 31]], dtype=float)
@@ -208,12 +223,12 @@ def test_calculate_vector_difference_overlap():
     assert vectors.shape == (5, 2)
     np.testing.assert_allclose(vectors, np.tile([-1.0, 0.0], (5, 1)), atol=1e-3)
 
-    # Control: splines without any overlap give the documented zero fallback
+    # Control: splines without any overlap give NaN (D23; it was all zeros, which
+    # looks exactly like perfect agreement)
     far = create_resampled_spline(line2 + 100, num_points=20)
-    np.testing.assert_array_equal(
-        calculate_vector_difference(resampled1, far, overlap_only=True, num_points=5),
-        np.zeros((5, 2)),
-    )
+    no_overlap = calculate_vector_difference(resampled1, far, overlap_only=True, num_points=5)
+    assert no_overlap.shape == (5, 2)
+    assert np.all(np.isnan(no_overlap))
 
 
 def test_calculate_vector_difference_small_overlap_and_unequal_lengths():
@@ -357,14 +372,14 @@ def test_calculate_spline_length_and_resolution_forms():
     assert calculate_spline_length(coords_3d) == pytest.approx(7.0)
 
     # List, dict, ndarray, and 3-element tuple for 2D
-    assert calculate_spline_length(coords_3d, resolution=[2.0, 1.0, 0.5]) == pytest.approx(np.sqrt(34.0))
-    assert calculate_spline_length(coords_2d, resolution={"Y": 2.0, "X": 0.5}) == pytest.approx(np.sqrt(40.0))
+    assert calculate_spline_length(coords_3d, pixel_sizes=[2.0, 1.0, 0.5]) == pytest.approx(np.sqrt(34.0))
+    assert calculate_spline_length(coords_2d, pixel_sizes={"Y": 2.0, "X": 0.5}) == pytest.approx(np.sqrt(40.0))
 
     line_z = [np.linspace(0, 10, 11), np.zeros(11), np.zeros(11)]
     line_y2d = [np.linspace(0, 10, 11), np.zeros(11)]
-    assert calculate_spline_length(line_z, resolution=np.array([2.0, 1.0, 1.0])) == pytest.approx(20.0)
-    assert calculate_spline_length(line_y2d, resolution=[0.5, 0.5]) == pytest.approx(5.0)
-    assert calculate_spline_length(line_y2d, resolution=(2.0, 0.5, 0.5)) == pytest.approx(5.0)
+    assert calculate_spline_length(line_z, pixel_sizes=np.array([2.0, 1.0, 1.0])) == pytest.approx(20.0)
+    assert calculate_spline_length(line_y2d, pixel_sizes=[0.5, 0.5]) == pytest.approx(5.0)
+    assert calculate_spline_length(line_y2d, pixel_sizes=(2.0, 0.5, 0.5)) == pytest.approx(5.0)
 
     # Single-point curves have zero length
     assert calculate_spline_length([np.array([5.0]), np.array([3.0])]) == pytest.approx(0.0)
@@ -374,25 +389,25 @@ def test_calculate_spline_length_and_resolution_forms():
     y_line = [np.zeros(11), np.linspace(0, 10, 11), np.zeros(11)]
     with pytest.warns(UserWarning, match="axis Z"):
         length_dict_none = calculate_spline_length(
-            y_line, resolution={"X": 0.5, "Y": 0.5, "Z": None, "unit": "micron"}
+            y_line, pixel_sizes={"X": 0.5, "Y": 0.5, "Z": None, "unit": "micron"}
         )
     assert length_dict_none == pytest.approx(5.0)
 
     # D01: a missing Z with known Y/X takes the finest of them (0.5), not 1.0
     with pytest.warns(UserWarning, match="axis Z"):
-        length_seq_none = calculate_spline_length(line_z, resolution=[None, 0.5, 0.5])
+        length_seq_none = calculate_spline_length(line_z, pixel_sizes=[None, 0.5, 0.5])
     assert length_seq_none == pytest.approx(5.0)
     with pytest.warns(UserWarning, match="axis Z"):
-        assert calculate_spline_length(line_z, resolution=[None, 0.5, None]) == pytest.approx(10.0)
+        assert calculate_spline_length(line_z, pixel_sizes=[None, 0.5, None]) == pytest.approx(10.0)
 
     # D01: units are converted to µm; non-positive sizes raise
-    assert calculate_spline_length(line_z, resolution={"Z": 2000.0, "Y": 1, "X": 1, "unit": "nm"}) == pytest.approx(20.0)
+    assert calculate_spline_length(line_z, pixel_sizes={"Z": 2000.0, "Y": 1, "X": 1, "unit": "nm"}) == pytest.approx(20.0)
     with pytest.raises(ValueError, match="finite and positive"):
-        calculate_spline_length(line_z, resolution=[0.0, 1.0, 1.0])
+        calculate_spline_length(line_z, pixel_sizes=[0.0, 1.0, 1.0])
 
     # Validation errors: wrong resolution length and unsupported coordinate dimensions (0D, 1D, 4D)
     with pytest.raises(ValueError, match="entries"):
-        calculate_spline_length(line_y2d, resolution=[1.0, 2.0, 3.0, 4.0])
+        calculate_spline_length(line_y2d, pixel_sizes=[1.0, 2.0, 3.0, 4.0])
 
     for bad_coords in ([], [np.array([0, 1])], [np.array([0, 1])] * 4):
         with pytest.raises(ValueError, match=r"coords must be a list of 2 or 3 arrays"):
@@ -519,7 +534,7 @@ def test_calculate_spline_length_isometric_invariance():
 def test_calculate_spline_length_resolution_scaling():
     """Verify anisotropic resolution mapping equals pre-scaling coordinates by pixel sizes.
 
-    Strategy: compare `calculate_spline_length([z, y, x], resolution=res)`
+    Strategy: compare `calculate_spline_length([z, y, x], pixel_sizes=res)`
     against `calculate_spline_length([z * sz, y * sy, x * sx])`.
     Expected outcome: both values agree within `rtol=1e-12`.
     """
@@ -528,7 +543,7 @@ def test_calculate_spline_length_resolution_scaling():
     x = np.linspace(0, 15, 100)
     res = {"Z": 2.0, "Y": 0.5, "X": 1.0}
 
-    len_mapped = calculate_spline_length([z, y, x], resolution=res)
+    len_mapped = calculate_spline_length([z, y, x], pixel_sizes=res)
     len_prescaled = calculate_spline_length([z * 2.0, y * 0.5, x * 1.0])
     assert np.isclose(len_mapped, len_prescaled, rtol=1e-12)
 
@@ -547,10 +562,11 @@ def test_spline_image_skips_negative_coordinates(make_image):
 
 
 def test_spline_image_matches_point_loop():
-    """Verify vectorized rasterization matches per-point integer flooring on in-bounds splines.
+    """Verify vectorized rasterization matches per-point rounding on in-bounds splines.
 
     Strategy: compare `create_3d_image_from_spline` against an explicit loop
-    flooring each evaluated point into a `(60, 60, 60)` grid.
+    rounding each evaluated point half up (`floor(c + 0.5)`) into a `(60, 60, 60)`
+    grid. (D23: the reference used `int()` truncation while coordinates were floored.)
     Expected outcome: both grids are bit-for-bit identical.
     """
     pts = generate_random_3d_coordinates(8, seed=3) * 0.5 + 5
@@ -559,7 +575,7 @@ def test_spline_image_matches_point_loop():
 
     ref = np.zeros((60, 60, 60), np.uint8)
     for p in np.array(splev(np.linspace(0, 1, 500), tck)).T:
-        ref[tuple(int(c) for c in p)] = 1
+        ref[tuple(int(np.floor(c + 0.5)) for c in p)] = 1
     np.testing.assert_array_equal(img, ref)
 
 
@@ -594,3 +610,142 @@ def test_plot_3d_spline_returns_figure():
     assert len(existing_ax.lines) == 1
     assert len(existing_ax.lines[0].get_data_3d()[0]) == 50
     assert len(existing_ax.collections) == 1
+
+
+# --- D23 / R7-02 / R7-06 / R7-07 / R7-16 ---
+
+
+@pytest.mark.parametrize("make_image", [create_3d_image_from_spline, create_nd_image_from_spline])
+def test_integer_knots_rasterise_to_exactly_the_knot_voxels(make_image):
+    """D23 (+): a spline through integer voxel centres marks exactly those voxels (Jaccard = 1).
+
+    Strategy: the R7-02 repro, a straight line along Z at (Y, X) = (5, 7) through
+    knots z = 2, 8, 14, 20. splev returns Y values like 4.999999999999996, which
+    flooring sent to the neighbouring voxel (54 voxels marked, 16 on the line).
+    Expected outcome: the marked voxels are exactly {(z, 5, 7) : 2 <= z <= 20}.
+    """
+    coords = np.array([[z, 5.0, 7.0] for z in (2, 8, 14, 20)])
+    img = make_image(fit_cubic_spline(coords), (24, 12, 12), num_points=2500)
+    expected = np.zeros((24, 12, 12), bool)
+    expected[2:21, 5, 7] = True
+    marked = img.astype(bool)
+    jaccard = (marked & expected).sum() / (marked | expected).sum()
+    assert jaccard == 1.0
+
+
+def test_mark_points_tie_rule():
+    """D23 (-): the rounding tie rule is round half up, and the image bounds are [-0.5, n - 0.5).
+
+    Strategy: mark single points at x.5 ties and at the bounds of a length-5 axis.
+    Expected outcome: 2.5 -> voxel 3 (up, not banker's rounding to 2); 1.5 -> 2;
+    2.4999 -> 2; -0.5 -> voxel 0 (inside); -0.5001 -> skipped (never wraps to -1);
+    4.4999 -> 4; 4.5 -> skipped (outside).
+    """
+    cases = {2.5: 3, 1.5: 2, 2.4999: 2, -0.5: 0, -0.5001: None, 4.4999: 4, 4.5: None}
+    for coord, voxel in cases.items():
+        img = np.zeros((5, 3), np.uint8)
+        _mark_points(img, np.array([[coord, 1.0]]))
+        if voxel is None:
+            assert not img.any(), coord
+        else:
+            assert np.argwhere(img).tolist() == [[voxel, 1]], coord
+
+
+def test_spline_length_point_major():
+    """R7-06: spline_length takes (N, d) points; 2- and 3-point inputs are not read as axes.
+
+    Strategy: 3 points along X with length 20 (calculate_spline_length on the same
+    (3, 3) array read rows as axes and returned 22.36); 4 points; a 2D curve; pixel sizes.
+    Expected outcome: exact lengths 20, 30 and 5; pixel_sizes scale per (Z)YX axis;
+    a 1-point curve has length 0; a wrong shape raises ValueError.
+    """
+    P = np.array([[0, 0, 0], [0, 0, 10], [0, 0, 20]], float)
+    assert spline_length(P) == pytest.approx(20.0)
+    assert spline_length(np.vstack([P, [[0, 0, 30]]])) == pytest.approx(30.0)
+    assert spline_length(np.array([[0, 0], [3, 4]])) == pytest.approx(5.0)
+    assert spline_length(P, pixel_sizes=(1.0, 1.0, 0.5)) == pytest.approx(10.0)
+    assert spline_length(P, pixel_sizes={"Z": 2.0, "Y": 2.0, "X": 500.0, "unit": "nm"}) == pytest.approx(10.0)
+    assert spline_length(np.array([[1.0, 2.0, 3.0]])) == 0.0
+    with pytest.raises(ValueError, match=r"\(N, 2\) or \(N, 3\)"):
+        spline_length(np.zeros((5, 4)))
+    # Matches the axis-major function on the transposed input
+    rng = np.random.default_rng(0)
+    pts = rng.uniform(0, 50, size=(30, 3))
+    assert spline_length(pts, pixel_sizes=(2.0, 0.5, 0.5)) == pytest.approx(
+        calculate_spline_length(list(pts.T), pixel_sizes=(2.0, 0.5, 0.5))
+    )
+
+
+def test_calculate_spline_length_warns_on_ambiguous_square_arrays():
+    """R7-06: an ndarray whose orientation is ambiguous (2 or 3 rows, at most 3 columns) warns.
+
+    Expected outcome: (3, 3) and (2, 2) arrays (and (3, 2)) warn and point to
+    spline_length; an unambiguous (3, 50) axis-major array and a list of arrays do not.
+    """
+    P = np.array([[0, 0, 0], [0, 0, 10], [0, 0, 20]], float)
+    for arr in (P, P[:2, :2], P[:, :2]):
+        with pytest.warns(UserWarning, match="spline_length"):
+            calculate_spline_length(arr)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        calculate_spline_length(np.zeros((3, 50)))
+        calculate_spline_length(list(P))
+
+
+def test_calculate_spline_length_resolution_is_deprecated():
+    """R8-18 / D08: resolution= is a deprecated alias of pixel_sizes= (FutureWarning, 0.1.0)."""
+    line = [np.linspace(0, 10, 11), np.zeros(11), np.zeros(11)]
+    with pytest.warns(FutureWarning, match=r"resolution.*0\.1\.0.*pixel_sizes"):
+        length = calculate_spline_length(line, resolution=[2.0, 1.0, 1.0])
+    assert length == pytest.approx(20.0)
+    # Positional use of the second argument is pixel_sizes and does not warn
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert calculate_spline_length(line, [2.0, 1.0, 1.0]) == pytest.approx(20.0)
+    with pytest.raises(TypeError, match="both"):
+        calculate_spline_length(line, pixel_sizes=[1, 1, 1], resolution=[1, 1, 1])
+
+
+def test_calculate_vector_difference_resamples_equal_length_inputs():
+    """R7-07: equal point counts no longer pair by index; the same curve gives zero difference.
+
+    Strategy: the same straight curve sampled uniformly and quadratically, 100
+    points each (index pairing gave max |diff| = 25).
+    Expected outcome: max |diff| < 1e-6 with the default; resample=False reproduces
+    the index pairing; resample=False with different lengths raises ValueError.
+    """
+    t = np.linspace(0, 1, 100)
+    uniform = np.column_stack([t * 50, t * 20, np.zeros(100)])
+    quad = np.column_stack([t**2 * 50, t**2 * 20, np.zeros(100)])
+    diff = calculate_vector_difference(uniform, quad, num_points=200)
+    assert diff.shape == (200, 3)
+    assert np.abs(diff).max() < 1e-6
+    paired = calculate_vector_difference(uniform, quad, resample=False)
+    assert np.abs(paired).max() > 10
+    with pytest.raises(ValueError, match="resample"):
+        calculate_vector_difference(uniform, quad[:50], resample=False)
+
+
+def test_fit_cubic_spline_lowers_degree_for_few_points():
+    """R7-16: fit_cubic_spline uses k = min(3, n - 1), so 2 and 3 points work.
+
+    Expected outcome: degree 1 for 2 points and 2 for 3 points; the spline passes
+    through the points; 4+ points stay cubic.
+    """
+    for n, k in ((2, 1), (3, 2), (4, 3), (6, 3)):
+        pts = generate_random_3d_coordinates(n, seed=n)
+        tck, u = fit_cubic_spline(pts, return_u=True)
+        assert tck[2] == k
+        np.testing.assert_allclose(np.column_stack(splev(u, tck)), pts, atol=1e-6)
+
+
+def test_plot_3d_spline_title():
+    """R7-16: plot_3d_spline takes a title; the default draws none (no hard-coded demo title)."""
+    pts = generate_random_3d_coordinates(6, seed=2)
+    tck = fit_cubic_spline(pts)
+    fig = plot_3d_spline(pts, tck, num_points=20)
+    assert fig.axes[0].get_title() == ""
+    fig2 = plot_3d_spline(pts, tck, num_points=20, title="Track 7")
+    assert fig2.axes[0].get_title() == "Track 7"
+    plt.close(fig)
+    plt.close(fig2)
