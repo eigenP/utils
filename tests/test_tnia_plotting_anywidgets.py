@@ -2700,7 +2700,8 @@ def test_iso_scatter_subsamples_above_max_points():
     X, Y, Z = _iso_points(n=400)
     color = np.arange(X.size, dtype=float)
 
-    w = show_iso_scatter(X, Y, Z, color=color, max_points=200, figsize=(4, 4))
+    with pytest.warns(UserWarning, match=r"random subset of 200 of 400 points"):
+        w = show_iso_scatter(X, Y, Z, color=color, max_points=200, figsize=(4, 4))
 
     assert w.X_orig.size == 200
     assert w.Y_orig.size == 200
@@ -5202,3 +5203,156 @@ def test_exports_report_through_warnings_and_the_module_logger_not_print(tmp_pat
     with pytest.warns(UserWarning, match="No points"):
         w.save_csv_trigger += 1
     assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): review fixes
+# ---------------------------------------------------------------------------
+
+def test_snap_depth_ignores_nan_voxels_like_the_projection():
+    """D11 / R2-08: a NaN voxel on the ray never becomes the snapped depth ('minip' and 'mip').
+
+    Strategy: a column of 5.0 with a NaN at z=3 and the visible minimum
+    1.0 at z=12, whole-Z slab, vmin=0, vmax=10, click on 'minip'; the same
+    with the visible maximum 9.0 at z=12 on 'mip'; and a flat column with
+    one NaN (negative control).
+    Expected outcome: z=12 is stored in both cases (the NaN voxel z=3 used to
+    win the 'minip' argmin, since NaN became 0); the flat column with a NaN
+    keeps the slab centre.
+    """
+    full = dict(slabs_thickness=(1000, 1000, 1000), figsize=(4, 4), vmin=0, vmax=10, annotate=True)
+    for projection, value in (("minip", 1.0), ("mip", 9.0)):
+        vol = np.full((20, 24, 24), 5.0, np.float32)
+        vol[3, 10, 10] = np.nan
+        vol[12, 10, 10] = value
+        w = show_zyx_max_slice_interactive_point_annotator(vol, projection=projection, **full)
+        _click_voxel(w, "xy", 12, 10, 10, 1)
+        assert w.points == [[12, 10, 10]], projection
+    vol = np.full((20, 24, 24), 5.0, np.float32)
+    vol[3, 10, 10] = np.nan
+    w = show_zyx_max_slice_interactive_point_annotator(vol, projection="minip", **full)
+    _click_voxel(w, "xy", 12, 10, 10, 1)
+    assert w.points == [[w.z_s, 10, 10]]
+
+
+def test_snap_depth_follows_the_attenuated_projection():
+    """D11 / R2-08: on 'attenuated_mip' the snap stores the voxel the attenuated projection shows.
+
+    Strategy: a ray with 0.9 at z=2 (front), 0.1 behind it and 1.0 at z=35,
+    attenuation 0.05, vmin=0, vmax=1, whole-Z slab; then attenuation 0
+    (negative control: the plain maximum).
+    Expected outcome: z=2, the front voxel that wins the display (the raw
+    argmax z=35, hidden behind it, used to be stored); with attenuation 0,
+    z=35.
+    """
+    vol = np.zeros((40, 24, 24), np.float32)
+    vol[2, 10, 10] = 0.9
+    vol[3:35, 10, 10] = 0.1
+    vol[35, 10, 10] = 1.0
+    full = dict(slabs_thickness=(1000, 1000, 1000), figsize=(4, 4), vmin=0, vmax=1, annotate=True,
+                projection="attenuated_mip")
+    w = show_zyx_max_slice_interactive_point_annotator(vol, attenuation=0.05, **full)
+    _click_voxel(w, "xy", 2, 10, 10, 1)
+    assert w.points == [[2, 10, 10]]
+    w = show_zyx_max_slice_interactive_point_annotator(vol, attenuation=0.0, **full)
+    _click_voxel(w, "xy", 2, 10, 10, 1)
+    assert w.points == [[35, 10, 10]]
+
+
+def test_scatter_empty_channel_list_is_zero_index_lists():
+    """D13 / R2-02: ``channels=[]`` builds an index-list viewer with no channel, not an ambiguity error.
+
+    Strategy: classify an empty list in 'auto' and 'index_lists' modes and
+    build the widget; then 'values' (negative control).
+    Expected outcome: ('idx_lists', []) and a rendered widget (the empty list
+    raised 'a list of 0 integer arrays ... valid point-index lists'); a
+    clear ValueError naming the empty list for 'values'.
+    """
+    assert tpa._classify_scatter_channels([], 10) == ('idx_lists', [])
+    assert tpa._classify_scatter_channels([], 10, 'index_lists') == ('idx_lists', [])
+    pts = np.random.default_rng(0).uniform(0, 20, (10, 3))
+    w = show_zyx_max_scatter_interactive(pts, channels=[], figsize=(4, 4))
+    assert w.mode == 'idx_lists' and w.image_data
+    with pytest.raises(ValueError, match="empty list"):
+        tpa._classify_scatter_channels([], 10, 'values')
+
+
+def test_iso_scatter_many_distinct_integers_stay_continuous():
+    """D16 / R2-16: integer colours are categories only up to 64 distinct values, like the ortho scatter.
+
+    Strategy: 3000 points coloured by integers drawn from 0..999 (about 950
+    distinct values); then 10 cluster labels (negative control).
+    Expected outcome: continuous with a UserWarning naming the 64 limit (it
+    drew one tab20 colour and legend entry per value, slowly); 10 labels
+    stay categorical with no warning.
+    """
+    rng = np.random.default_rng(0)
+    X, Y, Z = (rng.normal(size=3000) for _ in range(3))
+    with pytest.warns(UserWarning, match="more than 64"):
+        w = show_iso_scatter(X, Y, Z, color=rng.integers(0, 1000, 3000), figsize=(4, 4))
+    assert w.is_continuous and not w.is_categorical
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        w = show_iso_scatter(X, Y, Z, color=rng.integers(0, 10, 3000), figsize=(4, 4))
+    assert w.is_categorical and len(w.unique_cats) == 10
+
+
+def _legend_texts(w):
+    fig = w._render()
+    return [t.get_text() for ax in fig.axes if ax.get_legend() for t in ax.get_legend().get_texts()]
+
+
+def test_iso_scatter_channel_labels_name_the_legend():
+    """D16 / R2-15: IsoScatter's ``channel_labels`` names the legend entries (it was stored and never used).
+
+    Strategy: labels [-1, 0, 3] with a dict naming -1 and with a list of
+    three names; float colours with a string (colorbar label); default
+    names (negative control) and a wrong-length list.
+    Expected outcome: the legend reads the given names; the colorbar label
+    is the string; without channel_labels the legend shows the labels; a
+    wrong length raises ValueError.
+    """
+    X, Y, Z = _iso_points(n=60)
+    color = np.repeat([-1, 0, 3], 20)
+    w = show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4), channel_labels={-1: "noise"})
+    assert _legend_texts(w) == ["noise", "0", "3"]
+    w = show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4), channel_labels=["noise", "a", "b"])
+    assert _legend_texts(w) == ["noise", "a", "b"]
+    w = show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4))
+    assert _legend_texts(w) == ["-1", "0", "3"]
+    w = show_iso_scatter(X, Y, Z, color=np.linspace(0, 1, 60), figsize=(4, 4), channel_labels="depth (µm)")
+    fig = w._render()
+    assert "depth (µm)" in [ax.get_ylabel() for ax in fig.axes]
+    with pytest.raises(ValueError, match="one per category"):
+        show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4), channel_labels=["a", "b"])
+
+
+def test_iso_scatter_does_not_warn_below_max_points():
+    """D16 / R2-16 negative control: no subsampling notice when every point is drawn.
+
+    Strategy: 100 points with ``max_points=100``.
+    Expected outcome: no warning, all points kept.
+    """
+    X, Y, Z = _iso_points(n=100)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        w = show_iso_scatter(X, Y, Z, max_points=100, figsize=(4, 4))
+    assert w.X_orig.size == 100
+
+
+def test_deprecated_tnia_plotting_3d_warning_points_at_the_importer():
+    """D08: the ``tnia_plotting_3d`` FutureWarning is attributed to the importing line, not the shim.
+
+    Strategy: evict the module and re-import it with a plain ``import``
+    statement from this test, recording warnings.
+    Expected outcome: one FutureWarning whose filename is this test file (it
+    pointed at tnia_plotting_3d.py, so per-module filters and the shown
+    location did not reach the user's code).
+    """
+    sys.modules.pop("eigenp_utils.tnia_plotting_3d", None)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        import eigenp_utils.tnia_plotting_3d  # noqa: F401
+    fw = [x for x in w if issubclass(x.category, FutureWarning)]
+    assert len(fw) == 1
+    assert Path(fw[0].filename).resolve() == Path(__file__).resolve()
