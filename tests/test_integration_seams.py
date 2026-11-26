@@ -260,7 +260,8 @@ def test_bool_mask_opens_in_every_viewer():
     ``LabelAnnotator``.
     Expected outcome: nothing raises; the static and slice renderings are
     bright inside the mask and black outside; the scatter shows the mask's
-    points; LabelAnnotator keeps the mask's shape.
+    points (one per voxel, split by category); LabelAnnotator keeps the
+    mask's shape.
     """
     mask = _bool_mask()
     figs = []
@@ -272,7 +273,13 @@ def test_bool_mask_opens_in_every_viewer():
         for fig in figs:
             xy = np.asarray(fig.axXY.images[0].get_array(), dtype=float)
             xy = xy[..., :3].max(axis=-1) if xy.ndim == 3 else xy
-            assert xy.max() > 0 and xy.min() == 0
+            assert xy.shape == mask.shape[1:]
+            # Bright exactly where the mask is, black everywhere else
+            # (a transposed or shifted rendering fails here).
+            assert xy[8:16, 10:20].min() > 0
+            outside = np.ones(xy.shape, dtype=bool)
+            outside[8:16, 10:20] = False
+            assert xy[outside].max() == 0
 
         z, y, x = np.nonzero(mask)
         inside = (x < 15)
@@ -280,6 +287,11 @@ def test_bool_mask_opens_in_every_viewer():
         fig = ws._render()
         figs.append(fig)
         assert len(ws.category_labels) == 2
+        # Every mask voxel is drawn as a point, split 80/80 between categories.
+        counts = sorted(len(c.get_offsets()) for c in fig.axXY.collections
+                        if type(c).__name__ == "PathCollection")
+        assert counts == sorted([int(inside.sum()), int((~inside).sum())])
+        assert sum(counts) == int(mask.sum())
     finally:
         for fig in figs:
             plt.close(fig)
