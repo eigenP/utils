@@ -65,7 +65,11 @@ def render_um_reference():
     rec.update(_figure_record(fig, "multi"))
     plt.close(fig)
 
-    w = TNIASliceWidget(vol, pixel_sizes=ps, figsize=(4, 4), colormap="white", vmin=0, vmax=2500)
+    # The channel-label font is pinned to the base commit's automatic size for
+    # a 4-inch figure (4 * 72 * 0.035 pt): R1-23 later changed the automatic
+    # size, which is not what this pixel-size control is about.
+    w = TNIASliceWidget(vol, pixel_sizes=ps, figsize=(4, 4), colormap="white", vmin=0, vmax=2500,
+                        channel_label_fontsize_pt=4 * 72 * 0.035)
     fig = w._render()
     rec.update(_figure_record(fig, "widget"))
     plt.close(fig)

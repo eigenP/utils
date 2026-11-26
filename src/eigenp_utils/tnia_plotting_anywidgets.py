@@ -9,8 +9,11 @@
 # ]
 # ///
 
+import logging
 import pathlib
 import warnings
+
+_log = logging.getLogger(__name__)
 
 def _safe_float(v):
     if v is None:
@@ -80,6 +83,7 @@ default_colors, default_display_range, per_channel = _conv.default_colors, _conv
 format_length, is_length_unit, is_pixel_unit, to_um = _conv.format_length, _conv.is_length_unit, _conv.is_pixel_unit, _conv.to_um
 resolve_blending, resolve_pixel_sizes, sample_values = _conv.resolve_blending, _conv.resolve_pixel_sizes, _conv.sample_values
 _robust_max, _check_blending = _conv._robust_max, _conv._check_blending
+warn_deprecated = _conv.warn_deprecated
 
 
 class _UncalibratedXYPixelSizes(dict):
@@ -133,8 +137,8 @@ def _length_unit(pixel_sizes):
 import anywidget
 import traitlets
 import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
+import sys
 import io
 import base64
 from matplotlib import gridspec
@@ -143,6 +147,26 @@ from scipy import ndimage as ndi
 from matplotlib.colors import PowerNorm, to_rgb, LinearSegmentedColormap
 import matplotlib.colors as mcolors
 from matplotlib.figure import Figure
+
+def _new_figure(**kwargs):
+    """A ``matplotlib.figure.Figure`` with an Agg canvas, not registered with pyplot (D05)."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    fig = Figure(**kwargs)
+    FigureCanvasAgg(fig)
+    return fig
+
+
+def _pyplot_fignums():
+    """Numbers of the open pyplot figures, without importing pyplot (empty if it was never imported)."""
+    plt = sys.modules.get('matplotlib.pyplot')
+    return set(plt.get_fignums()) if plt is not None else set()
+
+
+def _close_pyplot_figures(nums):
+    plt = sys.modules.get('matplotlib.pyplot')
+    for num in nums if plt is not None else ():
+        plt.close(num)
+
 
 # The widget assets sit next to this module; resolving them from __file__ (not
 # importlib.resources("eigenp_utils")) also works when the file runs standalone.
@@ -222,12 +246,19 @@ class _PanelRotation:
                 self.s * dx + self.c * dy + self.cy)
 
     def warp(self, image, order=3, cval=0.0):
-        """Resample a 2D or channels-last image onto the rotated canvas (corners filled with ``cval``)."""
+        """Resample a 2D or channels-last image onto the rotated canvas.
+
+        The corners outside the input are filled with ``cval``; ``cval=nan``
+        marks them as missing (the viewers then show the panel background).
+        """
         image = np.asarray(image)
         if self.angle == 0.0:
             return image
         if not np.issubdtype(image.dtype, np.floating):
             image = image.astype(np.float64)
+        nan_fill = cval is not None and np.isnan(cval)
+        if nan_fill:
+            cval = 0.0
 
         def _warp(plane):
             finite = np.isfinite(plane)
@@ -236,7 +267,13 @@ class _PanelRotation:
             out = ndi.affine_transform(src, self.M, offset=self.offset, output_shape=self.out_shape,
                                        order=order, mode='grid-constant', cval=cval)
             if order > 1 and src.size:
-                out = np.clip(out, min(src.min(), cval), max(src.max(), cval))
+                lo, hi = (src.min(), src.max()) if nan_fill else (min(src.min(), cval), max(src.max(), cval))
+                out = np.clip(out, lo, hi)
+            if nan_fill:
+                inside = ndi.affine_transform(np.ones(src.shape), self.M, offset=self.offset,
+                                              output_shape=self.out_shape, order=1,
+                                              mode='grid-constant', cval=0.0)
+                out[inside < 0.5] = np.nan
             if not all_finite:
                 # Keep non-finite pixels local instead of letting the spline
                 # spread one NaN over the whole panel.
@@ -264,6 +301,9 @@ def _rotate_expand(image, angle_deg, order=3, pixel_size=None):
 
     ``pixel_size=(s_h, s_w)`` rotates in physical space instead; the output then
     has isotropic pixels (see ``_PanelRotation``).
+
+    Kept as the skimage-equivalence test oracle (the viewers use
+    ``_PanelRotation`` directly).
     """
     s_h, s_w = (1.0, 1.0) if pixel_size is None else pixel_size
     return _PanelRotation(np.shape(image)[:2], angle_deg, s_h, s_w).warp(image, order=order)
@@ -294,19 +334,12 @@ def _rotate_points_2d(px, py, angle_deg, cx, cy):
     return rx, ry
 
 
-def _unrotate_2d(phys_x, phys_y, angle_deg, orig_dim_x, orig_dim_y, sx, sy):
-    """
-    Unrotates physical coordinate (phys_x, phys_y) on a rotated 2D view back to
-    the original unrotated physical space.
-    """
-    if angle_deg == 0.0 or angle_deg is None:
-        return phys_x, phys_y
-    return _PanelRotation((orig_dim_y, orig_dim_x), angle_deg, sy, sx).inverse(phys_x, phys_y)
-
-
 def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_dim_w, orig_dim_h, s_w, s_h):
     """
     Transforms a 2D line segment (x0,y0)->(x1,y1) in physical space through 2D rotation.
+
+    Kept as a test oracle (``_PanelRotation.forward`` on two points); the
+    viewers use ``_PanelRotation`` directly.
     """
     if angle_deg == 0.0 or angle_deg is None:
         return [x0, x1], [y0, y1]
@@ -429,102 +462,132 @@ def resolve_color(c):
 
     return c
 
-def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
-    a = arr.astype(dtype, copy=False)
-    if symmetric:
-        d = max(eps, float(np.abs(a).max()))
-    else:
-        d = max(eps, float(a.max()))
-    return a / d
+def _join_docs(doc, extra):
+    """A docstring followed by a shared section, both dedented (consistent on every Python version)."""
+    import inspect
+    return inspect.cleandoc(doc or '') + '\n\n' + inspect.cleandoc(extra) + '\n'
+
+
+def _static_doc(func):
+    """Append the input forms and display keywords shared by the static wrappers to a docstring."""
+    func.__doc__ = _join_docs(func.__doc__, _STATIC_DOC)
+    return func
+
+
+_STATIC_DOC = """
+    Input (every static wrapper): a ZYX (or YX) array, a list or tuple of
+    them (one per channel), an ndarray with a channel axis named by
+    ``channel_axis`` (e.g. ``channel_axis=0`` for CZYX; a 4D array without it
+    raises ValueError rather than guessing between CZYX and TZYX), or an
+    ``xarray.DataArray`` with C/Z/Y/X dims (other dims of size 1), whose
+    ``C`` coordinate, ``color`` coordinate and calibrated coordinates give
+    the default ``channel_labels``, ``colormap`` and ``pixel_sizes``.
+
+    Display keyword arguments, shared by every static wrapper (see
+    `show_zyx`): ``pixel_sizes`` ((Z, Y, X) or dict, converted to µm),
+    ``figsize`` (inches; None, the default, sizes the figure from the
+    physical extents to fit a 10-inch box), ``colormap`` (per channel), ``vmin`` / ``vmax`` /
+    ``gamma`` / ``opacity`` (scalar or per channel; None takes the default
+    display range of the whole volume), ``blending``, ``rotate_view``
+    (degrees), ``channel_labels``, ``channel_label_fontsize_pt``,
+    ``scale_bar_show``, ``scale_bar_fontsize_pt``, ``subplot_bg``,
+    ``use_plt``; ``colors`` is the deprecated name of ``colormap``.
+    Projecting wrappers also take ``projection`` / ``attenuation``.
+
+    Changed (D12, 2026-11): every static wrapper takes the same display
+    keywords and input forms (DataArrays, tuples, ``channel_axis``, 2D
+    images); they used to differ per wrapper and reject DataArrays.
+    ``figsize`` defaults to None (automatic from the physical extents; it
+    was a fixed 10 x 10, mostly empty for elongated volumes), and the
+    automatic font size of labels and scale bar is 3% of the figure width
+    (two formulas used 3.5% and 3% of the height).
+"""
 
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=True, opacity=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
+@_static_doc
+def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=None, colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=False, opacity=None, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                   *, colors=None, blending=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
+                   subplot_bg=None, channel_axis=None):
     """ extracts xy, xz, and zy slices at x, y, z of a 3D image and plots them
 
     Args:
-        image_to_show (3d numpy array): image to plot
-        x (int): x position of slice
-        y (int): y position of slice
-        z (int): z position of slice
-        pixel_sizes (tuple or dict, optional): pixel sizes of 3D in physical units. Defaults to None.
-        figsize (tuple, optional): figure size. Defaults to (10,10).
-        colormap (_type_, optional): _description_. Defaults to None.
+        image_to_show: image to plot (see the input forms below)
+        x (int): x index of the ZY slice
+        y (int): y index of the XZ slice
+        z (int): z index of the XY slice
         vmin, vmax (float, optional): display range; a bound left as None
             takes the default display range of the whole volume
             (`_conventions.default_display_range`: 0 or the negative data
             minimum, and the robust 99.99th percentile).
 
     Changed (D02, 2026-11): the default range is computed on the volume (it
-    used to be the min/max of the three slices).
+    used to be the min/max of the three slices). Changed (D05, 2026-11):
+    ``use_plt`` defaults to False (a plain Figure, not registered with pyplot).
     """
+    colormap = _legacy_colors(colors, colormap)
+    im, colormap, channel_labels, pixel_sizes = _ortho_input(
+        image_to_show, colormap, channel_labels, pixel_sizes, channel_axis)
 
-    slice_zy = np.flip(np.rot90(image_to_show[:,:,x],1),0)
-    slice_xz = image_to_show[:,y,:]
-    slice_xy = image_to_show[z,:,:]
-    vmin, vmax = _volume_display_range(image_to_show, vmin, vmax)
+    def _slices(v):
+        return v[z, :, :], v[:, y, :], np.flip(np.rot90(v[:, :, x], 1), 0)
 
-    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    if isinstance(im, list):
+        planes = [_slices(v) for v in im]
+        slice_xy, slice_xz, slice_zy = ([p[k] for p in planes] for k in range(3))
+        vmin, vmax = _channels_display_range(im, vmin, vmax)
+    else:
+        slice_xy, slice_xz, slice_zy = _slices(im)
+        vmin, vmax = _volume_display_range(im, vmin, vmax)
+
+    return show_zyx(slice_xy, slice_xz, slice_zy, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap,
+                    vmax=vmax, vmin=vmin, gamma=gamma, use_plt=use_plt, opacity=opacity, subplot_bg=subplot_bg,
+                    rotate_view=rotate_view, channel_labels=channel_labels,
+                    channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending,
+                    scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+
 
 # Copyright tnia 2021 - BSD License
-def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
-    """ plots max xy, xz, and zy projections of a 3D image
+@_static_doc
+def show_zyx_max(image_to_show, pixel_sizes=None, figsize=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                 *, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, subplot_bg=None,
+                 use_plt=False, channel_axis=None):
+    """ plots max xy, xz, and zy projections of a 3D image (the whole volume)
 
     Args:
-        image_to_show (3d numpy array): image to plot
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple, optional): figure size. Defaults to (10,10).
-        colormap (_type_, optional): _description_. Defaults to None.
-        vmax (float, optional): maximum value for display range. Defaults to None.
-        blending (str, optional): channel compositing mode, see `show_zyx`.
-        projection (str, optional): how each slab is projected along the view
-            axis (napari's rendering names): 'mip' (maximum, the default),
-            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
-        attenuation (float, optional): for 'attenuated_mip', the attenuation per
-            voxel along the ray (napari's default 0.05). Rays enter each slab at
-            its lowest index (z = start for XY, y = start for XZ, x = start for
-            ZY); samples are normalised with the display range (vmin/vmax, or
-            the channel's default range), so bright structures hide dimmer ones
-            behind them.
+        image_to_show: image to plot (see the input forms below)
+        projection, attenuation: see `show_zyx_projection_slabs`.
     """
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
+    colormap = _legacy_colors(colors, colormap)
+    return show_zyx_projection_slabs(
+        image_to_show, None, None, None, pixel_sizes=pixel_sizes, figsize=figsize, projector=None,
+        colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, opacity=opacity, blending=blending,
+        projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show,
+        scale_bar_fontsize_pt=scale_bar_fontsize_pt, rotate_view=rotate_view, channel_labels=channel_labels,
+        channel_label_fontsize_pt=channel_label_fontsize_pt, subplot_bg=subplot_bg, use_plt=use_plt,
+        channel_axis=channel_axis)
 
-    return show_zyx_projection(image_to_show, pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin = vmin, gamma = gamma, colors = None, opacity = opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
 
-
-def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
-    """ generates xy, xz, and zy max projections of a 3D image and plots them
+@_static_doc
+def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=None, projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                        *, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, subplot_bg=None,
+                        use_plt=False, channel_axis=None):
+    """ generates xy, xz, and zy projections of a 3D image (the whole volume) and plots them
 
     Args:
-        image_to_show (3d numpy array, or a list of them for channels): image to plot
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple): size of figure to
+        image_to_show: image to plot (see the input forms below)
         projector: function ``f(volume, axis)`` to project with; None (default)
             is the maximum ignoring NaN voxels, like ``projection='mip'``.
-        colormap (_type_, optional): _description_. Defaults to None.
-        vmax (float, optional): maximum value for display range. Defaults to None.
-        blending (str, optional): channel compositing mode, see `show_zyx`.
-        projection (str, optional): how each slab is projected along the view
-            axis (napari's rendering names): 'mip' (maximum, the default),
-            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
-        attenuation (float, optional): for 'attenuated_mip', the attenuation per
-            voxel along the ray (napari's default 0.05). Rays enter each slab at
-            its lowest index (z = start for XY, y = start for XZ, x = start for
-            ZY); samples are normalised with the display range (vmin/vmax, or
-            the channel's default range), so bright structures hide dimmer ones
-            behind them.
+        projection, attenuation: see `show_zyx_projection_slabs`.
     """
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-    full = slice(None)
-    return show_zyx_projection_slabs(image_to_show, full, full, full, pixel_sizes=pixel_sizes, figsize=figsize, projector=projector, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    colormap = _legacy_colors(colors, colormap)
+    return show_zyx_projection_slabs(
+        image_to_show, None, None, None, pixel_sizes=pixel_sizes, figsize=figsize, projector=projector,
+        colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, opacity=opacity, blending=blending,
+        projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show,
+        scale_bar_fontsize_pt=scale_bar_fontsize_pt, rotate_view=rotate_view, channel_labels=channel_labels,
+        channel_label_fontsize_pt=channel_label_fontsize_pt, subplot_bg=subplot_bg, use_plt=use_plt,
+        channel_axis=channel_axis)
 
 # Copyright tnia 2021 - BSD License
 def _draw_channel_label_bar(axLabels, fontsize_pt, as_image=False):
@@ -560,16 +623,73 @@ def _draw_channel_label_bar(axLabels, fontsize_pt, as_image=False):
         ))
 
 
-def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
+_GAP_IN = 1.0 / 16.0   # gap between the ortho panels (inches)
+_MARGIN_IN = 0.05      # figure margin (inches)
+
+
+def _auto_fontsize_pt(fig_w_in):
+    """
+    The one automatic font size (pt) of channel labels and scale-bar labels:
+    3% of the figure width (2.16 pt per inch), clipped to [8, 24] (R1-23).
+    Width, not height, so thin volumes (short auto figures) keep readable text.
+    """
+    return float(max(8.0, min(24.0, float(fig_w_in) * 72 * 0.03)))
+
+
+def _label_row_in(fontsize_pt):
+    """Height (inches) of the channel-label row for a font size."""
+    return 0.10 + fontsize_pt / 72.0
+
+
+def _rotated_extent(w, h, angle_deg):
+    """Bounding box (width, height) of a w x h panel rotated by ``angle_deg``."""
+    if not angle_deg:
+        return float(w), float(h)
+    t = np.radians(angle_deg)
+    c, s = abs(np.cos(t)), abs(np.sin(t))
+    return float(w * c + h * s), float(w * s + h * c)
+
+
+def _ortho_extents(wx, wy, wz, rotate_view=None):
+    """Physical (column widths, row heights) of the ortho layout for extents X, Y, Z (after rotation)."""
+    rz, ry, rx = _parse_rotate_view(rotate_view)
+    xy = _rotated_extent(wx, wy, rz)
+    xz = _rotated_extent(wx, wz, ry)
+    zy = _rotated_extent(wz, wy, rx)
+    return (max(xy[0], xz[0]), zy[0]), (max(xy[1], zy[1]), xz[1])
+
+
+def _auto_figsize(cols, rows, has_labels, box=(10.0, 10.0), gap_in=_GAP_IN, label_fontsize_pt=None):
+    """
+    Automatic figure size (inches) for the ortho layout: the largest figure
+    inside ``box`` whose panels keep their physical aspect and fill it, with
+    the gaps, margins and (``has_labels``) the channel-label row (D12, R2-22).
+    ``cols`` / ``rows`` are the physical (col1, col2) widths and (row1, row2)
+    heights, e.g. from `_ortho_extents`.
+    """
+    W = max(float(cols[0]) + float(cols[1]), 1e-12)
+    H = max(float(rows[0]) + float(rows[1]), 1e-12)
+    fig_w = float(box[0])
+    for _ in range(4):  # the label row depends on the font size, which depends on the width
+        fs = label_fontsize_pt if label_fontsize_pt is not None else _auto_fontsize_pt(fig_w)
+        extra_w = gap_in + 2.0 * _MARGIN_IN
+        extra_h = (2 if has_labels else 1) * gap_in + 2.0 * _MARGIN_IN + (_label_row_in(fs) if has_labels else 0.0)
+        scale = max(1e-6, min((box[0] - extra_w) / W, (box[1] - extra_h) / H))
+        fig_w, fig_h = W * scale + extra_w, H * scale + extra_h
+    return (float(fig_w), float(fig_h))
+
+
+def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, use_plt=False, colors=None, opacity=None, subplot_bg=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, gap_in=1.0/16.0, channel_label_colors=None, pixel_sizes_given=None, blending=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
     """ shows pre-computed xy, xz and zy of a 3D image in a plot
 
     Args:
         xy (2d numpy array): xy projection
         xz (2d numpy array): xz projection
         zy (2d numpy array): zy projection
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple, optional): figure size. Defaults to (10,10).
-        colormap (_type_, optional): _description_. Defaults to None.
+        figsize ((width, height) in inches, optional): None (default) fits
+            the physical extents of the (rotated) panels, the gaps and the
+            label row in a 10-inch box. Changed (D12, 2026-11): it was a
+            fixed (10, 10).
         pixel_sizes (dict or (Z, Y, X) sequence, optional): converted to µm
             (a dict's 'unit'); a missing Z with known X/Y takes the finest of
             them; without X and Y sizes the scale bar is labelled in pixels.
@@ -609,8 +729,24 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             bar's line width follows it. None sizes it from the figure height;
             0 hides the label but keeps the bar (at the auto width).
             ``scale_bar_show`` toggles the bar.
+        subplot_bg (colour, optional): panel background. None (default) is
+            the theme background: black, or white for ``blending='minimum'``.
+            NaN pixels, rotation corners and faded (opacity < 1) channels
+            show it.
+        use_plt (bool, optional): create the figure with ``pyplot.figure``
+            (registered with pyplot, shown by ``plt.show()``). Default False:
+            a plain ``matplotlib.figure.Figure``, which Jupyter and marimo
+            display when it is returned.
     Returns:
         matplotlib Figure with named axes ``axXY``, ``axZY``, ``axXZ``, ``axBar``.
+
+    Changed (D05, 2026-11): ``use_plt`` defaults to False (the object-oriented
+    interface; figures no longer pile up in pyplot), and the figure is no
+    longer drawn before it is returned. Changed (WP2, 2026-11): the panels
+    default to the theme background (they kept rcParams' white axes colour,
+    so single-channel NaN pixels and opacity looked like saturated signal);
+    NaN pixels take that colour, and the corners added by ``rotate_view`` to a
+    single-channel panel are background, not the colour of value 0.
 
     Changed (D01-D04, 2026-11): a single channel defaults to grey, not
     viridis; the default vmin/vmax is the robust default display range, not
@@ -622,10 +758,8 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     uses up 'white'), and None entries in a colormap list take a palette
     colour, as in LabelAnnotator.
     """
-    if figsize is None:
-        figsize = (10, 10)
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
 
@@ -634,9 +768,13 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         # One colour per channel, then the blending=None rule (D04)
         colormap, blending = _resolve_channels(colormap, len(xy), blending)
     white_theme = blending == 'minimum'
-    if white_theme and subplot_bg is None:
-        subplot_bg = 'white'
-    # Value used for the corners that rotation adds to a panel
+    if subplot_bg is None:
+        # The theme background, never rcParams' (white) axes colour: NaN
+        # pixels and opacity show it, so it must not look like signal (R1-03).
+        subplot_bg = 'white' if white_theme else 'black'
+    # Value used for the corners that rotation adds to a panel: the panel
+    # background of a composite, missing (NaN, drawn as the background) for a
+    # single channel (R1-10).
     pad_value = 0.0
 
     (pz, py, px), xy_given, length_unit = _viewer_pixel_sizes(pixel_sizes)
@@ -686,11 +824,15 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         if colormap is not None:
             c = channel_spec(colormap)  # a registered Colormap instance -> its name
             orig_colormap = c
-            colormap = c if is_colormap(c) else to_cmap(resolve_color(c))
+            colormap = matplotlib.colormaps[c] if is_colormap(c) else to_cmap(resolve_color(c))
+            # NaN pixels take the panel background (matplotlib's 'bad' colour
+            # is transparent, which showed whatever lay behind the panel)
+            colormap = colormap.with_extremes(bad=subplot_bg)
 
-        if white_theme:
-            # Corners added by rotation take the colour of the low end of the range
-            pad_value = 1.0 if np.ndim(xy) == 3 else (vmin if vmin is not None else 0.0)
+        if np.ndim(xy) == 3:
+            pad_value = 1.0 if white_theme else 0.0
+        else:
+            pad_value = np.nan
 
     rot_z, rot_y, rot_x = _parse_rotate_view(rotate_view)
 
@@ -710,11 +852,18 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
     xy, xz, zy = _warp(g_xy, xy), _warp(g_xz, xz), _warp(g_zy, zy)
     (sxy_h, sxy_w), (sxz_h, sxz_w), (szy_h, szy_w) = g_xy.p_out, g_xz.p_out, g_zy.p_out
+    if figsize is None:
+        # From the physical extents of the (rotated) panels (D12)
+        figsize = _auto_figsize(
+            (max(xy.shape[1] * sxy_w, xz.shape[1] * sxz_w), zy.shape[1] * szy_w),
+            (max(xy.shape[0] * sxy_h, zy.shape[0] * szy_h), xz.shape[0] * sxz_h),
+            channel_labels is not None, gap_in=gap_in, label_fontsize_pt=channel_label_fontsize_pt)
 
     if use_plt:
+        import matplotlib.pyplot as plt  # only on request: library figures stay out of pyplot (D05)
         fig = plt.figure(figsize=figsize, constrained_layout=False)
     else:
-        fig = Figure(figsize=figsize, constrained_layout=False)
+        fig = _new_figure(figsize=figsize, constrained_layout=False)
 
     figW, figH = figsize
 
@@ -726,14 +875,12 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     col2_w = zy_w
     row1_h = max(xy_h, zy_h)
     row2_h = xz_h
-    fig_h_in = figH
-    fontsize_pt = max(10, min(24, fig_h_in * 72 * 0.035))
     if channel_label_fontsize_pt is None:
-        channel_label_fontsize_pt = fontsize_pt
+        channel_label_fontsize_pt = _auto_fontsize_pt(figW)
 
-    hl_in = (0.10 + (channel_label_fontsize_pt / 72.0)) if channel_labels is not None else 0.0
+    hl_in = _label_row_in(channel_label_fontsize_pt) if channel_labels is not None else 0.0
 
-    margin_in = 0.05
+    margin_in = _MARGIN_IN
     avail_w_in = figW - gap_in - 2.0 * margin_in
     num_v_gaps = 2 if channel_labels is not None else 1
     avail_h_in = figH - num_v_gaps * gap_in - 2.0 * margin_in - hl_in
@@ -840,7 +987,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     axXZ.set_xlim([0, xz_w]); axXZ.set_ylim([xz_h, 0])
 
     for i, ax in enumerate([axXY, axZY, axXZ, axBar]):
-        if i < 3 and subplot_bg is not None:
+        if i < 3:
             ax.set_facecolor(subplot_bg)
         elif ax == axBar:
             ax.patch.set_visible(False)
@@ -865,7 +1012,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     fig.axBar = axBar
     fig.axLabels = axLabels
 
-    fig.canvas.draw()
+    # imshow's equal aspect may shrink a panel box; apply it now so transData
+    # (used for the widgets' axis_bounds) is final without a full draw.
+    for ax in (axXY, axZY, axXZ):
+        ax.apply_aspect()
     return fig
 
 def _scale_bar_fontsize(v):
@@ -938,9 +1088,8 @@ def _add_scale_bar(ax_line, ax_physical_width_um, pixel_sizes_given, figsize, un
 
     # pick fontsize and line width to scale with figure size
     if fontsize_pt is None:
-        fig_h_in = figsize[1] if figsize is not None else 10
-        fontsize_pt = max(8, min(24, fig_h_in * 72 * 0.03))
-    linewidth = max(1, fontsize_pt * 0.2 / (72 * 0.03))  # = 0.2 pt per inch of figure height at the auto size
+        fontsize_pt = _auto_fontsize_pt(figsize[0] if figsize is not None else 10)
+    linewidth = max(1, fontsize_pt * 0.2 / (72 * 0.03))  # = 0.2 pt per inch of figure width at the auto size
 
     ### Draw
     # Put the line at the bottom right of ax_line
@@ -979,69 +1128,74 @@ def _add_scale_bar(ax_line, ax_physical_width_um, pixel_sizes_given, figsize, un
     )
 
 ### New function
-def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=None, figsize=(10,10), colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
+def _slab_slice(rng, n, name):
+    """
+    ``[start, stop)`` index range (rounded; a range of zero width widens to
+    one plane) -> slice clamped to ``[0, n)``. None is the whole axis.
+    Out-of-range bounds are clipped with a warning (negative values count
+    from 0, not from the end); a range with nothing left raises ValueError.
+    """
+    if rng is None:
+        return slice(None)
+    lo, hi = (int(np.round(float(v))) for v in rng)
+    if hi <= lo:
+        hi = lo + 1
+    clo, chi = max(0, lo), min(n, hi)
+    if chi <= clo:
+        raise ValueError(f"{name} range [{lo}, {hi}) lies outside the image (size {n} along {name.upper()}).")
+    if (clo, chi) != (lo, hi):
+        warnings.warn(f"{name} range [{lo}, {hi}) clipped to the image: [{clo}, {chi}).", UserWarning, stacklevel=3)
+    return slice(clo, chi)
+
+
+@_static_doc
+def show_zyx_max_slabs(image_to_show, x=None, y=None, z=None, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1, colors=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                       *, subplot_bg=None, use_plt=False, channel_axis=None):
     """ plots max xy, xz, and zy projections of a 3D image SLABS (slice intervals)
 
     Author: PanosOik https://github.com/PanosOik
 
     Args:
-        image_to_show (3d numpy array): image to plot
-        x: slices for x in format [x_1, x_2] where values are integers, to be passed as slice(x_1, x_2, None)
-        y: slices for y in format [y_1, y_2] where values are integers
-        z: slices for z in format [z_1, z_2] where values are integers
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple, optional): figure size. Defaults to (10,10).
-        colormap (_type_, optional): _description_. Defaults to None.
-        vmax (float, optional): maximum value for display range. Defaults to None.
-        blending (str, optional): channel compositing mode, see `show_zyx`.
-        projection (str, optional): how each slab is projected along the view
-            axis (napari's rendering names): 'mip' (maximum, the default),
-            'minip' (minimum), 'average', or 'attenuated_mip'. None uses
-            ``projector``. NaN voxels are ignored (a ray of only NaN stays NaN).
-        attenuation (float, optional): for 'attenuated_mip', the attenuation per
-            voxel along the ray (napari's default 0.05). Rays enter each slab at
-            its lowest index (z = start for XY, y = start for XZ, x = start for
-            ZY); samples are normalised with the display range (vmin/vmax, or
-            the channel's default range), so bright structures hide dimmer ones
-            behind them.
+        image_to_show: image to plot (see the input forms below)
+        x, y, z: half-open index ranges ``[start, stop)`` of the slabs
+            (voxel indices, rounded; a zero-width range widens to one
+            plane). None (default) is the whole axis, i.e. the full
+            projection. Bounds outside the image are clipped with a
+            warning; a range entirely outside raises ValueError.
+        projection, attenuation: see `show_zyx_projection_slabs`.
+
+    Changed (D12, 2026-11): x, y and z default to None, the whole axis (the
+    defaults were [0, 1], the first plane of each axis), and out-of-range
+    bounds are clipped with a warning (they raised an opaque 'zero-size
+    array' error).
     """
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-
-    ### Coerce into integers for slices, rounding floats and ensuring non-zero bounds
-    x_ = [int(np.round(float(i))) for i in x]
-    y_ = [int(np.round(float(i))) for i in y]
-    z_ = [int(np.round(float(i))) for i in z]
-
-    if x_[1] <= x_[0]: x_[1] = x_[0] + 1
-    if y_[1] <= y_[0]: y_[1] = y_[0] + 1
-    if z_[1] <= z_[0]: z_[1] = z_[0] + 1
-
-    x_slices = slice(*x_)
-    y_slices = slice(*y_)
-    z_slices = slice(*z_)
-
-    return show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection, attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    colormap = _legacy_colors(colors, colormap)
+    im, colormap, channel_labels, pixel_sizes = _ortho_input(
+        image_to_show, colormap, channel_labels, pixel_sizes, channel_axis)
+    Zn, Yn, Xn = np.shape(im[0] if isinstance(im, list) else im)
+    return show_zyx_projection_slabs(
+        im, _slab_slice(x, Xn, 'x'), _slab_slice(y, Yn, 'y'), _slab_slice(z, Zn, 'z'),
+        pixel_sizes=pixel_sizes, figsize=figsize, projector=None, colormap=colormap, vmax=vmax, vmin=vmin,
+        gamma=gamma, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels,
+        channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, projection=projection,
+        attenuation=attenuation, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
+        subplot_bg=subplot_bg, use_plt=use_plt)
 
 
-### New function
-def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=(10,10), projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None):
-    """ generates xy, xz, and zy max projections of a 3D image and plots them
+@_static_doc
+def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel_sizes=None, figsize=None, projector=None, colormap=None, vmin = None, vmax=None, gamma = 1, colors = None, opacity = None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None, blending=None, projection=None, attenuation=0.05, scale_bar_show=True, scale_bar_fontsize_pt=None,
+                              *, subplot_bg=None, use_plt=False, channel_axis=None):
+    """ generates xy, xz, and zy projections of slabs of a 3D image and plots them
 
     Author: PanosOik https://github.com/PanosOik
 
     Args:
-        image_to_show (3d numpy array): image to plot
-        pixel_sizes (tuple or dict, optional): pixel sizes in physical units. Defaults to None.
-        figsize (tuple): size of figure to
+        image_to_show: image to plot (see the input forms below)
+        x_slices, y_slices, z_slices: index slices (or None for the whole
+            axis) of the slabs projected onto the ZY, XZ and XY panels.
         projector: function ``f(volume, axis)`` to project with (used when
             ``projection`` is None); None (default) is the maximum ignoring NaN
             voxels, like ``projection='mip'``.
-        colormap (_type_, optional): _description_. Defaults to None.
-        vmax (float, optional): maximum value for display range. Defaults to None.
-        blending (str, optional): channel compositing mode, see `show_zyx`.
         projection (str, optional): how each slab is projected along the view
             axis (napari's rendering names): 'mip' (maximum, the default),
             'minip' (minimum), 'average', or 'attenuated_mip'. None uses
@@ -1061,10 +1215,10 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
     projected panels (single channel) or 0 / the panels' max (channel list),
     so a single hot pixel darkened the whole figure.
     """
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
+    colormap = _legacy_colors(colors, colormap)
+    image_to_show, colormap, channel_labels, pixel_sizes = _ortho_input(
+        image_to_show, colormap, channel_labels, pixel_sizes, channel_axis)
+    x_slices, y_slices, z_slices = (slice(None) if v is None else v for v in (x_slices, y_slices, z_slices))
     if projection is not None:
         projection = _check_projection(projection, attenuation)
 
@@ -1104,7 +1258,12 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
     else:
         projection_y, projection_x, projection_z = _project(image_to_show, 0)
 
-    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, colors=None, opacity=opacity, rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt)
+    return show_zyx(projection_z, projection_y, projection_x, pixel_sizes=pixel_sizes, figsize=figsize,
+                    colormap=colormap, vmax=vmax, vmin=vmin, gamma=gamma, opacity=opacity,
+                    rotate_view=rotate_view, channel_labels=channel_labels,
+                    channel_label_fontsize_pt=channel_label_fontsize_pt, blending=blending,
+                    scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
+                    subplot_bg=subplot_bg, use_plt=use_plt)
 
 
 def _finite_min(*arrays):
@@ -1376,7 +1535,7 @@ def create_multichannel_rgb(
     Colormap instances are accepted.
     """
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
     return _composite_planes(xy_list, xz_list, zy_list, vmin=vmin, vmax=vmax, gamma=gamma,
@@ -1399,7 +1558,7 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
     1/255 different); the default vmax is the robust 99.99th percentile.
     """
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
     return _composite_planes(xy_list, xz_list, zy_list, vmin=vmin, vmax=vmax, gamma=gamma,
@@ -1880,95 +2039,104 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         # Observe copy params trigger
         self.observe(self._copy_params, names='copy_params_trigger')
 
-        # Sync initial start/end from initial x_s, x_t
-        self._sync_start_end_from_st()
-
         # Initial bounds update
         self._update_bounds(None)
 
         # Initial render
         self._render_wrapper(None)
 
-    def _sync_start_end_from_st(self):
-        if getattr(self, '_syncing_traits', False):
-            return
+    # Slabs (D10). The inclusive index range [start, end] of each axis is the
+    # state that is drawn, exported and used for selection; the centre and
+    # half-thickness (x_s, x_t) are derived from it ((start + end) // 2 and
+    # (end - start) // 2), so an even width is never rounded away. Writing
+    # x_s moves the slab and keeps its width; writing x_t sets [s - t, s + t].
+
+    _AXIS_INDEX = {'x': 2, 'y': 1, 'z': 0}
+
+    def _axis_size(self, axis):
+        return self.dims[self._AXIS_INDEX[axis]]
+
+    def _set_slab_traits(self, axis, start, end, s=None, t=None, keep_width=False):
+        """
+        Write one axis's [start, end] (clamped to the volume) and its centre/half-thickness.
+
+        The requested width ``end - start`` (before clamping) is remembered as
+        the slab's nominal width, which hover moves keep (``keep_width``), so a
+        slab narrowed at a border widens again when it moves back.
+        """
+        if not keep_width:
+            if not hasattr(self, '_slab_width'):
+                self._slab_width = {}
+            self._slab_width[axis] = max(0, int(end) - int(start))
+        n = self._axis_size(axis)
+        start = max(0, min(n - 1, int(start)))
+        end = max(start, min(n - 1, int(end)))
+        if s is None:
+            s, t = (start + end) // 2, (end - start) // 2
+        was = getattr(self, '_syncing_traits', False)
         self._syncing_traits = True
         try:
-            Z, Y, X = self.dims
-            x_s_c = max(0, min(X - 1, self.x_s))
-            y_s_c = max(0, min(Y - 1, self.y_s))
-            z_s_c = max(0, min(Z - 1, self.z_s))
-
-            nx_start = max(0, min(X - 1, x_s_c - self.x_t))
-            nx_end = max(0, min(X - 1, x_s_c + self.x_t))
-            if nx_end < nx_start: nx_end = nx_start
-
-            ny_start = max(0, min(Y - 1, y_s_c - self.y_t))
-            ny_end = max(0, min(Y - 1, y_s_c + self.y_t))
-            if ny_end < ny_start: ny_end = ny_start
-
-            nz_start = max(0, min(Z - 1, z_s_c - self.z_t))
-            nz_end = max(0, min(Z - 1, z_s_c + self.z_t))
-            if nz_end < nz_start: nz_end = nz_start
-
             with self.hold_trait_notifications():
-                self.x_s = x_s_c
-                self.y_s = y_s_c
-                self.z_s = z_s_c
-                self.x_start = nx_start
-                self.x_end = nx_end
-                self.y_start = ny_start
-                self.y_end = ny_end
-                self.z_start = nz_start
-                self.z_end = nz_end
+                setattr(self, f'{axis}_start', start)
+                setattr(self, f'{axis}_end', end)
+                setattr(self, f'{axis}_s', int(s))
+                setattr(self, f'{axis}_t', int(t))
         finally:
-            self._syncing_traits = False
+            self._syncing_traits = was
+
+    def _init_slab(self, axis, centre, half):
+        """
+        Place a slab from a centre and half-thickness in index units (floats).
+
+        ``centre`` is clamped into the volume first. When ``centre -/+ half``
+        are whole indices (half-voxel values, as copy-kwargs emits for even
+        widths) they are the inclusive range exactly; otherwise the centre and
+        half-thickness are rounded (to the nearest index, as before) and the
+        range ``[s - t, s + t]`` is clipped to the volume.
+        """
+        n = self._axis_size(axis)
+        c = min(max(float(centre), 0.0), n - 1.0)
+        h = max(0.0, float(half))
+        lo, hi = c - h, c + h
+        if abs(lo - round(lo)) < 1e-6 and abs(hi - round(hi)) < 1e-6:
+            start, end = int(round(lo)), int(round(hi))
+            s, t = None, None
+            if c == round(c) and h == round(h):
+                s, t = int(round(c)), int(round(h))  # an odd width keeps its centre when clipped
+        else:
+            s, t = int(round(c)), int(round(h))
+            start, end = s - t, s + t
+        self._set_slab_traits(axis, start, end, s, t)
+
+    def _translate_slab(self, axis, centre):
+        """
+        Centre the slab on index ``centre``, keeping its nominal width.
+
+        For a width w (``end - start``) the slab is ``[c - w // 2, c - w // 2 + w]``,
+        so ``(start + end) // 2 == c`` for odd and even widths; at a border it
+        is clipped (``x_s`` stays ``c``) and regains its width when moved back.
+        """
+        widths = getattr(self, '_slab_width', {})
+        width = widths.get(axis, getattr(self, f'{axis}_end') - getattr(self, f'{axis}_start'))
+        c = int(centre)
+        start = c - width // 2
+        self._set_slab_traits(axis, start, start + width, c, width // 2, keep_width=True)
 
     def _on_st_changed(self, change):
-        self._sync_start_end_from_st()
+        if getattr(self, '_syncing_traits', False):
+            return
+        axis, kind = change.name[0], change.name[2]
+        if kind == 's':
+            self._translate_slab(axis, change.new)
+        else:
+            s = getattr(self, f'{axis}_s')
+            self._set_slab_traits(axis, s - change.new, s + change.new, s, change.new)
 
     def _on_start_end_changed(self, change):
         if getattr(self, '_syncing_traits', False):
             return
-        self._syncing_traits = True
-        try:
-            Z, Y, X = self.dims
-            nx_start = max(0, min(X - 1, self.x_start))
-            nx_end = max(0, min(X - 1, self.x_end))
-            if nx_end < nx_start: nx_end = nx_start
-
-            ny_start = max(0, min(Y - 1, self.y_start))
-            ny_end = max(0, min(Y - 1, self.y_end))
-            if ny_end < ny_start: ny_end = ny_start
-
-            nz_start = max(0, min(Z - 1, self.z_start))
-            nz_end = max(0, min(Z - 1, self.z_end))
-            if nz_end < nz_start: nz_end = nz_start
-
-            nx_s = (nx_start + nx_end) // 2
-            nx_t = max(0, (nx_end - nx_start) // 2)
-
-            ny_s = (ny_start + ny_end) // 2
-            ny_t = max(0, (ny_end - ny_start) // 2)
-
-            nz_s = (nz_start + nz_end) // 2
-            nz_t = max(0, (nz_end - nz_start) // 2)
-
-            with self.hold_trait_notifications():
-                self.x_start = nx_start
-                self.x_end = nx_end
-                self.y_start = ny_start
-                self.y_end = ny_end
-                self.z_start = nz_start
-                self.z_end = nz_end
-                self.x_s = nx_s
-                self.x_t = nx_t
-                self.y_s = ny_s
-                self.y_t = ny_t
-                self.z_s = nz_s
-                self.z_t = nz_t
-        finally:
-            self._syncing_traits = False
+        axis = change.name[0]
+        self._set_slab_traits(axis, getattr(self, f'{axis}_start'), getattr(self, f'{axis}_end'))
 
     def _update_bounds(self, change):
         # x
@@ -2015,7 +2183,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
             if state == getattr(self, '_last_render_state', None):
                 return
 
-        open_before = set(plt.get_fignums())
+        open_before = _pyplot_fignums()
         fig = None
         try:
             fig = self._render()
@@ -2057,23 +2225,24 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 # computed in, whatever the user's savefig rcParams (e.g. 'tight').
                 with matplotlib.rc_context({'savefig.bbox': 'standard'}):
                     fig.savefig(buf, format='png')
+                    dpi = matplotlib.rcParams['savefig.dpi']
+                dpi = fig.dpi if dpi == 'figure' else float(dpi)
+                # Size of the displayed PNG, for distances in screen pixels
+                self._png_px = tuple(float(v) for v in fig.get_size_inches() * dpi)
                 self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
             # Recorded only after a successful render, so a state whose render
             # failed is retried by the next notification.
             self._last_render_state = state
         except Exception as e:
-            # A figure opened by a render that failed half-way was never returned.
-            for num in set(plt.get_fignums()) - open_before:
-                plt.close(num)
+            # A pyplot figure opened by a render that failed half-way (e.g. by a
+            # user projector) was never returned.
+            _close_pyplot_figures(_pyplot_fignums() - open_before)
             if change is None:
                 raise  # building the widget: report to the caller
             # From an interactive change the exception would only reach the
             # kernel log while the image silently stays stale: keep the last
             # frame and say why in the widget.
             self.warning_msg = f"⚠️ Render failed: {type(e).__name__}: {e}"
-        finally:
-            if fig is not None:
-                plt.close(fig)
     # Traits whose values fully describe what the slab/channel observers render.
     _RENDER_STATE_TRAITS = (
         'x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t',
@@ -2136,14 +2305,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         idx = self._phys_to_index(plane, phys_x, phys_y)
         if idx is None:
             return
-        Z, Y, X = self.dims
         with self.hold_trait_notifications():
-            if 'x' in idx:
-                self.x_s = max(0, min(X - 1, idx['x']))
-            if 'y' in idx:
-                self.y_s = max(0, min(Y - 1, idx['y']))
-            if 'z' in idx:
-                self.z_s = max(0, min(Z - 1, idx['z']))
+            # Move each slab under the cursor, keeping its width (D10)
+            for axis, i in idx.items():
+                self._translate_slab(axis, max(0, min(self._axis_size(axis) - 1, i)))
 
     def _panel_geometry(self, plane):
         """
@@ -2179,28 +2344,42 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     def _render(self):
         raise NotImplementedError
 
+    def _check_trait_kwargs(self, kwargs):
+        """Reject keyword arguments that are neither parameters nor traits (D12: no silent typos)."""
+        traits = set(type(self).class_trait_names())
+        unknown = [k for k in kwargs if k not in traits]
+        if unknown:
+            raise TypeError(f"{type(self).__name__}() got unexpected keyword argument(s): "
+                            + ", ".join(repr(k) for k in unknown))
+
+    def _apply_trait_kwargs(self, kwargs):
+        """Set traits passed as keyword arguments (after the widget is built, so observers see them)."""
+        if kwargs:
+            with self.hold_trait_notifications():
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+    def _slab_origin(self):
+        """Data coordinate (z, y, x) of widget index 0 (copy-kwargs positions are measured from 0)."""
+        return (0, 0, 0)
+
     def _save_svg(self, change):
         fig = self._render()
         if fig:
             try:
                 fig.savefig(self.save_filename, format='svg', dpi=300, bbox_inches='tight')
-                print(f"Saved to {self.save_filename}")
+                _log.info("Saved to %s", self.save_filename)
             except Exception as e:
-                print(f"Error saving file: {e}")
-            finally:
-                plt.close(fig)
+                warnings.warn(f"Error saving {self.save_filename}: {e}", UserWarning, stacklevel=2)
 
     def _png_bytes(self, dpi=300):
         """The figure as PNG bytes, cropped like the SVG export (bbox 'tight')."""
         fig = self._render()
         if not fig:
             return None
-        try:
-            buf = io.BytesIO()
-            fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
-            return buf.getvalue()
-        finally:
-            plt.close(fig)
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
+        return buf.getvalue()
 
     def _copy_png(self, change):
         # Clear first so an identical image still fires a change event in JS.
@@ -2208,7 +2387,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         try:
             data = self._png_bytes()
         except Exception as e:
-            print(f"Error rendering PNG: {e}")
+            warnings.warn(f"Error rendering PNG: {e}", UserWarning, stacklevel=2)
             data = None
         self.copy_png_data = base64.b64encode(data).decode('utf-8') if data else "error"
 
@@ -2223,15 +2402,17 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         """The current view as keyword-argument lines (one ``key=value,`` each)."""
         s = []
 
-        x_s_phys = self.x_s * self.sx
-        y_s_phys = self.y_s * self.sy
-        z_s_phys = self.z_s * self.sz
-        s.append(f"slabs_position=({z_s_phys}, {y_s_phys}, {x_s_phys}),")
-
-        x_t_phys = self.x_t * self.sx
-        y_t_phys = self.y_t * self.sy
-        z_t_phys = self.z_t * self.sz
-        s.append(f"slabs_thickness=({z_t_phys}, {y_t_phys}, {x_t_phys}),")
+        # Physical centre and half-thickness of the drawn [start, end] slabs
+        # (half-voxel values for even widths, so the paste rebuilds the same
+        # slabs; D10). The scatter viewer's index 0 is its data minimum.
+        oz, oy, ox = self._slab_origin()
+        pos, half = [], []
+        for axis, o, step in (('z', oz, self.sz), ('y', oy, self.sy), ('x', ox, self.sx)):
+            a, b = getattr(self, f'{axis}_start'), getattr(self, f'{axis}_end')
+            pos.append(float(((a + b) / 2.0 + o) * step))
+            half.append(float((b - a) / 2.0 * step))
+        s.append(f"slabs_position=({pos[0]}, {pos[1]}, {pos[2]}),")
+        s.append(f"slabs_thickness=({half[0]}, {half[1]}, {half[2]}),")
 
         # Handle channels
         if hasattr(self, 'num_channels'):
@@ -2299,10 +2480,27 @@ class TNIASliceWidget(TNIAWidgetBase):
     registered Colormap instances are accepted. Per-channel vmin / vmax /
     gamma / opacity lists longer than the number of channels raise
     ValueError, as in the static viewers (extra entries used to be dropped).
+
+    Slabs: ``slabs_position`` is the physical centre and ``slabs_thickness``
+    the physical half-thickness of each slab, (Z, Y, X). The drawn slab is
+    the inclusive index range ``[x_start, x_end]``; ``x_s`` / ``x_t`` are its
+    centre and half-thickness in indices. Changed (D10, 2026-11): half-voxel
+    values select even widths (centre 11.5, half 1.5 voxels -> [10, 13]), and
+    copy-kwargs, hover sync and the annotator use the drawn range; the
+    (x_s, x_t) form used to drop one voxel of an even width.
     """
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-                 blending=None, projection=None, attenuation=0.05, bit_depth=None, **kwargs):
+                 blending=None, projection=None, attenuation=0.05, bit_depth=None, colors=None, channel_axis=None,
+                 **kwargs):
+        self._check_trait_kwargs(kwargs)
+        if colors is not None:
+            warn_deprecated("The 'colors' parameter", "'colormap'")
+            if colormap is None:
+                colormap = colors
+        # DataArrays, tuples, channel_axis and 2D images, as in every viewer (D12)
+        im, colormap, channel_labels, pixel_sizes = _ortho_input(
+            im, colormap, channel_labels, pixel_sizes, channel_axis)
 
         self.blending = _check_blending(blending)
         self.projection = None if projection is None else _check_projection(projection, attenuation)
@@ -2340,6 +2538,12 @@ class TNIASliceWidget(TNIAWidgetBase):
 
         self.im_orig = im
 
+        if figsize is None:
+            # The widgets' automatic size: physical extents in an 8-inch box,
+            # with the channel-label row the slice viewers always draw (D12)
+            figsize = _auto_figsize(_ortho_extents(X * px, Y * py, Z * pz, rotate_view)[0],
+                                    _ortho_extents(X * px, Y * py, Z * pz, rotate_view)[1],
+                                    True, box=(8.0, 8.0), label_fontsize_pt=channel_label_fontsize_pt)
         self.figsize = figsize
         self.colormap = colormap
         self.colors_orig = colormap
@@ -2406,33 +2610,16 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.gamma_list = per_channel(gamma, self.num_channels, 'gamma', 1.0)
         self.opacity_list = per_channel(opacity, self.num_channels, 'opacity', 1.0)
 
-        # Convert physical position/thickness to pixel indices
+        # Physical position / half-thickness -> index slabs (D10: half-voxel
+        # values select even widths exactly; see TNIAWidgetBase._init_slab)
         def _default_t(n): return max(1, n // 64)
-        x_t_idx = int(round(x_t / px)) if x_t is not None else _default_t(X)
-        y_t_idx = int(round(y_t / py)) if y_t is not None else _default_t(Y)
-        z_t_idx = int(round(z_t / pz)) if z_t is not None else _default_t(Z)
-
-        x_s_idx = int(round(x_s / px)) if x_s is not None else X // 2
-        y_s_idx = int(round(y_s / py)) if y_s is not None else Y // 2
-        z_s_idx = int(round(z_s / pz)) if z_s is not None else Z // 2
-
-        # Override for max projection if thickness exceeds shape
-        if x_t_idx >= X:
-            x_t_idx = max(1, X // 2)
-            x_s_idx = X // 2
-        if y_t_idx >= Y:
-            y_t_idx = max(1, Y // 2)
-            y_s_idx = Y // 2
-        if z_t_idx >= Z:
-            z_t_idx = max(1, Z // 2)
-            z_s_idx = Z // 2
-
-        self.x_t = x_t_idx
-        self.y_t = y_t_idx
-        self.z_t = z_t_idx
-        self.x_s = x_s_idx
-        self.y_s = y_s_idx
-        self.z_s = z_s_idx
+        for axis, n, pos, half, step in (('x', X, x_s, x_t, px), ('y', Y, y_s, y_t, py), ('z', Z, z_s, z_t, pz)):
+            h = half / step if half is not None else _default_t(n)
+            c = pos / step if pos is not None else n // 2
+            if round(h) >= n:
+                # Thicker than the volume: the whole axis
+                c, h = n // 2, max(1, n // 2)
+            self._init_slab(axis, c, h)
 
         # Compute histograms over each channel's (inferred or enforced) bit-depth range
         hists = []
@@ -2446,6 +2633,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 
         # Initialize observers and render
         self._init_observers()
+        self._apply_trait_kwargs(kwargs)
 
     def _render(self):
         Z, Y, X = self.dims
@@ -2487,7 +2675,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 
             if not visible_indices:
                 # Create a placeholder figure
-                fig = plt.figure(figsize=self.figsize if self.figsize else (10, 10))
+                fig = _new_figure(figsize=self.figsize if self.figsize else (8, 8))
                 fig.text(0.5, 0.5, "No Channels Visible", ha='center', va='center', color='white')
                 fig.patch.set_facecolor('black')
                 return fig
@@ -2533,7 +2721,7 @@ class TNIASliceWidget(TNIAWidgetBase):
             opacity_val = float(self.opacity_list[0])
 
             if opacity_val <= 0:
-                fig = plt.figure(figsize=self.figsize if self.figsize else (10, 10))
+                fig = _new_figure(figsize=self.figsize if self.figsize else (8, 8))
                 fig.text(0.5, 0.5, "No Channels Visible", ha='center', va='center', color='white')
                 fig.patch.set_facecolor('black')
                 return fig
@@ -2610,6 +2798,23 @@ class _PointList(traitlets.List):
 class TNIAAnnotatorWidget(TNIASliceWidget):
     """
     Subclass of TNIASliceWidget that supports interactive point annotation.
+
+    ``points`` are voxel indices ``[z, y, x]`` (not physical coordinates).
+    In delete mode a click removes the nearest point drawn within about 12
+    screen pixels (at least the marker's size) among the points inside the
+    panel's drawn slab. Clicks on the padding of a rotated panel are ignored.
+
+    ``snap_depth`` (default True): a click on a projection stores, as the
+    out-of-plane coordinate, the depth of the voxel the projection shows
+    there (argmax of the summed visible channels inside the slab, argmin for
+    'minip'), falling back to the slab centre for a flat profile or the
+    'average' projection. False stores the slab centre.
+
+    Changed (D11, 2026-11): the slab centre was always stored, up to half
+    the slab thickness away from the clicked object.
+    Changed (D10, 2026-11): the delete radius was 20 voxel indices mixed
+    across axes, and the visible slab was the (x_s, x_t) form, which drops
+    one plane of an even-width slab.
     """
     # UI Toggles
     annotation_mode = traitlets.Bool(False).tag(sync=True)
@@ -2662,11 +2867,19 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     def annotate(self, value):
         self.annotation_mode = bool(value)
 
-    def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, annotate=False, *args, **kwargs):
+    def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, annotate=False,
+                 *args, snap_depth=True, channel_axis=None, **kwargs):
         if colors is not None:
-            warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+            warn_deprecated("The 'colors' parameter", "'colormap'")
             if colormap is None:
                 colormap = colors
+        # DataArrays, tuples, channel_axis and 2D images, as in every viewer (D12)
+        im, colormap, labels, ps = _ortho_input(
+            im, colormap, kwargs.get('channel_labels'), kwargs.get('pixel_sizes'), channel_axis)
+        if labels is not None:
+            kwargs['channel_labels'] = labels
+        if ps is not None:
+            kwargs['pixel_sizes'] = ps
         # Normalize input to list
         if not isinstance(im, list):
             im_list = [im]
@@ -2727,6 +2940,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         else:
             bd_list = [bit_depth] * n_img
         kwargs['bit_depth'] = bd_list + [8]
+
+        self.snap_depth = bool(snap_depth)
 
         # Initialize superclass
         super().__init__(im_list, colormap=colors_list, opacity=opacity_list, *args, **kwargs)
@@ -2792,6 +3007,11 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         # it must not be clamped onto the border and added as a real point.
         extent = {'x': X, 'y': Y, 'z': Z}
         outside = any(not 0 <= i < extent[axis] for axis, i in idx.items())
+        # The out-of-plane coordinate: the depth of what the projection shows
+        # at the clicked pixel (D11), else the slab centre
+        normal = next(a for a in 'xyz' if a not in idx)
+        if not outside:
+            idx[normal] = self._snap_depth(normal, idx)
         data_x = idx.get('x', self.x_s)
         data_y = idx.get('y', self.y_s)
         data_z = idx.get('z', self.z_s)
@@ -2800,40 +3020,87 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         data_y = max(0, min(Y - 1, data_y))
         data_z = max(0, min(Z - 1, data_z))
 
+        if outside:
+            return  # padding of a rotated panel: neither add nor delete
         if self.annotation_action == 'add':
-            if not outside:
-                self.add_point(data_z, data_y, data_x)
+            self.add_point(data_z, data_y, data_x)
         elif self.annotation_action == 'delete':
-            if not self.points:
-                return
-            pts = np.array(self.points)
-            x0_sl = max(0, self.x_s - self.x_t)
-            x1_sl = min(self.dims[2] - 1, self.x_s + self.x_t)
-            y0_sl = max(0, self.y_s - self.y_t)
-            y1_sl = min(self.dims[1] - 1, self.y_s + self.y_t)
-            z0_sl = max(0, self.z_s - self.z_t)
-            z1_sl = min(self.dims[0] - 1, self.z_s + self.z_t)
+            self._delete_near(plane, frac_x, frac_y, info)
 
-            if plane == 'xy':
-                mask = (pts[:, 0] >= z0_sl) & (pts[:, 0] <= z1_sl)
-                if not np.any(mask): return
-                visible_pts = pts[mask]
-                dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 1] - data_y)**2
-            elif plane == 'zy':
-                mask = (pts[:, 2] >= x0_sl) & (pts[:, 2] <= x1_sl)
-                if not np.any(mask): return
-                visible_pts = pts[mask]
-                dist = (visible_pts[:, 0] - data_z)**2 + (visible_pts[:, 1] - data_y)**2
-            elif plane == 'xz':
-                mask = (pts[:, 1] >= y0_sl) & (pts[:, 1] <= y1_sl)
-                if not np.any(mask): return
-                visible_pts = pts[mask]
-                dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 0] - data_z)**2
+    def _snap_depth(self, axis, idx):
+        """
+        Index along ``axis`` (the panel's normal) of the voxel the projection
+        shows at the in-plane indices ``idx`` (D11).
 
-            closest_idx = np.argmin(dist)
-            if dist[closest_idx] <= 400:
-                closest_pt = visible_pts[closest_idx]
-                self.remove_point(closest_pt[0], closest_pt[1], closest_pt[2])
+        With ``snap_depth`` the visible image channels (opacity > 0, the
+        annotation channel excluded), each normalised by its display range,
+        are summed along the ray inside the drawn slab; the argmax ('mip',
+        'attenuated_mip') or argmin ('minip') is returned. A flat profile, the
+        'average' projection or ``snap_depth=False`` give the slab centre.
+        """
+        centre = getattr(self, f'{axis}_s')
+        if not self.snap_depth or self.projection == 'average':
+            return centre
+        lo, hi = getattr(self, f'{axis}_start'), getattr(self, f'{axis}_end')
+        if hi <= lo:
+            return centre
+        sl = {a: idx.get(a) for a in 'xyz'}
+        sl[axis] = slice(lo, hi + 1)
+        profile = None
+        n_img = self.num_channels - 1  # the last channel holds the annotations
+        for i in range(n_img):
+            if float(self.opacity_list[i]) <= 0:
+                continue
+            vmin = self._auto_vmin[i] if self.vmin_list[i] == "" else float(self.vmin_list[i])
+            vmax = self._auto_vmax[i] if self.vmax_list[i] == "" else float(self.vmax_list[i])
+            ray = np.asarray(self.im_orig[i][sl['z'], sl['y'], sl['x']], dtype=np.float64)
+            ray = np.nan_to_num((ray - vmin) / max(vmax - vmin, 1e-12), nan=0.0, posinf=0.0, neginf=0.0)
+            profile = ray if profile is None else profile + ray
+        if profile is None or profile.size == 0 or np.all(profile == profile[0]):
+            return centre
+        k = np.argmin(profile) if self.projection == 'minip' else np.argmax(profile)
+        return lo + int(k)
+
+    # Delete radius in rendered (PNG) pixels (D10): fixed on screen, whatever
+    # the voxel size or the panel's zoom.
+    _DELETE_RADIUS_PX = 12.0
+
+    def _delete_near(self, plane, frac_x, frac_y, info):
+        """Remove the visible point drawn nearest to a click, if within ~12 screen px.
+
+        Visible means inside the drawn slab ``[start, end]`` of the panel's
+        normal axis. Distances are measured on the rendered image between the
+        click and each point's drawn position (voxel centre, rotation applied).
+        """
+        if not self.points:
+            return
+        pts = np.array(self.points)
+        normal = {'xy': ('z', 0), 'zy': ('x', 2), 'xz': ('y', 1)}[plane]
+        lo, hi = getattr(self, f'{normal[0]}_start'), getattr(self, f'{normal[0]}_end')
+        visible = pts[(pts[:, normal[1]] >= lo) & (pts[:, normal[1]] <= hi)]
+        if visible.size == 0:
+            return
+        # Panel coordinates (horizontal, vertical) of each point's voxel centre
+        steps = {0: self.sz, 1: self.sy, 2: self.sx}
+        col_ax, row_ax = {'xy': (2, 1), 'zy': (0, 1), 'xz': (2, 0)}[plane]
+        a = (visible[:, col_ax] + 0.5) * steps[col_ax]
+        b = (visible[:, row_ax] + 0.5) * steps[row_ax]
+        a, b = self._panel_geometry(plane).forward(a, b)
+
+        (x0, x1), (y0, y1) = (info['x0'], info['x1']), (info['y0_js'], info['y1_js'])
+        (xl0, xl1), (yl0, yl1) = info['xlim'], info['ylim']
+        w_px, h_px = getattr(self, '_png_px', (1.0, 1.0))
+        fx = x0 + (np.asarray(a) - xl0) / (xl1 - xl0) * (x1 - x0)
+        fy = y0 + (np.asarray(b) - yl1) / (yl0 - yl1) * (y1 - y0)
+        dist = np.hypot((fx - frac_x) * w_px, (fy - frac_y) * h_px)
+
+        # At least the drawn marker's half-size on screen
+        marker_um = max(1, self.point_size // 2) * min(self.sx, self.sz)
+        marker_px = marker_um / abs(xl1 - xl0) * (x1 - x0) * w_px
+        k = int(np.argmin(dist))
+        if dist[k] <= max(self._DELETE_RADIUS_PX, marker_px):
+            self.remove_point(*visible[k])
+
     def add_point(self, z, y, x):
         """Programmatically add a point"""
         pt = [int(z), int(y), int(x)]
@@ -2855,7 +3122,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
     def _save_csv(self, change):
         if not self.points:
-            print("No points to save.")
+            warnings.warn("No points to save.", UserWarning, stacklevel=2)
             return
 
         import os
@@ -2870,9 +3137,9 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
                 f.write("z,y,x\n")
                 for p in self.points:
                     f.write(f"{p[0]},{p[1]},{p[2]}\n")
-            print(f"Saved {len(self.points)} points to {filename}")
+            _log.info("Saved %d points to %s", len(self.points), filename)
         except Exception as e:
-            print(f"Error saving CSV: {e}")
+            warnings.warn(f"Error saving CSV {filename}: {e}", UserWarning, stacklevel=2)
 
 
     def _on_points_changed(self, change):
@@ -2902,6 +3169,140 @@ def _int_bounds(a):
     if len(a) == 0:
         return 0.0, 0.0
     return float(np.floor(np.min(a))), float(np.ceil(np.max(a)))
+
+
+def _scatter_auto_figsize(xb, yb, zb, sizes, rotate_view, has_labels, label_fontsize_pt=None):
+    """Automatic scatter figure size: the data box ``[min - 0.5, max + 0.5)`` per axis, in physical units."""
+    pz, py, px = sizes
+    (x0, x1), (y0, y1), (z0, z1) = xb, yb, zb
+    cols, rows = _ortho_extents((x1 + 1 - x0) * px, (y1 + 1 - y0) * py, (z1 + 1 - z0) * pz, rotate_view)
+    return _auto_figsize(cols, rows, has_labels, box=(8.0, 8.0), label_fontsize_pt=label_fontsize_pt)
+
+
+_CHANNEL_MODES = ('auto', 'values', 'categories', 'index_lists')
+# 'auto' reads one integer label per point as categories up to this many
+# distinct labels; more are ambiguous (intensities?) and need channel_mode.
+_MAX_AUTO_CATEGORIES = 64
+
+
+def _is_index_list(a, n):
+    """True if ``a`` could be indices of distinct points among ``n`` (integers in [0, n), no repeats)."""
+    a = np.asarray(a)
+    if a.size and not (np.issubdtype(a.dtype, np.integer) and a.min() >= 0 and a.max() < n):
+        return False
+    return len(np.unique(a)) == a.size
+
+
+def _classify_scatter_channels(channels, n, channel_mode='auto'):
+    """
+    Interpret the scatter viewer's ``channels`` for ``n`` points (D13).
+
+    Returns ``(mode, data)``: 'single' (None), 'cont_single' ((n,) floats),
+    'cont_multi' ((n, C) floats), 'ids' (``(codes, labels)`` from
+    ``np.unique``, so sparse and negative labels work), or 'idx_lists'
+    (list of integer index arrays).
+
+    ``channel_mode='auto'`` infers, and raises ValueError when the input is
+    ambiguous: a list of equal-length (n) arrays is values unless every one
+    is a valid index list (then ambiguous); lists of other lengths are index
+    lists; an (n, C) array or one float array is values; one integer/bool
+    array is categories up to 64 distinct labels (ambiguous above); strings
+    are categories. 'values', 'categories' and 'index_lists' force a reading.
+    """
+    if channel_mode not in _CHANNEL_MODES:
+        raise ValueError(f"channel_mode must be one of {_CHANNEL_MODES}, got {channel_mode!r}")
+    if channels is None:
+        return 'single', None
+    hint = "pass channel_mode='values', 'categories' or 'index_lists'"
+    if isinstance(channels, (list, tuple)):
+        arrs = [np.asarray(a).reshape(-1) for a in channels]
+        per_point = all(len(a) == n for a in arrs)
+        mode = channel_mode
+        if mode == 'auto':
+            if not per_point:
+                mode = 'index_lists'
+            elif any(not np.issubdtype(a.dtype, np.integer) for a in arrs) or \
+                    not all(_is_index_list(a, n) for a in arrs):
+                mode = 'values'
+            else:
+                raise ValueError(f"channels is a list of {len(arrs)} integer arrays of one entry per point that "
+                                 f"are also valid point-index lists; {hint}.")
+        if mode == 'values':
+            if not per_point:
+                raise ValueError(f"channel_mode='values' needs one value per point ({n}) in every channel, "
+                                 f"got lengths {[len(a) for a in arrs]}")
+            return 'cont_multi', np.stack([a.astype(float) for a in arrs], axis=1)
+        if mode == 'index_lists':
+            lists = []
+            for a in arrs:
+                if a.size and not (np.issubdtype(a.dtype, np.integer) or np.all(a == np.round(a))):
+                    raise ValueError("index lists must hold integer point indices")
+                a = a.astype(int)
+                if a.size and (a.min() < 0 or a.max() >= n):
+                    raise ValueError(f"index lists must hold point indices in [0, {n}), got [{a.min()}, {a.max()}]")
+                lists.append(a)
+            return 'idx_lists', lists
+        raise ValueError("channel_mode='categories' takes one label per point (an array), not a list")
+
+    a = np.asarray(channels)
+    if a.ndim == 2:
+        if channel_mode not in ('auto', 'values'):
+            raise ValueError(f"an (n_points, n_channels) array holds values; got channel_mode={channel_mode!r}")
+        if a.shape[0] != n:
+            raise ValueError(
+                f"A 2D channels array must have shape (n_points, n_channels) = ({n}, C), got {a.shape}")
+        return 'cont_multi', a.astype(float)
+    a = a.reshape(-1)
+    if len(a) != n:
+        if channel_mode in ('auto', 'index_lists'):
+            return _classify_scatter_channels([a], n, 'index_lists')
+        raise ValueError(f"channels has {len(a)} entries for {n} points")
+    numeric = np.issubdtype(a.dtype, np.number) or a.dtype == bool
+    mode = channel_mode
+    if mode == 'auto':
+        if not numeric:
+            mode = 'categories'
+        elif np.issubdtype(a.dtype, np.integer) or a.dtype == bool:
+            if len(np.unique(a)) > _MAX_AUTO_CATEGORIES:
+                raise ValueError(f"channels has {len(np.unique(a))} distinct integer values: categories or "
+                                 f"values (e.g. intensities)? {hint}.")
+            mode = 'categories'
+        else:
+            mode = 'values'
+    if mode == 'values':
+        if not numeric:
+            raise ValueError("channel_mode='values' needs numeric channels")
+        return 'cont_single', a.astype(float)
+    if mode == 'categories':
+        labels, codes = np.unique(a, return_inverse=True)
+        return 'ids', (codes.reshape(-1).astype(int), labels)
+    return _classify_scatter_channels([a], n, 'index_lists')
+
+
+def _filter_channels(mode, data, keep):
+    """Keep the channel data of the points where ``keep`` (index lists are re-indexed)."""
+    if keep is None or mode == 'single':
+        return data
+    if mode == 'idx_lists':
+        new_index = np.cumsum(keep) - 1
+        return [new_index[ix[keep[ix]]] for ix in data]
+    if mode == 'ids':
+        return data[0][keep], data[1]
+    return data[keep]
+
+
+def _finite_mask(X, Y, Z, warn=True):
+    """Coordinates as 1D arrays, and the mask of points with finite coordinates (None if all are)."""
+    X, Y, Z = (np.asarray(a).reshape(-1) for a in (X, Y, Z))
+    if not (len(X) == len(Y) == len(Z)):
+        raise ValueError(f"X, Y and Z must have the same length, got {len(X)}, {len(Y)}, {len(Z)}")
+    keep = np.isfinite(X.astype(float)) & np.isfinite(Y.astype(float)) & np.isfinite(Z.astype(float))
+    if keep.all():
+        return X, Y, Z, None
+    if warn:
+        warnings.warn(f"Dropping {int((~keep).sum())} of {len(X)} points with non-finite coordinates.",
+                      UserWarning, stacklevel=4)
+    return X, Y, Z, keep
 
 
 def _finite_points(X, Y, Z, channels=None):
@@ -2937,18 +3338,35 @@ class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, subplot_bg=None, slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-                 blending=None, **kwargs):
+                 blending=None, channel_mode='auto', **kwargs):
+        self._check_trait_kwargs(kwargs)
         # Keyword-only channel compositing (not in the GUI); see `show_zyx`.
         # 'minimum' also switches to a white canvas and inverted default colours.
         self.blending = _check_blending(blending)
         self.rotate_view = rotate_view
         self.channel_label_fontsize_pt = channel_label_fontsize_pt
         if colors is not None:
-            warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+            warn_deprecated("The 'colors' parameter", "'colormap'")
             if colormap is None:
                 colormap = colors
 
-        X_arr, Y_arr, Z_arr, channels = _finite_points(X_arr, Y_arr, Z_arr, channels)
+        # Legacy per-axis slab kwargs (the factories already route theirs)
+        if any(v is not None for v in (x_s, y_s, z_s)):
+            warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'")
+            if slabs_position is None:
+                slabs_position = (z_s, y_s, x_s)
+        if any(v is not None for v in (x_t, y_t, z_t)):
+            warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'")
+            if slabs_thickness is None:
+                slabs_thickness = (z_t, y_t, x_t)
+
+        if channel_mode is None:
+            channel_mode = 'auto'
+        X_arr, Y_arr, Z_arr, keep = _finite_mask(X_arr, Y_arr, Z_arr)
+        mode, ch_data = _classify_scatter_channels(channels, len(X_arr), channel_mode)
+        if keep is not None:
+            X_arr, Y_arr, Z_arr = X_arr[keep], Y_arr[keep], Z_arr[keep]
+            ch_data = _filter_channels(mode, ch_data, keep)
         self.X_arr = X_arr
         self.Y_arr = Y_arr
         self.Z_arr = Z_arr
@@ -2974,6 +3392,9 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.point_size = point_size
         self.alpha = alpha
         self.colors = colors
+        if figsize is None:
+            figsize = _scatter_auto_figsize((xmin, xmax), (ymin, ymax), (zmin, zmax), (pz, py, px),
+                                            rotate_view, channel_labels is not None, channel_label_fontsize_pt)
         self.figsize = figsize
 
         self.xmin = xmin
@@ -3012,49 +3433,23 @@ class TNIAScatterWidget(TNIAWidgetBase):
         # Analyze channels
         self.N = len(self.X_arr)
 
-        def _is_int_like(a): return np.issubdtype(np.asarray(a).dtype, np.integer) or np.asarray(a).dtype == bool
-        def _as_1d(a):
-            a = np.asarray(a)
-            return a.reshape(-1) if a.ndim == 1 else a
-
-        self.mode = 'single'
-        self.ch_ids = None
-        self.cont_single = None
-        self.cont_multi = None
-        self.idx_lists = None
-
-        if channels is None:
-            self.mode = 'single'
-        elif isinstance(channels, (list, tuple)):
-            arrs = [ _as_1d(a) for a in channels ]
-            lens = {len(a) for a in arrs}
-            if lens == {self.N} and any(np.issubdtype(a.dtype, np.floating) for a in arrs):
-                self.mode = 'cont_multi'
-                self.cont_multi = np.stack([a.astype(float) for a in arrs], axis=1)
-            else:
-                self.mode = 'idx_lists'
-                self.idx_lists = [np.asarray(ix, dtype=int) for ix in channels]
-        else:
-            a = _as_1d(channels)
-            if a.ndim == 2:
-                # (N, C) array: one column of values per channel
-                if a.shape[0] != self.N:
-                    raise ValueError(
-                        f"A 2D channels array must have shape (n_points, n_channels) = ({self.N}, C), got {a.shape}"
-                    )
-                self.mode = 'cont_multi'
-                self.cont_multi = a.astype(float)
-            elif _is_int_like(a):
-                self.mode = 'ids'
-                self.ch_ids = np.asarray(a, dtype=int)
-            else:
-                self.mode = 'cont_single'
-                self.cont_single = np.asarray(a, dtype=float)
+        # Channel interpretation (D13): see _classify_scatter_channels
+        self.mode = mode
+        self.ch_ids = self.category_labels = None
+        self.cont_single = self.cont_multi = self.idx_lists = None
+        if mode == 'ids':
+            self.ch_ids, self.category_labels = ch_data
+        elif mode == 'cont_single':
+            self.cont_single = ch_data
+        elif mode == 'cont_multi':
+            self.cont_multi = ch_data
+        elif mode == 'idx_lists':
+            self.idx_lists = ch_data
 
         if self.mode in ('single',):
             self.C = 1
         elif self.mode == 'ids':
-            self.C = int(self.ch_ids.max()) + 1 if self.ch_ids.size else 1
+            self.C = max(1, len(self.category_labels))
         elif self.mode == 'idx_lists':
             self.C = len(self.idx_lists)
         elif self.mode == 'cont_single':
@@ -3137,7 +3532,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
         if channel_labels is not None:
             self.channel_names = _to_list(channel_labels, self.C, "Channel")
         else:
-            self.channel_names = [f"Channel {i}" for i in range(self.C)]
+            self.channel_names = ([str(v) for v in self.category_labels] if self.mode == 'ids'
+                                  else [f"Channel {i}" for i in range(self.C)])
         self.channel_dtypes = ["float"] * self.C
         GUI_CHANNEL_COLORS = [get_gui_channel_color(matplotlib.colors.to_hex(c)) for c in self.colors_rgb]
         self.channel_colors = GUI_CHANNEL_COLORS
@@ -3145,20 +3541,15 @@ class TNIAScatterWidget(TNIAWidgetBase):
         z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
         z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
 
-        # Init values
-        if x_t_in is not None: self.x_t = int(x_t_in)
-        if y_t_in is not None: self.y_t = int(y_t_in)
-        if z_t_in is not None: self.z_t = int(z_t_in)
-
-        # Center default
-        if x_s_in is None: self.x_s = int((self.xmax - self.xmin)/2) # relative to 0
-        else: self.x_s = int(x_s_in)
-
-        if y_s_in is None: self.y_s = int((self.ymax - self.ymin)/2)
-        else: self.y_s = int(y_s_in)
-
-        if z_s_in is None: self.z_s = int((self.zmax - self.zmin)/2)
-        else: self.z_s = int(z_s_in)
+        # Slabs in physical units, as in the image viewers (D10): data
+        # coordinate = physical / pixel size, widget index = data - minimum.
+        for axis, n, pos, half, step, lo, hi in (
+                ('x', X_dim, x_s_in, x_t_in, px, xmin, xmax),
+                ('y', Y_dim, y_s_in, y_t_in, py, ymin, ymax),
+                ('z', Z_dim, z_s_in, z_t_in, pz, zmin, zmax)):
+            h = half / step if half is not None else max(1, n // 64)
+            c = pos / step - lo if pos is not None else int((hi - lo) / 2)
+            self._init_slab(axis, c, h)
 
         # Compute histograms
         hists = []
@@ -3183,18 +3574,11 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
         # Initialize observers and render
         self._init_observers()
+        self._apply_trait_kwargs(kwargs)
 
-    def _copy_params_lines(self):
-        """
-        Like the base class, but slabs in the units ``show_zyx_max_scatter_interactive``
-        takes: positions in data coordinates (index + data minimum), thicknesses in
-        data units (one index is one data unit).
-        """
-        lines = super()._copy_params_lines()
-        lines[0] = (f"slabs_position=({self.z_s + self.zmin}, {self.y_s + self.ymin}, "
-                    f"{self.x_s + self.xmin}),")
-        lines[1] = f"slabs_thickness=({self.z_t}, {self.y_t}, {self.x_t}),"
-        return lines
+    # Widget index 0 is the data minimum of each axis (``_copy_params_lines``)
+    def _slab_origin(self):
+        return (self.zmin, self.ymin, self.xmin)
 
     def _label_colors(self):
         """Colour of each channel as drawn (used for the channel labels)."""
@@ -3366,7 +3750,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 pixel_sizes={'Z': bzs, 'Y': bys, 'X': bxs, 'unit': self._length_unit},
                 pixel_sizes_given=self._pixel_sizes_given,
                 figsize=self.figsize, colormap=None,
-                vmin=None, vmax=None, gamma=1, use_plt=True, colors=None, opacity=None, subplot_bg=self.subplot_bg,
+                vmin=None, vmax=None, gamma=1, colors=None, opacity=None, subplot_bg=self.subplot_bg,
                 rotate_view=self.rotate_view, channel_labels=channel_labels,
                 channel_label_fontsize_pt=self.channel_label_fontsize_pt,
                 channel_label_colors=self._label_colors(),
@@ -3414,17 +3798,16 @@ class TNIAScatterWidget(TNIAWidgetBase):
             row1_h = max(w_y_xy, w_y_zy)
             row2_h = w_z_xz
 
-            figW, figH = self.figsize if self.figsize is not None else (10, 10)
-            gap_in = 1.0 / 16.0
-            margin_in = 0.05
+            figW, figH = self.figsize
+            gap_in = _GAP_IN
+            margin_in = _MARGIN_IN
 
-            fontsize_pt = max(10, min(24, figH * 72 * 0.035))
             if self.channel_label_fontsize_pt is not None:
                 channel_label_fontsize_pt = self.channel_label_fontsize_pt
             else:
-                channel_label_fontsize_pt = fontsize_pt
+                channel_label_fontsize_pt = _auto_fontsize_pt(figW)
 
-            hl_in = (0.10 + (channel_label_fontsize_pt / 72.0)) if channel_labels is not None else 0.0
+            hl_in = _label_row_in(channel_label_fontsize_pt) if channel_labels is not None else 0.0
             num_v_gaps = 2 if channel_labels is not None else 1
 
             avail_w_in = figW - gap_in - 2.0 * margin_in
@@ -3462,7 +3845,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
             # Create the figure at the size the layout was computed for
             fig_bg = 'white' if self._blend == 'minimum' else 'none'
-            fig = Figure(figsize=(figW, figH), facecolor=fig_bg) if not plt.get_fignums() else plt.figure(figsize=(figW, figH), facecolor=fig_bg)
+            fig = _new_figure(figsize=(figW, figH), facecolor=fig_bg)
 
             axLabels = None
             if channel_labels is not None:
@@ -3601,9 +3984,6 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 _add_scale_bar(axXY, w_x_xy, self._pixel_sizes_given, (figW, figH), unit=self._length_unit,
                                color='black' if self._blend == 'minimum' else 'white',
                                fontsize_pt=_scale_bar_fontsize(self.scale_bar_fontsize_pt))
-
-            # FORCE MATPLOTLIB TRANSFORMS BEFORE RETURN <<<
-            fig.canvas.draw()
             return fig
 
 
@@ -3672,6 +4052,184 @@ def _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes):
     return channels, colormap, channel_labels, pixel_sizes
 
 
+def _legacy_colors(colors, colormap, stacklevel=4):
+    """The deprecated ``colors=`` (FutureWarning, D08), used when ``colormap`` is None."""
+    if colors is None:
+        return colormap
+    warn_deprecated("The 'colors' parameter", "'colormap'", stacklevel=stacklevel)
+    return colormap if colormap is not None else colors
+
+
+def _ortho_input(im, colormap=None, channel_labels=None, pixel_sizes=None, channel_axis=None):
+    """
+    One input normaliser for every ortho viewer (D12).
+
+    Returns ``(image, colormap, channel_labels, pixel_sizes)`` where image is
+    a 3D (Z, Y, X) array or a list of them (channels):
+
+    - an ``xarray.DataArray`` goes through `_viewer_input_from_xarray`
+      (channel labels, colours and pixel sizes from its coordinates;
+      explicit arguments win);
+    - a tuple of channels becomes a list;
+    - an ndarray with ``channel_axis`` is split along that axis; a 4D
+      ndarray without it raises ValueError (CZYX or TZYX cannot be told
+      apart, so the channel axis is never guessed);
+    - 2D (YX) images get a Z axis of length 1.
+    """
+    if hasattr(im, "dims") and hasattr(im, "isel") and hasattr(im, "coords"):
+        im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(
+            im, colormap, channel_labels, pixel_sizes)
+    elif isinstance(im, tuple):
+        im = list(im)
+    if not isinstance(im, list):
+        im = np.asarray(im)
+        if channel_axis is not None:
+            im = [np.asarray(c) for c in np.moveaxis(im, channel_axis, 0)]
+        elif im.ndim > 3:
+            raise ValueError(
+                f"got a {im.ndim}D array {im.shape}: pass channel_axis= to split channels "
+                "(e.g. channel_axis=0 for CZYX), or a list of 3D arrays.")
+    if isinstance(im, list):
+        im = [np.asarray(c) for c in im]
+        if any(c.ndim not in (2, 3) for c in im):
+            raise ValueError(f"each channel must be a 2D or 3D array, got shapes {[c.shape for c in im]}")
+        im = [c[np.newaxis] if c.ndim == 2 else c for c in im]
+    elif im.ndim == 2:
+        im = im[np.newaxis]
+    elif im.ndim != 3:
+        raise ValueError(f"expected a 2D or 3D image, got shape {im.shape}")
+    return im, colormap, channel_labels, pixel_sizes
+
+
+def _legacy_viewer_kwargs(colors=None, colormap=None, sxy=None, sz=None, pixel_sizes=None,
+                         x_s=None, y_s=None, z_s=None, slabs_position=None,
+                         x_t=None, y_t=None, z_t=None, slabs_thickness=None, stacklevel=5):
+    """
+    Resolve the deprecated viewer names (D08, FutureWarning): ``colors`` ->
+    ``colormap``, ``sxy``/``sz`` -> ``pixel_sizes``, ``x_s..z_s`` ->
+    ``slabs_position``, ``x_t..z_t`` -> ``slabs_thickness``. The new names
+    win when both are given. ``stacklevel`` is counted from
+    ``warn_deprecated`` up to the user's call.
+    """
+    colormap = _legacy_colors(colors, colormap, stacklevel=stacklevel)
+    if sxy is not None or sz is not None:
+        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'", stacklevel=stacklevel - 1)
+        if pixel_sizes is None:
+            pixel_sizes = (1.0 if sz is None else sz, 1.0 if sxy is None else sxy, 1.0 if sxy is None else sxy)
+    if any(v is not None for v in (x_s, y_s, z_s)):
+        warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'", stacklevel=stacklevel - 1)
+        if slabs_position is None:
+            slabs_position = (z_s, y_s, x_s)
+    if any(v is not None for v in (x_t, y_t, z_t)):
+        warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'", stacklevel=stacklevel - 1)
+        if slabs_thickness is None:
+            slabs_thickness = (z_t, y_t, x_t)
+    return colormap, pixel_sizes, slabs_position, slabs_thickness
+
+
+def _prepare_viewer_args(im, pixel_sizes=None, sxy=None, sz=None, colormap=None, colors=None,
+                         channel_labels=None, channel_axis=None, figsize=None, figsize_scale=1,
+                         rotate_view=None, channel_label_fontsize_pt=None,
+                         slabs_position=None, x_s=None, y_s=None, z_s=None,
+                         slabs_thickness=None, x_t=None, y_t=None, z_t=None, _stacklevel=6):
+    """
+    The argument preparation shared by the image-viewer factories (D12).
+
+    Resolves the deprecated names, normalises the input (`_ortho_input`:
+    DataArray, tuple, ``channel_axis``, 2D), and computes the automatic
+    figure size (physical extents in an 8-inch box, the rule the classes
+    use) times ``figsize_scale``. Returns a dict of keyword arguments for
+    ``TNIASliceWidget`` / ``TNIAAnnotatorWidget`` (slab defaults are the
+    classes'): im, pixel_sizes, colormap, channel_labels, figsize,
+    slabs_position, slabs_thickness.
+    """
+    colormap, pixel_sizes, slabs_position, slabs_thickness = _legacy_viewer_kwargs(
+        colors, colormap, sxy, sz, pixel_sizes, x_s, y_s, z_s, slabs_position,
+        x_t, y_t, z_t, slabs_thickness, stacklevel=_stacklevel)
+    # after resolving the deprecated names, so they still apply to DataArray input
+    im, colormap, channel_labels, pixel_sizes = _ortho_input(im, colormap, channel_labels, pixel_sizes, channel_axis)
+    if figsize is None:
+        # The widget parses pixel_sizes again and warns about missing axes once
+        (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
+        Z, Y, X = np.shape(im[0] if isinstance(im, list) else im)
+        cols, rows = _ortho_extents(X * px, Y * py, Z * pz, rotate_view)
+        figsize = _auto_figsize(cols, rows, True, box=(8.0, 8.0), label_fontsize_pt=channel_label_fontsize_pt)
+    if figsize_scale != 1:
+        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
+    return dict(im=im, pixel_sizes=pixel_sizes, colormap=colormap, channel_labels=channel_labels,
+                figsize=figsize, slabs_position=slabs_position, slabs_thickness=slabs_thickness)
+
+
+def _viewer_doc(func):
+    """Append the parameters shared by the interactive viewers to a factory docstring."""
+    func.__doc__ = _join_docs(func.__doc__, _VIEWER_DOC)
+    return func
+
+
+_VIEWER_DOC = """
+Parameters shared by the interactive viewers
+--------------------------------------------
+pixel_sizes : dict or (Z, Y, X) sequence, optional
+    Voxel size per axis. A dict may carry a 'unit' (known length units are
+    converted to µm); without one the numbers are taken as µm. Missing X/Y
+    sizes draw the panels in pixels with a 'px' scale bar; a missing Z with
+    known X/Y takes the finest of them (with a warning).
+figsize : (width, height) in inches, optional
+    None (default): fit the physical extents of the (rotated) panels and the
+    channel-label row in an 8-inch box. ``figsize_scale`` multiplies it.
+colormap : colour, colormap name, registered Colormap, or a list of them
+    One per channel; None takes the package palette ('white', 'lime',
+    'magenta', ...). ``colors`` is the deprecated name (FutureWarning).
+vmin, vmax : float or per-channel list, optional (data units)
+    Display range. In the image viewers None (per channel) is the default
+    display range of the whole channel volume (0, or the data minimum if
+    negative; robust 99.99th percentile), which a box cleared in the GUI
+    restores; for the scatter viewer see its own entry.
+gamma, opacity : float or per-channel list
+    Gamma after the linear window (1 = linear); opacity 0..1 (0 hides).
+slabs_position : (Z, Y, X) or dict, optional (physical units, µm)
+    Centre of the slab of each axis; None centres it. Half-voxel values are
+    allowed (copy-kwargs emits them for even widths).
+slabs_thickness : (Z, Y, X) or dict, optional (physical units, µm)
+    Half-thickness of each slab: the slab spans centre +/- half-thickness
+    (inclusive voxel range). None is 1/64 of the axis (at least one voxel);
+    a value beyond the volume shows the whole axis. ``x_s, y_s, z_s`` /
+    ``x_t, y_t, z_t`` are deprecated per-axis aliases (FutureWarning).
+sxy, sz : float, deprecated
+    Use ``pixel_sizes=(sz, sxy, sxy)`` (FutureWarning).
+rotate_view : float or (Z, Y, X) degrees, optional
+    Rotates the XY panel (a float) or the XY, XZ and ZY panels
+    counter-clockwise for display only; slabs stay along the array axes.
+channel_labels : list of str, optional
+    Names drawn above the panels and in the GUI rows.
+channel_label_fontsize_pt : float, optional
+    Label font size in points; None is 3% of the figure width (8..24 pt).
+blending : str, optional
+    'additive', 'maximum', 'screen' or 'minimum' (white canvas); None picks
+    additive for colours, maximum with a colormap name, minimum when every
+    colormap starts at white. Keyword only; not in the GUI.
+show_crosshair : bool
+    Draw the slab boundaries on the panels.
+sync_on_hover : bool
+    Enables hover sync: pressing 'C' while the pointer is over a panel
+    moves the other slabs to the voxel under it (keeping their widths).
+scale_bar_show : bool
+    Draw the scale bar (also a GUI checkbox).
+scale_bar_fontsize_pt : float, optional
+    Scale-bar label size in points (None = auto, as the channel labels; 0
+    hides the label but keeps the bar). Also a GUI box (empty = auto).
+
+Exports: the SVG / PNG buttons save the figure; "kwargs" copies the
+current view as keyword arguments (physical slab centre / half-thickness,
+display ranges) that rebuild the same view.
+
+Changed (D12, 2026-11): factories and classes share one argument
+preparation (`_prepare_viewer_args`) and one automatic figsize rule; the
+classes raise TypeError for unknown keyword arguments.
+"""
+
+
+@_viewer_doc
 def show_zyx_max_slice_interactive(
     im,
     pixel_sizes=None, sxy=None, sz=None,
@@ -3684,144 +4242,56 @@ def show_zyx_max_slice_interactive(
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
     blending=None, projection=None, attenuation=0.05, bit_depth=None,
+    channel_axis=None,
 ):
     """
-    Interactive 3D slice viewer using AnyWidget.
+    Interactive ortho-slab viewer of a 3D image (anywidget): XY, XZ and ZY
+    projections of movable slabs, per-channel display controls, histograms.
 
-    Inspired by show_zyx_max_slice_interactive in tnia_plotting_3d.py (ipywidgets version).
+    Returns a `TNIASliceWidget`.
 
     Parameters
     ----------
-    im : ndarray, list of ndarrays, or xarray.DataArray
-        ZYX (or YX) array, a list of them (one per channel), or a DataArray
-        with C/Z/Y/X dims (e.g. STCZYX from ``image_io``; other dims must have
-        size 1). For a DataArray, ``channel_labels`` default to the ``C``
-        coordinate, ``colormap`` to a ``color`` coordinate along ``C`` (see
-        ``image_io.set_channel_info``) and ``pixel_sizes`` to the calibrated
+    im : ndarray, list/tuple of ndarrays, or xarray.DataArray
+        ZYX (or YX) array, a list of them (one per channel), an ndarray with
+        a channel axis given by ``channel_axis`` (e.g. 0 for CZYX; a 4D array
+        without it raises), or a DataArray with C/Z/Y/X dims (other dims of
+        size 1, e.g. STCZYX from ``image_io``). For a DataArray,
+        ``channel_labels`` default to the ``C`` coordinate, ``colormap`` to a
+        ``color`` coordinate along ``C`` and ``pixel_sizes`` to the calibrated
         coordinates; explicit arguments win.
-    blending : str, optional
-        Channel compositing: 'additive', 'maximum', 'screen' or 'minimum'
-        (white background with white->colour or inverted colormaps). None
-        keeps the default. Keyword only; not in the GUI.
+    channel_axis : int, optional
+        Axis of ``im`` holding the channels (ndarray input).
     projection : str, optional
         Slab projection: 'mip' (default), 'minip', 'average' or
-        'attenuated_mip' (napari's rendering names). Keyword only.
+        'attenuated_mip' (napari's names). Keyword only; not in the GUI.
     attenuation : float, optional
-        Attenuation per voxel for 'attenuated_mip' (default 0.05).
+        Attenuation per voxel along the ray for 'attenuated_mip' (default 0.05).
     bit_depth : None, 'auto', int, 'dtype', 'data' or list, optional
-        Range of the channel histograms. By default the detector bit depth is
-        inferred from the data (the smallest of 8, 10, 12, 14, 16, ... bits
-        holding the maximum, e.g. 0..4095 for 12-bit data stored as uint16).
-        An int (e.g. 12) enforces a bit depth, 'dtype' uses the full dtype
-        range, 'data' the data range; a list sets it per channel.
-    scale_bar_show : bool, optional
-        Draw the scale bar (default True; also a GUI checkbox).
-    scale_bar_fontsize_pt : float, optional
-        Font size of the scale-bar label in points; the bar's line width
-        follows it. None (default) sizes it from the figure height; 0 hides
-        the label but keeps the bar (``scale_bar_show`` toggles the bar).
-        Also a GUI box (empty = auto).
-    rotate_view : float or tuple of floats, optional
-        Rotates the 2D projected views purely for visualization.
-        If a single float is provided, it rotates the XY projection (in degrees).
-        If a tuple of three floats is provided `(Z, Y, X)`, it rotates the XY, XZ, and ZY projections independently.
-        Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
-        For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
+        Range of the channel histograms: by default the detector bit depth
+        inferred from the data (e.g. 0..4095 for 12-bit data stored as
+        uint16); an int enforces one, 'dtype' the dtype range, 'data' the
+        data range; a list sets it per channel.
+    figsize_scale : float
+        Multiplies ``figsize`` (automatic or given).
 
-    Notes:
-        - When `vmax` is not explicitly provided (or its box is cleared in the GUI), it defaults to
-          the 99.99th percentile of each channel's finite values, so a few hot pixels do not set the
-          display range (the maximum when the signal covers less than 0.01% of the voxels; 1.0 for an
-          all-NaN channel); `vmin` defaults to 0, or the data minimum when the channel has negative
-          values (a cleared vmin box restores that value). Changed (D02, 2026-11): `vmin` was 0 always.
-        - Interactive widgets compute a 128-bin histogram per channel in the Python backend (excluding NaNs for floats)
-          and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
-          underneath the channel controls, overlaid with a curve reflecting the current `vmin`, `vmax`, and `gamma` settings.
+    Histograms: 128 bins per channel (NaN excluded), log counts, drawn under
+    each channel's controls with the current vmin / vmax / gamma curve.
     """
-
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-
-    if sxy is not None or sz is not None:
-        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
-        if pixel_sizes is None:
-            _sxy = sxy if sxy is not None else 1.0
-            _sz = sz if sz is not None else 1.0
-            pixel_sizes = (_sz, _sxy, _sxy)
-
-    # after resolving the deprecated colors/sxy/sz, so they still apply to DataArray input
-    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
-
-    # The widget parses pixel_sizes again and warns about missing axes once
-    (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
-
-    if any(x is not None for x in [x_s, y_s, z_s]):
-        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
-        if slabs_position is None:
-            slabs_position = (z_s, y_s, x_s)
-
-    if any(x is not None for x in [x_t, y_t, z_t]):
-        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
-        if slabs_thickness is None:
-            slabs_thickness = (z_t, y_t, x_t)
-
-    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
-    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
-
-    if isinstance(im, list):
-        if im[0].ndim == 2:
-            im = [img[np.newaxis, ...] for img in im]
-    elif im.ndim == 2:
-        im = im[np.newaxis, ...]
-    im_shape = (im[0].shape if isinstance(im, list) else im.shape)
-    Z, Y, X = im_shape
-
-    # Calculate physical layout dimensions (microns)
-    phys_w = X * px + Z * pz
-    phys_h = Y * py + Z * pz
-    if channel_labels is not None:
-        phys_h += phys_h * 0.05
-
-    if figsize is None:
-        divisor = max(phys_w / 8.0, phys_h / 8.0)
-        w, h = float(phys_w / divisor), float(phys_h / divisor)
-        figsize = (w * figsize_scale, h * figsize_scale)
-    elif figsize_scale != 1.0:
-        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
-
-    def _default_t(n): return max(1, n // 64)
-    if x_t is None: x_t = _default_t(X) * px
-    if y_t is None: y_t = _default_t(Y) * py
-    if z_t is None: z_t = _default_t(Z) * pz
-
-    # Defaults for s are handled in init (midpoint)
-    if x_s is None: x_s = (X // 2) * px
-    if y_s is None: y_s = (Y // 2) * py
-    if z_s is None: z_s = (Z // 2) * pz
-
-    # Override for max projection if thickness exceeds shape
-    if x_t >= X * px:
-        x_t = max(1, X // 2) * px
-        x_s = (X // 2) * px
-    if y_t >= Y * py:
-        y_t = max(1, Y // 2) * py
-        y_s = (Y // 2) * py
-    if z_t >= Z * pz:
-        z_t = max(1, Z // 2) * pz
-        z_s = (Z // 2) * pz
-
-    w = TNIASliceWidget(
-        im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
-        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
-        channel_label_fontsize_pt=channel_label_fontsize_pt,
-        blending=blending, projection=projection, attenuation=attenuation,
-        bit_depth=bit_depth,
+    a = _prepare_viewer_args(
+        im, pixel_sizes, sxy, sz, colormap, colors, channel_labels, channel_axis, figsize, figsize_scale,
+        rotate_view, channel_label_fontsize_pt, slabs_position, x_s, y_s, z_s, slabs_thickness, x_t, y_t, z_t)
+    return TNIASliceWidget(
+        a['im'], pixel_sizes=a['pixel_sizes'], figsize=a['figsize'], colormap=a['colormap'],
+        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair,
+        sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
+        slabs_position=a['slabs_position'], slabs_thickness=a['slabs_thickness'], rotate_view=rotate_view,
+        channel_labels=a['channel_labels'], channel_label_fontsize_pt=channel_label_fontsize_pt,
+        blending=blending, projection=projection, attenuation=attenuation, bit_depth=bit_depth,
     )
-    return w
 
+
+@_viewer_doc
 def show_zyx_max_slice_interactive_point_annotator(
     im,
     pixel_sizes=None, sxy=None, sz=None,
@@ -3832,138 +4302,52 @@ def show_zyx_max_slice_interactive_point_annotator(
     colors=None, opacity=None,
     point_size_scale=0.01,
     annotate=False,
+    snap_depth=True,
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
     blending=None, projection=None, attenuation=0.05, bit_depth=None,
+    channel_axis=None,
 ):
     """
-    Interactive 3D slice viewer with point annotation using AnyWidget.
-    Features the same visualization as show_zyx_max_slice_interactive, but adds:
-    - Point annotation toggle
-    - Left-click on any projection to add or delete points.
-    Returns a widget instance `w`. The list of annotated points is accessible via `w.points`.
+    Interactive ortho-slab viewer with point annotation (anywidget).
+
+    The same viewer as `show_zyx_max_slice_interactive` (same ``im``,
+    ``channel_axis``, ``projection``, ``attenuation`` and ``bit_depth``),
+    plus an annotation toggle: a left click on a panel adds a point, or in
+    delete mode removes the nearest point drawn within about 12 screen
+    pixels among the points inside the panel's slab. Returns a
+    `TNIAAnnotatorWidget`; ``w.points`` is the list of points as voxel
+    indices ``[z, y, x]`` (not physical coordinates), and the CSV button
+    writes them as ``z,y,x`` rows.
 
     Parameters
     ----------
-    im : ndarray, list of ndarrays, or xarray.DataArray
-        ZYX (or YX) array, a list of them (one per channel), or a DataArray
-        with C/Z/Y/X dims (e.g. STCZYX from ``image_io``; other dims must have
-        size 1). For a DataArray, ``channel_labels`` default to the ``C``
-        coordinate, ``colormap`` to a ``color`` coordinate along ``C`` (see
-        ``image_io.set_channel_info``) and ``pixel_sizes`` to the calibrated
-        coordinates; explicit arguments win.
-    blending : str, optional
-        Channel compositing: 'additive', 'maximum', 'screen' or 'minimum'
-        (white background with white->colour or inverted colormaps). None
-        keeps the default. Keyword only; not in the GUI.
-    projection : str, optional
-        Slab projection: 'mip' (default), 'minip', 'average' or
-        'attenuated_mip' (napari's rendering names). Keyword only.
-    attenuation : float, optional
-        Attenuation per voxel for 'attenuated_mip' (default 0.05).
-    bit_depth : None, 'auto', int, 'dtype', 'data' or list, optional
-        Range of the channel histograms. By default the detector bit depth is
-        inferred from the data (the smallest of 8, 10, 12, 14, 16, ... bits
-        holding the maximum, e.g. 0..4095 for 12-bit data stored as uint16).
-        An int (e.g. 12) enforces a bit depth, 'dtype' uses the full dtype
-        range, 'data' the data range; a list sets it per channel.
-    scale_bar_show : bool, optional
-        Draw the scale bar (default True; also a GUI checkbox).
-    scale_bar_fontsize_pt : float, optional
-        Font size of the scale-bar label in points; the bar's line width
-        follows it. None (default) sizes it from the figure height; 0 hides
-        the label but keeps the bar (``scale_bar_show`` toggles the bar).
-        Also a GUI box (empty = auto).
-    rotate_view : float or tuple of floats, optional
-        Rotates the 2D projected views purely for visualization.
-        If a single float is provided, it rotates the XY projection (in degrees).
-        If a tuple of three floats is provided `(Z, Y, X)`, it rotates the XY, XZ, and ZY projections independently.
-        Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
-        For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
+    point_size_scale : float
+        Marker size as a fraction of min(X, Y) in voxels (at least 3).
+    annotate : bool
+        Start with annotation mode on.
+    snap_depth : bool
+        A click on a projection stores the depth of the voxel the projection
+        shows there (argmax of the visible channels inside the slab, argmin
+        for 'minip'; the slab centre for flat profiles or 'average'). False
+        stores the slab centre.
     """
-
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-
-    if sxy is not None or sz is not None:
-        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
-        if pixel_sizes is None:
-            _sxy = sxy if sxy is not None else 1.0
-            _sz = sz if sz is not None else 1.0
-            pixel_sizes = (_sz, _sxy, _sxy)
-
-    # after resolving the deprecated colors/sxy/sz, so they still apply to DataArray input
-    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
-
-    # The widget parses pixel_sizes again and warns about missing axes once
-    (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
-
-    if any(x is not None for x in [x_s, y_s, z_s]):
-        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
-        if slabs_position is None:
-            slabs_position = (z_s, y_s, x_s)
-
-    if any(x is not None for x in [x_t, y_t, z_t]):
-        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
-        if slabs_thickness is None:
-            slabs_thickness = (z_t, y_t, x_t)
-
-    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
-    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
-
-    if isinstance(im, list):
-        if im[0].ndim == 2:
-            im = [img[np.newaxis, ...] for img in im]
-    elif im.ndim == 2:
-        im = im[np.newaxis, ...]
-    im_shape = (im[0].shape if isinstance(im, list) else im.shape)
-    Z, Y, X = im_shape
-
-    phys_w = X * px + Z * pz
-    phys_h = Y * py + Z * pz
-    if channel_labels is not None:
-        phys_h += phys_h * 0.05
-
-    if figsize is None:
-        divisor = max(phys_w / 8.0, phys_h / 8.0)
-        w, h = float(phys_w / divisor), float(phys_h / divisor)
-        figsize = (w * figsize_scale, h * figsize_scale)
-    elif figsize_scale != 1.0:
-        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
-
-    def _default_t(n): return max(1, n // 64)
-    if x_t is None: x_t = _default_t(X) * px
-    if y_t is None: y_t = _default_t(Y) * py
-    if z_t is None: z_t = _default_t(Z) * pz
-
-    if x_s is None: x_s = (X // 2) * px
-    if y_s is None: y_s = (Y // 2) * py
-    if z_s is None: z_s = (Z // 2) * pz
-
-    if x_t >= X * px:
-        x_t = max(1, X // 2) * px
-        x_s = (X // 2) * px
-    if y_t >= Y * py:
-        y_t = max(1, Y // 2) * py
-        y_s = (Y // 2) * py
-    if z_t >= Z * pz:
-        z_t = max(1, Z // 2) * pz
-        z_s = (Z // 2) * pz
-
-    w = TNIAAnnotatorWidget(
-        im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
-        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
-        point_size_scale=point_size_scale, annotate=annotate,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
-        channel_label_fontsize_pt=channel_label_fontsize_pt,
-        blending=blending, projection=projection, attenuation=attenuation,
-        bit_depth=bit_depth,
+    a = _prepare_viewer_args(
+        im, pixel_sizes, sxy, sz, colormap, colors, channel_labels, channel_axis, figsize, figsize_scale,
+        rotate_view, channel_label_fontsize_pt, slabs_position, x_s, y_s, z_s, slabs_thickness, x_t, y_t, z_t)
+    return TNIAAnnotatorWidget(
+        a['im'], pixel_sizes=a['pixel_sizes'], figsize=a['figsize'], colormap=a['colormap'],
+        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair,
+        sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
+        point_size_scale=point_size_scale, annotate=annotate, snap_depth=snap_depth,
+        slabs_position=a['slabs_position'], slabs_thickness=a['slabs_thickness'], rotate_view=rotate_view,
+        channel_labels=a['channel_labels'], channel_label_fontsize_pt=channel_label_fontsize_pt,
+        blending=blending, projection=projection, attenuation=attenuation, bit_depth=bit_depth,
     )
-    return w
 
+
+@_viewer_doc
 def show_zyx_max_scatter_interactive(
     points,
     channels=None,
@@ -3979,67 +4363,68 @@ def show_zyx_max_scatter_interactive(
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-    blending=None,
+    blending=None, channel_mode='auto',
 ):
     """
-    Shows interactive sliders for XY, XZ, and YZ projection of 3D point coordinates.
+    Interactive ortho-slab viewer of a 3D point cloud (anywidget): the
+    points inside each slab, projected onto the XY, XZ and ZY panels.
+
+    Returns a `TNIAScatterWidget`.
 
     Parameters
     ----------
-    blending : str, optional
-        Channel compositing: 'additive' (default), 'maximum', 'screen' or
-        'minimum' (white canvas; each channel from white to its colour).
-        Keyword only; not in the GUI.
-    subplot_bg : str, optional
-        Panel background; defaults to black ('white' with blending='minimum').
-    rotate_view : float or tuple of floats, optional
-        Rotates the 2D projected views purely for visualization.
-        If a single float is provided, it rotates the XY projection (in degrees).
-        If a tuple of three floats is provided `(Z, Y, X)`, it rotates the XY, XZ, and ZY projections independently.
-        Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
-        For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
+    points : (N, 3) or (3, N) array, or a tuple/list of 3 arrays
+        Coordinates in (Z, Y, X) order, in data units: one unit is one voxel,
+        so physical position = coordinate x pixel size. Points with a
+        non-finite coordinate are dropped (with a warning).
+    channels : array or list, optional
+        How points are coloured (see ``channel_mode``): one value per point
+        (a continuous channel), an (N, C) array or a list of C per-point
+        arrays (C continuous channels), one label per point (categories:
+        one channel per distinct label, named after it; -1 and sparse labels
+        work), or a list of index arrays (index lists: channel c is the
+        points ``channels[c]``).
+    channel_mode : 'auto', 'values', 'categories' or 'index_lists'
+        How ``channels`` is read. 'auto' (default) infers it and raises
+        ValueError when the input is ambiguous: integer arrays of one entry
+        per point that are also valid index lists, or one integer array with
+        more than 64 distinct values (categories or intensities?). Lists of
+        other lengths are index lists.
 
-    Notes:
-        - When hiding axes to maintain custom subplot backgrounds (e.g. `subplot_bg`), the code
-          manually hides ticks and spines instead of using `ax.axis('off')`, as `ax.axis('off')`
-          inadvertently disables the background patch in matplotlib.
-        - When `vmax` is not explicitly provided, it defaults to the largest finite value of each
-          channel (1.0 for an all-NaN channel); `vmin` defaults to 0.
-        - The function dynamically determines its rendering mode: if `render=None`, it defaults to
-          `'points'` for point counts under 10,000, and `'density'` for larger datasets to optimize interactive performance.
+    Changed (D13, 2026-11): integer channels were guessed silently: a list
+    of integer per-point values became index lists, an integer array
+    became max+1 category channels (label -1 was never drawn); categories
+    now go through ``np.unique`` and ambiguous input raises.
+    render : 'points', 'density' or None
+        Scatter markers, or 2D histograms of the slab (``bins``); None picks
+        'points' below 10,000 points.
+    bins : int or (int, int)
+        Density bins along X and Y (Z gets bins of about the same physical size).
+    point_size : float
+        Marker area in points^2 (matplotlib ``s``).
+    alpha : float
+        Marker transparency in points mode.
+    subplot_bg : colour, optional
+        Panel background; black, or white with blending='minimum'.
+    vmin, vmax : float or per-channel list (values of the channels)
+        For continuous channels; vmin defaults to 0 and vmax to the largest
+        finite value.
+
+    Changed (D10, 2026-11): `slabs_position` / `slabs_thickness` are physical
+    (data coordinate x pixel size), centre and half-thickness, as in the image
+    viewers; they used to be data units, so the same kwargs selected
+    different slabs in the two viewers. Copy-kwargs emits physical values.
 
     Changed (D04, 2026-11): per-channel `vmin`, `vmax`, `gamma` and `opacity`
     follow the static viewers' rule (`_conventions.per_channel`): a list
     longer than the number of channels raises ValueError (extra entries used
     to be dropped silently); None entries take the default.
     """
-    if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
-        if colormap is None:
-            colormap = colors
-
-    if sxy is not None or sz is not None:
-        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
-        if pixel_sizes is None:
-            _sxy = sxy if sxy is not None else 1.0
-            _sz = sz if sz is not None else 1.0
-            pixel_sizes = (_sz, _sxy, _sxy)
-
+    colormap, pixel_sizes, slabs_position, slabs_thickness = _legacy_viewer_kwargs(
+        colors, colormap, sxy, sz, pixel_sizes, x_s, y_s, z_s, slabs_position,
+        x_t, y_t, z_t, slabs_thickness, stacklevel=5)
     # The widget parses pixel_sizes again and warns about missing axes once
     (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
-
-    if any(x is not None for x in [x_s, y_s, z_s]):
-        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
-        if slabs_position is None:
-            slabs_position = (z_s, y_s, x_s)
-
-    if any(x is not None for x in [x_t, y_t, z_t]):
-        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
-        if slabs_thickness is None:
-            slabs_thickness = (z_t, y_t, x_t)
-
-    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
-    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
 
     if isinstance(points, (tuple, list)) and len(points) == 3:
         # points is a tuple or list of 3 arrays: (Z, Y, X)
@@ -4064,82 +4449,40 @@ def show_zyx_max_scatter_interactive(
         else:
             raise ValueError("points must be an array of shape (N, 3) representing (Z, Y, X) or a tuple/list of 3 arrays (Z, Y, X).")
 
-    X, Y, Z, channels = _finite_points(X, Y, Z, channels)
+    # Points with a non-finite coordinate are dropped (with a warning) by the widget
+    Xf, Yf, Zf, keep = _finite_mask(X, Y, Z, warn=False)
+    if keep is not None:
+        Xf, Yf, Zf = Xf[keep], Yf[keep], Zf[keep]
 
     if render is None:
-        if len(X) < 10000:
-            render = 'points'
-        else:
-            render = 'density'
+        render = 'points' if len(Xf) < 10000 else 'density'
 
-
-    (xmin, xmax), (ymin, ymax), (zmin, zmax) = (_int_bounds(a) for a in (X, Y, Z))
-
-    XN = xmax - xmin + 1
-    YN = ymax - ymin + 1
-    ZN = zmax - zmin + 1
-    z_xy_ratio = (pz / px) if px != pz else 1
-
-    if figsize is None:
-        width_px  = XN + ZN * z_xy_ratio
-        height_px = YN + ZN * z_xy_ratio
-        divisor = max(width_px / 8, height_px / 8)
-        w, h = float(width_px / divisor), float(height_px / divisor)
-        figsize = (w * figsize_scale, h * figsize_scale)
-    elif figsize_scale != 1.0:
+    if figsize is None and figsize_scale != 1.0:
+        # The class's automatic size, from the physical extents of the data box
+        figsize = _scatter_auto_figsize(_int_bounds(Xf), _int_bounds(Yf), _int_bounds(Zf), (pz, py, px),
+                                        rotate_view, channel_labels is not None, channel_label_fontsize_pt)
+    if figsize is not None and figsize_scale != 1.0:
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
-
-    def _default_t(n): return max(1, int(n // 64))
-    Xdim = int(np.ceil(XN)); Ydim = int(np.ceil(YN)); Zdim = int(np.ceil(ZN))
-
-    if x_t is None: x_t = _default_t(Xdim)
-    if y_t is None: y_t = _default_t(Ydim)
-    if z_t is None: z_t = _default_t(Zdim)
-
-    # Note: s inputs to scatter are in data coords (min-max range)
-    # The Widget expects 0-Dim range?
-    # Wait, my logic in TNIAScatterWidget._render adds xmin to x_s.
-    # So x_s inside the widget is 0-based offset.
-    # But x_s PASSED here is likely data coord?
-    # Original code:
-    # x_center_default = int(np.round((xmin + xmax) * 0.5))
-    # x_s0 = _clip(int(x_s if x_s is not None else x_center_default), x_lo0, x_hi0)
-    # So original input x_s is data coordinate.
-
-    # Merge individual args and tuple arg before offsetting
-    z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
-    x_s = x_s_in if x_s is None else x_s
-    y_s = y_s_in if y_s is None else y_s
-    z_s = z_s_in if z_s is None else z_s
-
-    # So if x_s is provided, I need to subtract xmin to get 0-based offset for the widget init.
-    if x_s is not None: x_s = int(x_s - xmin)
-    if y_s is not None: y_s = int(y_s - ymin)
-    if z_s is not None: z_s = int(z_s - zmin)
-    z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
-    x_t = x_t_in if x_t is None else x_t
-    y_t = y_t_in if y_t is None else y_t
-    z_t = z_t_in if z_t is None else z_t
 
     w = TNIAScatterWidget(
         X, Y, Z,
         channels=channels, pixel_sizes=pixel_sizes, render=render, bins=bins,
-        point_size=point_size, alpha=alpha, colormap=colormap if colormap is not None else colors, opacity=opacity,
+        point_size=point_size, alpha=alpha, colormap=colormap, opacity=opacity,
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
         subplot_bg=subplot_bg,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t),
+        slabs_position=slabs_position, slabs_thickness=slabs_thickness,
         rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt,
-        blending=blending,
+        blending=blending, channel_mode=channel_mode,
     )
     w.X_arr_phys = w.X_arr * px
     w.Y_arr_phys = w.Y_arr * py
     w.Z_arr_phys = w.Z_arr * pz
-    w.x_min_phys = xmin * px
-    w.x_max_phys = xmax * px
-    w.y_min_phys = ymin * py
-    w.y_max_phys = ymax * py
-    w.z_min_phys = zmin * pz
-    w.z_max_phys = zmax * pz
+    w.x_min_phys = w.xmin * px
+    w.x_max_phys = w.xmax * px
+    w.y_min_phys = w.ymin * py
+    w.y_max_phys = w.ymax * py
+    w.z_min_phys = w.zmin * pz
+    w.z_max_phys = w.zmax * pz
     return w
 
 class IsoScatterWidget(anywidget.AnyWidget):
@@ -4151,10 +4494,23 @@ class IsoScatterWidget(anywidget.AnyWidget):
     save_filename = traitlets.Unicode("iso_scatter.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
 
-    def __init__(self, X, Y, Z, color=None, sxy=1, sz=1, figsize=(12, 10),
+    def __init__(self, X, Y, Z, color=None, sxy=None, sz=None, figsize=(10, 8),
                  point_size=5, alpha=0.6, cmap='viridis', max_points=10000,
                  title=None, pixel_sizes=None, channel_labels=None, seed=0):
+        """
+        Isometric scatter widget of X, Y, Z coordinates (see `show_iso_scatter`).
+
+        Changed (D16, 2026-11): integer and bool ``color`` arrays are
+        categories (they were a continuous gradient); ``sxy``/``sz`` are
+        deprecated (FutureWarning; use ``pixel_sizes``) and now also apply to
+        empty input; ``figsize`` defaults to (10, 8) like ``show_iso_scatter``
+        (it was (12, 10)).
+        """
         super().__init__()
+        if sxy is not None or sz is not None:
+            warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
+            if pixel_sizes is None:
+                pixel_sizes = (1.0 if sz is None else sz, 1.0 if sxy is None else sxy, 1.0 if sxy is None else sxy)
 
         # Store ORIGINAL Data
         self.X_orig = np.asarray(X)
@@ -4186,7 +4542,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         if len(self.X_orig) == 0:
              self.cx, self.cy, self.cz = 0, 0, 0
              self.max_radius = 1.0
-             (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes)
+             (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes)  # sxy/sz apply here too
              self.sx = px
              self.sy = py
              self.sz = pz
@@ -4211,8 +4567,6 @@ class IsoScatterWidget(anywidget.AnyWidget):
             if self.color is not None:
                  self.color = self.color[idx]
 
-        if pixel_sizes is None:
-            pixel_sizes = (sz, sxy, sxy)
         (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes)
         self.sx = px
         self.sy = py
@@ -4241,7 +4595,9 @@ class IsoScatterWidget(anywidget.AnyWidget):
 
         # Analyze color types (after subsampling)
         if self.color is not None:
-            if np.issubdtype(self.color.dtype, np.number):
+            # Floats are continuous; integer labels (cluster ids, -1 noise),
+            # bools and strings are categories (D16)
+            if np.issubdtype(self.color.dtype, np.floating):
                  self.is_continuous = True
             else:
                  self.is_categorical = True
@@ -4263,25 +4619,22 @@ class IsoScatterWidget(anywidget.AnyWidget):
         self._render_wrapper(None)
 
     def _render_wrapper(self, change):
+        # The figure is a plain matplotlib Figure (never registered with
+        # pyplot), so a failed encode leaks nothing.
         fig = self._render()
         if fig:
-            try:
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-                self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
-            finally:
-                plt.close(fig)
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
 
     def _save_svg(self, change):
         fig = self._render()
         if fig:
             try:
                 fig.savefig(self.save_filename, format='svg', dpi=300, bbox_inches='tight')
-                print(f"Saved to {self.save_filename}")
+                _log.info("Saved to %s", self.save_filename)
             except Exception as e:
-                print(f"Error saving file: {e}")
-            finally:
-                plt.close(fig)
+                warnings.warn(f"Error saving {self.save_filename}: {e}", UserWarning, stacklevel=2)
 
     def _get_rotation_matrix(self, elev_deg, azim_deg):
         # Convert to radians
@@ -4309,7 +4662,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
         return Rx @ Rz
 
     def _render(self):
-        fig = plt.figure(figsize=self.figsize, facecolor='white')
+        fig = _new_figure(figsize=self.figsize, facecolor='white', layout='tight')
 
         # Layout: 3 Rows, 2 Columns
         # Row 0 (Span 2): 3D Scatter
@@ -4430,13 +4783,12 @@ class IsoScatterWidget(anywidget.AnyWidget):
         if self.title:
             fig.suptitle(self.title, fontsize=16)
 
-        fig.tight_layout()
         return fig
 
 def show_iso_scatter(
     X, Y, Z,
     color=None,
-    sxy=1, sz=1,
+    sxy=None, sz=None,
     figsize=(10, 8),
     point_size=5,
     alpha=0.6,
@@ -4455,10 +4807,12 @@ def show_iso_scatter(
         Coordinates of points. Points with a non-finite coordinate are
         dropped (with a warning), together with their ``color`` values.
     color : array-like or color, optional
-        Color values (continuous or categorical), one per point, or a single
-        matplotlib colour (e.g. ``'red'``) for every point.
-    sxy, sz : float
-        Scaling factors for XY and Z dimensions (used when ``pixel_sizes`` is None).
+        One value per point: floats are mapped through ``cmap`` (continuous);
+        integers, bools and strings are categories (one colour per distinct
+        label, with a legend). Or a single matplotlib colour (e.g. ``'red'``)
+        for every point.
+    sxy, sz : float, deprecated
+        XY and Z scaling; use ``pixel_sizes=(sz, sxy, sxy)`` (FutureWarning).
     pixel_sizes : tuple or dict, optional
         (Z, Y, X) pixel sizes, or a dict with 'Z', 'Y', 'X' keys. Takes
         precedence over ``sxy``/``sz``.
@@ -4476,12 +4830,17 @@ def show_iso_scatter(
         Plot title.
     seed : int or None
         Seed of the subsampling (default 0, reproducible; None for a fresh draw).
+
+    Changed (D16, 2026-11): integer and bool colours are categories (they
+    were drawn as a continuous gradient); ``sxy``/``sz`` are deprecated.
     """
+    if sxy is not None or sz is not None:
+        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
+        if pixel_sizes is None:
+            pixel_sizes = (1.0 if sz is None else sz, 1.0 if sxy is None else sxy, 1.0 if sxy is None else sxy)
     return IsoScatterWidget(
         X, Y, Z,
         color=color,
-        sxy=sxy,
-        sz=sz,
         figsize=figsize,
         point_size=point_size,
         alpha=alpha,
