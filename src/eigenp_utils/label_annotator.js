@@ -13,9 +13,11 @@ const MAX_LABEL = 65535; // labels travel as uint16: larger ids would wrap (6553
 // reserved annotated-background id when the model's `background` is on (Python BACKGROUND_ID)
 const BG_ID = 65535;
 const BG_RGB_A = [112, 112, 112], BG_RGB_B = [48, 48, 48]; // hatched neutral greys, not in the cell palette
-const KEY_HELP = "keys: b/e/f/p brush/eraser/fill/picker, g background brush (if enabled), " +
-  "x delete mask (shift+click: all z), m/s merge/split track, n new id, [ ] radius, " +
-  "ArrowUp/Down or Alt+ArrowRight/Left z+1/z-1, 0 fit, ctrl+z undo, space/right drag pan, wheel zoom, 1-9 class (semantic)";
+const KEY_HELP = "keys (click the image first; they then stay in the widget): " +
+  "b/e/f/p brush/eraser/fill/picker, g background brush (if enabled), " +
+  "x delete mask (shift+click: all z), m/s merge/split track, n new id, [ ] radius, o filled/outlined, " +
+  "ArrowUp/Down or Alt+ArrowRight/Left z+1/z-1, PageUp/PageDown previous/next stack, 0 fit, ctrl+z undo, " +
+  "space/right/middle drag pan, wheel zoom (after a click; ctrl+wheel or pinch always), 1-9 class (semantic)";
 
 function asBytes(v) {
   if (!v) return null;
@@ -99,7 +101,7 @@ function render({ model, el: root }) {
   root.style.position = "relative";
   const toolbar = el("div", { class: "lbl-toolbar" });
   const chanPanel = el("div", { class: "lbl-channels" });
-  const viewport = el("div", { class: "lbl-viewport", tabindex: "0" });
+  const viewport = el("div", { class: "lbl-viewport", tabindex: "0", "data-lm-suppress-shortcuts": "true", role: "application", "aria-label": "label annotator: image and labels; " + KEY_HELP });
   const stage = el("div", { class: "lbl-stage" });
   const imgCanvas = el("canvas", { class: "lbl-img" });
   const labCanvas = el("canvas", { class: "lbl-lab" });
@@ -135,18 +137,18 @@ function render({ model, el: root }) {
     toolBtns[t] = el("button", { class: "lbl-btn", "data-tool": t, text: t, title: toolTitles[t] || `${t} (${t[0]})`, onclick: () => { model.set("tool", t); model.save_changes(); } });
     toolbar.appendChild(toolBtns[t]);
   }
-  const labelInput = el("input", { type: "number", min: "0", max: String(MAX_LABEL), class: "lbl-label", title: "active label" });
+  const labelInput = el("input", { type: "number", min: "0", max: String(MAX_LABEL), class: "lbl-label", title: "active label", "aria-label": "active label id" });
   labelInput.addEventListener("change", () => {
     const v = Math.min(maxCellId(), Math.max(0, parseInt(labelInput.value || "0") || 0));
     labelInput.value = String(v);
     model.set("active_label", v); model.save_changes();
   });
-  const classSelect = el("select", { class: "lbl-class" });
+  const classSelect = el("select", { class: "lbl-class", "aria-label": "active class" });
   classSelect.addEventListener("change", () => { model.set("active_label", parseInt(classSelect.value)); model.save_changes(); });
   const newBtn = el("button", { class: "lbl-btn", text: "new", title: "new label id (n)", onclick: () => { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); } });
-  const radius = el("input", { type: "range", min: "0", max: "50", class: "lbl-radius", title: "brush radius ([ / ])" });
+  const radius = el("input", { type: "range", min: "0", max: "50", class: "lbl-radius", title: "brush radius ([ / ])", "aria-label": "brush radius" });
   radius.addEventListener("input", () => { model.set("brush_radius", parseInt(radius.value)); model.save_changes(); });
-  const opacity = el("input", { type: "range", min: "0", max: "100", class: "lbl-opacity", title: "label opacity" });
+  const opacity = el("input", { type: "range", min: "0", max: "100", class: "lbl-opacity", title: "label opacity", "aria-label": "label opacity" });
   opacity.addEventListener("input", () => { model.set("opacity", parseInt(opacity.value) / 100); model.save_changes(); });
   const mkToggle = (name, label, title) => {
     const cb = el("input", { type: "checkbox", class: `lbl-${name}` });
@@ -181,14 +183,14 @@ function render({ model, el: root }) {
     el("span", { class: "lbl-help", text: "?", title: KEY_HELP }),
   );
 
-  const zSlider = el("input", { type: "range", min: "0", max: "0", class: "lbl-z" });
+  const zSlider = el("input", { type: "range", min: "0", max: "0", class: "lbl-z", "aria-label": "z slice" });
   const zLabel = el("span", { class: "lbl-zlabel" });
   zSlider.addEventListener("input", () => { model.set("z", parseInt(zSlider.value)); model.save_changes(); });
   const zPrev = el("button", { class: "lbl-btn lbl-step", text: "‹", title: "previous slice (ArrowDown)", onclick: () => stepZ(-1) });
   const zNext = el("button", { class: "lbl-btn lbl-step", text: "›", title: "next slice (ArrowUp)", onclick: () => stepZ(1) });
   const zGroup = el("span", { class: "lbl-group" }, [el("span", { text: "z" }), zPrev, zSlider, zNext, zLabel]);
   // stack selector (several 3D stacks, e.g. one per cage / field of view)
-  const stackSel = el("select", { class: "lbl-stack", title: "stack (PageUp / PageDown)" });
+  const stackSel = el("select", { class: "lbl-stack", title: "stack (PageUp / PageDown)", "aria-label": "stack" });
   stackSel.addEventListener("change", () => { model.set("stack", parseInt(stackSel.value)); model.save_changes(); });
   const sPrev = el("button", { class: "lbl-btn lbl-step", text: "‹", title: "previous stack (PageUp)", onclick: () => stepStack(-1) });
   const sNext = el("button", { class: "lbl-btn lbl-step", text: "›", title: "next stack (PageDown)", onclick: () => stepStack(1) });
@@ -196,26 +198,97 @@ function render({ model, el: root }) {
   zRow.append(stackGroup, zGroup);
 
   // ------------------------------------------------------------ channels UI
+  // One row per channel. vmin / vmax are in DATA units (data_range gives each
+  // slider's extent, step and automatic values); Python re-quantises the slice
+  // when they change, the browser applies gamma and colour. Rows are built on
+  // change:channel_names only and refreshed in place on every other change, so
+  // Python-side edits of vmin / vmax / gamma / colours / visibility show up.
+  const rows = [];
+  const fmtVal = (v) => {
+    const a = Math.abs(v);
+    return a !== 0 && (a >= 1e5 || a < 1e-2) ? v.toExponential(2) : String(Math.round(v * 100) / 100);
+  };
+  // vmin / vmax edits not yet sent: {name: {channel: value}}; sent at most every RANGE_MS
+  const RANGE_MS = 100;
+  const pendingRange = {};
+  let rangeTimer = null, rangeLast = -Infinity;
+  const curRange = (name, i) => pendingRange[name]?.[i] ?? (model.get(name) || [])[i];
+  function flushRange() {
+    if (rangeTimer !== null) { clearTimeout(rangeTimer); rangeTimer = null; }
+    const names = Object.keys(pendingRange);
+    if (!names.length) return;
+    for (const name of names) {
+      const arr = [...(model.get(name) || [])];
+      for (const [i, v] of Object.entries(pendingRange[name])) arr[+i] = v;
+      delete pendingRange[name];
+      model.set(name, arr);
+    }
+    rangeLast = performance.now();
+    model.save_changes();
+  }
+  function queueRange(name, i, v) {
+    (pendingRange[name] = pendingRange[name] || {})[i] = v;
+    const wait = RANGE_MS - (performance.now() - rangeLast);
+    if (wait <= 0) flushRange();
+    else if (rangeTimer === null) rangeTimer = setTimeout(flushRange, wait);
+  }
   function buildChannels() {
     chanPanel.innerHTML = "";
+    rows.length = 0;
     const names = model.get("channel_names") || [];
     names.forEach((name, i) => {
-      const vis = el("input", { type: "checkbox" });
-      vis.checked = (model.get("channel_visible") || [])[i] !== false;
+      const vis = el("input", { type: "checkbox", "aria-label": `show channel ${name}` });
       vis.addEventListener("change", () => setListItem("channel_visible", i, vis.checked));
-      const col = el("input", { type: "color", value: (model.get("channel_colors") || [])[i] || "#ffffff" });
+      const col = el("input", { type: "color", "aria-label": `colour of channel ${name}` });
       col.addEventListener("input", () => setListItem("channel_colors", i, col.value));
-      const lo = el("input", { type: "range", min: "0", max: "255", value: String((model.get("vmin") || [])[i] ?? 0), title: "min" });
-      const hi = el("input", { type: "range", min: "0", max: "255", value: String((model.get("vmax") || [])[i] ?? 255), title: "max" });
-      const ga = el("input", { type: "range", min: "10", max: "300", value: String(Math.round(((model.get("gamma") || [])[i] ?? 1) * 100)), title: "gamma" });
-      lo.addEventListener("input", () => setListItem("vmin", i, parseInt(lo.value)));
-      hi.addEventListener("input", () => setListItem("vmax", i, parseInt(hi.value)));
+      const lo = el("input", { type: "range", class: "lbl-vmin", title: "min (data units; double-click: automatic)", "aria-label": `minimum of channel ${name}, data units` });
+      const hi = el("input", { type: "range", class: "lbl-vmax", title: "max (data units; double-click: automatic)", "aria-label": `maximum of channel ${name}, data units` });
+      const ga = el("input", { type: "range", class: "lbl-gamma", min: "10", max: "300", step: "1", title: "gamma", "aria-label": `gamma of channel ${name}` });
+      const step = () => ((model.get("data_range") || [])[i] || [0, 255, 1])[2] || 1;
+      // the two limits never cross (min stays one step below max)
+      // a drag fires many input events and each update makes Python re-quantise
+      // and re-send the slice: the readout follows every step, the model gets a
+      // throttled stream and the final value on change
+      lo.addEventListener("input", () => {
+        const v = Math.min(parseFloat(lo.value), (curRange("vmax", i) ?? Infinity) - step());
+        loTxt.textContent = fmtVal(v);
+        queueRange("vmin", i, v);
+      });
+      hi.addEventListener("input", () => {
+        const v = Math.max(parseFloat(hi.value), (curRange("vmin", i) ?? -Infinity) + step());
+        hiTxt.textContent = fmtVal(v);
+        queueRange("vmax", i, v);
+      });
+      lo.addEventListener("change", flushRange);
+      hi.addEventListener("change", flushRange);
       ga.addEventListener("input", () => setListItem("gamma", i, parseInt(ga.value) / 100));
-      const slider = (txt, input) => el("label", { class: "lbl-sl" }, [el("span", { text: txt }), input]);
+      // double-click restores the automatic (default display range) value
+      lo.addEventListener("dblclick", () => { const r = (model.get("data_range") || [])[i]; if (r) { queueRange("vmin", i, r[3]); flushRange(); } });
+      hi.addEventListener("dblclick", () => { const r = (model.get("data_range") || [])[i]; if (r) { queueRange("vmax", i, r[4]); flushRange(); } });
+      const loTxt = el("span", { class: "lbl-val" }), hiTxt = el("span", { class: "lbl-val" }), gaTxt = el("span", { class: "lbl-val" });
+      const slider = (txt, input, val) => el("label", { class: "lbl-sl" }, [el("span", { text: txt }), input, val]);
       chanPanel.appendChild(el("div", { class: "lbl-chan" }, [
         el("div", { class: "lbl-chan-head" }, [vis, col, el("span", { class: "lbl-cname", text: name, title: name })]),
-        slider("min", lo), slider("max", hi), slider("γ", ga),
+        slider("min", lo, loTxt), slider("max", hi, hiTxt), slider("γ", ga, gaTxt),
       ]));
+      rows.push({ vis, col, lo, hi, ga, loTxt, hiTxt, gaTxt });
+    });
+    refreshChannels();
+  }
+  function refreshChannels() {
+    const vis = model.get("channel_visible") || [], cols = model.get("channel_colors") || [];
+    const gam = model.get("gamma") || [];
+    const dr = model.get("data_range") || [];
+    rows.forEach((r, i) => {
+      r.vis.checked = vis[i] !== false;
+      r.col.value = cols[i] || "#ffffff";
+      const [lo, hi, st] = dr[i] || [0, 255, 1];
+      for (const s of [r.lo, r.hi]) { s.min = String(lo); s.max = String(hi); s.step = String(st || "any"); }
+      // a value still being dragged (not yet sent) wins over the model's
+      const a = curRange("vmin", i) ?? lo, b = curRange("vmax", i) ?? hi, g = gam[i] ?? 1;
+      r.lo.value = String(a); r.hi.value = String(b); r.ga.value = String(Math.round(g * 100));
+      r.lo.setAttribute("aria-valuetext", fmtVal(a)); r.hi.setAttribute("aria-valuetext", fmtVal(b));
+      r.loTxt.textContent = fmtVal(a); r.hiTxt.textContent = fmtVal(b); r.gaTxt.textContent = g.toFixed(2);
     });
   }
   function setListItem(name, i, v) {
@@ -223,7 +296,6 @@ function render({ model, el: root }) {
     arr[i] = v;
     model.set(name, arr);
     model.save_changes();
-    if (name !== "channel_colors" && name !== "channel_visible") return;
   }
 
   // -------------------------------------------------------------- drawing
@@ -236,17 +308,16 @@ function render({ model, el: root }) {
     }
     const vis = model.get("channel_visible") || [];
     const cols = model.get("channel_colors") || [];
-    const vmin = model.get("vmin") || [];
-    const vmax = model.get("vmax") || [];
     const gam = model.get("gamma") || [];
     const n = im.x * im.y;
     const acc = new Float32Array(n * 3);
     for (let c = 0; c < im.c; c++) {
       if (vis[c] === false) continue;
       const [r, g, b] = hexToRgb(cols[c]);
-      const lo = vmin[c] ?? 0, hi = Math.max((vmax[c] ?? 255), lo + 1), gm = gam[c] ?? 1;
+      // the 8-bit slice already spans vmin..vmax (quantised in Python): only gamma here
+      const gm = gam[c] ?? 1;
       const lut = new Float32Array(256);
-      for (let k = 0; k < 256; k++) lut[k] = Math.pow(Math.min(Math.max((k - lo) / (hi - lo), 0), 1), gm);
+      for (let k = 0; k < 256; k++) lut[k] = Math.pow(k / 255, gm);
       const off = c * n;
       for (let p = 0; p < n; p++) {
         const v = lut[im.data[off + p]];
@@ -306,70 +377,97 @@ function render({ model, el: root }) {
     ctx.putImageData(out, 0, 0);
   }
 
-  function drawLabels() {
+  // Pixels around a changed pixel whose rendering can change: its 4-neighbours'
+  // edge status (1) plus the reach of the outline stamps (outlined display).
+  function redrawMargin() {
+    const px = Math.max(1, Math.round(model.get("outline_px") ?? 2));
+    const rb = Math.max(0, Math.round(model.get("outline_border_px") ?? 1));
+    return 2 + (px >> 1) + rb;
+  }
+
+  // Redraw the label layer, or only rect = [x0, y0, x1, y1] (inclusive, image
+  // pixels): painting redraws just the dirty rectangle of each stamp, so a
+  // pointer move costs the brush area, not the whole slice (R4-17).
+  function drawLabels(rect) {
     const lb = state.lab;
     if (!lb) return;
+    const d = lb.data, W = lb.x, H = lb.y;
+    let x0 = 0, y0 = 0, x1 = W - 1, y1 = H - 1;
+    if (rect) {
+      x0 = Math.max(0, rect[0]); y0 = Math.max(0, rect[1]);
+      x1 = Math.min(W - 1, rect[2]); y1 = Math.min(H - 1, rect[3]);
+      if (x1 < x0 || y1 < y0) return;
+    }
+    const rw = x1 - x0 + 1, rh = y1 - y0 + 1;
     const ctx = labCanvas.getContext("2d");
-    const out = ctx.createImageData(lb.x, lb.y);
+    const out = ctx.createImageData(rw, rh);
+    const o4 = (x, y) => 4 * ((y - y0) * rw + (x - x0));
     const a = Math.round(255 * (model.get("opacity") ?? 0.45));
     const outlined = model.get("display") === "outlined";
+    const thin = !!model.get("outline_only");
     const cache = new Map();
-    const d = lb.data, W = lb.x, H = lb.y;
     const bg = bgOn();
     const bgA = Math.max(a, 140);
     const color = (id) => { let rgb = cache.get(id); if (!rgb) { rgb = labelRgb(id); cache.set(id, rgb); } return rgb; };
-    for (let p = 0; p < d.length; p++) {
-      const id = d[p];
-      if (id === 0) continue;
-      if (id === BG_ID && bg) {
-        // annotated background: hatched neutral grey, in every display mode
-        const x = p % W, y = (p - x) / W;
-        const rgb = ((x + y) & 3) < 2 ? BG_RGB_A : BG_RGB_B;
-        out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
-        out.data[4 * p + 3] = bgA;
-        continue;
-      }
-      if (outlined) {
-        // interior: very faint fill (opacity slider / 4); the outline is added below
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const p = y * W + x;
+        const id = d[p];
+        if (id === 0) continue;
+        const o = o4(x, y);
+        if (id === BG_ID && bg) {
+          // annotated background: hatched neutral grey, in every display mode
+          const rgb = ((x + y) & 3) < 2 ? BG_RGB_A : BG_RGB_B;
+          out.data[o] = rgb[0]; out.data[o + 1] = rgb[1]; out.data[o + 2] = rgb[2];
+          out.data[o + 3] = bgA;
+          continue;
+        }
+        if (outlined) {
+          // interior: very faint fill (opacity slider / 4); the outline is added below
+          const rgb = color(id);
+          out.data[o] = rgb[0]; out.data[o + 1] = rgb[1]; out.data[o + 2] = rgb[2];
+          out.data[o + 3] = a >> 2;
+          continue;
+        }
+        if (thin && !isEdge(d, p, W, H, id)) continue;
         const rgb = color(id);
-        out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
-        out.data[4 * p + 3] = a >> 2;
-        continue;
+        out.data[o] = rgb[0]; out.data[o + 1] = rgb[1]; out.data[o + 2] = rgb[2];
+        out.data[o + 3] = thin ? 255 : a;
       }
-      if (model.get("outline_only") && !isEdge(d, p, W, H, id)) continue;
-      const rgb = color(id);
-      out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
-      out.data[4 * p + 3] = model.get("outline_only") ? 255 : a;
     }
     if (outlined) {
       // Each non-background label's boundary pixels are stamped with a square of
-      // half-width rc (coloured) over one of rc + rb (opaque black border band).
-      // Cost: boundary pixels x (2r+1)^2, once per redraw, entirely in JS.
+      // half-width rc (coloured) over one of rc + rb (opaque black border band),
+      // clipped to the redrawn rectangle; boundary pixels up to that reach
+      // outside it are included, so a partial redraw matches a full one.
       const px = Math.max(1, Math.round(model.get("outline_px") ?? 2));
       const rc = (px - 1) >> 1, rc2 = px >> 1; // asymmetric for even widths
       const rb = Math.max(0, Math.round(model.get("outline_border_px") ?? 1));
       const oa = Math.min(255, Math.round(255 * Math.min(1, (a / 255) / 0.45)));
+      const reach = Math.max(rc, rc2) + rb;
+      const ex0 = Math.max(0, x0 - reach), ey0 = Math.max(0, y0 - reach);
+      const ex1 = Math.min(W - 1, x1 + reach), ey1 = Math.min(H - 1, y1 + reach);
       const edge = [];
-      for (let p = 0; p < d.length; p++) {
-        const id = d[p];
+      for (let y = ey0; y <= ey1; y++) for (let x = ex0; x <= ex1; x++) {
+        const p = y * W + x, id = d[p];
         if (id === 0 || (id === BG_ID && bg) || !isEdge(d, p, W, H, id)) continue;
         edge.push(p);
       }
-      const stamp = (r0, r1, fn) => {
+      const stampEdges = (r0, r1, fn) => {
         for (const p of edge) {
           const x = p % W, y = (p - x) / W;
-          const ya = Math.max(0, y - r0), yb = Math.min(H - 1, y + r1);
-          const xa = Math.max(0, x - r0), xb = Math.min(W - 1, x + r1);
-          for (let yy = ya; yy <= yb; yy++) for (let xx = xa; xx <= xb; xx++) fn(yy * W + xx, p);
+          const ya = Math.max(y0, y - r0), yb = Math.min(y1, y + r1);
+          const xa = Math.max(x0, x - r0), xb = Math.min(x1, x + r1);
+          for (let yy = ya; yy <= yb; yy++) for (let xx = xa; xx <= xb; xx++) fn(o4(xx, yy), p);
         }
       };
-      stamp(rc + rb, rc2 + rb, (q) => { const o = 4 * q; out.data[o] = out.data[o + 1] = out.data[o + 2] = 0; out.data[o + 3] = oa; });
-      stamp(rc, rc2, (q, p) => {
-        const rgb = color(d[p]), o = 4 * q;
+      stampEdges(rc + rb, rc2 + rb, (o) => { out.data[o] = out.data[o + 1] = out.data[o + 2] = 0; out.data[o + 3] = oa; });
+      stampEdges(rc, rc2, (o, p) => {
+        const rgb = color(d[p]);
         out.data[o] = rgb[0]; out.data[o + 1] = rgb[1]; out.data[o + 2] = rgb[2]; out.data[o + 3] = oa;
       });
     }
-    ctx.putImageData(out, 0, 0);
+    ctx.putImageData(out, x0, y0);
   }
 
   function drawCursor() {
@@ -417,9 +515,17 @@ function render({ model, el: root }) {
     return [x, y];
   }
 
+  // [x0, y0, x1, y1] grown to hold another box (null: empty)
+  function grow(box, x0, y0, x1, y1) {
+    if (!box) return [x0, y0, x1, y1];
+    return [Math.min(box[0], x0), Math.min(box[1], y0), Math.max(box[2], x1), Math.max(box[3], y1)];
+  }
+  const pad = (box, m) => (box ? [box[0] - m, box[1] - m, box[2] + m, box[3] + m] : null);
+
   function stamp(cx, cy) {
     const lb = state.lab;
     const r = model.get("brush_radius") ?? 2;
+    state.dirty = grow(state.dirty, cx - r, cy - r, cx + r, cy + r);
     const tool = model.get("tool");
     const eraser = tool === "eraser";
     const active = tool === "background" ? BG_ID : (model.get("active_label") ?? 1);
@@ -460,9 +566,13 @@ function render({ model, el: root }) {
     // box from its border through non-stroke pixels; unreached pixels are inside.
     const lb = state.lab, s = state.stroke, W = lb.x, H = lb.y;
     let x0 = W, y0 = H, x1 = -1, y1 = -1;
-    for (let p = 0; p < s.length; p++) if (s[p]) {
-      const x = p % W, y = (p - x) / W;
-      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    // only the stroke's bounding box (state.strokeBox) can hold stroke pixels
+    const sb = state.strokeBox || [0, 0, W - 1, H - 1];
+    for (let y = Math.max(0, sb[1]); y <= Math.min(H - 1, sb[3]); y++) {
+      for (let x = Math.max(0, sb[0]); x <= Math.min(W - 1, sb[2]); x++) {
+        if (!s[y * W + x]) continue;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
     }
     if (x1 < 0) return;
     x0 = Math.max(0, x0 - 1); y0 = Math.max(0, y0 - 1); x1 = Math.min(W - 1, x1 + 1); y1 = Math.min(H - 1, y1 + 1);
@@ -508,11 +618,40 @@ function render({ model, el: root }) {
     return true;
   }
 
+  // Slice undo entries {z, x0, y0, w, h, data}: a full snapshot while the edit
+  // runs, then compacted to the bounding box of the pixels it changed (R4-17),
+  // so 30 entries cost a few strokes' area instead of 30 full slices.
   function pushUndo() {
-    const entry = { z: state.lab.z, data: state.lab.data.slice() };
+    const lb = state.lab;
+    const entry = { z: lb.z, x0: 0, y0: 0, w: lb.x, h: lb.y, data: lb.data.slice() };
     state.undo.push(entry);
     if (state.undo.length > UNDO_MAX) state.undo.shift();
     return entry;
+  }
+
+  // Shrink a full snapshot to the changed box; drop it when nothing changed.
+  // Returns the changed box [x0, y0, x1, y1] or null.
+  function compactUndo(entry) {
+    const lb = state.lab;
+    if (!entry || !lb || entry.w !== lb.x || entry.h !== lb.y) return null;
+    const W = lb.x, H = lb.y, old = entry.data, d = lb.data;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (let y = 0; y < H; y++) {
+      const row = y * W;
+      for (let x = 0; x < W; x++) {
+        if (old[row + x] === d[row + x]) continue;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+    if (x1 < 0) {
+      const i = state.undo.indexOf(entry);
+      if (i >= 0) state.undo.splice(i, 1);
+      return null;
+    }
+    const w = x1 - x0 + 1, h = y1 - y0 + 1, box = new Uint16Array(w * h);
+    for (let r = 0; r < h; r++) box.set(old.subarray((y0 + r) * W + x0, (y0 + r) * W + x0 + w), r * w);
+    Object.assign(entry, { x0, y0, w, h, data: box });
+    return [x0, y0, x1, y1];
   }
 
   function send() {
@@ -597,10 +736,12 @@ function render({ model, el: root }) {
         trackRequest({ op: "undo", serial: state.undo[i].track });
         return;
       }
-      if (state.undo[i].z === lb.z) {
-        lb.data.set(state.undo[i].data);
+      const u = state.undo[i];
+      if (u.z === lb.z) {
+        // restore the entry's box (row by row) and redraw only around it
+        for (let r = 0; r < u.h; r++) lb.data.set(u.data.subarray(r * u.w, (r + 1) * u.w), (u.y0 + r) * lb.x + u.x0);
         state.undo.splice(i, 1);
-        drawLabels(); send();
+        drawLabels(pad([u.x0, u.y0, u.x0 + u.w - 1, u.y0 + u.h - 1], redrawMargin())); send();
         return;
       }
     }
@@ -609,8 +750,9 @@ function render({ model, el: root }) {
 
   function clearSlice() {
     if (!state.lab) return;
-    pushUndo();
+    const entry = pushUndo();
     state.lab.data.fill(0);
+    compactUndo(entry);
     drawLabels(); send();
   }
 
@@ -618,7 +760,7 @@ function render({ model, el: root }) {
 
   viewport.addEventListener("contextmenu", (e) => e.preventDefault());
   viewport.addEventListener("pointerdown", (ev) => {
-    viewport.focus();
+    viewport.focus({ preventScroll: true });
     if (!state.lab) return;
     if (ev.button === 1 || ev.button === 2 || state.spaceDown) {
       state.panning = true; state.last = [ev.clientX, ev.clientY];
@@ -656,16 +798,21 @@ function render({ model, el: root }) {
       return;
     }
     if (t === "fill") {
-      pushUndo();
-      if (floodFill(x, y)) { drawLabels(); send(); } else state.undo.pop();
+      const entry = pushUndo();
+      if (floodFill(x, y)) {
+        const box = compactUndo(entry);
+        if (box) { drawLabels(pad(box, redrawMargin())); send(); }
+      } else state.undo.splice(state.undo.indexOf(entry), 1);
       return;
     }
     state.strokeUndo = pushUndo();
     state.painting = true;
     state.stroke = new Uint8Array(state.lab.x * state.lab.y);
     state.last = [x, y];
+    state.dirty = null;
     stamp(x, y);
-    drawLabels();
+    state.strokeBox = state.dirty;
+    drawLabels(pad(state.dirty, redrawMargin()));
     viewport.setPointerCapture?.(ev.pointerId);
   });
   viewport.addEventListener("pointermove", (ev) => {
@@ -679,9 +826,12 @@ function render({ model, el: root }) {
     const [x, y] = toPixel(ev);
     state.cursor = [x, y];
     if (state.painting) {
+      state.dirty = null;
       line(state.last[0], state.last[1], x, y);
       state.last = [x, y];
-      drawLabels();
+      const b = state.dirty;
+      state.strokeBox = grow(state.strokeBox, b[0], b[1], b[2], b[3]);
+      drawLabels(pad(b, redrawMargin())); // only around this segment
     }
     drawCursor();
     const inside = x >= 0 && y >= 0 && x < state.lab.x && y < state.lab.y;
@@ -694,14 +844,24 @@ function render({ model, el: root }) {
     // only the cell brush closes and fills strokes; background strokes stay open scribbles
     if (model.get("tool") === "brush" && model.get("auto_fill")) fillEnclosed();
     state.stroke = null;
-    drawLabels();
+    // the fill stays inside the stroke's box + 1; redraw just that
+    drawLabels(pad(state.strokeBox, redrawMargin() + 1));
+    compactUndo(state.strokeUndo);
+    state.strokeUndo = null;
+    state.strokeBox = null;
     send();
   };
   viewport.addEventListener("pointerup", endStroke);
   viewport.addEventListener("pointercancel", endStroke);
   viewport.addEventListener("pointerleave", () => { state.cursor = null; drawCursor(); });
+  // Input capture (D17). A plain wheel zooms only while the viewport has focus
+  // (after a click on it, or tabbing to it), so a notebook can be scrolled past
+  // the widget; ctrl/meta + wheel (a trackpad pinch sets ctrlKey) always zooms.
+  viewport.addEventListener("focus", () => { state.focused = true; });
+  viewport.addEventListener("blur", () => { state.focused = false; state.spaceDown = false; });
   viewport.addEventListener("wheel", (ev) => {
     if (!state.img) return;
+    if (!(ev.ctrlKey || ev.metaKey) && !state.focused) return; // let the page scroll
     ev.preventDefault();
     const r = viewport.getBoundingClientRect();
     const mx = ev.clientX - r.left, my = ev.clientY - r.top;
@@ -712,42 +872,48 @@ function render({ model, el: root }) {
     state.zoom = nz; state.userView = true;
     applyTransform();
   }, { passive: false });
+  // Keys act only on the focused viewport. Every key the widget handles is
+  // stopped here (preventDefault + stopPropagation), so it never reaches the
+  // host: JupyterLab's command mode maps b, x, m, 0 0, 1-6, z, Up / Down to
+  // cell commands. The viewport also carries data-lm-suppress-shortcuts, which
+  // Lumino honours in both capture and bubble phase. Keys the widget does not
+  // handle (and modified letters such as ctrl+s) go to the host unchanged.
   viewport.addEventListener("keydown", (ev) => {
+    if (handleKey(ev)) { ev.preventDefault(); ev.stopPropagation(); }
+  });
+  function handleKey(ev) {
     const k = ev.key;
-    if (k === " ") { state.spaceDown = true; ev.preventDefault(); return; }
-    if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "z") { undo(); ev.preventDefault(); return; }
-    if (ev.altKey && (k === "ArrowLeft" || k === "ArrowRight")) {
+    if (k === " " && !ev.ctrlKey && !ev.metaKey && !ev.altKey) { state.spaceDown = true; return true; }
+    if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && k.toLowerCase() === "z") { undo(); return true; }
+    if (ev.altKey && !ev.ctrlKey && !ev.metaKey && (k === "ArrowLeft" || k === "ArrowRight")) {
       // Alt+Left/Right step z (and must not trigger browser back/forward);
       // z / stack keys do nothing during a stroke, which belongs to one slice
-      ev.preventDefault(); ev.stopPropagation();
       if (!state.painting) stepZ(k === "ArrowRight" ? 1 : -1);
-      return;
+      return true;
     }
-    // letter keys only without modifiers: ctrl+s / ctrl+f / ctrl+p belong to the
-    // host (saving the notebook must not silently arm the split tool)
-    const mod = ev.ctrlKey || ev.metaKey || ev.altKey;
-    if (k === "o" && !mod) { model.set("display", model.get("display") === "outlined" ? "filled" : "outlined"); model.save_changes(); return; }
+    // everything else only without modifiers: ctrl+s / ctrl+f / ctrl+p belong to
+    // the host (saving the notebook must not silently arm the split tool)
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return false;
+    if (k === "o") { model.set("display", model.get("display") === "outlined" ? "filled" : "outlined"); model.save_changes(); return true; }
     const map = { b: "brush", e: "eraser", f: "fill", p: "picker", x: "delete" };
     if (model.get("mode") !== "semantic") Object.assign(map, { m: "merge", s: "split" });
     if (bgOn()) map.g = "background";
-    if (map[k]) { if (!mod) { model.set("tool", map[k]); model.save_changes(); } return; }
+    if (map[k]) { model.set("tool", map[k]); model.save_changes(); return true; }
     if (k === "[" || k === "]") {
       const r = Math.max(0, (model.get("brush_radius") ?? 2) + (k === "]" ? 1 : -1));
-      model.set("brush_radius", r); model.save_changes(); return;
+      model.set("brush_radius", r); model.save_changes(); return true;
     }
-    if (k === "n" && !mod) { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); return; }
-    if (k === "0") { fit(); return; }
+    if (k === "n") { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); return true; }
+    if (k === "0") { fit(); return true; }
     if (/^[1-9]$/.test(k) && model.get("mode") === "semantic") {
       const id = parseInt(k);
       if (id <= (model.get("class_names") || []).length) { model.set("active_label", id); model.save_changes(); }
-      return;
+      return true;
     }
-    if (k === "PageUp" || k === "PageDown") { if (!state.painting) stepStack(k === "PageDown" ? 1 : -1); ev.preventDefault(); return; }
-    if (k === "ArrowUp" || k === "ArrowDown") {
-      if (!state.painting) stepZ(k === "ArrowUp" ? 1 : -1);
-      ev.preventDefault();
-    }
-  });
+    if (k === "PageUp" || k === "PageDown") { if (!state.painting) stepStack(k === "PageDown" ? 1 : -1); return true; }
+    if (k === "ArrowUp" || k === "ArrowDown") { if (!state.painting) stepZ(k === "ArrowUp" ? 1 : -1); return true; }
+    return false;
+  }
   function stepStack(d) {
     const n = (model.get("stack_names") || []).length;
     if (n < 2) return;
@@ -830,7 +996,9 @@ function render({ model, el: root }) {
   const handlers = [
     ["change:image_to_js", onImage],
     ["change:labels_to_js change:labels_rev", onLabels],
-    ["change:channel_visible change:channel_colors change:vmin change:vmax change:gamma", compose],
+    ["change:channel_visible change:channel_colors change:gamma", () => { compose(); refreshChannels(); }],
+    // a new range arrives as a re-quantised image_to_js; only the controls change here
+    ["change:vmin change:vmax change:data_range", refreshChannels],
     ["change:labels_prev_to_js change:labels_next_to_js", onAdjacent],
     ["change:opacity change:outline_only change:display change:outline_px change:outline_border_px change:class_colors change:instance_palette change:mode change:background", () => { drawLabels(); drawAdjacent(); syncControls(); }],
     ["change:show_adjacent", () => { drawAdjacent(); syncControls(); }],
@@ -840,7 +1008,13 @@ function render({ model, el: root }) {
     // later: drop the slice snapshots now, so a ctrl+z before Python's answer
     // cannot send the previous stack's slice into the new one (track markers
     // stay; Python refuses a serial that is not its top)
-    ["change:stack", () => { state.undo = state.undo.filter((u) => u.track !== undefined); }],
+    ["change:stack", () => {
+      state.undo = state.undo.filter((u) => u.track !== undefined);
+      // an unsent drag of the old stack's range must not land on the new stack
+      for (const k of Object.keys(pendingRange)) delete pendingRange[k];
+      if (rangeTimer !== null) { clearTimeout(rangeTimer); rangeTimer = null; }
+      refreshChannels();
+    }],
     ["change:labels_from_js", onForeignLabels],
     ["change:tool change:active_label change:brush_radius change:auto_fill change:auto_increment change:overwrite change:z change:stack change:stack_names change:shape_zyx change:class_names change:status change:active_label_extent change:counts_text", () => { syncControls(); drawCursor(); }],
     ["change:channel_names", buildChannels],
@@ -863,7 +1037,12 @@ function render({ model, el: root }) {
     model.save_changes();
   } catch (e) { /* no live kernel */ }
 
+  // read-only diagnostics (tests): bytes held by the slice undo entries
+  root.__lblDebug = { undoBytes: () => state.undo.reduce((s, u) => s + (u.data ? u.data.byteLength : 0), 0) };
+
   return () => {
+    delete root.__lblDebug;
+    flushRange(); // a drag cut short still reaches Python
     for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.off?.(e, fn);
     // a discarded view must not stay reachable (image, labels, undo snapshots)
     window.removeEventListener("resize", refit);
