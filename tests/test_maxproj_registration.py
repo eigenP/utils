@@ -383,18 +383,19 @@ def test_drift_edge_object():
     frame1 = _create_square_frame_noisy(shape, (10, 64), (10, 10), intensity=1.0, noise_level=0.2)
     frame2 = _create_square_frame_noisy(shape, (10, 84), (10, 10), intensity=1.0, noise_level=0.2)
 
-    est = estimate_drift(frame1, frame2)
+    est = estimate_drift(frame1, frame2, order="xy")
     np.testing.assert_allclose(est, np.array([-20.0, 0.0]), atol=1.0)
 
 
 def test_estimate_drift_return_ccm():
-    """estimate_drift(return_ccm=True) returns identical shift and a finite 2D cross-correlation map."""
+    """estimate_drift(return_ccm=True) warns (deprecated, D08) and returns the same shift plus a finite map."""
     base = _blob_scene(H=64, W=64, sigma=3.0)
     f1 = base * 200.0
     f2 = shift(base, (3.0, -2.0), order=3, mode="nearest") * 200.0
 
-    shift_only = estimate_drift(f1, f2, return_ccm=False)
-    shift_with_ccm, ccm = estimate_drift(f1, f2, return_ccm=True)
+    shift_only = estimate_drift(f1, f2, order="xy")
+    with pytest.warns(FutureWarning, match=r"return_ccm.*0\.1\.0"):
+        shift_with_ccm, ccm = estimate_drift(f1, f2, return_ccm=True, order="xy")
 
     np.testing.assert_array_equal(shift_with_ccm, shift_only)
     assert ccm.shape == (2, f1.shape[0])
@@ -498,11 +499,11 @@ def test_estimate_drift_with_camera_offset():
     f1 = base * 300
     f2 = shift(base, (4.0, -3.0), order=3, mode="nearest") * 300
     for offset in (0, 1000):
-        np.testing.assert_allclose(estimate_drift(f1 + offset, f2 + offset), [3.0, -4.0], atol=0.1)
+        np.testing.assert_allclose(estimate_drift(f1 + offset, f2 + offset, order="xy"), [3.0, -4.0], atol=0.1)
 
 
 def test_compute_drift_trajectory_defaults_and_short_axes():
-    """windows=None works, short axes (limit // 5 == 0) still correct 1 px, and large jumps clamp to 0."""
+    """windows=None works, short axes (limit // 5 == 0) still correct 1 px, and large jumps clamp to 0 with a warning."""
     prof = _two_peak_profile()
     projs = np.stack([shift(prof, 0.5 * t, order=3, mode="nearest") for t in range(5)])
 
@@ -512,9 +513,10 @@ def test_compute_drift_trajectory_defaults_and_short_axes():
     table_short = compute_drift_trajectory([projs], shape_limit=(4,))
     np.testing.assert_allclose(table_short["dx"].to_numpy()[1:], -0.5, atol=0.05)
 
-    table_jump = compute_drift_trajectory(
-        [np.stack([prof, shift(prof, 7.0, order=3, mode="nearest")])], shape_limit=(30,)
-    )
+    with pytest.warns(UserWarning, match="rejected"):
+        table_jump = compute_drift_trajectory(
+            [np.stack([prof, shift(prof, 7.0, order=3, mode="nearest")])], shape_limit=(30,)
+        )
     assert table_jump["dx"].iloc[1] == 0.0
 
 
@@ -581,3 +583,155 @@ def test_single_frame_and_constant_video(method):
     assert np.all(np.isfinite(table_const.to_numpy()))
     np.testing.assert_array_equal(table_const[["dx", "dy", "dz", "cum_dx", "cum_dy", "cum_dz"]].to_numpy(), 0.0)
     np.testing.assert_array_equal(corr_const, const)
+
+
+# --- D22 / R7-03 / R7-04 / R7-13 / R7-09 / R7-10 ---
+
+
+def _drift_pair(dy, dx, seed=3):
+    """A blob scene and a copy moved by (dy, dx) px (the motion; the correction is its negative)."""
+    base = _blob_scene(H=128, W=128, n=14, seed=seed, sigma=3.0) * 300.0
+    return base, shift(base, (dy, dx), order=3, mode="nearest")
+
+
+def test_estimate_drift_zyx_chains_into_apply_subpixel_drift_correction():
+    """D22 (+): estimate_drift(order='zyx') -> apply_subpixel_drift_correction registers frame2 onto frame1.
+
+    Strategy: 12 random sub-pixel motions |d| <= 6 px of a blob scene; estimate the
+    correction in array-axis order and apply it to the moved frame.
+    Expected outcome: the RMS error of the estimated correction against the true
+    correction (-motion) is <= 0.1 px, and the applied correction leaves an
+    interior mean absolute error far below that of the uncorrected frame.
+    """
+    rng = np.random.default_rng(0)
+    errs = []
+    for k in range(12):
+        dy, dx = rng.uniform(-6, 6, size=2)
+        f1, f2 = _drift_pair(dy, dx, seed=k)
+        d = estimate_drift(f1, f2, order="zyx")
+        assert d.shape == (2,)
+        errs.append(d - (-dy, -dx))
+        corrected = apply_subpixel_drift_correction(f2, d)
+        inner = (slice(16, -16), slice(16, -16))
+        assert np.abs(corrected - f1)[inner].mean() < 0.2 * np.abs(f2 - f1)[inner].mean()
+    rms = float(np.sqrt(np.mean(np.square(errs))))
+    assert rms <= 0.1, rms
+
+
+def test_estimate_drift_zero_drift():
+    """D22 (-): identical frames give |d| < 1e-3 on both axes, in both orders."""
+    f1, _ = _drift_pair(0.0, 0.0)
+    assert np.all(np.abs(estimate_drift(f1, f1.copy(), order="zyx")) < 1e-3)
+    assert np.all(np.abs(estimate_drift(f1, f1.copy(), order="xy")) < 1e-3)
+
+
+def test_estimate_drift_order_default_warns_and_xy_is_reversed_zyx():
+    """D22: without order= the result is (x, y) with a FutureWarning; 'xy' is 'zyx' reversed.
+
+    Expected outcome: the default warns (naming 'zyx' and 0.1.0) and equals order='xy';
+    explicit orders do not warn; an unknown order raises ValueError.
+    """
+    f1, f2 = _drift_pair(2.3, -4.6)
+    with pytest.warns(FutureWarning, match=r"zyx.*0\.1\.0"):
+        d_default = estimate_drift(f1, f2)
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("error")
+        d_xy = estimate_drift(f1, f2, order="xy")
+        d_zyx = estimate_drift(f1, f2, order="zyx")
+    np.testing.assert_array_equal(d_default, d_xy)
+    np.testing.assert_array_equal(d_xy, d_zyx[::-1])
+    np.testing.assert_allclose(d_zyx, [-2.3, 4.6], atol=0.1)
+    with pytest.raises(ValueError, match="order"):
+        estimate_drift(f1, f2, order="yx")
+
+
+def test_estimate_drift_uses_iterative_estimator():
+    """R7-13: estimate_drift equals estimate_shift_1d_iterative on the windowed max projections.
+
+    Expected outcome: per axis, the same value as the iterative estimator with a
+    Tukey(alpha=0.1) window, as apply_drift_correction uses.
+    """
+    f1, f2 = _drift_pair(1.37, -2.81)
+    d = estimate_drift(f1, f2, order="zyx")
+    wy = windows.tukey(f1.shape[0], alpha=0.1).astype(np.float32)
+    wx = windows.tukey(f1.shape[1], alpha=0.1).astype(np.float32)
+    ey = estimate_shift_1d_iterative(f1.max(axis=1), f2.max(axis=1), wy)
+    ex = estimate_shift_1d_iterative(f1.max(axis=0), f2.max(axis=0), wx)
+    np.testing.assert_allclose(d, [ey, ex], atol=1e-6)
+
+
+def test_estimate_drift_3d_frames_zyx():
+    """D22: order='zyx' accepts 3D frames and returns (dz, dy, dx); order='xy' rejects them."""
+    zz, yy, xx = np.mgrid[:24, :40, :40]
+    vol = np.exp(-((zz - 12) ** 2 + (yy - 20) ** 2 + (xx - 18) ** 2) / (2 * 2.5**2)).astype(np.float32)
+    moved = shift(vol, (1.5, -2.0, 0.75), order=3, mode="nearest")
+    d = estimate_drift(vol, moved, order="zyx")
+    np.testing.assert_allclose(d, [-1.5, 2.0, -0.75], atol=0.1)
+    with pytest.raises(ValueError, match="2D"):
+        estimate_drift(vol, moved, order="xy")
+
+
+def _jump_projections():
+    """X profiles of 3 frames: frame 1 jumps +25 px (limit 100 // 5 = 20), frame 2 is at +26."""
+    prof = np.exp(-0.5 * ((np.arange(100) - 40) / 3) ** 2) * 100
+    return np.stack([prof, shift(prof, 25.0, order=3), shift(prof, 26.0, order=3)])
+
+
+def test_rejected_drift_step_warns_with_time_point_axis_and_value():
+    """R7-04 / D22: a step above max_step (default 0.2 of the axis) is set to 0 with a UserWarning.
+
+    Expected outcome: the warning names time point 1, axis X and the rejected value;
+    dx[1] == 0. max_step=None keeps the step; max_step=30 (absolute pixels) too.
+    """
+    projs = _jump_projections()
+    with pytest.warns(UserWarning, match=r"time point 1.*axis X.*-25"):
+        table = compute_drift_trajectory([projs], shape_limit=(100,))
+    assert table["dx"].iloc[1] == 0.0
+    for max_step in (None, 30):
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("error")
+            kept = compute_drift_trajectory([projs], shape_limit=(100,), max_step=max_step, progress=False)
+        assert kept["dx"].iloc[1] == pytest.approx(-25.0, abs=0.1)
+
+
+def test_apply_drift_correction_passes_max_step():
+    """R7-04: apply_drift_correction(max_step=...) reaches compute_drift_trajectory.
+
+    Strategy: a 3-frame video whose frame 1 jumps +25 px in X (limit 100 // 5 = 20).
+    Expected outcome: default -> warning and cum_dx[1] == 0; max_step=None ->
+    cum_dx = [0, -25, -26] within 0.2 px.
+    """
+    prof = _jump_projections()
+    video = np.repeat(prof[:, None, :], 64, axis=1).astype(np.float32)
+    video *= np.exp(-0.5 * ((np.arange(64) - 32) / 5) ** 2)[None, :, None]
+    with pytest.warns(UserWarning, match="rejected"):
+        _, table = apply_drift_correction(video, progress=False)
+    assert table["cum_dx"].iloc[1] == 0.0
+    _, table = apply_drift_correction(video, max_step=None, progress=False)
+    np.testing.assert_allclose(table["cum_dx"].to_numpy(), [0.0, -25.0, -26.0], atol=0.2)
+
+
+def test_apply_drift_correction_leaves_root_logger_alone(capsys):
+    """R7-09: no root-logger configuration, and progress=False prints no tqdm bars.
+
+    Expected outcome: the root logger's handlers are unchanged and stderr is empty.
+    """
+    import logging
+
+    root = logging.getLogger()
+    before = list(root.handlers)
+    video, _ = _make_drifting_gaussian(n_frames=3, shape=(32, 32))
+    apply_drift_correction(video, progress=False)
+    assert root.handlers == before
+    assert capsys.readouterr().err == ""
+
+
+def test_apply_drift_correction_unknown_method_raises():
+    """R7-10: an unknown method name raises instead of silently using 'integer'."""
+    video, _ = _make_drifting_gaussian(n_frames=2, shape=(16, 16))
+    with pytest.raises(ValueError, match="method"):
+        apply_drift_correction(video, method="bicubic", progress=False)

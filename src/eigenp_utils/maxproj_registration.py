@@ -11,16 +11,21 @@
 #@markdown `maxproj_registration.py`
 
 ### Imports
+import logging
+import warnings
+
 import numpy as np
 import pandas as pd
-from typing import Literal
-import logging
+from typing import Literal, Optional
 from skimage.registration import phase_cross_correlation
-from skimage.registration._phase_cross_correlation import _upsampled_dft
 from scipy.ndimage import shift
 from scipy.signal import windows
 # from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
+
+from ._conventions import warn_deprecated
+
+logger = logging.getLogger(__name__)
 
 
 def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
@@ -91,116 +96,82 @@ def zero_shift_multi_dimensional(arr, shifts = 0, fill_value=0, out=None):
 
     return result
 
-def estimate_drift(frame1, frame2, return_ccm = False):
+def estimate_drift(frame1, frame2, return_ccm=False, order=None):
     """
-    Estimate the xy-drift between two 2D frames using cross-correlation.
-    NOTE: Currently 2D only. For 3D+t data, consider projecting or using the full pipeline.
+    Estimate the correction that registers `frame2` onto `frame1`.
 
-    :param frame1: 2D numpy array, first frame
-    :param frame2: 2D numpy array, second frame
-    :return: Tuple (dx, dy), estimated drift in x and y directions
+    Each axis is estimated from the frames' max projections onto that axis (the
+    baseline removed, a Tukey(alpha=0.1) window applied) with
+    `estimate_shift_1d_iterative`, the estimator `apply_drift_correction` uses.
+    The result is the shift to *apply* to `frame2` (the negative of its motion
+    relative to `frame1`).
+
+    :param frame1: reference frame, 2D (Y, X) (or 3D (Z, Y, X) with order='zyx')
+    :param frame2: frame to register, same shape
+    :param return_ccm: deprecated; also return the Y-profile cross-correlation map
+    :param order: 'zyx' returns the correction in array-axis order ((dy, dx), or
+        (dz, dy, dx) for 3D), which `apply_subpixel_drift_correction` takes directly;
+        'xy' returns (dx, dy) (2D only). The default (None) is 'xy' with a
+        FutureWarning: it becomes 'zyx' in eigenp_utils 0.1.0.
+    :return: ndarray of the correction, in the order above
+
+    Changed (D22, R7-03, R7-13, 2026-11): uses the iterative estimator (the single
+    windowed correlation erred by up to ~0.9 px); new `order=` keyword (the old
+    (x, y) order is the default for one release, with a FutureWarning; chaining it
+    into `apply_subpixel_drift_correction` swapped the axes); `return_ccm` is
+    deprecated (FutureWarning, removed in 0.1.0).
     """
-    # Calculate the cross-correlation matrix
+    if order is None:
+        warnings.warn(
+            "estimate_drift returns (dx, dy) by default; the default will become "
+            "order='zyx' (array-axis order, as apply_subpixel_drift_correction takes) "
+            "in eigenp_utils 0.1.0. Pass order='zyx' (or order='xy' for the old order).",
+            FutureWarning, stacklevel=2
+        )
+        order = 'xy'
+    if order not in ('xy', 'zyx'):
+        raise ValueError(f"order must be 'xy' or 'zyx', got {order!r}.")
+
+    frame1 = np.asarray(frame1)
+    frame2 = np.asarray(frame2)
+    if frame1.shape != frame2.shape:
+        raise ValueError(f"frame1 and frame2 must have the same shape, got {frame1.shape} and {frame2.shape}.")
+    if order == 'xy' and frame1.ndim != 2:
+        raise ValueError(f"order='xy' needs 2D frames, got {frame1.ndim}D; use order='zyx'.")
+    if frame1.ndim not in (2, 3):
+        raise ValueError(f"Expected 2D (Y, X) or 3D (Z, Y, X) frames, got {frame1.ndim}D.")
 
     # matth: Decoupled 1D Windowing
-    # Instead of windowing the 2D image (which couples X and Y attenuation and causes
-    # information loss at the boundaries), we compute the raw max projections and then
-    # apply a 1D window to the projections.
-
-    # Raw max projections
-    # axis=0 -> Projection along Height -> Profile of Width (X)
-    frame1_max_proj_x = np.max(frame1, axis = 0)
-    frame2_max_proj_x = np.max(frame2, axis = 0)
-
-    # axis=1 -> Projection along Width -> Profile of Height (Y)
-    frame1_max_proj_y = np.max(frame1, axis = 1)
-    frame2_max_proj_y = np.max(frame2, axis = 1)
-
-    # Remove the background pedestal before windowing (see _remove_baseline)
-    frame1_max_proj_x = _remove_baseline(frame1_max_proj_x)
-    frame2_max_proj_x = _remove_baseline(frame2_max_proj_x)
-    frame1_max_proj_y = _remove_baseline(frame1_max_proj_y)
-    frame2_max_proj_y = _remove_baseline(frame2_max_proj_y)
-
-    # Apply 1D Tukey window to reduce FFT edge artifacts
-    # Use alpha=0.1 (taper 5% on each side)
-    # This is much less aggressive than the previous 33% taper
-    w_shape_x = frame1_max_proj_x.shape[0]
-    w_shape_y = frame1_max_proj_y.shape[0]
-
-    win_x = windows.tukey(w_shape_x, alpha=0.1).astype(np.float32)
-    win_y = windows.tukey(w_shape_y, alpha=0.1).astype(np.float32)
-
-    frame1_max_proj_x = frame1_max_proj_x * win_x
-    frame2_max_proj_x = frame2_max_proj_x * win_x
-
-    frame1_max_proj_y = frame1_max_proj_y * win_y
-    frame2_max_proj_y = frame2_max_proj_y * win_y
-
-    # Apply gaussian smoothing for robustness
-    # frame1_max_proj_x = gaussian_filter1d(frame1_max_proj_x, sigma = 3, radius = 5)
-    # frame2_max_proj_x = gaussian_filter1d(frame2_max_proj_x, sigma = 3, radius = 5)
-
-    # frame1_max_proj_y = gaussian_filter1d(frame1_max_proj_y, sigma = 3, radius = 5)
-    # frame2_max_proj_y = gaussian_filter1d(frame2_max_proj_y, sigma = 3, radius = 5)
-
-    # Plain (unnormalised) cross-correlation: see estimate_shift_1d_iterative.
-    # Constant projections become all zeros after _remove_baseline; calling
-    # phase_cross_correlation on all-zero arrays emits an RMS warning and picks
-    # the first bin of the upsampled grid (-0.75 px) instead of 0.
-    if np.any(frame1_max_proj_x) and np.any(frame2_max_proj_x):
-        shift_x, error, diffphase = phase_cross_correlation(frame1_max_proj_x,
-                                                          frame2_max_proj_x, upsample_factor=100,
-                                                          normalization=None)
-        sx = shift_x[0]
-    else:
-        sx = 0.0
-
-    if np.any(frame1_max_proj_y) and np.any(frame2_max_proj_y):
-        shift_y, error, diffphase = phase_cross_correlation(frame1_max_proj_y,
-                                                          frame2_max_proj_y, upsample_factor=100,
-                                                          normalization=None)
-        sy = shift_y[0]
-    else:
-        sy = 0.0
-
-    shift = np.array((sx, sy))
-
-
-    # ### --- Add a test if shifts are too large
-    # if shift_x > int(frame1.shape[0]*0.4) or shift_y > int(frame1.shape[0]*0.4):
-
-    #     spacer = int(frame1.shape[0]*0.1)
-
-    #     shift_x, error, diffphase = phase_cross_correlation(frame1_max_proj_x[spacer:-spacer],
-    #                                                   frame2_max_proj_x[spacer:-spacer])
-
-    #     shift_y, error, diffphase = phase_cross_correlation(frame1_max_proj_y[spacer:-spacer],
-    #                                                     frame2_max_proj_y[spacer:-spacer])
-
-    #     shift_x = shift_x #+ spacer
-    #     shift_y = shift_y #+ spacer
-
-
-    # shift = (shift_x, shift_y)
-
+    # Instead of windowing the image (which couples the axes' attenuation and causes
+    # information loss at the boundaries), the raw max projections onto each axis
+    # are windowed in 1D; the window is stationary, so the iterative estimator
+    # re-aligns the moving profile before each refinement.
+    correction = []
+    profiles = []
+    for axis in range(frame1.ndim):
+        other = tuple(a for a in range(frame1.ndim) if a != axis)
+        p1 = np.max(frame1, axis=other)
+        p2 = np.max(frame2, axis=other)
+        win = windows.tukey(p1.shape[0], alpha=0.1).astype(np.float32)
+        correction.append(float(estimate_shift_1d_iterative(p1, p2, win)))
+        profiles.append((p1, p2, win))
+    correction = np.array(correction)
+    if order == 'xy':
+        correction = correction[::-1]
 
     if return_ccm:
-        # Calculate the upsampled DFT, again to show what the algorithm is doing
-        # behind the scenes.  Constants correspond to calculated values in routine.
-        # See source code for details.
-        # image_product = np.fft.fft2(frame1) * np.fft.fft2(frame2).conj()
-        # cc_image = _upsampled_dft(image_product, 150, 100, (shift*100)+75).conj()
-
-        frame1 = np.vstack((frame1_max_proj_y,frame1_max_proj_y))
-        frame2 = np.vstack((frame2_max_proj_y,frame2_max_proj_y))
-
-        image_product = np.fft.fft2(frame1) * np.fft.fft2(frame2).conj()
+        warn_deprecated("estimate_drift(return_ccm=True)", stacklevel=3)
+        # The cross-correlation of the (baseline-removed, windowed) Y profiles,
+        # stacked twice: shape (2, H)
+        p1, p2, win = profiles[-2]
+        prof1 = _remove_baseline(p1) * win
+        prof2 = _remove_baseline(p2) * win
+        f1 = np.vstack((prof1, prof1))
+        f2 = np.vstack((prof2, prof2))
+        image_product = np.fft.fft2(f1) * np.fft.fft2(f2).conj()
         cc_image = np.fft.fftshift(np.fft.ifft2(image_product))
-
-        return shift, cc_image.real
-    else:
-        return shift
+        return correction, cc_image.real
+    return correction
 
 def _remove_baseline(profile):
     """
@@ -278,21 +249,35 @@ def compute_drift_trajectory(
     projections: list,
     mode: Literal['forward', 'reverse', 'both'] = 'forward',
     shape_limit: tuple = None,
-    windows: tuple = None
+    windows: tuple = None,
+    max_step: Optional[float] = 0.2,
+    progress: bool = True,
 ) -> pd.DataFrame:
     """
     Computes the drift trajectory (cumulative corrections) for the video.
 
     :param projections: List of numpy arrays, one for each spatial dimension (e.g., [proj_z, proj_y, proj_x]).
     :param mode: 'forward', 'reverse', or 'both'
-    :param shape_limit: Tuple of maximum shifts to clamp (e.g., (z_shape, y_shape, x_shape))
+    :param shape_limit: Tuple of the axis lengths (e.g., (z_shape, y_shape, x_shape)) that
+        `max_step` fractions refer to; None disables fractional limits.
     :param windows: Tuple of 1D windows to apply to each projection (e.g., (win_z, win_y, win_x))
+    :param max_step: Largest plausible step between consecutive frames. A value below 1
+        is a fraction of the axis length (default 0.2: max(axis // 5, 1) px); 1 or more is
+        in pixels; None disables the check. A larger step is treated as an outlier and
+        set to 0, with a UserWarning naming the time point, axis and value. The
+        trajectory is cumulative, so every later frame then stays offset by that step.
+    :param progress: show a tqdm progress bar.
     Returns a DataFrame with columns: ['Time Point', 'dx', 'dy', 'dz', 'cum_dx', 'cum_dy', 'cum_dz']
     where cum_d* are the shifts needed to align the frame to the reference.
     If 2 spatial dimensions are provided, dz and cum_dz will be 0.
+
+    Changed (D22, R7-04, R7-09, 2026-11): a rejected step warns (it used to be set
+    to 0 silently); new `max_step` (the old fixed rule is the default 0.2) and
+    `progress` parameters.
     """
     num_dims = len(projections)
     T = projections[0].shape[0]
+    axis_names = ('Z', 'Y', 'X')[-num_dims:]
 
     # Initialize steps and cumulative drift for 3 axes (z, y, x)
     # If 2D (num_dims == 2), we will just map index 0 -> y, index 1 -> x
@@ -301,12 +286,30 @@ def compute_drift_trajectory(
     d = np.zeros((3, T), dtype=np.float32)
 
     wins = windows if windows else [None] * num_dims
-    limits = shape_limit if shape_limit else [1e9] * num_dims
 
-    # Helper to reject implausible drift steps (larger than 1/5 of the axis) as outliers.
-    # The limit is at least 1 px, so short axes (e.g. Z < 5) are still corrected.
-    def clamp(val, limit):
-        if abs(val) > max(limit, 1):
+    # Largest accepted step per axis (None: no limit). A fraction of the axis is
+    # floored to whole pixels and is at least 1 px, so short axes (e.g. Z < 5) are
+    # still corrected; without shape_limit a fraction has nothing to refer to.
+    if max_step is None:
+        step_limits = [None] * num_dims
+    elif max_step < 1:
+        if shape_limit:
+            step_limits = [max(int(np.floor(n * max_step + 1e-9)), 1) for n in shape_limit]
+        else:
+            step_limits = [None] * num_dims
+    else:
+        step_limits = [float(max_step)] * num_dims
+
+    # Helper to reject implausible drift steps as outliers
+    def clamp(val, d_idx, t):
+        limit = step_limits[d_idx]
+        if limit is not None and abs(val) > limit:
+            warnings.warn(
+                f"Drift step at time point {t}, axis {axis_names[d_idx]}: {val:.2f} px "
+                f"exceeds max_step ({limit:g} px) and was rejected (set to 0); every later "
+                f"frame keeps this offset. Raise max_step or pass max_step=None to keep it.",
+                UserWarning, stacklevel=3
+            )
             return 0.0
         return val
 
@@ -324,10 +327,11 @@ def compute_drift_trajectory(
 
     if mode == 'reverse':
         # Iterate backwards: T-1 -> 1
-        for t in tqdm(range(T - 1, 0, -1), desc='Computing Drift Trajectory (Reverse)'):
+        for t in tqdm(range(T - 1, 0, -1), desc='Computing Drift Trajectory (Reverse)',
+                      disable=not progress):
             shifts = align_step(t, t-1)
             for d_idx in range(num_dims):
-                c = clamp(shifts[d_idx], limits[d_idx] // 5)
+                c = clamp(shifts[d_idx], d_idx, t - 1)
                 # target axis in output arrays:
                 # If 2D (y, x), d_idx=0 -> y (axis 1), d_idx=1 -> x (axis 2)
                 # If 3D (z, y, x), d_idx=0 -> z (axis 0), d_idx=1 -> y (axis 1), d_idx=2 -> x (axis 2)
@@ -337,7 +341,8 @@ def compute_drift_trajectory(
 
     else:
         # Forward or Both
-        for t in tqdm(range(1, T), desc=f'Computing Drift Trajectory ({mode})'):
+        for t in tqdm(range(1, T), desc=f'Computing Drift Trajectory ({mode})',
+                      disable=not progress):
             if mode == 'both':
                 shifts_bwd = align_step(t-1, t)
                 shifts_fwd = align_step(t, t-1)
@@ -346,7 +351,7 @@ def compute_drift_trajectory(
                 shifts = align_step(t-1, t)
 
             for d_idx in range(num_dims):
-                c = clamp(shifts[d_idx], limits[d_idx] // 5)
+                c = clamp(shifts[d_idx], d_idx, t)
                 out_idx = d_idx + (3 - num_dims)
                 d[out_idx, t] = c
                 cum_d[out_idx, t] = cum_d[out_idx, t-1] + c
@@ -370,7 +375,9 @@ def apply_drift_correction(
     reverse_time = False,
     save_drift_table=False,
     csv_filename='drift_table.csv',
-    method: Literal['integer', 'subpixel'] = 'integer'
+    method: Literal['integer', 'subpixel'] = 'integer',
+    max_step: Optional[float] = 0.2,
+    progress: bool = True,
 ):
     """
     Apply drift correction to video data (2D+t or 3D+t).
@@ -383,17 +390,27 @@ def apply_drift_correction(
     :param save_drift_table: A boolean indicating whether to save the drift values to a CSV file. Default is False.
     :param csv_filename: The name of the CSV file to save the drift table to. Default is 'drift_table.csv'.
     :param method: 'integer' (default) for fast integer shifting, or 'subpixel' for precise bicubic interpolation.
+    :param max_step: largest plausible step between frames, see `compute_drift_trajectory`
+        (default 0.2 of each axis; None disables the outlier rejection).
+    :param progress: show tqdm progress bars.
     :return: A tuple containing two elements:
         - corrected_data: A numpy array of the same shape as video_data.
         - drift_table: A pandas DataFrame containing the drift values.
+
+    Changed (D22, R7-04, R7-09, R7-10, 2026-11): messages go to the module logger
+    (``logging.getLogger(__name__)``; the root logger is no longer configured);
+    new `max_step` and `progress` parameters; a rejected step warns; an unknown
+    `method` raises ValueError (it silently used 'integer').
     """
+    if method not in ('integer', 'subpixel'):
+        raise ValueError(f"method must be 'integer' or 'subpixel', got {method!r}.")
     ndim = video_data.ndim
     if ndim == 3:
-        logging.info("Input is 3D (T, Y, X). Proceeding with 2D+t max-projection registration.")
+        logger.info("Input is 3D (T, Y, X). Proceeding with 2D+t max-projection registration.")
         t_shape, y_shape, x_shape = video_data.shape
         num_spatial_dims = 2
     elif ndim == 4:
-        logging.info("Input is 4D (T, Z, Y, X). Proceeding with 3D+t max-projection registration.")
+        logger.info("Input is 4D (T, Z, Y, X). Proceeding with 3D+t max-projection registration.")
         t_shape, z_shape, y_shape, x_shape = video_data.shape
         num_spatial_dims = 3
     else:
@@ -483,11 +500,13 @@ def apply_drift_correction(
         projections,
         mode=mode,
         shape_limit=shape_limit,
-        windows=windows_tuple
+        windows=windows_tuple,
+        max_step=max_step,
+        progress=progress,
     )
 
     # Iterate all frames to apply correction
-    for t in tqdm(range(t_shape), desc='Applying Drift Correction'):
+    for t in tqdm(range(t_shape), desc='Applying Drift Correction', disable=not progress):
         # Lookup drift
         # drift_table is indexed 0..T-1 and guaranteed to be sorted by Time Point by compute_drift_trajectory
         cum_dx = drift_table.loc[t, 'cum_dx']
@@ -543,7 +562,8 @@ def apply_subpixel_drift_correction(image, drift):
 
     Parameters:
     image (np.array): The input image.
-    drift (tuple): The drift in subpixel units (dz, dy, dx).
+    drift (tuple): The shift to apply, in pixels, in array-axis order ((dy, dx) for 2D,
+        (dz, dy, dx) for 3D): e.g. ``estimate_drift(frame1, frame2, order='zyx')``.
 
     Returns:
     np.array: The corrected image.
