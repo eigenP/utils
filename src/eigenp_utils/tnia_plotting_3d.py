@@ -1,9 +1,14 @@
-import warnings
+"""Deprecated alias of :mod:`eigenp_utils.tnia_plotting_anywidgets`.
 
-warnings.warn(
-    "The 'tnia_plotting_3d' module is deprecated. Please import plotting functions "
-    "directly from 'eigenp_utils.tnia_plotting_anywidgets'.",
-    DeprecationWarning,
+Importing it emits a ``FutureWarning``; the module will be removed in
+eigenp_utils 0.1.0. Changed (D08, 2026-11): the warning was a hidden
+DeprecationWarning without a removal version.
+"""
+from ._conventions import warn_deprecated
+
+warn_deprecated(
+    "The 'tnia_plotting_3d' module",
+    "'eigenp_utils.tnia_plotting_anywidgets' (import the plotting functions from there)",
     stacklevel=2,
 )
 

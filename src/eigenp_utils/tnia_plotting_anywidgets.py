@@ -80,6 +80,7 @@ default_colors, default_display_range, per_channel = _conv.default_colors, _conv
 format_length, is_length_unit, is_pixel_unit, to_um = _conv.format_length, _conv.is_length_unit, _conv.is_pixel_unit, _conv.to_um
 resolve_blending, resolve_pixel_sizes, sample_values = _conv.resolve_blending, _conv.resolve_pixel_sizes, _conv.sample_values
 _robust_max, _check_blending = _conv._robust_max, _conv._check_blending
+warn_deprecated = _conv.warn_deprecated
 
 
 class _UncalibratedXYPixelSizes(dict):
@@ -510,7 +511,7 @@ def show_zyx_max(image_to_show, pixel_sizes=None, figsize=(10,10), colormap=None
             behind them.
     """
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
 
@@ -541,7 +542,7 @@ def show_zyx_projection(image_to_show, pixel_sizes=None, figsize=(10,10), projec
             behind them.
     """
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
     full = slice(None)
@@ -662,7 +663,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     if figsize is None:
         figsize = (10, 10)
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
 
@@ -1055,7 +1056,7 @@ def show_zyx_max_slabs(image_to_show, x=[0,1], y=[0,1], z=[0,1], pixel_sizes=Non
             behind them.
     """
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
 
@@ -1111,7 +1112,7 @@ def show_zyx_projection_slabs(image_to_show, x_slices, y_slices, z_slices, pixel
     so a single hot pixel darkened the whole figure.
     """
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
     if projection is not None:
@@ -1425,7 +1426,7 @@ def create_multichannel_rgb(
     Colormap instances are accepted.
     """
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
     return _composite_planes(xy_list, xz_list, zy_list, vmin=vmin, vmax=vmax, gamma=gamma,
@@ -1448,7 +1449,7 @@ def create_multichannel_rgb_cmap(xy_list, xz_list, zy_list, vmin=None, vmax=None
     1/255 different); the default vmax is the robust 99.99th percentile.
     """
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
     return _composite_planes(xy_list, xz_list, zy_list, vmin=vmin, vmax=vmax, gamma=gamma,
@@ -2343,7 +2344,11 @@ class TNIASliceWidget(TNIAWidgetBase):
     """
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-                 blending=None, projection=None, attenuation=0.05, bit_depth=None, **kwargs):
+                 blending=None, projection=None, attenuation=0.05, bit_depth=None, colors=None, **kwargs):
+        if colors is not None:
+            warn_deprecated("The 'colors' parameter", "'colormap'")
+            if colormap is None:
+                colormap = colors
 
         self.blending = _check_blending(blending)
         self.projection = None if projection is None else _check_projection(projection, attenuation)
@@ -2705,7 +2710,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
     def __init__(self, im, colormap=None, colors=None, opacity=None, point_size_scale=0.01, annotate=False, *args, **kwargs):
         if colors is not None:
-            warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+            warn_deprecated("The 'colors' parameter", "'colormap'")
             if colormap is None:
                 colormap = colors
         # Normalize input to list
@@ -2985,9 +2990,19 @@ class TNIAScatterWidget(TNIAWidgetBase):
         self.rotate_view = rotate_view
         self.channel_label_fontsize_pt = channel_label_fontsize_pt
         if colors is not None:
-            warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+            warn_deprecated("The 'colors' parameter", "'colormap'")
             if colormap is None:
                 colormap = colors
+
+        # Legacy per-axis slab kwargs (the factories already route theirs)
+        if any(v is not None for v in (x_s, y_s, z_s)):
+            warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'")
+            if slabs_position is None:
+                slabs_position = (z_s, y_s, x_s)
+        if any(v is not None for v in (x_t, y_t, z_t)):
+            warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'")
+            if slabs_thickness is None:
+                slabs_thickness = (z_t, y_t, x_t)
 
         X_arr, Y_arr, Z_arr, channels = _finite_points(X_arr, Y_arr, Z_arr, channels)
         self.X_arr = X_arr
@@ -3778,12 +3793,12 @@ def show_zyx_max_slice_interactive(
     """
 
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
 
     if sxy is not None or sz is not None:
-        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
         if pixel_sizes is None:
             _sxy = sxy if sxy is not None else 1.0
             _sz = sz if sz is not None else 1.0
@@ -3796,12 +3811,12 @@ def show_zyx_max_slice_interactive(
     (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
 
     if any(x is not None for x in [x_s, y_s, z_s]):
-        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'")
         if slabs_position is None:
             slabs_position = (z_s, y_s, x_s)
 
     if any(x is not None for x in [x_t, y_t, z_t]):
-        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'")
         if slabs_thickness is None:
             slabs_thickness = (z_t, y_t, x_t)
 
@@ -3922,12 +3937,12 @@ def show_zyx_max_slice_interactive_point_annotator(
     """
 
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
 
     if sxy is not None or sz is not None:
-        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
         if pixel_sizes is None:
             _sxy = sxy if sxy is not None else 1.0
             _sz = sz if sz is not None else 1.0
@@ -3940,12 +3955,12 @@ def show_zyx_max_slice_interactive_point_annotator(
     (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
 
     if any(x is not None for x in [x_s, y_s, z_s]):
-        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'")
         if slabs_position is None:
             slabs_position = (z_s, y_s, x_s)
 
     if any(x is not None for x in [x_t, y_t, z_t]):
-        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'")
         if slabs_thickness is None:
             slabs_thickness = (z_t, y_t, x_t)
 
@@ -4052,12 +4067,12 @@ def show_zyx_max_scatter_interactive(
     to be dropped silently); None entries take the default.
     """
     if colors is not None:
-        warnings.warn("The 'colors' parameter is deprecated and will be removed. Use 'colormap' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("The 'colors' parameter", "'colormap'")
         if colormap is None:
             colormap = colors
 
     if sxy is not None or sz is not None:
-        warnings.warn("The 'sxy' and 'sz' parameters are deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
         if pixel_sizes is None:
             _sxy = sxy if sxy is not None else 1.0
             _sz = sz if sz is not None else 1.0
@@ -4067,12 +4082,12 @@ def show_zyx_max_scatter_interactive(
     (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
 
     if any(x is not None for x in [x_s, y_s, z_s]):
-        warnings.warn("The 'x_s', 'y_s', 'z_s' parameters are deprecated. Use 'slabs_position' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'")
         if slabs_position is None:
             slabs_position = (z_s, y_s, x_s)
 
     if any(x is not None for x in [x_t, y_t, z_t]):
-        warnings.warn("The 'x_t', 'y_t', 'z_t' parameters are deprecated. Use 'slabs_thickness' instead.", DeprecationWarning, stacklevel=2)
+        warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'")
         if slabs_thickness is None:
             slabs_thickness = (z_t, y_t, x_t)
 

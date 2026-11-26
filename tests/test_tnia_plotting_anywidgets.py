@@ -396,12 +396,13 @@ def test_slice_widget_colormap_resolution_and_padding(n_channels, colormap, expe
     ],
 )
 def test_deprecated_colors_warns_once_at_caller(caller):
-    """Verify passing deprecated ``colors=`` emits exactly one ``DeprecationWarning`` pointing to the caller.
+    """Verify passing deprecated ``colors=`` emits exactly one ``FutureWarning`` pointing to the caller.
 
     Strategy: invoke each static and interactive entry point with ``colors='red'``
     while recording warnings.
-    Expected outcome: exactly one ``DeprecationWarning`` mentioning ``'colors'``
-    is emitted, with ``filename == __file__``.
+    Expected outcome: exactly one ``FutureWarning`` mentioning ``'colors'`` and
+    the removal version 0.1.0 is emitted, with ``filename == __file__``.
+    (Changed by D08: it was a DeprecationWarning, hidden by default.)
     """
     rng = np.random.default_rng(0)
     im = rng.random((4, 8, 8)).astype(np.float32)
@@ -425,9 +426,10 @@ def test_deprecated_colors_warns_once_at_caller(caller):
         else:
             show_zyx_max_scatter_interactive(pts, colors="red", render="points")
 
-    dep = [r for r in rec if issubclass(r.category, DeprecationWarning) and "'colors'" in str(r.message)]
+    dep = [r for r in rec if issubclass(r.category, FutureWarning) and "'colors'" in str(r.message)]
     assert len(dep) == 1, dep
     assert dep[0].filename == __file__
+    assert "eigenp_utils 0.1.0" in str(dep[0].message)
 
 
 @pytest.mark.parametrize(
@@ -435,12 +437,13 @@ def test_deprecated_colors_warns_once_at_caller(caller):
     ["slice", "annotator", "scatter"],
 )
 def test_deprecation_warnings_interactive_legacy_kwargs(kind):
-    """Verify legacy ``sxy``/``sz``, ``x_s``/``y_s``/``z_s``, and ``x_t``/``y_t``/``z_t`` kwargs emit ``DeprecationWarning``.
+    """Verify legacy ``sxy``/``sz``, ``x_s``/``y_s``/``z_s``, and ``x_t``/``y_t``/``z_t`` kwargs emit ``FutureWarning``.
 
     Strategy: call each interactive factory function with each deprecated
     parameter group.
-    Expected outcome: each call emits a ``DeprecationWarning`` pointing to the
+    Expected outcome: each call emits a ``FutureWarning`` pointing to the
     replacement parameter (``pixel_sizes``, ``slabs_position``, ``slabs_thickness``).
+    (Changed by D08: it was a DeprecationWarning, hidden by default.)
     """
     rng = np.random.default_rng(2)
     im = np.zeros((10, 20, 30), dtype=np.float32)
@@ -453,11 +456,11 @@ def test_deprecation_warnings_interactive_legacy_kwargs(kind):
             return show_zyx_max_slice_interactive_point_annotator(im, **kw)
         return show_zyx_max_scatter_interactive(pts, render="points", **kw)
 
-    with pytest.warns(DeprecationWarning, match="The 'sxy' and 'sz' parameters are deprecated"):
+    with pytest.warns(FutureWarning, match=r"'sxy'/'sz' is deprecated .*0\.1\.0.*'pixel_sizes'"):
         _call(sxy=0.5, sz=2.0)
-    with pytest.warns(DeprecationWarning, match="The 'x_s', 'y_s', 'z_s' parameters are deprecated"):
+    with pytest.warns(FutureWarning, match=r"'x_s'/'y_s'/'z_s' is deprecated .*'slabs_position'"):
         _call(x_s=5, y_s=10, z_s=5)
-    with pytest.warns(DeprecationWarning, match="The 'x_t', 'y_t', 'z_t' parameters are deprecated"):
+    with pytest.warns(FutureWarning, match=r"'x_t'/'y_t'/'z_t' is deprecated .*'slabs_thickness'"):
         _call(x_t=2, y_t=3, z_t=4)
 
 
@@ -544,13 +547,15 @@ def test_pixel_size_dict_with_missing_axis_falls_back_to_one():
 
 
 def test_deprecated_tnia_plotting_3d_warning():
-    """Verify importing ``tnia_plotting_3d`` emits a ``DeprecationWarning`` and re-exports every name in ``__all__``.
+    """Verify importing ``tnia_plotting_3d`` emits a ``FutureWarning`` and re-exports every name in ``__all__``.
 
     Strategy: evict ``eigenp_utils.tnia_plotting_3d`` from ``sys.modules``,
     re-import under ``warnings.catch_warnings``, and compare every symbol in
     ``__all__`` against ``eigenp_utils.tnia_plotting_anywidgets``.
-    Expected outcome: emits one ``DeprecationWarning`` and every name in
-    ``__all__`` resolves to the identical object on ``tnia_plotting_anywidgets``.
+    Expected outcome: emits one ``FutureWarning`` naming the removal version
+    0.1.0, and every name in ``__all__`` resolves to the identical object on
+    ``tnia_plotting_anywidgets``. (Changed by D08: it was a DeprecationWarning
+    without a removal version.)
     """
     if "eigenp_utils.tnia_plotting_3d" in sys.modules:
         del sys.modules["eigenp_utils.tnia_plotting_3d"]
@@ -560,8 +565,8 @@ def test_deprecated_tnia_plotting_3d_warning():
         import eigenp_utils.tnia_plotting_3d as tnia3d
 
         assert len(w) == 1
-        assert issubclass(w[-1].category, DeprecationWarning)
-        assert "deprecated" in str(w[-1].message)
+        assert issubclass(w[-1].category, FutureWarning)
+        assert "deprecated" in str(w[-1].message) and "eigenp_utils 0.1.0" in str(w[-1].message)
 
     assert len(tnia3d.__all__) > 0
     for name in tnia3d.__all__:
@@ -4036,10 +4041,11 @@ def test_viewer_deprecated_colors_arg_applies_to_dataarray():
 
     Strategy: pass a DataArray with a ``color`` coordinate along ``C`` together
     with deprecated ``colors=['red', 'blue']`` to ``show_zyx_max_slice_interactive``.
-    Expected outcome: emits ``DeprecationWarning`` and applies ``['red', 'blue']``.
+    Expected outcome: emits ``FutureWarning`` and applies ``['red', 'blue']``.
+    (Changed by D08: it was a DeprecationWarning.)
     """
     da = _xarray_viewer_da().sel(C=["DAPI", "TBXT"])
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(FutureWarning):
         w = show_zyx_max_slice_interactive(da, colors=["red", "blue"])
     assert w.colors_resolved == ["red", "blue"]
 
@@ -4608,3 +4614,31 @@ def test_dead_rotation_and_normalisation_helpers_are_gone():
     """
     assert not hasattr(tpa, "_norm") and not hasattr(tpa, "_unrotate_2d")
     assert callable(tpa._rotate_expand) and callable(tpa._get_rotated_line)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): deprecations (D08)
+# ---------------------------------------------------------------------------
+
+def test_widget_classes_deprecate_legacy_kwargs_and_still_apply_them():
+    """D08 / R8-09 / R2-14: the widget classes warn on legacy names and keep honouring them.
+
+    Strategy: build ``TNIASliceWidget(colors=...)`` and
+    ``TNIAScatterWidget(..., x_s=..., x_t=...)`` directly.
+    Expected outcome: each emits a ``FutureWarning`` naming the replacement
+    and removal version 0.1.0; the colour is applied and the scatter slab is
+    placed (it used to be dropped silently).
+    """
+    vol = _structured_volume()
+    with pytest.warns(FutureWarning, match=r"'colors'.*0\.1\.0.*'colormap'"):
+        w = TNIASliceWidget(vol, colors="red")
+    assert w.colors_resolved == ["red"]
+
+    rng = np.random.default_rng(0)
+    pts = rng.uniform(0, 40, (200, 3))
+    with pytest.warns(FutureWarning, match="'x_s'/'y_s'/'z_s'.*'slabs_position'"):
+        ws = tpa.TNIAScatterWidget(pts[:, 2], pts[:, 1], pts[:, 0], x_s=10, y_s=20, z_s=20)
+    assert ws.x_s == 10 - int(ws.xmin)
+    with pytest.warns(FutureWarning, match="'x_t'/'y_t'/'z_t'.*'slabs_thickness'"):
+        ws = tpa.TNIAScatterWidget(pts[:, 2], pts[:, 1], pts[:, 0], x_t=3, y_t=3, z_t=3)
+    assert ws.x_t == 3
