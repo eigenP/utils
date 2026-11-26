@@ -123,15 +123,16 @@ def test_voronoi_otsu_intensity_scale_invariance():
 
 
 def test_voronoi_otsu_deprecated_spacing_matches_pixel_sizes():
-    """Verify deprecated `spacing` tuple parameter emits `DeprecationWarning` and matches `pixel_sizes`.
+    """Verify deprecated `spacing` tuple parameter emits `FutureWarning` and matches `pixel_sizes`.
 
     Strategy: segment a 3D blob volume with `spacing=(2.0, 0.5, 0.5)` and with
     `pixel_sizes={'Z': 2.0, 'Y': 0.5, 'X': 0.5}`.
-    Expected outcome: `spacing` emits `DeprecationWarning` and yields the exact
-    same label array as `pixel_sizes`.
+    Expected outcome: `spacing` emits a `FutureWarning` naming 0.1.0 (D08; it was a
+    `DeprecationWarning`, hidden when attributed to library code) and yields the
+    exact same label array as `pixel_sizes`.
     """
     vol = _blob_volume((10, 30, 30), [(5, 15, 15)], sigma=(1.0, 3.0, 3.0))
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(FutureWarning, match=r"spacing.*0\.1\.0.*pixel_sizes"):
         a = voronoi_otsu_labeling(vol, 1, 1, spacing=(2.0, 0.5, 0.5))
     b = voronoi_otsu_labeling(vol, 1, 1, pixel_sizes={"Z": 2.0, "Y": 0.5, "X": 0.5})
     np.testing.assert_array_equal(a, b)
@@ -567,7 +568,7 @@ def test_sample_intensity_along_surface_normals_anisotropic_profile():
     surface_grid = np.stack([np.full_like(u_grid, 5.0), u_grid, v_grid], axis=-1)
 
     sampled = sample_intensity_along_surface_normals(
-        img, surface_grid, thickness=8.0, num_steps=5, interpolation="bicubic", pixel_sizes=pixel_sizes
+        img, surface_grid, thickness=8.0, num_steps=5, interpolation="cubic", pixel_sizes=pixel_sizes
     )
     assert sampled.shape == (6, 6, 5)
     assert np.all(np.argmax(sampled, axis=-1) == 2)
@@ -605,7 +606,7 @@ def test_sample_intensity_along_surface_normals_curved_surface_bicubic():
 
     with pytest.warns(UserWarning, match="pixel_sizes not provided"):
         sampled = sample_intensity_along_surface_normals(
-            img, surface_grid, thickness=4.0, num_steps=7, interpolation="bicubic", pixel_sizes=None
+            img, surface_grid, thickness=4.0, num_steps=7, interpolation="cubic", pixel_sizes=None
         )
     assert sampled.shape == (8, 12, 7)
     assert not np.isnan(sampled).any()
@@ -646,7 +647,7 @@ def test_surface_normals_interpolation_degenerate_and_oob():
         ramp, grid, thickness=0.6, num_steps=3, interpolation="nearest", pixel_sizes=ISO_3D
     )
     cubic = sample_intensity_along_surface_normals(
-        ramp, grid, thickness=0.6, num_steps=3, interpolation="bicubic", pixel_sizes=ISO_3D
+        ramp, grid, thickness=0.6, num_steps=3, interpolation="cubic", pixel_sizes=ISO_3D
     )
     np.testing.assert_allclose(near, 100.0)
     np.testing.assert_allclose(cubic[1, 1, :], [97.0, 100.0, 103.0], atol=1e-2)
@@ -1019,7 +1020,7 @@ def test_create_ellipsoid_struct():
     assert struct_iso[0, 3, 3] and not struct_iso[0, 0, 0]
 
     # Anisotropic spacing (2, 1, 1), radius 3 um -> radii_vox (1.5, 3, 3) -> shape (5, 7, 7), center (2, 3, 3)
-    struct_aniso = create_ellipsoid_struct(radius_um=3.0, spacing=(2.0, 1.0, 1.0))
+    struct_aniso = create_ellipsoid_struct(radius_um=3.0, pixel_sizes=(2.0, 1.0, 1.0))
     assert struct_aniso.shape == (5, 7, 7)
     assert struct_aniso[2, 3, 3]
     assert struct_aniso[1, 3, 3] and struct_aniso[3, 3, 3]  # |dz|=1 -> 2 um <= 3 um
@@ -1034,7 +1035,7 @@ def test_create_ellipsoid_struct():
     np.testing.assert_array_equal(struct_aniso, struct_aniso[:, :, ::-1])
 
     # Tiny radius preserves only the center voxel
-    struct_tiny = create_ellipsoid_struct(radius_um=1e-8, spacing=(1.0, 1.0, 1.0))
+    struct_tiny = create_ellipsoid_struct(radius_um=1e-8, pixel_sizes=(1.0, 1.0, 1.0))
     assert struct_tiny.shape == (3, 3, 3)
     assert struct_tiny[1, 1, 1] and np.sum(struct_tiny) == 1
 
@@ -1059,7 +1060,7 @@ def test_generate_morphological_surface_mask():
     vol[(z - 15) ** 2 + (y - 15) ** 2 + (x - 15) ** 2 <= 10**2] = True
 
     surface_mask, envelope = generate_morphological_surface_mask(
-        vol, spacing=(1.0, 1.0, 1.0), closing_radius_um=2.0, surface_depth_um=3.0, downscale_factor=1, fill_holes=True
+        vol, pixel_sizes=(1.0, 1.0, 1.0), closing_radius_um=2.0, surface_depth_um=3.0, downscale_factor=1, fill_holes=True
     )
     assert surface_mask.shape == vol.shape and envelope.shape == vol.shape
     assert surface_mask.dtype == bool and envelope.dtype == bool
@@ -1201,7 +1202,7 @@ def test_estimate_inter_label_distance():
     # Fewer labels than k_nearest falls back to min spacing
     few_labels = np.zeros((20, 20, 20), dtype=int)
     few_labels[5:8, 5:8, 5:8] = 1
-    fallback = estimate_inter_label_distance(few_labels, spacing=(2.0, 2.0, 2.0), k_nearest=2)
+    fallback = estimate_inter_label_distance(few_labels, pixel_sizes=(2.0, 2.0, 2.0), k_nearest=2)
     assert fallback["median_um"] == 2.0 and fallback["recommended_closing_um"] == 3.0
 
     # Empty all-zero labels fall back to min spacing without error
@@ -1240,3 +1241,170 @@ def test_estimate_inter_label_distance_neighbours_from_all_labels():
     assert estimate_inter_label_distance(labels, pixel_sizes=ps, seed=3) == estimate_inter_label_distance(
         labels, pixel_sizes=ps, seed=3
     )
+
+
+# --- R7-10 / R7-11 / R7-14 / R7-15 / R7-09 / R8-18 (processing-geometry) ---
+
+
+def _ramp_and_grid():
+    """A Z ramp (value 10 * z) and a flat 4x4 surface grid at z = 10."""
+    ramp = np.broadcast_to(np.arange(20, dtype=float)[:, None, None] * 10.0, (20, 10, 10)).copy()
+    yy, xx = np.meshgrid(np.arange(3, 7), np.arange(3, 7), indexing="ij")
+    grid = np.stack([np.full_like(yy, 10.0), yy, xx], axis=-1).astype(float)
+    return ramp, grid
+
+
+def test_surface_normal_sampling_interpolation_vocabulary():
+    """R7-10: interpolation takes 'nearest' | 'linear' | 'cubic'; 'bicubic' is deprecated; others raise.
+
+    Strategy: sample a Z ramp 0.3 voxel either side of a flat surface.
+    Expected outcome: 'linear' and 'cubic' give [97, 100, 103] (they silently fell
+    back to 'nearest' = 100 before); 'bicubic' warns (FutureWarning) and equals
+    'cubic'; an unknown name raises ValueError.
+    """
+    ramp, grid = _ramp_and_grid()
+    kw = dict(thickness=0.6, num_steps=3, pixel_sizes=ISO_3D)
+    near = sample_intensity_along_surface_normals(ramp, grid, interpolation="nearest", **kw)
+    np.testing.assert_allclose(near, 100.0)
+    for method in ("linear", "cubic"):
+        out = sample_intensity_along_surface_normals(ramp, grid, interpolation=method, **kw)
+        np.testing.assert_allclose(out[1, 1, :], [97.0, 100.0, 103.0], atol=1e-2)
+    with pytest.warns(FutureWarning, match=r"bicubic.*0\.1\.0.*cubic"):
+        legacy = sample_intensity_along_surface_normals(ramp, grid, interpolation="bicubic", **kw)
+    np.testing.assert_array_equal(
+        legacy, sample_intensity_along_surface_normals(ramp, grid, interpolation="cubic", **kw)
+    )
+    with pytest.raises(ValueError, match="interpolation"):
+        sample_intensity_along_surface_normals(ramp, grid, interpolation="spline", **kw)
+
+
+def test_surface_normal_sampling_cval_and_thin_grid():
+    """R7-10: out-of-volume samples take `cval` (default 0); a 1-row grid raises a clear ValueError.
+
+    Expected outcome: with cval=np.nan the samples above the top face are NaN (they
+    were indistinguishable from real zeros); a (1, N, 3) grid raises ValueError
+    naming the grid shape instead of crashing inside np.gradient.
+    """
+    ramp, grid = _ramp_and_grid()
+    top = grid.copy()
+    top[..., 0] = 0.0
+    kw = dict(thickness=4.0, num_steps=5, pixel_sizes=ISO_3D, interpolation="linear")
+    out0 = sample_intensity_along_surface_normals(ramp, top, **kw)
+    out_nan = sample_intensity_along_surface_normals(ramp, top, cval=np.nan, **kw)
+    outside = np.isnan(out_nan)
+    assert outside.any() and not outside.all()
+    np.testing.assert_array_equal(out0[outside], 0.0)
+    np.testing.assert_array_equal(out0[~outside], out_nan[~outside])
+    with pytest.raises(ValueError, match="at least 2"):
+        sample_intensity_along_surface_normals(ramp, grid[:1], **kw)
+
+
+def test_sample_volume_plane_method_vocabulary():
+    """R7-10: method takes 'nearest' | 'linear' | 'cubic'; 'nearest' is order 0; others raise.
+
+    Strategy: sample a Z ramp on a plane at z = 4.3 ('nearest' used to fall back to linear).
+    Expected outcome: nearest = 40, linear = 43; an unknown name raises ValueError;
+    cval sets the out-of-volume value.
+    """
+    vol = np.broadcast_to(np.arange(10, dtype=np.float32)[:, None, None] * 10.0, (10, 8, 8)).copy()
+    kw = dict(pixel_sizes=ISO_3D, p0_phys=np.array([4.3, 3.5, 3.5]), normal_phys=np.array([1.0, 0, 0]),
+              u_range_um=(-2, 2), v_range_um=(-2, 2), u_res=5, v_res=5)
+    near, _ = sample_volume_plane(vol, method="nearest", **kw)
+    lin, _ = sample_volume_plane(vol, method="linear", **kw)
+    np.testing.assert_allclose(near, 40.0)
+    np.testing.assert_allclose(lin, 43.0, atol=1e-4)
+    with pytest.raises(ValueError, match="method"):
+        sample_volume_plane(vol, method="bilinear", **kw)
+    far = dict(kw, p0_phys=np.array([40.0, 3.5, 3.5]))
+    for method in ("nearest", "linear", "cubic"):
+        out, _ = sample_volume_plane(vol, method=method, cval=-1.0, **far)
+        np.testing.assert_array_equal(out, -1.0)
+
+
+def test_fit_plane_ransac_seed_is_reproducible():
+    """R7-11: fit_plane_ransac(seed=...) makes the result reproducible; seed=None stays random.
+
+    Strategy: a noisy plane with 30% outliers, max_iters=50 (the R7-11 repro gave
+    p0_z in 9.86 ... 10.12 over five unseeded calls).
+    Expected outcome: equal seeds give bit-identical results; a Generator is accepted.
+    """
+    rng = np.random.default_rng(3)
+    yy, xx = rng.uniform(0, 40, size=(2, 200))
+    zz = 10 + 0.1 * yy + rng.normal(0, 0.3, 200)
+    zz[:60] = rng.uniform(0, 30, 60)
+    pts = np.column_stack([zz, yy, xx])
+    a = fit_plane_ransac(pts, pixel_sizes=ISO_3D, max_iters=50, seed=7)
+    b = fit_plane_ransac(pts, pixel_sizes=ISO_3D, max_iters=50, seed=7)
+    np.testing.assert_array_equal(a[0], b[0])
+    np.testing.assert_array_equal(a[1], b[1])
+    c = fit_plane_ransac(pts, pixel_sizes=ISO_3D, max_iters=50, seed=np.random.default_rng(7))
+    np.testing.assert_array_equal(a[0], c[0])
+
+
+def test_fit_plane_ransac_degeneracy_test_is_unit_independent():
+    """R7-11: the degeneracy test is relative, so tiny (metre-scale) pixel sizes still fit.
+
+    Strategy: the same plane with pixel sizes of 1 µm and of 1e-6 (as if in metres),
+    thresholds scaled alike (the absolute area cutoff 1e-6 rejected every triple).
+    Expected outcome: the same unit normal, and p0 scaled by 1e-6; exactly collinear
+    points still raise RuntimeError.
+    """
+    rng = np.random.default_rng(0)
+    yy, xx = rng.uniform(0, 20, size=(2, 50))
+    pts = np.column_stack([5 + 0.2 * yy - 0.1 * xx, yy, xx])
+    p0, n = fit_plane_ransac(pts, pixel_sizes=(1.0, 1.0, 1.0), inlier_threshold_um=0.1, seed=0)
+    p0_m, n_m = fit_plane_ransac(pts, pixel_sizes=(1e-6,) * 3, inlier_threshold_um=1e-7, seed=0)
+    np.testing.assert_allclose(n_m, n, atol=1e-9)
+    np.testing.assert_allclose(p0_m, p0 * 1e-6, rtol=1e-9)
+    collinear = np.column_stack([np.arange(10.0), np.arange(10.0), np.arange(10.0)])
+    with pytest.raises(RuntimeError):
+        fit_plane_ransac(collinear, pixel_sizes=ISO_3D, max_iters=50, seed=0)
+
+
+def test_windowed_slice_projection_even_window_does_not_print(capsys):
+    """R7-09: an even window is widened to the next odd size silently (documented), no print."""
+    vol = np.random.default_rng(0).random((8, 5, 5))
+    out = windowed_slice_projection(vol, window_size=4, pixel_sizes=ISO_3D)
+    np.testing.assert_array_equal(out, windowed_slice_projection(vol, window_size=5, pixel_sizes=ISO_3D))
+    assert capsys.readouterr().out == ""
+
+
+def test_optimized_entire_labels_touching_mask_without_isin_matches_reference():
+    """R7-15: dropping the always-true np.isin(dilated, labels) keeps the result.
+
+    Strategy: compare against a direct reference (labels whose expansion touches the mask).
+    """
+    from skimage.segmentation import expand_labels
+
+    rng = np.random.default_rng(1)
+    labels = np.zeros((12, 30, 30), dtype=np.int32)
+    for i in range(1, 9):
+        z, y, x = rng.integers(2, [10, 28, 28])
+        labels[z - 1:z + 2, y - 2:y + 3, x - 2:x + 3] = i
+    mask = np.zeros(labels.shape, bool)
+    mask[:, :, :6] = True
+    out = optimized_entire_labels_touching_mask(labels, mask, distance=2, pixel_sizes=ISO_3D)
+    touching = np.unique(expand_labels(labels, 2)[mask])
+    touching = touching[touching > 0]
+    np.testing.assert_array_equal(out, labels * np.isin(labels, touching))
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: create_ellipsoid_struct(2.0, spacing=(1.0, 1.0, 1.0)),
+        lambda: create_ellipsoid_struct(2.0, (1.0, 1.0, 1.0)),
+        lambda: generate_morphological_surface_mask(np.ones((6, 6, 6), bool), spacing=(1.0, 1.0, 1.0)),
+        lambda: estimate_inter_label_distance(np.ones((4, 4, 4), int), spacing=(1.0, 1.0, 1.0)),
+    ],
+    ids=["ellipsoid_kw", "ellipsoid_positional", "surface_mask", "inter_label"],
+)
+def test_spacing_alias_is_deprecated(call):
+    """R8-18 / D08: `spacing=` (keyword or positional) is a deprecated alias of `pixel_sizes=`.
+
+    Expected outcome: a FutureWarning naming spacing, 0.1.0 and pixel_sizes,
+    attributed to this test file (the caller), not to the library.
+    """
+    with pytest.warns(FutureWarning, match=r"spacing.*0\.1\.0.*pixel_sizes") as rec:
+        call()
+    assert any(r.filename == __file__ for r in rec if issubclass(r.category, FutureWarning))
