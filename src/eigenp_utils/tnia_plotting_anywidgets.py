@@ -10,6 +10,7 @@
 # ///
 
 import logging
+import os
 import pathlib
 import warnings
 
@@ -406,17 +407,32 @@ def _channel_specs(colormap, n, blending=None):
 #: naming a registered matplotlib colormap.
 is_colormap = _conv.is_colormap_name
 
+_GUI_MIN_LUMA = 0.45
+
+
 def _gui_channel_color(c, blending=None):
-    """GUI colour for a channel; dark inks of minimum blending are lifted to stay readable in the dark GUI."""
-    col = get_gui_channel_color(c)
-    if blending == 'minimum':
-        try:
-            r, g, b = mcolors.to_rgb(col)
-        except (ValueError, TypeError):
-            return col
-        if 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.2:
-            return '#9e9e9e'
-    return col
+    """
+    Colour of a channel's row header, histogram and slider in the (dark) GUI.
+
+    The channel's colour (a colormap's end colour) is mixed with white just
+    enough to reach a luma of 0.45, which keeps its hue: blue stays blue and
+    red stays red, black becomes a neutral grey. ``blending`` is accepted for
+    compatibility; every mode uses the same rule.
+
+    Changed (D14 / R3-10, 2026-11): colours were darkened to 75% for a light
+    page, and under 'minimum' blending every dark ink (black, blue, red,
+    navy, ...) became the same '#9e9e9e'.
+    """
+    col = resolve_color(c)
+    try:
+        rgb = np.asarray(mcolors.to_rgb(col), dtype=float)
+    except (ValueError, TypeError):
+        return col
+    luma = float(rgb @ [0.2126, 0.7152, 0.0722])
+    if luma < _GUI_MIN_LUMA:
+        t = (_GUI_MIN_LUMA - luma) / (1.0 - luma)
+        rgb = rgb + t * (1.0 - rgb)
+    return mcolors.to_hex(np.clip(rgb, 0.0, 1.0))
 
 
 def get_gui_channel_color(c):
@@ -1665,7 +1681,8 @@ def _projector_for(projection, attenuation, lo=None, hi=None):
     return lambda vol, axis: _attenuated_mip(vol, axis, lo, hi, attenuation)
 
 
-def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_clip=True, blending=None):
+def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_clip=True, blending=None,
+                 opacity=None):
     """
     Blend multiple channels of intensities into RGB.
 
@@ -1686,6 +1703,10 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
         (each channel from white to its colour, per-RGB minimum). None follows
         the viewers' rule: additive for colours, maximum when a channel is a
         colormap name, minimum when every colormap starts at white.
+    opacity : float or list of float, optional
+        Per-channel weight 0..1 of each channel's colour, as in the image
+        viewers (0 removes the channel; None is 1 for every channel). New
+        (R2-23, 2026-11): used by the scatter viewer's points mode.
 
     Notes:
         - The same compositor as the image viewers (`create_multichannel_rgb`):
@@ -1720,8 +1741,9 @@ def blend_colors(intensities, base_colors, vmin=None, vmax=None, gamma=1, soft_c
         return (float(valid.min()), float(valid.max())) if valid.size else (0.0, 1.0)
 
     gamma = gamma.tolist() if isinstance(gamma, np.ndarray) else gamma
+    opacity = opacity.tolist() if isinstance(opacity, np.ndarray) else opacity
     (colors,) = _composite([columns], list(base_colors), _broadcast(vmin), _broadcast(vmax),
-                           gamma, None, blending, soft_clip, 1e-9, default_range=_data_range)
+                           gamma, opacity, blending, soft_clip, 1e-9, default_range=_data_range)
     return colors
 
 
@@ -1943,6 +1965,59 @@ def _draw_slab_crosshairs(axes, geoms, x_edges, y_edges, z_edges, widths, origin
         line('xz', ox, e, ox + wx, e)
 
 
+def _unique_path(filename, default):
+    """
+    Absolute path for a new export: ``~`` and ``$VAR`` expanded, and a
+    numbered suffix (``name_1.svg``, ``name_2.svg``, ...) when the file
+    exists, so an export never overwrites a file (D15).
+    """
+    path = os.path.abspath(os.path.expanduser(os.path.expandvars(filename or default)))
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    k = 1
+    while os.path.exists(f"{stem}_{k}{ext}"):
+        k += 1
+    return f"{stem}_{k}{ext}"
+
+
+# File extension -> matplotlib format; text stays editable in SVG / PDF
+_EXPORT_RC = {'svg': {'svg.fonttype': 'none'}, 'pdf': {'pdf.fonttype': 42}}
+
+
+def _export_figure(widget, render, filename, default="figure.svg"):
+    """
+    Save ``render()`` to ``filename`` for a widget's save button (D15).
+
+    The format follows the extension (svg, pdf, png or any other format
+    matplotlib writes; no extension adds '.svg'), at 300 dpi with a tight
+    bounding box, with editable text in SVG and PDF. An existing file is
+    never overwritten (`_unique_path`). The outcome goes to the widget's
+    ``status_msg`` ('saved <absolute path>' or 'error: ...'); a failure also
+    warns, a success is logged.
+    """
+    name = filename or default
+    try:
+        fig = render()
+        if not fig:
+            raise RuntimeError("nothing to save")
+        if not os.path.splitext(name)[1]:
+            name = name + '.svg'
+        fmt = os.path.splitext(name)[1][1:].lower()
+        if fmt not in fig.canvas.get_supported_filetypes():
+            raise ValueError(f"unsupported file extension '.{fmt}' (use .svg, .pdf or .png)")
+        path = _unique_path(name, default)
+        with matplotlib.rc_context(_EXPORT_RC.get(fmt, {})):
+            fig.savefig(path, format=fmt, dpi=300, bbox_inches='tight')
+    except Exception as e:
+        warnings.warn(f"Error saving {name}: {e}", UserWarning, stacklevel=3)
+        widget.status_msg = f"error: could not save {name}: {e}"
+        return None
+    _log.info("Saved to %s", path)
+    widget.status_msg = f"saved {path}"
+    return path
+
+
 class TNIAWidgetBase(anywidget.AnyWidget):
     _esm = _ASSET_DIR.joinpath("tnia_plotting_anywidgets.js").read_text()
     _css = _ASSET_DIR.joinpath("tnia_plotting_anywidgets.css").read_text()
@@ -1951,14 +2026,16 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     # Data traits
     image_data = traitlets.Unicode().tag(sync=True)
 
-    # Sliders
-    x_s = traitlets.Int(0).tag(sync=True)
-    y_s = traitlets.Int(0).tag(sync=True)
-    z_s = traitlets.Int(0).tag(sync=True)
+    # Slabs. The inclusive index range [x_start, x_end] is what the GUI
+    # reads; the centre / half-thickness (x_s, x_t) are Python-only traits
+    # (observable, not synced: the front end never reads them; R3-16).
+    x_s = traitlets.Int(0)
+    y_s = traitlets.Int(0)
+    z_s = traitlets.Int(0)
 
-    x_t = traitlets.Int(1).tag(sync=True)
-    y_t = traitlets.Int(1).tag(sync=True)
-    z_t = traitlets.Int(1).tag(sync=True)
+    x_t = traitlets.Int(1)
+    y_t = traitlets.Int(1)
+    z_t = traitlets.Int(1)
 
     x_start = traitlets.Int(0).tag(sync=True)
     x_end = traitlets.Int(1).tag(sync=True)
@@ -1971,19 +2048,21 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     sy = traitlets.Float(1.0).tag(sync=True)
     sz = traitlets.Float(1.0).tag(sync=True)
 
-    # Bounds for sliders (computed)
-    x_min_pos = traitlets.Int(0).tag(sync=True)
+    # Last index of each axis (the range-slider tracks); set once in __init__.
+    # Changed (R3-16, 2026-11): the never-read x/y/z_min_pos, x/y/z_thick_max
+    # and min_thickness traits are gone.
     x_max_pos = traitlets.Int(100).tag(sync=True)
-    y_min_pos = traitlets.Int(0).tag(sync=True)
     y_max_pos = traitlets.Int(100).tag(sync=True)
-    z_min_pos = traitlets.Int(0).tag(sync=True)
     z_max_pos = traitlets.Int(100).tag(sync=True)
 
-    x_thick_max = traitlets.Int(100).tag(sync=True)
-    y_thick_max = traitlets.Int(100).tag(sync=True)
-    z_thick_max = traitlets.Int(100).tag(sync=True)
+    # How the range boxes show an index i: ``(i + offset) * scale`` followed
+    # by ``unit``, per axis ('x', 'y', 'z'), with integer steps when not
+    # calibrated (R3-08). Set by the subclasses (`_set_range_display`).
+    range_display = traitlets.Dict().tag(sync=True)
 
-    min_thickness = traitlets.Int(1).tag(sync=True)
+    # Resolution of the on-screen PNG in dots per inch, independent of
+    # rcParams['figure.dpi'] (D14); exports keep their own 300 dpi.
+    display_dpi = traitlets.Float(100.0)
 
     # Channels
     channel_names = traitlets.List(traitlets.Unicode()).tag(sync=True)
@@ -1993,6 +2072,13 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     # Channel Parameters
     vmin_list = traitlets.List(traitlets.Any()).tag(sync=True)
     vmax_list = traitlets.List(traitlets.Any()).tag(sync=True)
+    # The value a cleared ("") vmin / vmax box stands for, per channel
+    # (R3-04): the box placeholder, and the slider / tone-curve position.
+    vmin_auto = traitlets.List(traitlets.Float()).tag(sync=True)
+    vmax_auto = traitlets.List(traitlets.Float()).tag(sync=True)
+    # Controls that act on each channel: 'all', or 'opacity' where vmin /
+    # vmax / gamma do nothing (categorical scatter points; R3-09).
+    channel_controls = traitlets.List(traitlets.Unicode()).tag(sync=True)
     gamma_list = traitlets.List(traitlets.Float()).tag(sync=True)
     opacity_list = traitlets.List(traitlets.Float()).tag(sync=True)
     histograms_data = traitlets.List(traitlets.Dict()).tag(sync=True)
@@ -2001,9 +2087,15 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     show_crosshair = traitlets.Bool(True).tag(sync=True)
     scale_bar_show = traitlets.Bool(True).tag(sync=True)
     scale_bar_fontsize_pt = traitlets.Any(None).tag(sync=True)  # None/'' auto, 0 hides the label only
+    # 'C' pressed while the pointer is over a panel (no modifier, not typing
+    # in a box) moves the other slabs to the voxel under the pointer.
     sync_on_hover = traitlets.Bool(True).tag(sync=True)
 
     warning_msg = traitlets.Unicode("").tag(sync=True)
+    # Outcome of the last export ('saved <absolute path>' or 'error: ...'),
+    # shown in the widget's status line (D15): print() from a comm callback
+    # does not reach the notebook cell.
+    status_msg = traitlets.Unicode("").tag(sync=True)
 
     # Communication
     hover_coords = traitlets.Dict().tag(sync=True) # {'plane': 'xy', 'x': 0.5, 'y': 0.5, 't': 123}
@@ -2029,16 +2121,42 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         self.scale_bar_fontsize_pt = _scale_bar_fontsize(scale_bar_fontsize_pt)
         self.sync_on_hover = sync_on_hover
         self.dims = (Z, Y, X) # (Z, Y, X) convention from numpy shape
+        # Last index per axis (the slab handlers clamp to the volume)
+        self.x_max_pos = max(0, X - 1)
+        self.y_max_pos = max(0, Y - 1)
+        self.z_max_pos = max(0, Z - 1)
 
-        # Set max thickness bounds
-        self.x_thick_max = max(1, X - 1)
-        self.y_thick_max = max(1, Y - 1)
-        self.z_thick_max = max(1, Z - 1)
+    def _set_range_display(self, offsets=(0.0, 0.0, 0.0)):
+        """
+        Fill ``range_display``: per axis, the range boxes show index i as
+        ``(i + offset) * scale`` in ``unit`` (R3-08).
+
+        Calibrated axes show physical positions in µm, or in nm / mm chosen by
+        the magnitude of the axis (`_conventions.format_length`; an unknown
+        unit is shown as given); uncalibrated ones show the index (plus the
+        data offset of the scatter viewer) in 'px'. ``offsets`` is (z, y, x).
+        """
+        calibrated = bool(getattr(self, '_pixel_sizes_given', False))
+        unit_in = getattr(self, '_length_unit', None)
+        out = {}
+        for axis, off, step in zip('zyx', offsets, (self.sz, self.sy, self.sx)):
+            off = float(off)
+            if not calibrated:
+                out[axis] = {'offset': off, 'scale': 1.0, 'unit': 'px', 'calibrated': False}
+                continue
+            scale, unit = float(step), UM
+            if unit_in is None:
+                n = getattr(self, f'{axis}_max_pos')
+                far = max(abs(off), abs(off + n)) * float(step)
+                if far > 0 and np.isfinite(far):
+                    value, unit = format_length(far)
+                    scale = float(step) * (value / far)
+            else:
+                unit = str(unit_in)
+            out[axis] = {'offset': off, 'scale': scale, 'unit': unit, 'calibrated': True}
+        self.range_display = out
 
     def _init_observers(self):
-        # Observe thickness changes to update position bounds
-        self.observe(self._update_bounds, names=['x_t', 'y_t', 'z_t', 'x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end'])
-
         # Sync handlers between (x_s, x_t) and (x_start, x_end)
         self.observe(self._on_st_changed, names=['x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t'])
         self.observe(self._on_start_end_changed, names=['x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end'])
@@ -2050,7 +2168,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         self.observe(self._render_wrapper, names=['vmin_list', 'vmax_list', 'gamma_list', 'opacity_list'])
 
         # Observe crosshair toggle
-        self.observe(self._render_wrapper, names=['show_crosshair', 'scale_bar_show', 'scale_bar_fontsize_pt'])
+        self.observe(self._render_wrapper, names=['show_crosshair', 'scale_bar_show', 'scale_bar_fontsize_pt',
+                                                  'display_dpi'])
 
         # Observe hover synchronization
         self.observe(self._handle_hover_sync, names=['hover_coords'])
@@ -2064,8 +2183,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         # Observe copy params trigger
         self.observe(self._copy_params, names='copy_params_trigger')
 
-        # Initial bounds update
-        self._update_bounds(None)
+        # Traits that change the first frame (display_dpi) are set before it
+        # is rendered, not by a second render in _apply_trait_kwargs.
+        for k, v in getattr(self, '_early_trait_kwargs', {}).items():
+            setattr(self, k, v)
 
         # Initial render
         self._render_wrapper(None)
@@ -2163,31 +2284,6 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         axis = change.name[0]
         self._set_slab_traits(axis, getattr(self, f'{axis}_start'), getattr(self, f'{axis}_end'))
 
-    def _update_bounds(self, change):
-        # x
-        lo = 0
-        hi = max(0, self.dims[2] - 1)
-        self.x_min_pos = lo
-        self.x_max_pos = hi
-        if self.x_s < lo: self.x_s = lo
-        if self.x_s > hi: self.x_s = hi
-
-        # y
-        lo = 0
-        hi = max(0, self.dims[1] - 1)
-        self.y_min_pos = lo
-        self.y_max_pos = hi
-        if self.y_s < lo: self.y_s = lo
-        if self.y_s > hi: self.y_s = hi
-
-        # z
-        lo = 0
-        hi = max(0, self.dims[0] - 1)
-        self.z_min_pos = lo
-        self.z_max_pos = hi
-        if self.z_s < lo: self.z_s = lo
-        if self.z_s > hi: self.z_s = hi
-
     def _render_wrapper(self, change):
         # Skip renders requested from inside a trait-synchronization pass.
         # Moving one slider writes the paired representation too (e.g. x_start
@@ -2248,10 +2344,11 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 buf = io.BytesIO()
                 # The PNG must show the whole figure frame that axis_bounds were
                 # computed in, whatever the user's savefig rcParams (e.g. 'tight').
+                # At display_dpi (D14): the frame no longer follows
+                # rcParams['figure.dpi'] / ['savefig.dpi'].
+                dpi = float(self.display_dpi)
                 with matplotlib.rc_context({'savefig.bbox': 'standard'}):
-                    fig.savefig(buf, format='png')
-                    dpi = matplotlib.rcParams['savefig.dpi']
-                dpi = fig.dpi if dpi == 'figure' else float(dpi)
+                    fig.savefig(buf, format='png', dpi=dpi)
                 # Size of the displayed PNG, for distances in screen pixels
                 self._png_px = tuple(float(v) for v in fig.get_size_inches() * dpi)
                 self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
@@ -2273,7 +2370,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         'x_s', 'y_s', 'z_s', 'x_t', 'y_t', 'z_t',
         'x_start', 'x_end', 'y_start', 'y_end', 'z_start', 'z_end',
         'vmin_list', 'vmax_list', 'gamma_list', 'opacity_list', 'show_crosshair',
-        'scale_bar_show', 'scale_bar_fontsize_pt',
+        'scale_bar_show', 'scale_bar_fontsize_pt', 'display_dpi',
     )
 
     def _render_state(self):
@@ -2376,6 +2473,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         if unknown:
             raise TypeError(f"{type(self).__name__}() got unexpected keyword argument(s): "
                             + ", ".join(repr(k) for k in unknown))
+        # Applied before the first render (see _init_observers)
+        self._early_trait_kwargs = {k: kwargs.pop(k) for k in self._EARLY_TRAITS if k in kwargs}
+
+    _EARLY_TRAITS = ('display_dpi',)
 
     def _apply_trait_kwargs(self, kwargs):
         """Set traits passed as keyword arguments (after the widget is built, so observers see them)."""
@@ -2389,13 +2490,8 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         return (0, 0, 0)
 
     def _save_svg(self, change):
-        fig = self._render()
-        if fig:
-            try:
-                fig.savefig(self.save_filename, format='svg', dpi=300, bbox_inches='tight')
-                _log.info("Saved to %s", self.save_filename)
-            except Exception as e:
-                warnings.warn(f"Error saving {self.save_filename}: {e}", UserWarning, stacklevel=2)
+        """The figure to ``save_filename`` (see `_export_figure`); outcome in ``status_msg``."""
+        _export_figure(self, self._render, self.save_filename)
 
     def _png_bytes(self, dpi=300):
         """The figure as PNG bytes, cropped like the SVG export (bbox 'tight')."""
@@ -2523,6 +2619,15 @@ class TNIASliceWidget(TNIAWidgetBase):
     automatic label and scale-bar font size is 3% of the figure width,
     clipped to 8-24 pt. Changed (D08): ``colors=`` is accepted with a
     FutureWarning (use ``colormap=``).
+
+    Changed (D14 / D15 / R3-16, 2026-11): the on-screen PNG is rendered at
+    ``display_dpi`` (default 100; it followed rcParams['figure.dpi']); the
+    save button follows the file extension, never overwrites (numbered
+    suffix) and reports in ``status_msg``; ``x_s`` ... ``z_t`` (and the
+    annotator's ``points``) are no longer synced to the browser, and the
+    never-read ``*_min_pos``, ``*_thick_max`` and ``min_thickness`` traits
+    are gone. New synced traits for the GUI: ``vmin_auto`` / ``vmax_auto``,
+    ``range_display``, ``channel_controls`` and ``status_msg``.
     """
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
@@ -2641,6 +2746,11 @@ class TNIASliceWidget(TNIAWidgetBase):
                           for i, v in enumerate(per_channel(vmin, self.num_channels, 'vmin'))]
         self.vmax_list = [self._auto_vmax[i] if v is None else float(v)
                           for i, v in enumerate(per_channel(vmax, self.num_channels, 'vmax'))]
+        # What a cleared box means, shown by the GUI (R3-04)
+        self.vmin_auto = [float(v) for v in self._auto_vmin]
+        self.vmax_auto = [float(v) for v in self._auto_vmax]
+        self.channel_controls = ['all'] * self.num_channels
+        self._set_range_display()
         # the static viewers' per-channel rule: a list longer than the channels raises
         self.gamma_list = per_channel(gamma, self.num_channels, 'gamma', 1.0)
         self.opacity_list = per_channel(opacity, self.num_channels, 'opacity', 1.0)
@@ -2863,7 +2973,9 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
     click_coords = traitlets.Dict().tag(sync=True) # {'plane': 'xy', 'x': 0.5, 'y': 0.5, 't': 123}
 
     # Data
-    points = _PointList().tag(sync=True) # List of [z, y, x] lists
+    # List of [z, y, x] index lists. Python-only (the front end never reads
+    # it; R3-16): observe it from Python as before.
+    points = _PointList()
 
     @traitlets.validate('points')
     def _validate_points(self, proposal):
@@ -2990,8 +3102,8 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         super()._init_observers()
         self.observe(self._handle_click, names=['click_coords'])
         self.observe(self._on_points_changed, names=['points'])
-        # Also re-render if annotation_mode changes (so UI cursor updates)
-        self.observe(self._render_wrapper, names=['annotation_mode'])
+        # annotation_mode changes no pixel (the JS sets the cursor), so it
+        # does not re-render (R3-16).
         self.observe(self._save_csv, names='save_csv_trigger')
 
     def _handle_click(self, change):
@@ -3173,25 +3285,40 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             self.points = new_points
 
     def _save_csv(self, change):
-        if not self.points:
-            warnings.warn("No points to save.", UserWarning, stacklevel=2)
-            return
+        """
+        Write ``points`` to ``save_csv_filename`` (D15).
 
-        import os
-        filename = self.save_csv_filename
-        if not filename:
-            filename = "points.csv"
+        Columns ``z,y,x`` are voxel indices, followed by the physical
+        positions ``z_um,y_um,x_um`` (index x pixel size; ``*_px`` when the
+        X/Y pixel sizes are unknown, in the panels' units). The file is
+        always written (header only without points, with a warning), never
+        overwrites an existing file (``points_1.csv``, ...), and the outcome
+        goes to ``status_msg``.
 
-        filename = os.path.expanduser(os.path.expandvars(filename))
-
+        Changed (D15, 2026-11): the CSV had only ``z,y,x``, overwrote the
+        file, and nothing was written without points, so a file with
+        deleted points stayed the latest.
+        """
+        filename = None
         try:
+            filename = _unique_path(self.save_csv_filename, "points.csv")
+            suffix = 'um' if self._pixel_sizes_given else 'px'
+            steps = (self.sz, self.sy, self.sx)
             with open(filename, 'w') as f:
-                f.write("z,y,x\n")
+                f.write(f"z,y,x,z_{suffix},y_{suffix},x_{suffix}\n")
                 for p in self.points:
-                    f.write(f"{p[0]},{p[1]},{p[2]}\n")
-            _log.info("Saved %d points to %s", len(self.points), filename)
+                    phys = [float(i) * float(s) for i, s in zip(p, steps)]
+                    f.write(f"{p[0]},{p[1]},{p[2]},{phys[0]!r},{phys[1]!r},{phys[2]!r}\n")
         except Exception as e:
-            warnings.warn(f"Error saving CSV {filename}: {e}", UserWarning, stacklevel=2)
+            name = filename or self.save_csv_filename
+            warnings.warn(f"Error saving CSV {name}: {e}", UserWarning, stacklevel=2)
+            self.status_msg = f"error: could not save {name}: {e}"
+            return
+        if not self.points:
+            warnings.warn(f"No points to save: wrote a CSV with only the header to {filename}.",
+                          UserWarning, stacklevel=2)
+        _log.info("Saved %d points to %s", len(self.points), filename)
+        self.status_msg = f"saved {len(self.points)} points to {filename}"
 
 
     def _on_points_changed(self, change):
@@ -3414,6 +3541,15 @@ class TNIAScatterWidget(TNIAWidgetBase):
     Changed (D12, 2026-11): unknown keyword arguments raise TypeError and
     trait kwargs are applied; ``figsize=None`` is an automatic size from the
     physical extents in an 8-inch box (it was 10 x 10 inches).
+
+    Changed (D14 / R3-09 / R2-23 / R3-04, 2026-11): in points mode the
+    per-channel opacity multiplies ``alpha`` (0 hides the channel) and gamma
+    applies to a single continuous channel (both were ignored); categorical
+    channels (one colour per channel, points mode) expose only opacity in
+    the GUI (``channel_controls``) and 'ids' has no histogram of ID values;
+    a cleared vmin / vmax box means ``vmin_auto`` / ``vmax_auto`` (0 and the
+    data maximum), not the data minimum or the panel range. See also
+    `TNIASliceWidget` (display_dpi, exports, synced traits).
     """
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
@@ -3606,8 +3742,16 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
         self.vmin_list = _resolve_vmin(vmin, self.C)
         self.vmax_list = _resolve_vmax(vmax, self.C, self.mode, self.cont_single, self.cont_multi)
+        # A cleared box ("") restores these defaults (R3-04): it used to mean
+        # the data minimum / maximum in points mode and the panel range in
+        # density mode.
+        self.vmin_auto = _resolve_vmin(None, self.C)
+        self.vmax_auto = _resolve_vmax(None, self.C, self.mode, self.cont_single, self.cont_multi)
         self.gamma_list = per_channel(gamma, self.C, 'gamma', 1.0)
         self.opacity_list = per_channel(opacity, self.C, 'opacity', 1.0)
+        # Categorical points (one colour per channel) only have an opacity (R3-09)
+        categorical = self.mode in ('single', 'ids', 'idx_lists')
+        self.channel_controls = (['opacity' if categorical and render != 'density' else 'all'] * self.C)
 
         if channel_labels is not None:
             self.channel_names = _to_list(channel_labels, self.C, "Channel")
@@ -3615,8 +3759,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
             self.channel_names = ([str(v) for v in self.category_labels] if self.mode == 'ids'
                                   else [f"Channel {i}" for i in range(self.C)])
         self.channel_dtypes = ["float"] * self.C
-        GUI_CHANNEL_COLORS = [get_gui_channel_color(matplotlib.colors.to_hex(c)) for c in self.colors_rgb]
-        self.channel_colors = GUI_CHANNEL_COLORS
+        # The slice viewer's GUI colour rule (R3-10)
+        self.channel_colors = [_gui_channel_color(c, self._blend) for c in self._label_colors()]
 
         z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
         z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
@@ -3631,16 +3775,14 @@ class TNIAScatterWidget(TNIAWidgetBase):
             c = pos / step - lo if pos is not None else int((hi - lo) / 2)
             self._init_slab(axis, c, h)
 
-        # Compute histograms
+        self._set_range_display((self.zmin, self.ymin, self.xmin))
+
+        # Compute histograms. Categorical channels have no intensities: no
+        # histogram (Changed, R3-09: 'ids' used to show a histogram of the
+        # ID values in channel 0's row).
         hists = []
-        if self.mode == 'single' or self.mode == 'ids' or self.mode == 'idx_lists':
-            # For scatter with a single set of points and uniform color, the distribution is just counts (not really intensities).
-            # We don't have multiple intensity channels here. We'll leave it empty.
-            # If ids, we just have 1 channel (the IDs).
-            if self.mode == 'ids':
-                hists.append(compute_histogram(self.ch_ids))
-            else:
-                hists.append({'counts': [], 'bin_edges': []}) # No intensities to map
+        if self.mode in ('single', 'ids', 'idx_lists'):
+            pass
         elif self.mode == 'cont_single':
             hists.append(compute_histogram(self.cont_single))
         elif self.mode == 'cont_multi':
@@ -3716,8 +3858,9 @@ class TNIAScatterWidget(TNIAWidgetBase):
         return {'x': int(np.floor((u - ox) / self.sx)), 'z': int(np.floor((v - oz) / self.sz))}
 
     def _render(self):
-        vmin_resolved = [None if v == "" else float(v) for v in self.vmin_list]
-        vmax_resolved = [None if v == "" else float(v) for v in self.vmax_list]
+        # A cleared box ("") is the channel's automatic value (R3-04)
+        vmin_resolved = [self.vmin_auto[i] if v == "" else float(v) for i, v in enumerate(self.vmin_list)]
+        vmax_resolved = [self.vmax_auto[i] if v == "" else float(v) for i, v in enumerate(self.vmax_list)]
         gamma_resolved = [float(g) for g in self.gamma_list]
         opacity_resolved = [float(o) for o in self.opacity_list]
 
@@ -3986,7 +4129,12 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 for spine in ax.spines.values():
                     spine.set_visible(False)
 
-            def _scatter_planes(Xi, Yi, Zi, **kw):
+            def _scatter_planes(Xi, Yi, Zi, opacity=1.0, **kw):
+                # Per-channel opacity multiplies the marker alpha; 0 hides
+                # the channel, as in the image viewers (R3-09 / R2-23).
+                alpha = self.alpha * float(opacity)
+                if alpha <= 0:
+                    return
                 mZ, mY, mX = _slab_masks(Xi, Yi, Zi)
 
                 def _sub(m):
@@ -3994,13 +4142,13 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
                 if mZ.any():
                     u, v = geoms['xy'].forward(Xi[mZ] * sx, Yi[mZ] * sy)
-                    axXY.scatter(u, v, s=self.point_size, alpha=self.alpha, linewidths=0, **_sub(mZ))
+                    axXY.scatter(u, v, s=self.point_size, alpha=alpha, linewidths=0, **_sub(mZ))
                 if mY.any():
                     u, v = geoms['xz'].forward(Xi[mY] * sx, Zi[mY] * sz)
-                    axXZ.scatter(u, v, s=self.point_size, alpha=self.alpha, linewidths=0, **_sub(mY))
+                    axXZ.scatter(u, v, s=self.point_size, alpha=alpha, linewidths=0, **_sub(mY))
                 if mX.any():
                     u, v = geoms['zy'].forward(Zi[mX] * sz, Yi[mX] * sy)
-                    axZY.scatter(u, v, s=self.point_size, alpha=self.alpha, linewidths=0, **_sub(mX))
+                    axZY.scatter(u, v, s=self.point_size, alpha=alpha, linewidths=0, **_sub(mX))
 
             if self.mode == 'cont_single':
                 vals = self.cont_single
@@ -4012,18 +4160,25 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 else:
                     cmap = black_to(resolve_color(c_use))
 
-                vmin_c = np.nanmin(vals) if vmin_resolved[0] is None else vmin_resolved[0]
-                vmax_c = np.nanmax(vals) if vmax_resolved[0] is None else vmax_resolved[0]
+                vmin_c, vmax_c = vmin_resolved[0], vmax_resolved[0]
                 if vmin_c > vmax_c:
                     # Normalize raises for vmin > vmax (same rule as the slice viewer)
                     vmax_c = vmin_c + 1.0
                     self._warn_inverted_ranges([0])
-                norm = matplotlib.colors.Normalize(vmin=vmin_c, vmax=vmax_c)
-                _scatter_planes(self.X_arr, self.Y_arr, self.Z_arr, c=vals, cmap=cmap, norm=norm)
+                # gamma after the linear window, as in the image viewers
+                # (Changed, R2-23: points mode ignored gamma)
+                g = gamma_resolved[0]
+                norm = (matplotlib.colors.Normalize(vmin=vmin_c, vmax=vmax_c) if g == 1.0
+                        else PowerNorm(gamma=g, vmin=vmin_c, vmax=vmax_c, clip=True))
+                _scatter_planes(self.X_arr, self.Y_arr, self.Z_arr, opacity=opacity_resolved[0],
+                                c=vals, cmap=cmap, norm=norm)
 
             elif self.mode == 'cont_multi':
-                cols = blend_colors(self.cont_multi, self.colors_use, vmin=vmin_resolved, vmax=vmax_resolved, gamma=gamma_resolved, soft_clip=True, blending=self._blend)
-                _scatter_planes(self.X_arr, self.Y_arr, self.Z_arr, c=cols)
+                if any(o > 0 for o in opacity_resolved):
+                    cols = blend_colors(self.cont_multi, self.colors_use, vmin=vmin_resolved, vmax=vmax_resolved,
+                                        gamma=gamma_resolved, soft_clip=True, blending=self._blend,
+                                        opacity=opacity_resolved)
+                    _scatter_planes(self.X_arr, self.Y_arr, self.Z_arr, c=cols)
 
             else:
                 if self.mode == 'single':
@@ -4036,7 +4191,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
                 for c, idxs in enumerate(idx_lists_local):
                     if idxs.size == 0: continue
                     col = [self.colors_rgb[c % len(self.colors_rgb)]]
-                    _scatter_planes(self.X_arr[idxs], self.Y_arr[idxs], self.Z_arr[idxs], c=col)
+                    _scatter_planes(self.X_arr[idxs], self.Y_arr[idxs], self.Z_arr[idxs],
+                                    opacity=opacity_resolved[c] if c < len(opacity_resolved) else 1.0, c=col)
 
             # Axis limits: the rotated data box, centred on the rotation centre
             axXY.set_xlim([cx - w_x_xy / 2, cx + w_x_xy / 2])
@@ -4291,17 +4447,37 @@ blending : str, optional
 show_crosshair : bool
     Draw the slab boundaries on the panels.
 sync_on_hover : bool
-    Enables hover sync: pressing 'C' while the pointer is over a panel
-    moves the other slabs to the voxel under it (keeping their widths).
+    Enables hover sync. It is not continuous: pressing 'C' while the
+    pointer is over a panel moves the other slabs to the voxel under it
+    (keeping their widths). The key is ignored with Ctrl / Cmd / Alt held
+    and while typing in a text box (Changed, D17 / R3-02: it used to fire on
+    Ctrl+C and while typing anywhere on the page).
+display_dpi : float
+    Resolution of the on-screen image (default 100 dots per inch), whatever
+    rcParams['figure.dpi'] says; the image shrinks to the available width
+    and the controls wrap below it. Exports use 300 dpi. New (D14, 2026-11):
+    the image used to follow rcParams['figure.dpi'].
 scale_bar_show : bool
     Draw the scale bar (also a GUI checkbox).
 scale_bar_fontsize_pt : float, optional
     Scale-bar label size in points (None = auto, as the channel labels; 0
     hides the label but keeps the bar). Also a GUI box (empty = auto).
 
-Exports: the SVG / PNG buttons save the figure; "kwargs" copies the
-current view as keyword arguments (physical slab centre / half-thickness,
-display ranges) that rebuild the same view.
+Exports: the save button writes the figure to the file name in the box,
+in the format of its extension (.svg with editable text, .pdf, .png; none
+adds .svg), at 300 dpi; an existing file is never overwritten (a numbered
+suffix is added: ``name_1.svg``) and the outcome (absolute path or error)
+is shown in the widget's status line (``status_msg``). The PNG button
+copies the figure to the clipboard; "kwargs" copies the current view as
+keyword arguments (physical slab centre / half-thickness, display ranges)
+that rebuild the same view. Changed (D15, 2026-11): saving always wrote
+SVG, overwrote the file and reported with print().
+
+GUI: dark theme; range boxes show physical positions with their unit
+(index x pixel size, plus the data minimum for the scatter viewer;
+indices in 'px' when uncalibrated); a cleared vmin / vmax box shows and
+uses the automatic value (``vmin_auto`` / ``vmax_auto``). Sliders take
+Arrow / PageUp / PageDown keys once focused.
 
 Changed (D12, 2026-11): factories and classes share one argument
 preparation (`_prepare_viewer_args`) and one automatic figsize rule; the
@@ -4322,7 +4498,7 @@ def show_zyx_max_slice_interactive(
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
     blending=None, projection=None, attenuation=0.05, bit_depth=None,
-    channel_axis=None,
+    channel_axis=None, display_dpi=100,
 ):
     """
     Interactive ortho-slab viewer of a 3D image (anywidget): XY, XZ and ZY
@@ -4368,6 +4544,7 @@ def show_zyx_max_slice_interactive(
         slabs_position=a['slabs_position'], slabs_thickness=a['slabs_thickness'], rotate_view=rotate_view,
         channel_labels=a['channel_labels'], channel_label_fontsize_pt=channel_label_fontsize_pt,
         blending=blending, projection=projection, attenuation=attenuation, bit_depth=bit_depth,
+        display_dpi=display_dpi,
     )
 
 
@@ -4387,7 +4564,7 @@ def show_zyx_max_slice_interactive_point_annotator(
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
     blending=None, projection=None, attenuation=0.05, bit_depth=None,
-    channel_axis=None,
+    channel_axis=None, display_dpi=100,
 ):
     """
     Interactive ortho-slab viewer with point annotation (anywidget).
@@ -4424,6 +4601,7 @@ def show_zyx_max_slice_interactive_point_annotator(
         slabs_position=a['slabs_position'], slabs_thickness=a['slabs_thickness'], rotate_view=rotate_view,
         channel_labels=a['channel_labels'], channel_label_fontsize_pt=channel_label_fontsize_pt,
         blending=blending, projection=projection, attenuation=attenuation, bit_depth=bit_depth,
+        display_dpi=display_dpi,
     )
 
 
@@ -4443,7 +4621,7 @@ def show_zyx_max_scatter_interactive(
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-    blending=None, channel_mode='auto',
+    blending=None, channel_mode='auto', display_dpi=100,
 ):
     """
     Interactive ortho-slab viewer of a 3D point cloud (anywidget): the
@@ -4552,7 +4730,7 @@ def show_zyx_max_scatter_interactive(
         subplot_bg=subplot_bg,
         slabs_position=slabs_position, slabs_thickness=slabs_thickness,
         rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt,
-        blending=blending, channel_mode=channel_mode,
+        blending=blending, channel_mode=channel_mode, display_dpi=display_dpi,
     )
     w.X_arr_phys = w.X_arr * px
     w.Y_arr_phys = w.Y_arr * py
@@ -4567,12 +4745,16 @@ def show_zyx_max_scatter_interactive(
 
 class IsoScatterWidget(anywidget.AnyWidget):
     _esm = _ASSET_DIR.joinpath("iso_scatter.js").read_text()
+    # The dark viewer theme shared with the ortho viewers (D14)
+    _css = _ASSET_DIR.joinpath("tnia_plotting_anywidgets.css").read_text()
 
     image_data = traitlets.Unicode().tag(sync=True)
     elev = traitlets.Float(30).tag(sync=True)
     azim = traitlets.Float(-60).tag(sync=True)
     save_filename = traitlets.Unicode("iso_scatter.svg").tag(sync=True)
     save_trigger = traitlets.Int(0).tag(sync=True)
+    # Outcome of the last export, shown in the widget (D15)
+    status_msg = traitlets.Unicode("").tag(sync=True)
 
     def __init__(self, X, Y, Z, color=None, sxy=None, sz=None, figsize=(10, 8),
                  point_size=5, alpha=0.6, cmap='viridis', max_points=10000,
@@ -4746,13 +4928,8 @@ class IsoScatterWidget(anywidget.AnyWidget):
             self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
 
     def _save_svg(self, change):
-        fig = self._render()
-        if fig:
-            try:
-                fig.savefig(self.save_filename, format='svg', dpi=300, bbox_inches='tight')
-                _log.info("Saved to %s", self.save_filename)
-            except Exception as e:
-                warnings.warn(f"Error saving {self.save_filename}: {e}", UserWarning, stacklevel=2)
+        """The figure to ``save_filename`` (see `_export_figure`); outcome in ``status_msg``."""
+        _export_figure(self, self._render, self.save_filename)
 
     def _get_rotation_matrix(self, elev_deg, azim_deg):
         # Convert to radians
