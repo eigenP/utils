@@ -1358,6 +1358,105 @@ def test_color_coded_projection_single_frame():
     assert out.shape == (8, 8, 3) and np.isfinite(out).all()
 
 
+def _noise_stack_with_object(frame_with_object=0, seed=0):
+    """(5, 64, 64) camera noise N(100, 2), plus +1000 on a 16 x 16 square in one frame only."""
+    rng = np.random.default_rng(seed)
+    stack = rng.normal(100.0, 2.0, (5, 64, 64))
+    stack[frame_with_object, 8:24, 8:24] += 1000.0
+    return stack
+
+
+def test_color_coded_projection_global_normalisation_keeps_noise_frames_dark():
+    """D25 (+): frames without signal stay at the noise level of the global range.
+
+    Strategy: N(100, 2) noise in 5 frames and a bright square in frame 0 only (R5-01 repro).
+    Per-frame min-max stretched each noise frame to full scale (mean brightness of the
+    background about 0.56 here, max 0.84). With one robust range for the whole stack, a
+    noise-only pixel's brightness is (noise - lo) / (hi - lo): with lo at the stack's 0.1th
+    percentile, that is at most a few sigma_noise / (hi - lo) ~ 0.002 each.
+    Expected: background brightness <= 10 sigma / (hi - lo) (about 0.02), object stays bright.
+    """
+    stack = _noise_stack_with_object()
+    out = color_coded_projection(stack)
+    bg = out[32:, 32:].max(axis=-1)
+    obj = out[10:22, 10:22].max(axis=-1)
+    sigma_rel = 2.0 / (1100.0 - 94.0)
+    assert bg.mean() <= 10 * sigma_rel
+    assert bg.max() <= 20 * sigma_rel
+    assert obj.min() > 0.4
+
+
+def test_color_coded_projection_frames_spanning_unit_range_unchanged():
+    """D25 (-): binary frames that already span [0, 1] give the same output as per-frame scaling."""
+    rng = np.random.default_rng(1)
+    img = (rng.random((4, 16, 16)) > 0.5).astype(float)
+    np.testing.assert_allclose(color_coded_projection(img), color_coded_projection(img, normalize="frame"), atol=1e-6)
+
+
+def test_color_coded_projection_constant_frame_does_not_flood():
+    """A constant (blank or padded) frame no longer paints every pixel with its colour (R5-01)."""
+    stack = _noise_stack_with_object(frame_with_object=1)
+    stack[3] = 7.0  # constant frame below the noise floor
+    out = color_coded_projection(stack)
+    far = out[50, 50]
+    # the constant frame lowers the stack's floor to 7, so the noise (~100) sits at
+    # (100 - 7) / (1100 - 7) ~ 0.09; per-frame scaling gave plasma(3/4) ~ (0.99, 0.65, 0.25)
+    assert np.max(far) < 0.15
+    # per-frame mode maps a constant frame to 0 too (it has no contrast)
+    out_f = color_coded_projection(stack, normalize="frame")
+    plasma_frame3 = np.asarray(mpl_colormaps["plasma"](3 / 4)[:3])
+    assert not np.allclose(out_f[50, 50], plasma_frame3, atol=0.05)
+
+
+def test_color_coded_projection_vmin_vmax_pin_the_range():
+    """vmin/vmax replace the automatic range: values map to (v - vmin) / (vmax - vmin), clipped."""
+    img = np.zeros((2, 1, 3))
+    img[1, 0] = [10.0, 30.0, 50.0]
+    out = color_coded_projection(img, vmin=10.0, vmax=50.0)
+    c1 = np.asarray(mpl_colormaps["plasma"](1.0)[:3])
+    np.testing.assert_allclose(out[0, 0], 0.0, atol=1e-6)
+    np.testing.assert_allclose(out[0, 1], 0.5 * c1, atol=1e-6)
+    np.testing.assert_allclose(out[0, 2], c1, atol=1e-6)
+    # only vmax given: vmin stays automatic
+    out2 = color_coded_projection(img, vmax=100.0)
+    np.testing.assert_allclose(out2[0, 2], 0.5 * c1, atol=1e-6)
+    with pytest.raises(ValueError, match="vmin"):
+        color_coded_projection(img, vmin=5.0, vmax=5.0)
+    with pytest.raises(ValueError, match="normalize"):
+        color_coded_projection(img, normalize="frame", vmax=3.0)
+    with pytest.raises(ValueError, match="normalize"):
+        color_coded_projection(img, normalize="bogus")
+
+
+def test_color_coded_projection_argmax_keeps_colours_in_the_colormap():
+    """combine='argmax': a pixel takes the colour of its brightest frame, scaled by that intensity.
+
+    (+) bright at t=0 (0.6) and t=1 (1.0): argmax gives plasma(1) exactly, max mixes channels.
+    (-) a pixel bright in one frame only: argmax == max.
+    """
+    cmap = mpl_colormaps["plasma"]
+    img = np.zeros((2, 1, 2))
+    img[0, 0, 0] = 0.6
+    img[1, 0, 0] = 1.0
+    img[1, 0, 1] = 1.0
+    arg = color_coded_projection(img, combine="argmax")
+    mx = color_coded_projection(img, combine="max")
+    np.testing.assert_allclose(arg[0, 0], cmap(1.0)[:3], atol=1e-6)
+    assert not np.allclose(mx[0, 0], cmap(1.0)[:3], atol=1e-3)
+    np.testing.assert_allclose(arg[0, 1], mx[0, 1], atol=1e-6)
+    with pytest.raises(ValueError, match="combine"):
+        color_coded_projection(img, combine="mean")
+
+
+def test_color_coded_projection_default_cmap_is_plasma():
+    """User override of D25: the default colormap stays 'plasma' (time -> brightness, documented)."""
+    import inspect
+
+    sig = inspect.signature(color_coded_projection)
+    assert sig.parameters["color_map"].default == "plasma"
+    assert "brightness" in color_coded_projection.__doc__
+
+
 # =========================================
 # describe_image & hist_imshow
 # =========================================

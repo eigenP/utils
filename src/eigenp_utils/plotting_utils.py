@@ -719,54 +719,124 @@ def hist_imshow(*args, **kwargs):
     return describe_image(*args, **kwargs)
 
 
-def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
+def color_coded_projection(image: np.ndarray, color_map='plasma', *, normalize='global',
+                           vmin=None, vmax=None, percentiles=(0.1, 99.99), combine='max') -> np.ndarray:
     """
-    Pseudocolors each frame of a 3D image (time, y, x) using the specified color map.
+    Temporal colour code: pseudocolours each frame of a (time, y, x) stack by its
+    time index and projects the frames into one RGB image.
 
-    :param image: 3D array (time, y, x) representing the image
-    :param color_map: Name of the color map to use (default is 'plasma')
-    :return: RGB image with dimensions (y, x, channel)
+    Each frame's intensity, scaled to [0, 1], multiplies the colour
+    ``color_map(t / (T - 1))``; the frames are then combined per pixel
+    (``combine``).
+
+    Colormap trade-off: the default ``'plasma'`` (like viridis, inferno, magma)
+    is a brightness ramp, so time is also coded as brightness: an object in the
+    first frame is drawn about 13x darker (luminance 0.07) than the same object
+    in the last frame (0.91), and with inferno/magma early frames are nearly
+    invisible. For equal-brightness time coding pass a hue map such as
+    ``'turbo'`` or ``'hsv'``.
+
+    Parameters
+    ----------
+    image : array-like
+        3D array (time, y, x). NaN pixels count as 0.
+    color_map : str, default 'plasma'
+        Name of a registered Matplotlib colormap.
+    normalize : {'global', 'frame'}, default 'global'
+        ``'global'``: one display range for the whole stack (as Fiji's
+        Temporal-Color Code), the ``percentiles`` of its finite values, so
+        brightness can be compared between frames and frames holding only noise
+        stay dark. ``'frame'``: each frame is scaled to its own ``percentiles``
+        (e.g. to compensate bleaching); a frame without contrast becomes 0.
+    vmin, vmax : float, optional
+        Fix the global display range (either one or both); values are mapped
+        to ``(v - vmin) / (vmax - vmin)`` and clipped to [0, 1]. Only with
+        ``normalize='global'``.
+    percentiles : (float, float), default (0.1, 99.99)
+        Percentiles of the finite values that set the automatic range
+        (``_conventions.robust_range``, a fixed-seed sample above 10^6 values).
+        If the upper percentile does not exceed the lower one on non-constant
+        data (very sparse signal), the maximum is used, with a warning.
+    combine : {'max', 'argmax'}, default 'max'
+        ``'max'``: channel-wise maximum over frames (a pixel bright in several
+        frames gets a mixed colour that may not be in the colormap).
+        ``'argmax'``: the colour of the frame in which the pixel is brightest,
+        scaled by that intensity, so every colour is a colormap colour (ties:
+        the earliest frame).
+
+    Returns
+    -------
+    numpy.ndarray
+        float32 RGB image (y, x, 3) in [0, 1].
+
+    Changed (D25, 2026-11): normalisation is global and robust by default. It
+    used to be a min-max per frame, which stretched noise-only frames to full
+    brightness and let a constant frame flood the image; per-frame scaling is
+    now ``normalize='frame'``, with percentiles, and maps constant frames to 0.
+    Added ``vmin``/``vmax``, ``percentiles`` and ``combine``. The default
+    colormap stays ``'plasma'``.
     """
+    from ._conventions import robust_range
+
     # Ensure the input image has three dimensions (time, y, x)
     if image.ndim != 3:
         raise ValueError("Input image must have three dimensions (time, y, x)")
+    if normalize not in ("global", "frame"):
+        raise ValueError(f"normalize must be 'global' or 'frame', got {normalize!r}")
+    if combine not in ("max", "argmax"):
+        raise ValueError(f"combine must be 'max' or 'argmax', got {combine!r}")
+    if normalize == "frame" and (vmin is not None or vmax is not None):
+        raise ValueError("vmin/vmax fix the global range; they need normalize='global'")
+    pmin, pmax = percentiles
 
-    # Get the colormap
     cmap = mpl_colormaps[color_map]
-
-    # Get the time dimension
     time_dimension = image.shape[0]
 
-    # Initialize the result array (y, x, 3) for the maximum intensity projection
+    def scale(frame, lo, hi):
+        """(frame - lo) / (hi - lo) clipped to [0, 1], NaN -> 0; a degenerate range gives 0."""
+        if not hi > lo:
+            return np.zeros(frame.shape, np.float32)
+        out = (frame - np.float32(lo)) / np.float32(hi - lo)
+        return np.clip(np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+
+    if normalize == "global":
+        lo, hi = vmin, vmax
+        if lo is None or hi is None:
+            auto_lo, auto_hi = robust_range(image, pmin, pmax, stacklevel=3)
+            lo = auto_lo if lo is None else lo
+            hi = auto_hi if hi is None else hi
+        lo, hi = float(lo), float(hi)
+        if (vmin is not None or vmax is not None) and not hi > lo:
+            raise ValueError(f"vmin ({lo}) must be smaller than vmax ({hi})")
+
+    # The result (y, x, 3), updated frame by frame: no (time, y, x, 3) temporary
     rgb_image = np.zeros((image.shape[1], image.shape[2], 3), dtype=np.float32)
+    if combine == "argmax":
+        best = np.full(image.shape[1:], -1.0, dtype=np.float32)
+        best_t = np.zeros(image.shape[1:], dtype=np.intp)
 
-    # Loop through the time dimension and apply the colormap
     for t in range(time_dimension):
-        # Normalize the current frame to the range [0, 1], in float: integer
-        # differences overflow (int16 -20000..20000), and NaN pixels count as 0
-        frame = image[t].astype(np.float32)
-        frame_min = np.nanmin(frame) if np.isfinite(frame).any() else 0.0
-        frame_max = np.nanmax(frame) if np.isfinite(frame).any() else 0.0
-        if frame_max > frame_min:
-            frame_normalized = np.nan_to_num((frame - frame_min) / (frame_max - frame_min))
+        # float32: integer differences overflow (int16 -20000..20000)
+        frame = np.asarray(image[t]).astype(np.float32)
+        if normalize == "frame":
+            f_lo, f_hi = robust_range(frame, pmin, pmax, stacklevel=3)
+            frame_normalized = scale(frame, f_lo, f_hi)
         else:
-            # A constant frame has no contrast to normalise: keep its value, but
-            # clipped to [0, 1] (a frame of 1000 must not give RGB values of 1000)
-            frame_normalized = np.clip(np.nan_to_num(frame), 0.0, 1.0)
+            frame_normalized = scale(frame, lo, hi)
 
-        # Get the corresponding color value from the colormap based on the current time index
+        if combine == "argmax":
+            better = frame_normalized > best
+            best[better] = frame_normalized[better]
+            best_t[better] = t
+            continue
+
         color_value = cmap(t / max(time_dimension - 1, 1))[:3]
+        for c in range(3):  # in place, one channel at a time
+            np.maximum(rgb_image[:, :, c], frame_normalized * color_value[c], out=rgb_image[:, :, c])
 
-        # Modulate the color value by the intensity factor and update max projection
-        # Optimization: We update rgb_image iteratively to avoid allocating the large (time, y, x, 3) array.
-        # We also loop over channels to avoid allocating a full (y, x, 3) temporary for the current frame.
-        for c in range(3):  # Loop through the RGB channels
-            # Compute this channel's contribution for the current time point
-            # This allocates a temporary (y, x) array which is much smaller
-            channel_component = frame_normalized * color_value[c]
-
-            # Update the max projection in-place
-            np.maximum(rgb_image[:, :, c], channel_component, out=rgb_image[:, :, c])
+    if combine == "argmax":
+        colors = np.asarray(cmap(np.arange(time_dimension) / max(time_dimension - 1, 1)))[:, :3]
+        rgb_image[:] = np.clip(best, 0.0, 1.0)[..., None] * colors[best_t].astype(np.float32)
 
     return rgb_image
 
