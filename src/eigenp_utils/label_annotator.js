@@ -339,70 +339,97 @@ function render({ model, el: root }) {
     ctx.putImageData(out, 0, 0);
   }
 
-  function drawLabels() {
+  // Pixels around a changed pixel whose rendering can change: its 4-neighbours'
+  // edge status (1) plus the reach of the outline stamps (outlined display).
+  function redrawMargin() {
+    const px = Math.max(1, Math.round(model.get("outline_px") ?? 2));
+    const rb = Math.max(0, Math.round(model.get("outline_border_px") ?? 1));
+    return 2 + (px >> 1) + rb;
+  }
+
+  // Redraw the label layer, or only rect = [x0, y0, x1, y1] (inclusive, image
+  // pixels): painting redraws just the dirty rectangle of each stamp, so a
+  // pointer move costs the brush area, not the whole slice (R4-17).
+  function drawLabels(rect) {
     const lb = state.lab;
     if (!lb) return;
+    const d = lb.data, W = lb.x, H = lb.y;
+    let x0 = 0, y0 = 0, x1 = W - 1, y1 = H - 1;
+    if (rect) {
+      x0 = Math.max(0, rect[0]); y0 = Math.max(0, rect[1]);
+      x1 = Math.min(W - 1, rect[2]); y1 = Math.min(H - 1, rect[3]);
+      if (x1 < x0 || y1 < y0) return;
+    }
+    const rw = x1 - x0 + 1, rh = y1 - y0 + 1;
     const ctx = labCanvas.getContext("2d");
-    const out = ctx.createImageData(lb.x, lb.y);
+    const out = ctx.createImageData(rw, rh);
+    const o4 = (x, y) => 4 * ((y - y0) * rw + (x - x0));
     const a = Math.round(255 * (model.get("opacity") ?? 0.45));
     const outlined = model.get("display") === "outlined";
+    const thin = !!model.get("outline_only");
     const cache = new Map();
-    const d = lb.data, W = lb.x, H = lb.y;
     const bg = bgOn();
     const bgA = Math.max(a, 140);
     const color = (id) => { let rgb = cache.get(id); if (!rgb) { rgb = labelRgb(id); cache.set(id, rgb); } return rgb; };
-    for (let p = 0; p < d.length; p++) {
-      const id = d[p];
-      if (id === 0) continue;
-      if (id === BG_ID && bg) {
-        // annotated background: hatched neutral grey, in every display mode
-        const x = p % W, y = (p - x) / W;
-        const rgb = ((x + y) & 3) < 2 ? BG_RGB_A : BG_RGB_B;
-        out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
-        out.data[4 * p + 3] = bgA;
-        continue;
-      }
-      if (outlined) {
-        // interior: very faint fill (opacity slider / 4); the outline is added below
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const p = y * W + x;
+        const id = d[p];
+        if (id === 0) continue;
+        const o = o4(x, y);
+        if (id === BG_ID && bg) {
+          // annotated background: hatched neutral grey, in every display mode
+          const rgb = ((x + y) & 3) < 2 ? BG_RGB_A : BG_RGB_B;
+          out.data[o] = rgb[0]; out.data[o + 1] = rgb[1]; out.data[o + 2] = rgb[2];
+          out.data[o + 3] = bgA;
+          continue;
+        }
+        if (outlined) {
+          // interior: very faint fill (opacity slider / 4); the outline is added below
+          const rgb = color(id);
+          out.data[o] = rgb[0]; out.data[o + 1] = rgb[1]; out.data[o + 2] = rgb[2];
+          out.data[o + 3] = a >> 2;
+          continue;
+        }
+        if (thin && !isEdge(d, p, W, H, id)) continue;
         const rgb = color(id);
-        out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
-        out.data[4 * p + 3] = a >> 2;
-        continue;
+        out.data[o] = rgb[0]; out.data[o + 1] = rgb[1]; out.data[o + 2] = rgb[2];
+        out.data[o + 3] = thin ? 255 : a;
       }
-      if (model.get("outline_only") && !isEdge(d, p, W, H, id)) continue;
-      const rgb = color(id);
-      out.data[4 * p] = rgb[0]; out.data[4 * p + 1] = rgb[1]; out.data[4 * p + 2] = rgb[2];
-      out.data[4 * p + 3] = model.get("outline_only") ? 255 : a;
     }
     if (outlined) {
       // Each non-background label's boundary pixels are stamped with a square of
-      // half-width rc (coloured) over one of rc + rb (opaque black border band).
-      // Cost: boundary pixels x (2r+1)^2, once per redraw, entirely in JS.
+      // half-width rc (coloured) over one of rc + rb (opaque black border band),
+      // clipped to the redrawn rectangle; boundary pixels up to that reach
+      // outside it are included, so a partial redraw matches a full one.
       const px = Math.max(1, Math.round(model.get("outline_px") ?? 2));
       const rc = (px - 1) >> 1, rc2 = px >> 1; // asymmetric for even widths
       const rb = Math.max(0, Math.round(model.get("outline_border_px") ?? 1));
       const oa = Math.min(255, Math.round(255 * Math.min(1, (a / 255) / 0.45)));
+      const reach = Math.max(rc, rc2) + rb;
+      const ex0 = Math.max(0, x0 - reach), ey0 = Math.max(0, y0 - reach);
+      const ex1 = Math.min(W - 1, x1 + reach), ey1 = Math.min(H - 1, y1 + reach);
       const edge = [];
-      for (let p = 0; p < d.length; p++) {
-        const id = d[p];
+      for (let y = ey0; y <= ey1; y++) for (let x = ex0; x <= ex1; x++) {
+        const p = y * W + x, id = d[p];
         if (id === 0 || (id === BG_ID && bg) || !isEdge(d, p, W, H, id)) continue;
         edge.push(p);
       }
-      const stamp = (r0, r1, fn) => {
+      const stampEdges = (r0, r1, fn) => {
         for (const p of edge) {
           const x = p % W, y = (p - x) / W;
-          const ya = Math.max(0, y - r0), yb = Math.min(H - 1, y + r1);
-          const xa = Math.max(0, x - r0), xb = Math.min(W - 1, x + r1);
-          for (let yy = ya; yy <= yb; yy++) for (let xx = xa; xx <= xb; xx++) fn(yy * W + xx, p);
+          const ya = Math.max(y0, y - r0), yb = Math.min(y1, y + r1);
+          const xa = Math.max(x0, x - r0), xb = Math.min(x1, x + r1);
+          for (let yy = ya; yy <= yb; yy++) for (let xx = xa; xx <= xb; xx++) fn(o4(xx, yy), p);
         }
       };
-      stamp(rc + rb, rc2 + rb, (q) => { const o = 4 * q; out.data[o] = out.data[o + 1] = out.data[o + 2] = 0; out.data[o + 3] = oa; });
-      stamp(rc, rc2, (q, p) => {
-        const rgb = color(d[p]), o = 4 * q;
+      stampEdges(rc + rb, rc2 + rb, (o) => { out.data[o] = out.data[o + 1] = out.data[o + 2] = 0; out.data[o + 3] = oa; });
+      stampEdges(rc, rc2, (o, p) => {
+        const rgb = color(d[p]);
         out.data[o] = rgb[0]; out.data[o + 1] = rgb[1]; out.data[o + 2] = rgb[2]; out.data[o + 3] = oa;
       });
     }
-    ctx.putImageData(out, 0, 0);
+    ctx.putImageData(out, x0, y0);
   }
 
   function drawCursor() {
@@ -450,9 +477,17 @@ function render({ model, el: root }) {
     return [x, y];
   }
 
+  // [x0, y0, x1, y1] grown to hold another box (null: empty)
+  function grow(box, x0, y0, x1, y1) {
+    if (!box) return [x0, y0, x1, y1];
+    return [Math.min(box[0], x0), Math.min(box[1], y0), Math.max(box[2], x1), Math.max(box[3], y1)];
+  }
+  const pad = (box, m) => (box ? [box[0] - m, box[1] - m, box[2] + m, box[3] + m] : null);
+
   function stamp(cx, cy) {
     const lb = state.lab;
     const r = model.get("brush_radius") ?? 2;
+    state.dirty = grow(state.dirty, cx - r, cy - r, cx + r, cy + r);
     const tool = model.get("tool");
     const eraser = tool === "eraser";
     const active = tool === "background" ? BG_ID : (model.get("active_label") ?? 1);
@@ -493,9 +528,13 @@ function render({ model, el: root }) {
     // box from its border through non-stroke pixels; unreached pixels are inside.
     const lb = state.lab, s = state.stroke, W = lb.x, H = lb.y;
     let x0 = W, y0 = H, x1 = -1, y1 = -1;
-    for (let p = 0; p < s.length; p++) if (s[p]) {
-      const x = p % W, y = (p - x) / W;
-      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    // only the stroke's bounding box (state.strokeBox) can hold stroke pixels
+    const sb = state.strokeBox || [0, 0, W - 1, H - 1];
+    for (let y = Math.max(0, sb[1]); y <= Math.min(H - 1, sb[3]); y++) {
+      for (let x = Math.max(0, sb[0]); x <= Math.min(W - 1, sb[2]); x++) {
+        if (!s[y * W + x]) continue;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
     }
     if (x1 < 0) return;
     x0 = Math.max(0, x0 - 1); y0 = Math.max(0, y0 - 1); x1 = Math.min(W - 1, x1 + 1); y1 = Math.min(H - 1, y1 + 1);
@@ -541,11 +580,40 @@ function render({ model, el: root }) {
     return true;
   }
 
+  // Slice undo entries {z, x0, y0, w, h, data}: a full snapshot while the edit
+  // runs, then compacted to the bounding box of the pixels it changed (R4-17),
+  // so 30 entries cost a few strokes' area instead of 30 full slices.
   function pushUndo() {
-    const entry = { z: state.lab.z, data: state.lab.data.slice() };
+    const lb = state.lab;
+    const entry = { z: lb.z, x0: 0, y0: 0, w: lb.x, h: lb.y, data: lb.data.slice() };
     state.undo.push(entry);
     if (state.undo.length > UNDO_MAX) state.undo.shift();
     return entry;
+  }
+
+  // Shrink a full snapshot to the changed box; drop it when nothing changed.
+  // Returns the changed box [x0, y0, x1, y1] or null.
+  function compactUndo(entry) {
+    const lb = state.lab;
+    if (!entry || !lb || entry.w !== lb.x || entry.h !== lb.y) return null;
+    const W = lb.x, H = lb.y, old = entry.data, d = lb.data;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (let y = 0; y < H; y++) {
+      const row = y * W;
+      for (let x = 0; x < W; x++) {
+        if (old[row + x] === d[row + x]) continue;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+    if (x1 < 0) {
+      const i = state.undo.indexOf(entry);
+      if (i >= 0) state.undo.splice(i, 1);
+      return null;
+    }
+    const w = x1 - x0 + 1, h = y1 - y0 + 1, box = new Uint16Array(w * h);
+    for (let r = 0; r < h; r++) box.set(old.subarray((y0 + r) * W + x0, (y0 + r) * W + x0 + w), r * w);
+    Object.assign(entry, { x0, y0, w, h, data: box });
+    return [x0, y0, x1, y1];
   }
 
   function send() {
@@ -630,10 +698,12 @@ function render({ model, el: root }) {
         trackRequest({ op: "undo", serial: state.undo[i].track });
         return;
       }
-      if (state.undo[i].z === lb.z) {
-        lb.data.set(state.undo[i].data);
+      const u = state.undo[i];
+      if (u.z === lb.z) {
+        // restore the entry's box (row by row) and redraw only around it
+        for (let r = 0; r < u.h; r++) lb.data.set(u.data.subarray(r * u.w, (r + 1) * u.w), (u.y0 + r) * lb.x + u.x0);
         state.undo.splice(i, 1);
-        drawLabels(); send();
+        drawLabels(pad([u.x0, u.y0, u.x0 + u.w - 1, u.y0 + u.h - 1], redrawMargin())); send();
         return;
       }
     }
@@ -642,8 +712,9 @@ function render({ model, el: root }) {
 
   function clearSlice() {
     if (!state.lab) return;
-    pushUndo();
+    const entry = pushUndo();
     state.lab.data.fill(0);
+    compactUndo(entry);
     drawLabels(); send();
   }
 
@@ -689,16 +760,21 @@ function render({ model, el: root }) {
       return;
     }
     if (t === "fill") {
-      pushUndo();
-      if (floodFill(x, y)) { drawLabels(); send(); } else state.undo.pop();
+      const entry = pushUndo();
+      if (floodFill(x, y)) {
+        const box = compactUndo(entry);
+        if (box) { drawLabels(pad(box, redrawMargin())); send(); }
+      } else state.undo.splice(state.undo.indexOf(entry), 1);
       return;
     }
     state.strokeUndo = pushUndo();
     state.painting = true;
     state.stroke = new Uint8Array(state.lab.x * state.lab.y);
     state.last = [x, y];
+    state.dirty = null;
     stamp(x, y);
-    drawLabels();
+    state.strokeBox = state.dirty;
+    drawLabels(pad(state.dirty, redrawMargin()));
     viewport.setPointerCapture?.(ev.pointerId);
   });
   viewport.addEventListener("pointermove", (ev) => {
@@ -712,9 +788,12 @@ function render({ model, el: root }) {
     const [x, y] = toPixel(ev);
     state.cursor = [x, y];
     if (state.painting) {
+      state.dirty = null;
       line(state.last[0], state.last[1], x, y);
       state.last = [x, y];
-      drawLabels();
+      const b = state.dirty;
+      state.strokeBox = grow(state.strokeBox, b[0], b[1], b[2], b[3]);
+      drawLabels(pad(b, redrawMargin())); // only around this segment
     }
     drawCursor();
     const inside = x >= 0 && y >= 0 && x < state.lab.x && y < state.lab.y;
@@ -727,7 +806,11 @@ function render({ model, el: root }) {
     // only the cell brush closes and fills strokes; background strokes stay open scribbles
     if (model.get("tool") === "brush" && model.get("auto_fill")) fillEnclosed();
     state.stroke = null;
-    drawLabels();
+    // the fill stays inside the stroke's box + 1; redraw just that
+    drawLabels(pad(state.strokeBox, redrawMargin() + 1));
+    compactUndo(state.strokeUndo);
+    state.strokeUndo = null;
+    state.strokeBox = null;
     send();
   };
   viewport.addEventListener("pointerup", endStroke);
@@ -910,7 +993,11 @@ function render({ model, el: root }) {
     model.save_changes();
   } catch (e) { /* no live kernel */ }
 
+  // read-only diagnostics (tests): bytes held by the slice undo entries
+  root.__lblDebug = { undoBytes: () => state.undo.reduce((s, u) => s + (u.data ? u.data.byteLength : 0), 0) };
+
   return () => {
+    delete root.__lblDebug;
     for (const [evt, fn] of handlers) for (const e of evt.split(" ")) model.off?.(e, fn);
     // a discarded view must not stay reachable (image, labels, undo snapshots)
     window.removeEventListener("resize", refit);

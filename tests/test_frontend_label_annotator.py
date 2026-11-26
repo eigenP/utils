@@ -1034,3 +1034,116 @@ def test_plain_wheel_zooms_only_after_the_viewport_is_focused(page, serve):
     page.mouse.wheel(0, -200)
     page.wait_for_timeout(200)
     assert _zoom(page) != z1 and page.evaluate("window.scrollY") == y
+
+
+_BIG = 2048
+
+
+def _paint_latency(page, display):
+    """Median ms per pointermove over 5 strokes of 30 moves on the big slice (handler time only)."""
+    page.evaluate(f"window.mockModel.set('display', {json.dumps(display)})")
+    page.evaluate(
+        """() => {
+        window.moveMs = [];
+        let t0 = 0;
+        window.addEventListener('pointermove', () => { t0 = performance.now(); }, true);
+        window.addEventListener('pointermove', () => { window.moveMs.push(performance.now() - t0); });
+    }"""
+    )
+    box = page.evaluate("(() => { const b = document.querySelector('canvas.lbl-img').getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; })()")
+
+    def at(x, y):
+        return box[0] + (x + 0.5) * box[2] / _BIG, box[1] + (y + 0.5) * box[3] / _BIG
+
+    runs = []
+    for k in range(5):
+        page.evaluate("window.moveMs = []")
+        y = 300 + 300 * k
+        page.mouse.move(*at(200, y))
+        page.mouse.down()
+        for i in range(1, 31):
+            page.mouse.move(*at(200 + 20 * i, y + (i % 3)))
+        page.mouse.up()
+        ms = page.evaluate("window.moveMs")
+        runs.append(float(np.median(ms)))
+    return float(np.median(runs)), runs
+
+
+def test_paint_latency_on_a_2048_slice_is_bounded(page, serve):
+    """Painting redraws only the dirty rectangle, so a stroke on a 2048² slice stays interactive (R4-17).
+
+    Strategy: a 2048 x 2048 two-channel slice with 400 masks, brush radius
+    5; five strokes of 30 pointer moves each, timing the widget's
+    pointermove handling in the page, in the filled and the outlined
+    display. Then undo the last stroke and check the undo buffer size.
+    Expected outcome: the median per-move time (median over the 5 runs,
+    printed) is below a generous 10 ms in both displays (every move used to
+    rebuild the whole 4-megapixel label image: 29 ms filled and 49 ms
+    outlined per move here); the undo entry of a stroke holds only its bounding
+    box (a few kB instead of a full 8 MB slice copy) and still restores it.
+    """
+    rng = np.random.default_rng(0)
+    img = rng.random((2, _BIG, _BIG), dtype=np.float32)
+    lab = np.zeros((_BIG, _BIG), np.uint32)
+    for k in range(400):
+        y, x = rng.integers(0, _BIG - 40, 2)
+        lab[y:y + 30, x:x + 30] = k + 1
+    w = LabelAnnotator(img, axes="CYX", labels=lab, brush_radius=5)
+    w.auto_fill = False
+    _open_big = serve(w)
+    page.set_viewport_size({"width": 900, "height": 900})
+    page.goto(_open_big)
+    page.wait_for_function("window.ready === true")
+    page.wait_for_function(f"document.querySelector('canvas.lbl-img').width === {_BIG}")
+    page.wait_for_function("document.querySelector('.lbl-stage').style.transform.includes('scale(')")
+    filled, runs_f = _paint_latency(page, "filled")
+    outlined, runs_o = _paint_latency(page, "outlined")
+    print(f"\npaint latency per move on a 2048^2 slice: filled {filled:.2f} ms {runs_f}, "
+          f"outlined {outlined:.2f} ms {runs_o}")
+    assert filled < 10 and outlined < 10
+    nbytes = page.evaluate("document.getElementById('c').__lblDebug.undoBytes()")
+    assert 0 < nbytes < 2 * _BIG * _BIG // 10, f"undo holds {nbytes} bytes for 10 strokes"
+    before = _last_labels(page)[1]
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("Control+z")
+    after = _last_labels(page)[1]
+    changed = np.argwhere(before != after)
+    assert changed.size
+    assert changed[:, 0].min() >= 1490, "only the last stroke (y ~ 1500) was undone"
+
+
+@pytest.mark.parametrize("display", ["filled", "outlined"])
+def test_partial_redraw_matches_a_full_redraw(page, serve, display):
+    """The dirty-rectangle redraw paints exactly what a full redraw would (R4-17).
+
+    Strategy: masks next to each other, ``outline_px=3`` and a 2-px border
+    (the widest stamp reach); paint and erase strokes that touch, split and
+    cross them, then erase again and undo that; read the label canvas, then
+    force a full redraw (re-set ``opacity``) and read it again.
+    Expected outcome: identical RGBA everywhere (no stale outline or fill
+    pixels left at the edge of the redrawn rectangles).
+    """
+    lab = np.zeros((H, W), np.uint32)
+    lab[5:15, 5:15] = 1
+    lab[5:15, 15:25] = 2
+    lab[20:30, 8:30] = 3
+    w = _widget(labels=lab)
+    w.auto_fill = False
+    w.display = display
+    w.outline_px = 3
+    w.outline_border_px = 2
+    w.brush_radius = 1
+    _open(page, serve(w))
+    _stroke(page, [(2, 10), (35, 10)])
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("e")
+    _stroke(page, [(20, 2), (20, 35)])
+    _stroke(page, [(2, 25), (35, 25)])
+    page.keyboard.press("Control+z")
+    read = """() => { const c = document.querySelector('canvas.lbl-lab');
+        return Array.from(c.getContext('2d').getImageData(0, 0, c.width, c.height).data); }"""
+    partial = np.asarray(page.evaluate(read))
+    page.evaluate("window.mockModel.set('opacity', window.mockModel.get('opacity'))")
+    full = np.asarray(page.evaluate(read))
+    assert (full.reshape(H, W, 4)[..., 3] > 0).any()
+    np.testing.assert_array_equal(partial, full)
