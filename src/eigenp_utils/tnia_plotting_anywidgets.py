@@ -2488,6 +2488,16 @@ class TNIASliceWidget(TNIAWidgetBase):
     values select even widths (centre 11.5, half 1.5 voxels -> [10, 13]), and
     copy-kwargs, hover sync and the annotator use the drawn range; the
     (x_s, x_t) form used to drop one voxel of an even width.
+
+    Changed (D12, 2026-11): ``figsize=None`` is an automatic size that fits
+    the physical extents (rotation included) in an 8-inch box (it was
+    10 x 10 inches); unknown keyword arguments raise TypeError (they were
+    ignored) and widget trait kwargs are applied; ``im`` may also be an
+    xarray DataArray, a tuple of channels or an ndarray with an explicit
+    ``channel_axis`` (a 4D ndarray without it raises ValueError); the
+    automatic label and scale-bar font size is 3% of the figure width,
+    clipped to 8-24 pt. Changed (D08): ``colors=`` is accepted with a
+    FutureWarning (use ``colormap=``).
     """
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
@@ -3034,8 +3044,13 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
         With ``snap_depth`` the visible image channels (opacity > 0, the
         annotation channel excluded), each normalised by its display range,
-        are summed along the ray inside the drawn slab; the argmax ('mip',
-        'attenuated_mip') or argmin ('minip') is returned. A flat profile, the
+        are summed along the ray inside the drawn slab; the argmax ('mip') or
+        argmin ('minip') is returned. For 'attenuated_mip' each channel's
+        profile is first scaled exactly as the projection scales it
+        (``v * exp(-attenuation * (cumsum(v) - 1))`` on the clipped
+        normalised samples, rays entering at the slab start), so the voxel
+        that wins the display wins the snap. NaN voxels are ignored, as the
+        projections ignore them. A flat profile (all-NaN included), the
         'average' projection or ``snap_depth=False`` give the slab centre.
         """
         centre = getattr(self, f'{axis}_s')
@@ -3046,6 +3061,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             return centre
         sl = {a: idx.get(a) for a in 'xyz'}
         sl[axis] = slice(lo, hi + 1)
+        minip = self.projection == 'minip'
         profile = None
         n_img = self.num_channels - 1  # the last channel holds the annotations
         for i in range(n_img):
@@ -3054,11 +3070,22 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
             vmin = self._auto_vmin[i] if self.vmin_list[i] == "" else float(self.vmin_list[i])
             vmax = self._auto_vmax[i] if self.vmax_list[i] == "" else float(self.vmax_list[i])
             ray = np.asarray(self.im_orig[i][sl['z'], sl['y'], sl['x']], dtype=np.float64)
-            ray = np.nan_to_num((ray - vmin) / max(vmax - vmin, 1e-12), nan=0.0, posinf=0.0, neginf=0.0)
+            ray = (ray - vmin) / max(vmax - vmin, 1e-12)
+            if self.projection == 'attenuated_mip':
+                v = np.clip(np.nan_to_num(ray, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+                ray = v * np.exp(-float(self.attenuation) * (np.cumsum(v) - 1.0))
+            else:
+                # NaN never wins (the projections skip it); infinities are
+                # bounded so that summing channels stays finite.
+                ray = np.clip(ray, -1e12, 1e12)
+                ray[np.isnan(ray)] = 1e15 if minip else -1e15
             profile = ray if profile is None else profile + ray
-        if profile is None or profile.size == 0 or np.all(profile == profile[0]):
+        if profile is None or profile.size == 0:
             return centre
-        k = np.argmin(profile) if self.projection == 'minip' else np.argmax(profile)
+        shown = np.abs(profile) < 1e14  # voxels with no NaN in any visible channel
+        if not shown.any() or np.all(profile[shown] == profile[shown][0]):
+            return centre
+        k = np.argmin(profile) if minip else np.argmax(profile)
         return lo + int(k)
 
     # Delete radius in rendered (PNG) pixels (D10): fixed on screen, whatever
@@ -3215,6 +3242,11 @@ def _classify_scatter_channels(channels, n, channel_mode='auto'):
         return 'single', None
     hint = "pass channel_mode='values', 'categories' or 'index_lists'"
     if isinstance(channels, (list, tuple)):
+        if len(channels) == 0:
+            # No channel at all: zero index lists (as before D13), not an ambiguity
+            if channel_mode not in ('auto', 'index_lists'):
+                raise ValueError(f"channels is an empty list; channel_mode={channel_mode!r} needs data")
+            return 'idx_lists', []
         arrs = [np.asarray(a).reshape(-1) for a in channels]
         per_point = all(len(a) == n for a in arrs)
         mode = channel_mode
@@ -3335,6 +3367,29 @@ def _finite_points(X, Y, Z, channels=None):
 
 
 class TNIAScatterWidget(TNIAWidgetBase):
+    """
+    Interactive ortho-slab viewer of 3D points (see
+    `show_zyx_max_scatter_interactive`, whose docstring lists every
+    parameter). ``X_arr``, ``Y_arr``, ``Z_arr`` are coordinates in data
+    units; ``pixel_sizes`` (Z, Y, X) converts them to µm.
+
+    Changed (D10, 2026-11): ``slabs_position`` / ``slabs_thickness`` are
+    physical (data units x pixel size), like the image viewer: the slab
+    index is ``physical / pixel size - data minimum``; copy-kwargs emits the
+    same physical values. The legacy ``x_s`` ... ``z_t`` kwargs (FutureWarning,
+    D08) are now applied; they used to be ignored by the class.
+
+    Changed (D13, 2026-11): new ``channel_mode='auto'|'values'|'categories'|
+    'index_lists'``. In 'auto', ambiguous integer channels raise ValueError
+    (one integer array with more than 64 distinct values, or equal-length
+    integer lists that are also valid index lists); categories go through
+    ``np.unique`` (negative and sparse labels kept, channels named after the
+    labels, see ``category_labels``).
+
+    Changed (D12, 2026-11): unknown keyword arguments raise TypeError and
+    trait kwargs are applied; ``figsize=None`` is an automatic size from the
+    physical extents in an 8-inch box (it was 10 x 10 inches).
+    """
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, subplot_bg=None, slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
@@ -4504,7 +4559,12 @@ class IsoScatterWidget(anywidget.AnyWidget):
         categories (they were a continuous gradient); ``sxy``/``sz`` are
         deprecated (FutureWarning; use ``pixel_sizes``) and now also apply to
         empty input; ``figsize`` defaults to (10, 8) like ``show_iso_scatter``
-        (it was (12, 10)).
+        (it was (12, 10)). Integer colours with more than 64 distinct values
+        stay continuous, with a UserWarning. Subsampling to ``max_points``
+        emits a UserWarning (it was silent). ``channel_labels`` (stored but
+        unused before) names the legend entries: a dict ``{label: name}`` or
+        one name per category in sorted label order; for continuous colours
+        one string, the colorbar label.
         """
         super().__init__()
         if sxy is not None or sz is not None:
@@ -4551,6 +4611,7 @@ class IsoScatterWidget(anywidget.AnyWidget):
              self.alpha = alpha
              self.cmap = cmap
              self.title = title
+             self.legend_names = None
              # Initialize rendering observers even if empty
              self.observe(self._render_wrapper, names=['elev', 'azim'])
              self.observe(self._save_svg, names='save_trigger')
@@ -4559,6 +4620,10 @@ class IsoScatterWidget(anywidget.AnyWidget):
 
         # Subsample if needed
         if len(self.X_orig) > max_points:
+            # Subsampling changes what is drawn: say so (D16)
+            warnings.warn(f"IsoScatter: showing a random subset of {max_points} of {len(self.X_orig)} points "
+                          f"(max_points={max_points}); raise max_points to show more.",
+                          UserWarning, stacklevel=2)
             # Local generator: reproducible, and the caller's global stream is untouched
             idx = np.random.default_rng(seed).choice(len(self.X_orig), max_points, replace=False)
             self.X_orig = self.X_orig[idx]
@@ -4596,7 +4661,14 @@ class IsoScatterWidget(anywidget.AnyWidget):
         # Analyze color types (after subsampling)
         if self.color is not None:
             # Floats are continuous; integer labels (cluster ids, -1 noise),
-            # bools and strings are categories (D16)
+            # bools and strings are categories (D16), integers up to
+            # _MAX_AUTO_CATEGORIES distinct values like the ortho scatter.
+            n_unique = len(np.unique(self.color)) if self.color.dtype.kind in 'iub' else 0
+            if n_unique > _MAX_AUTO_CATEGORIES:
+                 warnings.warn(f"IsoScatter: color has {n_unique} distinct integer values (more than "
+                               f"{_MAX_AUTO_CATEGORIES}); drawing it as continuous values. Pass float values "
+                               f"to silence this.", UserWarning, stacklevel=2)
+                 self.color = self.color.astype(float)
             if np.issubdtype(self.color.dtype, np.floating):
                  self.is_continuous = True
             else:
@@ -4611,12 +4683,33 @@ class IsoScatterWidget(anywidget.AnyWidget):
                  base_cmap = matplotlib.colormaps['tab20' if n_cats > 10 else 'tab10']
                  self.cat_color_map = {cat: base_cmap(i % base_cmap.N) for i, cat in enumerate(self.unique_cats)}
                  self.c_mapped = [self.cat_color_map[c] for c in self.color]
+        self.legend_names = self._legend_names(channel_labels)
 
         self.observe(self._render_wrapper, names=['elev', 'azim'])
         self.observe(self._save_svg, names='save_trigger')
 
         # Initial render
         self._render_wrapper(None)
+
+    def _legend_names(self, channel_labels):
+        """Legend entry names per category, or the colorbar label (``channel_labels``, D16)."""
+        if self.is_continuous:
+            if channel_labels is None:
+                return 'Value'
+            if not isinstance(channel_labels, str):
+                raise ValueError("channel_labels for continuous colours must be one string (the colorbar label)")
+            return channel_labels
+        if not self.is_categorical:
+            return None
+        cats = list(self.unique_cats)
+        if channel_labels is None:
+            return {cat: str(cat) for cat in cats}
+        if isinstance(channel_labels, dict):
+            return {cat: str(channel_labels.get(cat, cat)) for cat in cats}
+        if isinstance(channel_labels, str) or len(channel_labels) != len(cats):
+            raise ValueError(f"channel_labels must be a dict {{label: name}} or a sequence of {len(cats)} names "
+                             f"(one per category, in sorted label order {cats})")
+        return {cat: str(name) for cat, name in zip(cats, channel_labels)}
 
     def _render_wrapper(self, change):
         # The figure is a plain matplotlib Figure (never registered with
@@ -4770,12 +4863,12 @@ class IsoScatterWidget(anywidget.AnyWidget):
             # Safely add colorbar only if collection exists
             if hasattr(p3d, 'cmap'):
                  cbar = fig.colorbar(p3d, ax=ax_leg, fraction=0.8, pad=0.05, aspect=20)
-                 cbar.set_label('Value')
+                 cbar.set_label(self.legend_names)
         elif self.is_categorical:
             handles = [
                 matplotlib.lines.Line2D([0], [0], marker='o', color='w',
                                         markerfacecolor=self.cat_color_map[cat],
-                                        markersize=10, label=str(cat))
+                                        markersize=10, label=self.legend_names[cat])
                 for cat in self.unique_cats
             ]
             ax_leg.legend(handles=handles, loc='center', title="Categories", frameon=False)
@@ -4797,6 +4890,7 @@ def show_iso_scatter(
     title=None,
     pixel_sizes=None,
     seed=0,
+    channel_labels=None,
 ):
     """
     Displays an interactive isometric scatter plot widget.
@@ -4808,9 +4902,10 @@ def show_iso_scatter(
         dropped (with a warning), together with their ``color`` values.
     color : array-like or color, optional
         One value per point: floats are mapped through ``cmap`` (continuous);
-        integers, bools and strings are categories (one colour per distinct
-        label, with a legend). Or a single matplotlib colour (e.g. ``'red'``)
-        for every point.
+        integers (up to 64 distinct values), bools and strings are categories
+        (one colour per distinct label, with a legend); integers with more
+        distinct values are drawn as continuous, with a UserWarning. Or a
+        single matplotlib colour (e.g. ``'red'``) for every point.
     sxy, sz : float, deprecated
         XY and Z scaling; use ``pixel_sizes=(sz, sxy, sxy)`` (FutureWarning).
     pixel_sizes : tuple or dict, optional
@@ -4825,14 +4920,20 @@ def show_iso_scatter(
     cmap : str
         Colormap for continuous data.
     max_points : int
-        Maximum number of points to render (random subsampling applied if exceeded).
+        Maximum number of points to render (random subsampling, with a
+        UserWarning, if exceeded).
     title : str, optional
         Plot title.
     seed : int or None
         Seed of the subsampling (default 0, reproducible; None for a fresh draw).
+    channel_labels : dict, sequence or str, optional
+        Legend names of the categories: ``{label: name}`` or one name per
+        category in sorted label order. For continuous colours, one string:
+        the colorbar label (default 'Value').
 
     Changed (D16, 2026-11): integer and bool colours are categories (they
-    were drawn as a continuous gradient); ``sxy``/``sz`` are deprecated.
+    were drawn as a continuous gradient), up to 64 distinct values;
+    ``sxy``/``sz`` are deprecated; subsampling warns; new ``channel_labels``.
     """
     if sxy is not None or sz is not None:
         warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
@@ -4849,4 +4950,5 @@ def show_iso_scatter(
         title=title,
         pixel_sizes=pixel_sizes,
         seed=seed,
+        channel_labels=channel_labels,
     )
