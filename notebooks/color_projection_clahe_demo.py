@@ -125,7 +125,8 @@ def _():
 
 @app.cell
 def _(mo):
-
+    # plasma / inferno / magma code depth as brightness (early frames look dark);
+    # turbo or hsv keep the brightness of every frame equal
     colormap_dropdown = mo.ui.dropdown(
         label="Projection colormap",
         options=[
@@ -134,6 +135,8 @@ def _(mo):
             ("inferno"),
             ("magma"),
             ("cividis"),
+            ("turbo"),
+            ("hsv"),
         ],
         value="plasma",
     )

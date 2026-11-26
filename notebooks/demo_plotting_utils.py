@@ -138,8 +138,10 @@ def _(cells_path, imread):
 
 @app.cell
 def _(mo):
+    # plasma / inferno / magma code depth as brightness (early frames look dark);
+    # turbo or hsv keep the brightness of every frame equal
     cmap_dropdown = mo.ui.dropdown(
-        options=['plasma', 'viridis', 'inferno', 'magma', 'cividis'],
+        options=['plasma', 'viridis', 'inferno', 'magma', 'cividis', 'turbo', 'hsv'],
         value='plasma',
         label="Colormap for Projection"
     )

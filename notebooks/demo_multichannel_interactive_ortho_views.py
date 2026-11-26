@@ -127,7 +127,10 @@ async def _():
     # Extract channels and cast to float to prevent clipping/overflow issues in blending
     nuclei = cells[:, 1, :, :].astype(float)
     membrane = cells[:, 0, :, :].astype(float)
+    # skimage.data.cells3d: voxel size (Z, Y, X) = (0.29, 0.26, 0.26) µm
+    CELLS3D_PIXEL_SIZES = {'Z': 0.29, 'Y': 0.26, 'X': 0.26, 'unit': 'µm'}
     return (
+        CELLS3D_PIXEL_SIZES,
         membrane,
         nuclei,
         show_zyx_max_slice_interactive,
@@ -146,14 +149,13 @@ def _(mo):
 
 
 @app.cell
-def _(membrane, nuclei, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive):
     # Standard Viewer
     viewer = show_zyx_max_slice_interactive(
         [nuclei, membrane],
-        colors=['viridis', 'magma'],
-        x_t=3,
-        y_t=3,
-        z_t=nuclei.shape[0] // 2 - 1,
+        colormap=['viridis', 'magma'],
+        slabs_thickness=(nuclei.shape[0] // 2 - 1, 3, 3),  # (Z, Y, X) voxels
+        pixel_sizes=CELLS3D_PIXEL_SIZES,
         show_crosshair=True
     )
     return (viewer,)
@@ -178,29 +180,27 @@ def _(mo):
 
 
 @app.cell
-def _(membrane, nuclei, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive):
     viewer_minimum = show_zyx_max_slice_interactive(
         [nuclei, membrane],
         colormap=['Blues', 'Oranges'],
         blending='minimum',
-        x_t=3,
-        y_t=3,
-        z_t=nuclei.shape[0] // 2 - 1,
+        slabs_thickness=(nuclei.shape[0] // 2 - 1, 3, 3),  # (Z, Y, X) voxels
+        pixel_sizes=CELLS3D_PIXEL_SIZES,
     )
     viewer_minimum
     return
 
 
 @app.cell
-def _(membrane, nuclei, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive):
     viewer_attenuated = show_zyx_max_slice_interactive(
         [nuclei, membrane],
         colormap=['lime', 'magenta'],
         projection='attenuated_mip',
         attenuation=0.05,
-        x_t=20,
-        y_t=20,
-        z_t=nuclei.shape[0] // 2 - 1,
+        slabs_thickness=(nuclei.shape[0] // 2 - 1, 20, 20),  # (Z, Y, X) voxels
+        pixel_sizes=CELLS3D_PIXEL_SIZES,
     )
     viewer_attenuated
     return
@@ -217,14 +217,13 @@ def _(mo):
 
 
 @app.cell
-def _(membrane, nuclei, show_zyx_max_slice_interactive_point_annotator):
+def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive_point_annotator):
     # Annotator Viewer
     annotator = show_zyx_max_slice_interactive_point_annotator(
         [nuclei, membrane],
-        colors=['green', 'magenta'],
-        x_t=5,
-        y_t=5,
-        z_t=nuclei.shape[0] // 2 - 1,
+        colormap=['green', 'magenta'],
+        slabs_thickness=(nuclei.shape[0] // 2 - 1, 5, 5),  # (Z, Y, X) voxels
+        pixel_sizes=CELLS3D_PIXEL_SIZES,
         show_crosshair=True,
         point_size_scale=0.015  # Adjust marker size
     )

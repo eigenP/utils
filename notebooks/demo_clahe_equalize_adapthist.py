@@ -121,7 +121,11 @@ def _():
     from eigenp_utils.clahe_equalize_adapthist import clahe_u8
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
+    # skimage.data.cells3d: voxel size (Z, Y, X) = (0.29, 0.26, 0.26) µm
+    CELLS3D_PIXEL_SIZES = {'Z': 0.29, 'Y': 0.26, 'X': 0.26, 'unit': 'µm'}
+
     return (
+        CELLS3D_PIXEL_SIZES,
         clahe_u8,
         download_file_async,
         imread,
@@ -154,10 +158,10 @@ def _(cells_path, imread):
 
 
 @app.cell
-def _(cells, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
-    show_zyx_max_slice_interactive([nuclei, membrane], colormap=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colormap=['lime', 'magenta'], pixel_sizes=CELLS3D_PIXEL_SIZES)
     return
 
 
@@ -236,7 +240,7 @@ def _(
 
     # _my_clahe_ is deprecated: run here only as the timing reference
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "_my_clahe_ is deprecated", DeprecationWarning)
+        warnings.filterwarnings("ignore", "_my_clahe_ is deprecated", FutureWarning)
         _t0 = time.perf_counter()
         volume_ref = my_clahe(membrane_stack, clip_limit=clip_slider.value, kernel_size=kernel_3d)
         t_ref = time.perf_counter() - _t0
@@ -258,9 +262,11 @@ def _(clahe_backend, kernel_3d, membrane_stack, mo, t_fast, t_ref):
 
 
 @app.cell
-def _(clip_slider, membrane_stack, np, plt, volume_fast, volume_ref):
+def _(CELLS3D_PIXEL_SIZES, clip_slider, membrane_stack, np, plt, volume_fast, volume_ref):
     z_show = membrane_stack.shape[0] // 2
     y_show = membrane_stack.shape[1] // 2
+    # cells3d's Z step / XY pixel size: 0.29 / 0.26 = 1.12
+    z_aspect = CELLS3D_PIXEL_SIZES['Z'] / CELLS3D_PIXEL_SIZES['X']
     panels = [
         ("Original", membrane_stack),
         ("_my_clahe_ (deprecated)", volume_ref),
@@ -268,14 +274,14 @@ def _(clip_slider, membrane_stack, np, plt, volume_fast, volume_ref):
     ]
     fig_3d, axes_3d = plt.subplots(
         2, 3, figsize=(12, 6),
-        height_ratios=[membrane_stack.shape[1], 2 * membrane_stack.shape[0]],
+        height_ratios=[membrane_stack.shape[1], z_aspect * membrane_stack.shape[0]],
     )
     for col, (name, vol) in enumerate(panels):
         axes_3d[0, col].imshow(vol[z_show], cmap="gray")
         axes_3d[0, col].set_title(f"{name}: XY, z={z_show}")
-        # aspect=2: cells3d's Z step is about twice its XY pixel size
+        # physical aspect: one Z step is z_aspect XY pixels tall
         axes_3d[1, col].imshow(
-            np.asarray(vol[:, y_show, :], dtype=np.float32), cmap="gray", aspect=2
+            np.asarray(vol[:, y_show, :], dtype=np.float32), cmap="gray", aspect=z_aspect
         )
         axes_3d[1, col].set_title(f"XZ, y={y_show}")
     for ax in axes_3d.ravel():

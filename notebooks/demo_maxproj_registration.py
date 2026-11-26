@@ -118,9 +118,14 @@ def _():
     )
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
+    # skimage.data.cells3d: voxel size (Z, Y, X) = (0.29, 0.26, 0.26) µm
+    CELLS3D_PIXEL_SIZES = {'Z': 0.29, 'Y': 0.26, 'X': 0.26, 'unit': 'µm'}
+
     return (
+        CELLS3D_PIXEL_SIZES,
         apply_drift_correction,
         download_file_async,
+        estimate_drift,
         imread,
         np,
         plt,
@@ -150,29 +155,47 @@ def _(cells_path, imread, np, shift):
     drifted_stack = np.zeros_like(original_stack)
     true_drifts = []
 
+    rng = np.random.default_rng(0)  # seeded: the same drift on every run
     current_dx, current_dy = 0, 0
     for t in range(original_stack.shape[0]):
         # Random walk drift
         if t > 0:
-            current_dx += np.random.randint(-2, 3)
-            current_dy += np.random.randint(-2, 3)
+            current_dx += int(rng.integers(-2, 3))
+            current_dy += int(rng.integers(-2, 3))
 
         drifted_stack[t] = shift(original_stack[t], shift=(current_dy, current_dx), mode='constant')
         true_drifts.append((current_dy, current_dx))
-    return cells, drifted_stack
+    return cells, drifted_stack, original_stack, true_drifts
 
 
 @app.cell
-def _(cells, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, cells, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
     membrane = cells[:, 0, :, :]
-    show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colormap=['lime', 'magenta'], pixel_sizes=CELLS3D_PIXEL_SIZES)
     return
 
 
 @app.cell
-def _(drifted_stack, show_zyx_max_slice_interactive):
-    show_zyx_max_slice_interactive(drifted_stack)
+def _(CELLS3D_PIXEL_SIZES, drifted_stack, show_zyx_max_slice_interactive):
+    # Z is used as time here: draw one frame as thick as one XY pixel
+    show_zyx_max_slice_interactive(drifted_stack, pixel_sizes={**CELLS3D_PIXEL_SIZES, 'Z': 0.26})
+    return
+
+
+@app.cell
+def _(drifted_stack, estimate_drift, mo, original_stack, true_drifts):
+    # One pair of frames: the shift that registers the drifted last frame onto its
+    # undrifted original, in array-axis order (dy, dx) -- the order
+    # apply_subpixel_drift_correction takes. (Consecutive frames here are different
+    # Z planes, so their content differs; the pair below differs only by the drift.)
+    _t = drifted_stack.shape[0] - 1
+    last_shift = estimate_drift(original_stack[_t], drifted_stack[_t], order='zyx')
+    _true = tuple(-v for v in true_drifts[_t])
+    mo.md(
+        f"`estimate_drift(original[{_t}], drifted[{_t}], order='zyx')` = "
+        f"({last_shift[0]:.2f}, {last_shift[1]:.2f}); true correction: {_true}"
+    )
     return
 
 
@@ -189,8 +212,9 @@ def _(drift_table, mo):
 
 
 @app.cell
-def _(corrected_stack, show_zyx_max_slice_interactive):
-    show_zyx_max_slice_interactive(corrected_stack)
+def _(CELLS3D_PIXEL_SIZES, corrected_stack, show_zyx_max_slice_interactive):
+    # Z is used as time here: draw one frame as thick as one XY pixel
+    show_zyx_max_slice_interactive(corrected_stack, pixel_sizes={**CELLS3D_PIXEL_SIZES, 'Z': 0.26})
     return
 
 
