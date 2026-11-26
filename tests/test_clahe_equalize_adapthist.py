@@ -1,4 +1,6 @@
 """Tests for ``eigenp_utils.clahe_equalize_adapthist`` (``clahe_u8`` and deprecated ``_my_clahe_``)."""
+import sys
+
 import numpy as np
 import pytest
 
@@ -468,6 +470,7 @@ def test_clahe_u8_empty_input_returns_empty_uint8(backend):
     np.testing.assert_array_equal(out, clahe_u8(image, kernel_size=8, backend="numpy"))
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide")
 def test_clahe_module_runs_standalone_with_sibling_conventions(tmp_path):
     """The module keeps its PEP 723 standalone use (D09-A): copied next to
     ``_conventions.py`` and loaded by file path with ``eigenp_utils`` not
