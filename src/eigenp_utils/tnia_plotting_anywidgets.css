@@ -1,2 +1,28 @@
-
-/* No complex CSS needed as most is inline */
+/* Dark viewer theme shared by the ortho viewers (slice, annotator, scatter)
+   and IsoScatter, matching LabelAnnotator and the black image panels (D14).
+   Colours live here; geometry that the layout depends on stays inline in the
+   ESM, so the widget still lays out if a host drops this stylesheet. */
+.tnia-viewer {
+  --tnia-bg: #1e1e1e; --tnia-panel: #262626; --tnia-fg: #ddd; --tnia-muted: #aaa;
+  --tnia-border: #555; --tnia-track: #444; --tnia-accent: #2d6cdf; --tnia-warn: #ff8a80;
+  font: 12px/1.4 system-ui, sans-serif; color: var(--tnia-fg); background: var(--tnia-bg);
+  padding: 6px; border-radius: 6px; max-width: 100%; box-sizing: border-box;
+}
+.tnia-viewer input, .tnia-viewer select, .tnia-viewer button { font: inherit; }
+.tnia-viewer input[type="text"], .tnia-viewer input[type="number"], .tnia-viewer select {
+  background: #333; color: var(--tnia-fg); border: 1px solid var(--tnia-border); border-radius: 3px;
+}
+.tnia-viewer input::placeholder { color: #888; }
+.tnia-btn { background: #333; color: var(--tnia-fg); border: 1px solid var(--tnia-border); border-radius: 4px;
+  padding: 4px 10px; cursor: pointer; }
+.tnia-btn:hover { background: #444; }
+.tnia-btn:focus-visible, .tnia-thumb:focus-visible { outline: 2px solid var(--tnia-accent); outline-offset: 1px; }
+.tnia-chan { border: 1px solid var(--tnia-border); background: var(--tnia-panel); border-radius: 4px; }
+.tnia-cname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tnia-sub { color: var(--tnia-muted); }
+.tnia-track { background: var(--tnia-track); }
+.tnia-hist { background: #111; }  /* no border: the drawing buffer is the laid-out width */
+.tnia-warning { color: var(--tnia-warn); }
+.tnia-status { color: var(--tnia-muted); min-height: 16px; font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere; }
+.tnia-status.tnia-error { color: var(--tnia-warn); }

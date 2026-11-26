@@ -1,20 +1,77 @@
+// Front end of the TNIA ortho viewers (TNIASliceWidget, TNIAAnnotatorWidget,
+// TNIAScatterWidget). Conventions shared with LabelAnnotator (D14, D17):
+// class-based dark theme (colours in tnia_plotting_anywidgets.css, geometry
+// inline), focus- or hover-scoped keys that never fire while typing, a status
+// line for feedback, labelled controls, keyboard-operable sliders.
 export default {
   render({ model, el }) {
-    // Styles
+    // Layout: image and controls side by side, wrapping the controls below
+    // the image when the row is too narrow; the image shrinks to fit (D14).
+    el.classList.add("tnia-viewer");
+    el.dataset.lmSuppressShortcuts = "true";  // typing in a box is not a notebook command
     el.style.display = "flex";
     el.style.flexDirection = "row";
-    el.style.gap = "10px";
-    el.style.fontFamily = "sans-serif";
+    el.style.flexWrap = "wrap";
+    el.style.alignItems = "flex-start";
+    el.style.gap = "10px 20px";
 
-    // Create Image Container
     const imgContainer = document.createElement("div");
-    imgContainer.style.flexShrink = "0"; 
-    imgContainer.style.marginRight = "20px";
+    imgContainer.style.flex = "0 1 auto";
+    imgContainer.style.minWidth = "0";
+    imgContainer.style.maxWidth = "100%";
 
     const img = document.createElement("img");
+    img.alt = "orthogonal views (XY, ZY, XZ)";
     img.style.maxWidth = "100%";
+    img.style.height = "auto";
     img.style.display = "block";
     imgContainer.appendChild(img);
+
+    const fmt = (v) => parseFloat(Number(v).toPrecision(6));
+
+    function button(text, title) {
+      const b = document.createElement("button");
+      b.className = "tnia-btn";
+      b.type = "button";
+      b.textContent = text;
+      if (title) b.title = title;
+      return b;
+    }
+
+    // Keys a slider thumb understands: +-1 step (arrows), +-big (Page keys), ends
+    function sliderKeyDelta(e, big) {
+      switch (e.key) {
+        case "ArrowRight": case "ArrowUp": return 1;
+        case "ArrowLeft": case "ArrowDown": return -1;
+        case "PageUp": return big;
+        case "PageDown": return -big;
+        case "Home": return -Infinity;
+        case "End": return Infinity;
+        default: return 0;
+      }
+    }
+
+    function makeThumb(title, ariaLabel, cursor, zIndex, size, colorVar) {
+      const thumb = document.createElement("div");
+      thumb.className = "tnia-thumb";
+      thumb.style.position = "absolute";
+      thumb.style.width = `${size}px`;
+      thumb.style.height = `${size}px`;
+      thumb.style.borderRadius = "50%";
+      thumb.style.backgroundColor = colorVar;
+      thumb.style.border = "2px solid #1e1e1e";
+      thumb.style.boxShadow = "0 0 0 1px #888";
+      thumb.style.cursor = cursor;
+      thumb.style.zIndex = zIndex;
+      thumb.style.transform = "translate(-50%, -50%)";
+      thumb.style.top = "50%";
+      thumb.title = title;
+      // Keyboard and assistive technology (R3-13)
+      thumb.tabIndex = 0;
+      thumb.setAttribute("role", "slider");
+      thumb.setAttribute("aria-label", ariaLabel);
+      return thumb;
+    }
 
     // Helper: Safely extract bounding box array [x0, y0, width, height]
     function getBbox(b) {
@@ -27,7 +84,6 @@ export default {
       return null;
     }
 
-    // New Safe Coordinate Helpers
     function getFractions(e, imgElement) {
       const rect = imgElement.getBoundingClientRect();
       const x_frac = (e.clientX - rect.left) / rect.width;
@@ -51,7 +107,17 @@ export default {
       return null;
     }
 
-    function createRangeSlider(label, startTrait, endTrait, maxTrait, scaleTrait) {
+    // How the range boxes show an index i: (i + offset) * scale, in `unit`
+    // (Python's range_display; R3-08). Without it: the old index x scale.
+    function rangeDisplay(axis, scaleTrait) {
+      const all = model.get("range_display");
+      const rd = all && all[axis];
+      if (rd) return rd;
+      const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
+      return { offset: 0, scale, unit: "", calibrated: scale !== 1.0 };
+    }
+
+    function createRangeSlider(label, axis, startTrait, endTrait, maxTrait, scaleTrait) {
       const container = document.createElement("div");
       container.style.display = "flex";
       container.style.flexDirection = "column";
@@ -63,10 +129,9 @@ export default {
       topRow.style.display = "flex";
       topRow.style.justifyContent = "space-between";
       topRow.style.alignItems = "center";
+      topRow.style.gap = "6px";
 
       const labelEl = document.createElement("label");
-      labelEl.textContent = label;
-      labelEl.style.fontSize = "12px";
       labelEl.style.fontWeight = "bold";
 
       const inputsRow = document.createElement("div");
@@ -76,17 +141,16 @@ export default {
 
       const startInput = document.createElement("input");
       startInput.type = "number";
-      startInput.style.width = "48px";
-      startInput.style.fontSize = "11px";
+      startInput.style.width = "64px";
+      startInput.setAttribute("aria-label", `${label} start`);
 
       const sep = document.createElement("span");
       sep.textContent = "-";
-      sep.style.fontSize = "11px";
 
       const endInput = document.createElement("input");
       endInput.type = "number";
-      endInput.style.width = "48px";
-      endInput.style.fontSize = "11px";
+      endInput.style.width = "64px";
+      endInput.setAttribute("aria-label", `${label} end`);
 
       inputsRow.appendChild(startInput);
       inputsRow.appendChild(sep);
@@ -105,41 +169,24 @@ export default {
       trackContainer.style.touchAction = "none";
 
       const trackBg = document.createElement("div");
+      trackBg.className = "tnia-track";
       trackBg.style.position = "absolute";
       trackBg.style.left = "0";
       trackBg.style.right = "0";
       trackBg.style.height = "6px";
-      trackBg.style.backgroundColor = "#e0e0e0";
       trackBg.style.borderRadius = "3px";
       trackBg.style.pointerEvents = "none";
 
       const rangeBar = document.createElement("div");
       rangeBar.style.position = "absolute";
       rangeBar.style.height = "6px";
-      rangeBar.style.backgroundColor = "#80b3ff";
+      rangeBar.style.backgroundColor = "#5b8def";
       rangeBar.style.borderRadius = "3px";
       rangeBar.style.pointerEvents = "none";
 
-      function createThumb(title, color, cursor, zIndex) {
-        const thumb = document.createElement("div");
-        thumb.style.position = "absolute";
-        thumb.style.width = "14px";
-        thumb.style.height = "14px";
-        thumb.style.borderRadius = "50%";
-        thumb.style.backgroundColor = color;
-        thumb.style.border = "2px solid #ffffff";
-        thumb.style.boxShadow = "0 1px 3px rgba(0,0,0,0.4)";
-        thumb.style.cursor = cursor;
-        thumb.style.zIndex = zIndex;
-        thumb.style.transform = "translate(-50%, -50%)";
-        thumb.style.top = "50%";
-        thumb.title = title;
-        return thumb;
-      }
-
-      const startThumb = createThumb("Start", "#d0d0d0", "ew-resize", "2");
-      const middleThumb = createThumb("Translate Range", "#000000", "grab", "3");
-      const endThumb = createThumb("End", "#d0d0d0", "ew-resize", "2");
+      const startThumb = makeThumb("Start", `${label} start`, "ew-resize", "2", 14, "#bbbbbb");
+      const middleThumb = makeThumb("Translate Range", `${label} centre (moves the slab)`, "grab", "3", 14, "#2d6cdf");
+      const endThumb = makeThumb("End", `${label} end`, "ew-resize", "2", 14, "#bbbbbb");
 
       trackContainer.appendChild(trackBg);
       trackContainer.appendChild(rangeBar);
@@ -162,11 +209,15 @@ export default {
         return Math.round(frac * maxVal);
       }
 
+      const show = (i, rd) => rd.calibrated ? fmt((i + rd.offset) * rd.scale) : i + rd.offset;
+      const toIndex = (v, rd) => Math.round(rd.calibrated ? v / rd.scale - rd.offset : v - rd.offset);
+
       function update() {
         const startVal = model.get(startTrait) || 0;
         const endVal = model.get(endTrait) || 0;
         const maxVal = getMax();
-        const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
+        const rd = rangeDisplay(axis, scaleTrait);
+        labelEl.textContent = rd.unit ? `${label} (${rd.unit})` : label;
 
         // Nothing to choose along a dimension of size 1: hide its row.
         container.style.display = maxVal > 0 ? "flex" : "none";
@@ -183,32 +234,78 @@ export default {
         rangeBar.style.left = `${startPct}%`;
         rangeBar.style.width = `${endPct - startPct}%`;
 
-        if (scale !== 1.0) {
-          startInput.value = parseFloat((startVal * scale).toFixed(2));
-          endInput.value = parseFloat((endVal * scale).toFixed(2));
-          startInput.step = "0.01";
-          endInput.step = "0.01";
-        } else {
-          startInput.value = startVal;
-          endInput.value = endVal;
-          startInput.step = "1";
-          endInput.step = "1";
+        // Physical values with significant digits, one voxel per step;
+        // indices with integer steps when uncalibrated (R3-08).
+        startInput.value = show(startVal, rd);
+        endInput.value = show(endVal, rd);
+        const step = rd.calibrated ? String(fmt(rd.scale)) : "1";
+        startInput.step = step;
+        endInput.step = step;
+
+        for (const [t, v] of [[startThumb, startVal], [middleThumb, midVal], [endThumb, endVal]]) {
+          t.setAttribute("aria-valuemin", "0");
+          t.setAttribute("aria-valuemax", String(maxVal));
+          t.setAttribute("aria-valuenow", String(v));
+          t.setAttribute("aria-valuetext", `${show(v, rd)}${rd.unit ? " " + rd.unit : ""}`);
         }
       }
 
       model.on(`change:${startTrait}`, update);
       model.on(`change:${endTrait}`, update);
       model.on(`change:${maxTrait}`, update);
+      model.on("change:range_display", update);
       if (scaleTrait) {
         model.on(`change:${scaleTrait}`, update);
       }
       update();
+
+      function setRange(newStart, newEnd) {
+        if (newStart !== model.get(startTrait) || newEnd !== model.get(endTrait)) {
+          model.set(startTrait, newStart);
+          model.set(endTrait, newEnd);
+          model.save_changes();
+        }
+      }
+      function setStart(v) {
+        const endVal = model.get(endTrait) || 0;
+        setRange(Math.max(0, Math.min(endVal, v)), endVal);
+      }
+      function setEnd(v) {
+        const startVal = model.get(startTrait) || 0;
+        setRange(startVal, Math.max(startVal, Math.min(getMax(), v)));
+      }
+      // Move the slab so that its centre is near `targetMid`, keeping its width
+      function translateTo(targetMid) {
+        const maxVal = getMax();
+        const startVal = model.get(startTrait) || 0;
+        const endVal = model.get(endTrait) || 0;
+        const span = endVal - startVal;
+        let newStart = Math.round(targetMid - span / 2);
+        let newEnd = newStart + span;
+        if (newStart < 0) {
+          newStart = 0;
+          newEnd = Math.min(maxVal, span);
+        } else if (newEnd > maxVal) {
+          newEnd = maxVal;
+          newStart = Math.max(0, maxVal - span);
+        }
+        setRange(newStart, newEnd);
+      }
+      function shiftBy(d) {
+        const startVal = model.get(startTrait) || 0;
+        const endVal = model.get(endTrait) || 0;
+        const span = endVal - startVal;
+        const maxVal = getMax();
+        const newStart = Math.max(0, Math.min(maxVal - span, startVal + d));
+        setRange(newStart, newStart + span);
+      }
 
       function setupDrag(thumb, onDrag, onStart, onEnd) {
         thumb.addEventListener("pointerdown", (e) => {
           e.preventDefault();
           e.stopPropagation();
           thumb.setPointerCapture(e.pointerId);
+          thumb.focus({ preventScroll: true });
           if (onStart) onStart();
 
           const handlePointerMove = (ev) => {
@@ -227,115 +324,95 @@ export default {
         });
       }
 
-      setupDrag(startThumb, (e) => {
-        const endVal = model.get(endTrait) || 0;
-        let newStart = Math.max(0, Math.min(endVal, getValFromX(e.clientX)));
-        if (newStart !== model.get(startTrait)) {
-          model.set(startTrait, newStart);
-          model.save_changes();
-        }
-      });
-
-      setupDrag(endThumb, (e) => {
-        const maxVal = getMax();
-        const startVal = model.get(startTrait) || 0;
-        let newEnd = Math.max(startVal, Math.min(maxVal, getValFromX(e.clientX)));
-        if (newEnd !== model.get(endTrait)) {
-          model.set(endTrait, newEnd);
-          model.save_changes();
-        }
-      });
-
+      setupDrag(startThumb, (e) => setStart(getValFromX(e.clientX)));
+      setupDrag(endThumb, (e) => setEnd(getValFromX(e.clientX)));
       setupDrag(
         middleThumb,
-        (e) => {
-          const maxVal = getMax();
-          const startVal = model.get(startTrait) || 0;
-          const endVal = model.get(endTrait) || 0;
-          const span = endVal - startVal;
-          const targetMid = getValFromX(e.clientX);
-          let newStart = Math.round(targetMid - span / 2);
-          let newEnd = newStart + span;
-
-          if (newStart < 0) {
-            newStart = 0;
-            newEnd = Math.min(maxVal, span);
-          } else if (newEnd > maxVal) {
-            newEnd = maxVal;
-            newStart = Math.max(0, maxVal - span);
-          }
-
-          if (newStart !== model.get(startTrait) || newEnd !== model.get(endTrait)) {
-            model.set(startTrait, newStart);
-            model.set(endTrait, newEnd);
-            model.save_changes();
-          }
-        },
+        (e) => translateTo(getValFromX(e.clientX)),
         () => { middleThumb.style.cursor = "grabbing"; },
         () => { middleThumb.style.cursor = "grab"; }
       );
 
+      // Keyboard (R3-13): the focused thumb takes arrows, Page keys, Home/End
+      const bigStep = () => Math.max(1, Math.round(getMax() / 10));
+      const keyHandler = (thumb, apply) => thumb.addEventListener("keydown", (e) => {
+        const d = sliderKeyDelta(e, bigStep());
+        if (!d || e.ctrlKey || e.metaKey || e.altKey) return;
+        e.preventDefault();
+        e.stopPropagation();
+        apply(d);
+      });
+      const clampD = (d) => (Number.isFinite(d) ? d : Math.sign(d) * (getMax() + 1));
+      keyHandler(startThumb, (d) => setStart((model.get(startTrait) || 0) + clampD(d)));
+      keyHandler(endThumb, (d) => setEnd((model.get(endTrait) || 0) + clampD(d)));
+      keyHandler(middleThumb, (d) => shiftBy(clampD(d)));
+
       startInput.addEventListener("change", () => {
-        const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
-        const endVal = model.get(endTrait) || 0;
-        let val = Math.round(parseFloat(startInput.value) / scale);
-        if (isNaN(val)) { update(); return; }
-        val = Math.max(0, Math.min(endVal, val));
-        model.set(startTrait, val);
-        model.save_changes();
+        const v = parseFloat(startInput.value);
+        if (isNaN(v)) { update(); return; }
+        setStart(toIndex(v, rangeDisplay(axis, scaleTrait)));
         update();
       });
 
       endInput.addEventListener("change", () => {
-        const scale = scaleTrait ? (model.get(scaleTrait) || 1.0) : 1.0;
-        const maxVal = getMax();
-        const startVal = model.get(startTrait) || 0;
-        let val = Math.round(parseFloat(endInput.value) / scale);
-        if (isNaN(val)) { update(); return; }
-        val = Math.max(startVal, Math.min(maxVal, val));
-        model.set(endTrait, val);
-        model.save_changes();
+        const v = parseFloat(endInput.value);
+        if (isNaN(v)) { update(); return; }
+        setEnd(toIndex(v, rangeDisplay(axis, scaleTrait)));
         update();
       });
 
       return container;
     }
 
-    const xRange = createRangeSlider("X Range", "x_start", "x_end", "x_max_pos", "sx");
-    const yRange = createRangeSlider("Y Range", "y_start", "y_end", "y_max_pos", "sy");
-    const zRange = createRangeSlider("Z Range", "z_start", "z_end", "z_max_pos", "sz");
+    const xRange = createRangeSlider("X Range", "x", "x_start", "x_end", "x_max_pos", "sx");
+    const yRange = createRangeSlider("Y Range", "y", "y_start", "y_end", "y_max_pos", "sy");
+    const zRange = createRangeSlider("Z Range", "z", "z_start", "z_end", "z_max_pos", "sz");
+
+    // Status line (D15): Python's export outcome (status_msg) and local
+    // copy feedback, announced politely to screen readers.
+    const statusLine = document.createElement("div");
+    statusLine.className = "tnia-status";
+    statusLine.setAttribute("aria-live", "polite");
+    function setStatus(msg, isError) {
+      statusLine.textContent = msg || "";
+      statusLine.classList.toggle("tnia-error", !!isError);
+    }
+    const showModelStatus = () => {
+      const msg = model.get("status_msg") || "";
+      setStatus(msg, msg.startsWith("error"));
+    };
+    model.on("change:status_msg", showModelStatus);
+    showModelStatus();
 
     const saveContainer = document.createElement("div");
     saveContainer.style.display = "flex";
-    saveContainer.style.gap = "10px";
+    saveContainer.style.flexWrap = "wrap";
+    saveContainer.style.gap = "6px 10px";
     saveContainer.style.alignItems = "center";
     saveContainer.style.marginTop = "10px";
 
-    const saveLabel = document.createElement("span");
-    saveLabel.textContent = "Filename:";
+    const saveLabel = document.createElement("label");
+    saveLabel.style.display = "flex";
+    saveLabel.style.alignItems = "center";
+    saveLabel.style.gap = "4px";
+    saveLabel.appendChild(document.createTextNode("File:"));
 
     const saveInput = document.createElement("input");
     saveInput.type = "text";
+    saveInput.style.width = "150px";
+    saveInput.style.minWidth = "0";
     saveInput.value = model.get("save_filename");
+    saveInput.title = "Format from the extension: .svg (editable text), .pdf or .png; an existing file is never overwritten";
     saveInput.addEventListener("change", () => {
       model.set("save_filename", saveInput.value);
       model.save_changes();
     });
+    saveLabel.appendChild(saveInput);
 
-    const saveBtn = document.createElement("button");
-    saveBtn.textContent = "💾 SVG";
-    saveBtn.title = "Save plot as SVG";
-    saveBtn.style.padding = "6px 12px";
-    saveBtn.style.backgroundColor = "#e0e0e0";
-    saveBtn.style.color = "#333";
-    saveBtn.style.border = "1px solid #999";
-    saveBtn.style.borderRadius = "4px";
-    saveBtn.style.cursor = "pointer";
-    saveBtn.style.fontWeight = "bold";
-    saveBtn.addEventListener("mouseover", () => { saveBtn.style.backgroundColor = "#ccc"; });
-    saveBtn.addEventListener("mouseout", () => { saveBtn.style.backgroundColor = "#e0e0e0"; });
+    const saveBtn = button("💾 Save", "Save the figure to the file (format from its extension: svg, pdf, png; never overwrites, adds _1, _2, ...)");
     saveBtn.addEventListener("click", () => {
-      let current = model.get("save_trigger");
+      setStatus("saving…");
+      let current = model.get("save_trigger") || 0;
       model.set("save_trigger", current + 1);
       model.save_changes();
     });
@@ -344,23 +421,13 @@ export default {
     // none of the GUI controls) at 300 dpi and sends it back as base64.
     // ClipboardItem is given a Promise synchronously inside the click, so the
     // write keeps the user activation while Python renders (Safari requires it).
-    const copyPngBtn = document.createElement("button");
-    copyPngBtn.textContent = "📋 PNG";
-    copyPngBtn.title = "Copy plot images to clipboard as PNG";
-    copyPngBtn.style.padding = "6px 12px";
-    copyPngBtn.style.backgroundColor = "#e0e0e0";
-    copyPngBtn.style.color = "#333";
-    copyPngBtn.style.border = "1px solid #999";
-    copyPngBtn.style.borderRadius = "4px";
-    copyPngBtn.style.cursor = "pointer";
-    copyPngBtn.style.fontWeight = "bold";
-    copyPngBtn.addEventListener("mouseover", () => { copyPngBtn.style.backgroundColor = "#ccc"; });
-    copyPngBtn.addEventListener("mouseout", () => { copyPngBtn.style.backgroundColor = "#e0e0e0"; });
+    const COPY_PNG = "📋 PNG";
+    const copyPngBtn = button(COPY_PNG, "Copy the figure to the clipboard as PNG (300 dpi)");
 
     let pendingPng = null;  // {resolve, reject, timer} while waiting on Python
     function flashCopyPng(text) {
       copyPngBtn.textContent = text;
-      setTimeout(() => { copyPngBtn.textContent = "📋 PNG"; }, 1500);
+      setTimeout(() => { copyPngBtn.textContent = COPY_PNG; }, 1500);
     }
     function base64ToPngBlob(b64) {
       const bin = atob(b64);
@@ -372,6 +439,7 @@ export default {
     copyPngBtn.addEventListener("click", () => {
       if (!navigator.clipboard || typeof ClipboardItem === "undefined") {
         console.error("Copy PNG: the Clipboard API is unavailable (needs a secure context).");
+        setStatus("error: the clipboard is unavailable here (needs a secure context)", true);
         flashCopyPng("❌");
         return;
       }
@@ -389,10 +457,11 @@ export default {
         pendingPng = { resolve, reject, timer };
       });
       navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })])
-        .then(() => flashCopyPng("✅"))
+        .then(() => { flashCopyPng("✅"); setStatus("copied the figure (PNG) to the clipboard"); })
         .catch(err => {
           if (err && (err.message === "superseded" || err.message === "disposed")) return;
           console.error("Failed to copy PNG: ", err);
+          setStatus(`error: PNG copy failed: ${err && err.message ? err.message : err}`, true);
           flashCopyPng("❌");
         });
       model.set("copy_png_trigger", (model.get("copy_png_trigger") || 0) + 1);
@@ -409,18 +478,8 @@ export default {
       else resolve(base64ToPngBlob(data));
     });
 
-    const copyParamsBtn = document.createElement("button");
-    copyParamsBtn.textContent = "📋 kwargs";
-    copyParamsBtn.title = "Copy the current view settings to the clipboard as function kwargs";
-    copyParamsBtn.style.padding = "6px 12px";
-    copyParamsBtn.style.backgroundColor = "#e0e0e0";
-    copyParamsBtn.style.color = "#333";
-    copyParamsBtn.style.border = "1px solid #999";
-    copyParamsBtn.style.borderRadius = "4px";
-    copyParamsBtn.style.cursor = "pointer";
-    copyParamsBtn.style.fontWeight = "bold";  // same look as the "💾 SVG" / "📋 PNG" buttons
-    copyParamsBtn.addEventListener("mouseover", () => { copyParamsBtn.style.backgroundColor = "#ccc"; });
-    copyParamsBtn.addEventListener("mouseout", () => { copyParamsBtn.style.backgroundColor = "#e0e0e0"; });
+    const COPY_KWARGS = "📋 kwargs";
+    const copyParamsBtn = button(COPY_KWARGS, "Copy the current view settings to the clipboard as function kwargs");
     // Same pattern as the PNG button: the clipboard write starts inside the
     // click (keeping its user activation) with a Promise that resolves when
     // Python answers. Python clears the string before each answer, so every
@@ -428,8 +487,14 @@ export default {
     let pendingKwargs = null;  // {resolve, reject, timer} while waiting on Python
     function flashCopyParams(text) {
       copyParamsBtn.textContent = text;
-      setTimeout(() => { copyParamsBtn.textContent = "📋 kwargs"; }, 1500);
+      setTimeout(() => { copyParamsBtn.textContent = COPY_KWARGS; }, 1500);
     }
+    const kwargsCopied = () => { flashCopyParams("✅"); setStatus("copied the view kwargs to the clipboard"); };
+    const kwargsFailed = (err) => {
+      console.error("Failed to copy kwargs: ", err);
+      setStatus(`error: kwargs copy failed: ${err && err.message ? err.message : err}`, true);
+      flashCopyParams("❌");
+    };
     copyParamsBtn.addEventListener("click", () => {
       if (navigator.clipboard && typeof ClipboardItem !== "undefined") {
         if (pendingKwargs) {
@@ -444,11 +509,10 @@ export default {
           pendingKwargs = { resolve, reject, timer };
         });
         navigator.clipboard.write([new ClipboardItem({ "text/plain": blobPromise })])
-          .then(() => flashCopyParams("✅"))
+          .then(kwargsCopied)
           .catch(err => {
             if (err && (err.message === "superseded" || err.message === "disposed")) return;
-            console.error("Failed to copy kwargs: ", err);
-            flashCopyParams("❌");
+            kwargsFailed(err);
           });
       }
       let current = model.get("copy_params_trigger") || 0;
@@ -469,66 +533,56 @@ export default {
       // No click waiting (ClipboardItem unavailable, or the copy was triggered
       // from Python): plain text write.
       if (navigator.clipboard) {
-        navigator.clipboard.writeText(str)
-          .then(() => flashCopyParams("✅"))
-          .catch(err => {
-            console.error("Failed to copy text: ", err);
-            flashCopyParams("❌");
-          });
+        navigator.clipboard.writeText(str).then(kwargsCopied).catch(kwargsFailed);
       }
     });
 
     saveContainer.appendChild(saveLabel);
-    saveContainer.appendChild(saveInput);
     saveContainer.appendChild(saveBtn);
     saveContainer.appendChild(copyPngBtn);
     saveContainer.appendChild(copyParamsBtn);
 
     const hasAnnotation = model.get("annotation_mode") !== undefined;
     if (hasAnnotation) {
-      const saveCsvLabel = document.createElement("span");
-      saveCsvLabel.textContent = "CSV:";
-      saveCsvLabel.style.marginLeft = "20px";
+      const saveCsvLabel = document.createElement("label");
+      saveCsvLabel.style.display = "flex";
+      saveCsvLabel.style.alignItems = "center";
+      saveCsvLabel.style.gap = "4px";
+      saveCsvLabel.appendChild(document.createTextNode("Points CSV:"));
 
       const saveCsvInput = document.createElement("input");
       saveCsvInput.type = "text";
+      saveCsvInput.style.width = "120px";
+      saveCsvInput.style.minWidth = "0";
       saveCsvInput.value = model.get("save_csv_filename") || "points.csv";
       saveCsvInput.addEventListener("change", () => {
         model.set("save_csv_filename", saveCsvInput.value);
         model.save_changes();
       });
+      saveCsvLabel.appendChild(saveCsvInput);
 
-      const saveCsvBtn = document.createElement("button");
-      saveCsvBtn.textContent = "Save Points as CSV";
-      saveCsvBtn.style.padding = "6px 12px";
-      saveCsvBtn.style.backgroundColor = "#e0e0e0";
-      saveCsvBtn.style.color = "#333";
-      saveCsvBtn.style.border = "1px solid #999";
-      saveCsvBtn.style.borderRadius = "4px";
-      saveCsvBtn.style.cursor = "pointer";
-      saveCsvBtn.style.fontWeight = "bold";
-      saveCsvBtn.addEventListener("mouseover", () => { saveCsvBtn.style.backgroundColor = "#ccc"; });
-      saveCsvBtn.addEventListener("mouseout", () => { saveCsvBtn.style.backgroundColor = "#e0e0e0"; });
+      const saveCsvBtn = button("💾 Save points", "Save the points as CSV: voxel indices and physical positions (never overwrites)");
       saveCsvBtn.addEventListener("click", () => {
-        let current = model.get("save_csv_trigger");
+        setStatus("saving…");
+        let current = model.get("save_csv_trigger") || 0;
         model.set("save_csv_trigger", current + 1);
         model.save_changes();
       });
 
       saveContainer.appendChild(saveCsvLabel);
-      saveContainer.appendChild(saveCsvInput);
       saveContainer.appendChild(saveCsvBtn);
     }
 
     el.appendChild(imgContainer);
 
     const controlsDiv = document.createElement("div");
-    controlsDiv.style.flexGrow = "1";
-    controlsDiv.style.minWidth = "300px";
+    controlsDiv.style.flex = "1 1 320px";
+    controlsDiv.style.minWidth = "min(300px, 100%)";
+    controlsDiv.style.maxWidth = "100%";
     controlsDiv.style.display = "flex";
     controlsDiv.style.flexDirection = "column";
     controlsDiv.style.gap = "10px";
-    
+
     const slidersContainer = document.createElement("div");
     slidersContainer.style.display = "flex";
     slidersContainer.style.flexDirection = "column";
@@ -542,7 +596,6 @@ export default {
     channelsContainer.style.display = "flex";
     channelsContainer.style.flexDirection = "column";
     channelsContainer.style.gap = "10px";
-    channelsContainer.style.fontSize = "12px";
     channelsContainer.style.overflowY = "auto";
     channelsContainer.style.maxHeight = "300px";
 
@@ -564,26 +617,37 @@ export default {
       const channelNames = model.get("channel_names");
       const channelDtypes = model.get("channel_dtypes");
       const channelColors = model.get("channel_colors");
+      const channelControls = model.get("channel_controls");
 
       if (!channelNames || channelNames.length === 0) return;
 
       channelNames.forEach((name, index) => {
         const dtype = (channelDtypes && channelDtypes[index]) || "unknown";
-        const color = (channelColors && channelColors[index]) || "black";
+        const color = (channelColors && channelColors[index]) || "#bbbbbb";
+        // 'opacity': vmin / vmax / gamma do nothing for this channel (R3-09)
+        const onlyOpacity = !!(channelControls && channelControls[index] === "opacity");
+        // The value a cleared vmin / vmax box stands for (R3-04)
+        const autoV = (trait) => {
+          const arr = model.get(trait === "vmin_list" ? "vmin_auto" : "vmax_auto");
+          const v = arr ? arr[index] : undefined;
+          return v === undefined || v === null ? undefined : Number(v);
+        };
 
         const chDiv = document.createElement("div");
-        chDiv.style.border = "1px solid #ccc";
+        chDiv.className = "tnia-chan";
         chDiv.style.padding = "5px";
-        chDiv.style.borderRadius = "4px";
         chDiv.style.display = "flex";
         chDiv.style.flexDirection = "row";
         chDiv.style.alignItems = "center";
         chDiv.style.gap = "8px";
 
+        // Index and channel name (full name in the tooltip; R3-10)
         const chHeader = document.createElement("strong");
-        chHeader.textContent = `${index}:`;
+        chHeader.className = "tnia-cname";
+        chHeader.textContent = `${index}: ${name}`;
+        chHeader.title = name;
         chHeader.style.color = color;
-        chHeader.style.width = "15px";
+        chHeader.style.maxWidth = "110px";
         chDiv.appendChild(chHeader);
 
         // `bound` = { trait, side }: keep this value at most ("max") or at least
@@ -596,18 +660,25 @@ export default {
           row.style.gap = "2px";
 
           const lbl = document.createElement("span");
+          lbl.className = "tnia-sub";
           lbl.textContent = label;
           lbl.style.fontSize = "11px";
 
           const inp = document.createElement("input");
           inp.type = "text";
-          inp.style.width = "35px";
+          inp.style.width = "44px";
           inp.style.fontSize = "11px";
+          inp.setAttribute("aria-label", `${label} of channel ${name}`);
 
           const updateInput = () => {
             const arr = model.get(traitName);
             if (arr && arr.length > index) {
               inp.value = arr[index];
+            }
+            if (allowEmpty) {
+              const a = autoV(traitName);
+              inp.placeholder = a === undefined ? "" : `auto ${fmt(a)}`;
+              inp.title = a === undefined ? "" : `empty = automatic (${fmt(a)})`;
             }
           };
 
@@ -657,13 +728,21 @@ export default {
         // Only unsigned and boolean data cannot go below 0 (int16 etc. can).
         const dtypeMin = (dtype.startsWith("uint") || dtype === "bool") ? 0 : undefined;
 
-        chDiv.appendChild(createNumberInput("vmin", "vmin_list", isFloatDtype, dtypeMin, dtypeMax, true,
-                                            { trait: "vmax_list", side: "max" }));
-        chDiv.appendChild(createNumberInput("vmax", "vmax_list", isFloatDtype, dtypeMin, dtypeMax, true,
-                                            { trait: "vmin_list", side: "min" }));
-        // gamma 0 maps every pixel to full intensity; keep it strictly positive.
-        chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0.05, 2.0, false));
+        if (!onlyOpacity) {
+          chDiv.appendChild(createNumberInput("vmin", "vmin_list", isFloatDtype, dtypeMin, dtypeMax, true,
+                                              { trait: "vmax_list", side: "max" }));
+          chDiv.appendChild(createNumberInput("vmax", "vmax_list", isFloatDtype, dtypeMin, dtypeMax, true,
+                                              { trait: "vmin_list", side: "min" }));
+          // gamma 0 maps every pixel to full intensity; keep it strictly
+          // positive. Python accepts any gamma > 0, so the box allows up to 10.
+          chDiv.appendChild(createNumberInput("gamma", "gamma_list", true, 0.05, 10.0, false));
+        }
         chDiv.appendChild(createNumberInput("opacity", "opacity_list", true, 0, 1, false));
+
+        if (onlyOpacity) {
+          channelsContainer.appendChild(chDiv);
+          return;
+        }
 
         // Histogram (fills the rest of the row, at least 160px) with a
         // vmin/vmax range slider underneath, styled like the X/Y/Z sliders.
@@ -672,17 +751,17 @@ export default {
         histWrap.style.flexDirection = "column";
         histWrap.style.flex = "1 1 160px";
         histWrap.style.minWidth = "160px";
-        histWrap.style.marginLeft = "10px";
 
         const histCanvas = document.createElement("canvas");
+        histCanvas.className = "tnia-hist";
         histCanvas.width = 160;
         histCanvas.height = 30;
         histCanvas.style.width = "100%";
         histCanvas.style.height = "30px";
         histCanvas.style.boxSizing = "border-box";
-        histCanvas.style.border = "1px solid #ccc";
         histCanvas.style.borderRadius = "2px";
-        histCanvas.style.backgroundColor = "#fff";
+        histCanvas.setAttribute("role", "img");
+        histCanvas.setAttribute("aria-label", `histogram of channel ${name} with the display curve`);
         histWrap.appendChild(histCanvas);
 
         const vTrack = document.createElement("div");
@@ -693,13 +772,13 @@ export default {
         vTrack.style.touchAction = "none";
 
         const vTrackBg = document.createElement("div");
+        vTrackBg.className = "tnia-track";
         vTrackBg.style.position = "absolute";
         vTrackBg.style.left = "0";
         vTrackBg.style.right = "0";
         vTrackBg.style.top = "50%";
         vTrackBg.style.transform = "translateY(-50%)";
         vTrackBg.style.height = "4px";
-        vTrackBg.style.backgroundColor = "#e0e0e0";
         vTrackBg.style.borderRadius = "2px";
         vTrackBg.style.pointerEvents = "none";
 
@@ -713,25 +792,9 @@ export default {
         vBar.style.borderRadius = "2px";
         vBar.style.pointerEvents = "none";
 
-        const makeThumb = (title, bg, cursor, zIndex) => {
-          const t = document.createElement("div");
-          t.style.position = "absolute";
-          t.style.width = "11px";
-          t.style.height = "11px";
-          t.style.borderRadius = "50%";
-          t.style.backgroundColor = bg;
-          t.style.border = "2px solid #ffffff";
-          t.style.boxShadow = "0 1px 3px rgba(0,0,0,0.4)";
-          t.style.cursor = cursor;
-          t.style.zIndex = zIndex;
-          t.style.top = "50%";
-          t.style.transform = "translate(-50%, -50%)";
-          t.title = title;
-          return t;
-        };
-        const vminThumb = makeThumb("vmin", "#d0d0d0", "ew-resize", "2");
-        const vmidThumb = makeThumb("Shift vmin and vmax", "#000000", "grab", "3");
-        const vmaxThumb = makeThumb("vmax", "#d0d0d0", "ew-resize", "2");
+        const vminThumb = makeThumb("vmin", `vmin of channel ${name}`, "ew-resize", "2", 11, "#bbbbbb");
+        const vmidThumb = makeThumb("Shift vmin and vmax", `display window of channel ${name}`, "grab", "3", 11, "#2d6cdf");
+        const vmaxThumb = makeThumb("vmax", `vmax of channel ${name}`, "ew-resize", "2", 11, "#bbbbbb");
         vTrack.appendChild(vTrackBg);
         vTrack.appendChild(vBar);
         vTrack.appendChild(vminThumb);
@@ -760,10 +823,14 @@ export default {
           const arr = model.get(trait);
           return arr ? arr[index] : undefined;
         };
+        // A cleared box ("") is the automatic value Python renders with
+        // (R3-04); the histogram edge only when Python sent none.
         const currentV = (trait, fallback) => {
           const raw = rawV(trait);
           const v = raw !== "" && raw !== null && raw !== undefined ? parseFloat(raw) : NaN;
-          return isNaN(v) ? fallback : v;
+          if (!isNaN(v)) return v;
+          const a = autoV(trait);
+          return a === undefined || isNaN(a) ? fallback : a;
         };
         const roundV = (v, lo, hi) => {
           if (isIntChannel) return Math.round(v);
@@ -796,13 +863,20 @@ export default {
           if (!r) return;
           const [lo, hi] = r;
           const pct = (v) => Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
-          const a = pct(currentV("vmin_list", lo));
-          const b = pct(currentV("vmax_list", hi));
+          const vmin = currentV("vmin_list", lo);
+          const vmax = currentV("vmax_list", hi);
+          const a = pct(vmin);
+          const b = pct(vmax);
           vminThumb.style.left = `${a}%`;
           vmaxThumb.style.left = `${b}%`;
           vmidThumb.style.left = `${(a + b) / 2}%`;
           vBar.style.left = `${Math.min(a, b)}%`;
           vBar.style.width = `${Math.abs(b - a)}%`;
+          for (const [t, v] of [[vminThumb, vmin], [vmidThumb, (vmin + vmax) / 2], [vmaxThumb, vmax]]) {
+            t.setAttribute("aria-valuemin", String(fmt(lo)));
+            t.setAttribute("aria-valuemax", String(fmt(hi)));
+            t.setAttribute("aria-valuenow", String(fmt(v)));
+          }
         };
         const dragThumb = (thumb, onMove) => {
           thumb.addEventListener("pointerdown", (e) => {
@@ -811,6 +885,7 @@ export default {
             e.preventDefault();
             e.stopPropagation();
             thumb.setPointerCapture(e.pointerId);
+            thumb.focus({ preventScroll: true });
             const start = { x: e.clientX, vmin: currentV("vmin_list", r[0]), vmax: currentV("vmax_list", r[1]) };
             const move = (ev) => onMove(ev, r[0], r[1], start);
             const up = (ev) => {
@@ -851,6 +926,30 @@ export default {
           stageV(roundV(start.vmin + d, lo, hi), roundV(start.vmax + d, lo, hi));
         });
 
+        // Keyboard (R3-13): one level (integers) or 1/100 of the range per
+        // arrow, ten of them per Page key; committed at once.
+        const vKeys = (thumb, apply) => thumb.addEventListener("keydown", (e) => {
+          const r = histRange();
+          if (!r) return;
+          const d = sliderKeyDelta(e, 10);
+          if (!d || e.ctrlKey || e.metaKey || e.altKey) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const [lo, hi] = r;
+          const unit = isIntChannel ? 1 : (hi - lo) / 100;
+          const delta = Number.isFinite(d) ? d * unit : Math.sign(d) * (hi - lo);
+          apply(delta, lo, hi, currentV("vmin_list", lo), currentV("vmax_list", hi));
+        });
+        vKeys(vminThumb, (delta, lo, hi, vmin, vmax) =>
+          commitV(roundV(Math.max(lo, Math.min(vmax, vmin + delta)), lo, hi), rawV("vmax_list")));
+        vKeys(vmaxThumb, (delta, lo, hi, vmin, vmax) =>
+          commitV(rawV("vmin_list"), roundV(Math.min(hi, Math.max(vmin, vmax + delta)), lo, hi)));
+        vKeys(vmidThumb, (delta, lo, hi, vmin, vmax) => {
+          const d = Math.max(Math.min(delta, hi - vmax), lo - vmin);
+          if (vmax - vmin > hi - lo) return;
+          commitV(roundV(vmin + d, lo, hi), roundV(vmax + d, lo, hi));
+        });
+
         const drawHistogram = () => {
           updateVSlider();
           // Match the canvas resolution to its laid-out width.
@@ -878,7 +977,7 @@ export default {
 
           if (maxCount > 0) {
             ctx.fillStyle = color;
-            ctx.globalAlpha = 0.5;
+            ctx.globalAlpha = 0.6;
             for (let i = 0; i < counts.length; i++) {
               const h = (counts[i] / maxCount) * histCanvas.height;
               const x = (i / counts.length) * histCanvas.width;
@@ -898,7 +997,7 @@ export default {
           if (isNaN(vmax)) vmax = maxData;
           if (vmax <= vmin) vmax = vmin + 1e-9;
 
-          ctx.strokeStyle = "#000000";
+          ctx.strokeStyle = "#e6e6e6";
           ctx.lineWidth = 2;
           ctx.beginPath();
 
@@ -932,6 +1031,7 @@ export default {
     updateChannelsUI();
     model.on("change:channel_names", updateChannelsUI);
     model.on("change:channel_colors", updateChannelsUI);
+    model.on("change:channel_controls", updateChannelsUI);
 
     // Registered once; each fans out to whichever rows currently exist.
     const refreshInputs = (trait) => {
@@ -947,19 +1047,21 @@ export default {
     for (const trait of ["vmin_list", "vmax_list", "gamma_list"]) {
       model.on(`change:${trait}`, () => { refreshInputs(trait); redrawHistograms(); });
     }
+    // The automatic values: box placeholders, slider and curve of cleared boxes
+    model.on("change:vmin_auto", () => { refreshInputs("vmin_list"); redrawHistograms(); });
+    model.on("change:vmax_auto", () => { refreshInputs("vmax_list"); redrawHistograms(); });
     model.on("change:opacity_list", () => refreshInputs("opacity_list"));
     model.on("change:histograms_data", redrawHistograms);
 
     const uiTogglesContainer = document.createElement("div");
     uiTogglesContainer.style.display = "flex";
-    uiTogglesContainer.style.gap = "10px";
+    uiTogglesContainer.style.gap = "6px 14px";
     uiTogglesContainer.style.alignItems = "center";
-    uiTogglesContainer.style.marginBottom = "10px";
     uiTogglesContainer.style.flexWrap = "wrap";
 
     const warningSpan = document.createElement("span");
-    warningSpan.style.color = "red";
-    warningSpan.style.fontSize = "14px";
+    warningSpan.className = "tnia-warning";
+    warningSpan.setAttribute("role", "status");
     warningSpan.style.marginLeft = "auto";
     warningSpan.textContent = model.get("warning_msg");
     warningSpan.style.display = model.get("warning_msg") ? "block" : "none";
@@ -970,55 +1072,34 @@ export default {
       warningSpan.style.display = msg ? "block" : "none";
     });
 
-    const crosshairLabel = document.createElement("label");
-    crosshairLabel.style.display = "flex";
-    crosshairLabel.style.alignItems = "center";
-    crosshairLabel.style.gap = "4px";
-    crosshairLabel.style.fontSize = "14px";
+    function checkbox(text, trait, title, isChecked) {
+      const label = document.createElement("label");
+      label.style.display = "flex";
+      label.style.alignItems = "center";
+      label.style.gap = "4px";
+      if (title) label.title = title;
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      const refresh = () => { cb.checked = isChecked(model.get(trait)); };
+      refresh();
+      cb.addEventListener("change", () => {
+        model.set(trait, cb.checked);
+        model.save_changes();
+      });
+      model.on(`change:${trait}`, refresh);
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(text));
+      return label;
+    }
 
-    const crosshairCb = document.createElement("input");
-    crosshairCb.type = "checkbox";
-    crosshairCb.checked = model.get("show_crosshair");
-    crosshairCb.addEventListener("change", () => {
-      model.set("show_crosshair", crosshairCb.checked);
-      model.save_changes();
-    });
-
-    model.on("change:show_crosshair", () => {
-      crosshairCb.checked = model.get("show_crosshair");
-    });
-
-    crosshairLabel.appendChild(crosshairCb);
-    crosshairLabel.appendChild(document.createTextNode("Show Crosshair"));
-    uiTogglesContainer.appendChild(crosshairLabel);
-
-    const scaleBarLabel = document.createElement("label");
-    scaleBarLabel.style.display = "flex";
-    scaleBarLabel.style.alignItems = "center";
-    scaleBarLabel.style.gap = "4px";
-    scaleBarLabel.style.fontSize = "14px";
-    scaleBarLabel.style.marginLeft = "10px";
-
-    const scaleBarCb = document.createElement("input");
-    scaleBarCb.type = "checkbox";
-    scaleBarCb.checked = model.get("scale_bar_show") !== false;
-    scaleBarCb.addEventListener("change", () => {
-      model.set("scale_bar_show", scaleBarCb.checked);
-      model.save_changes();
-    });
-
-    model.on("change:scale_bar_show", () => {
-      scaleBarCb.checked = model.get("scale_bar_show") !== false;
-    });
-
-    scaleBarLabel.appendChild(scaleBarCb);
-    scaleBarLabel.appendChild(document.createTextNode("Scale Bar"));
-    uiTogglesContainer.appendChild(scaleBarLabel);
+    uiTogglesContainer.appendChild(checkbox("Crosshair", "show_crosshair", "Draw the slab boundaries", (v) => !!v));
+    uiTogglesContainer.appendChild(checkbox("Scale Bar", "scale_bar_show", "Draw the scale bar", (v) => v !== false));
 
     // Scale-bar font size in pt (empty = auto from the figure height, 0 hides the label, keeps the bar)
     const scaleBarSize = document.createElement("input");
     scaleBarSize.type = "text";
     scaleBarSize.title = "Scale bar label size (pt); empty = auto, 0 = no label (bar stays)";
+    scaleBarSize.setAttribute("aria-label", "size of the scale-bar label in points");
     scaleBarSize.placeholder = "auto";
     scaleBarSize.style.width = "36px";
     scaleBarSize.style.fontSize = "11px";
@@ -1049,28 +1130,12 @@ export default {
     scaleBarSizeWrap.appendChild(document.createTextNode("pt"));
     uiTogglesContainer.appendChild(scaleBarSizeWrap);
 
-    const syncLabel = document.createElement("label");
-    syncLabel.style.display = "flex";
-    syncLabel.style.alignItems = "center";
-    syncLabel.style.gap = "4px";
-    syncLabel.style.fontSize = "14px";
-    syncLabel.style.marginLeft = "10px";
-
-    const syncCb = document.createElement("input");
-    syncCb.type = "checkbox";
-    syncCb.checked = model.get("sync_on_hover");
-    syncCb.addEventListener("change", () => {
-      model.set("sync_on_hover", syncCb.checked);
-      model.save_changes();
-    });
-
-    model.on("change:sync_on_hover", () => {
-      syncCb.checked = model.get("sync_on_hover");
-    });
-
-    syncLabel.appendChild(syncCb);
-    syncLabel.appendChild(document.createTextNode("Sync on Hover ('C')"));
-    uiTogglesContainer.appendChild(syncLabel);
+    // Hover sync is a key, not continuous hovering (R2-24)
+    uiTogglesContainer.appendChild(checkbox(
+      "Sync on 'C'", "sync_on_hover",
+      "Point at a panel and press C (no Ctrl/Cmd/Alt, not while typing in a box) " +
+      "to move the other slabs to the voxel under the pointer",
+      (v) => !!v));
 
     // Annotation setup UI
     if (hasAnnotation) {
@@ -1078,14 +1143,14 @@ export default {
       annotLabel.style.display = "flex";
       annotLabel.style.alignItems = "center";
       annotLabel.style.gap = "4px";
-      annotLabel.style.fontSize = "14px";
-      annotLabel.style.marginLeft = "20px";
+      annotLabel.title = "Click a panel to add or delete a point";
 
       const annotCb = document.createElement("input");
       annotCb.type = "checkbox";
       annotCb.checked = model.get("annotation_mode");
 
       const actionSelect = document.createElement("select");
+      actionSelect.setAttribute("aria-label", "annotation action");
       actionSelect.disabled = !annotCb.checked;
       const addOpt = document.createElement("option");
       addOpt.value = "add";
@@ -1110,7 +1175,7 @@ export default {
       });
 
       annotLabel.appendChild(annotCb);
-      annotLabel.appendChild(document.createTextNode("ANNOTATION"));
+      annotLabel.appendChild(document.createTextNode("Annotate"));
 
       actionSelect.value = model.get("annotation_action");
       actionSelect.addEventListener("change", () => {
@@ -1152,6 +1217,8 @@ export default {
       }
     });
 
+    // Position under the pointer while it is over a panel; null otherwise,
+    // so the 'C' key does nothing unless the pointer is on the image (D17).
     let currentHoverCoords = null;
 
     img.addEventListener("mousemove", (e) => {
@@ -1159,7 +1226,7 @@ export default {
         currentHoverCoords = null;
         return;
       }
-      
+
       const { x_frac, y_frac } = getFractions(e, img);
       const bounds = model.get("axis_bounds");
       const hover_plane = findPlane(bounds, x_frac, y_frac);
@@ -1179,21 +1246,33 @@ export default {
       currentHoverCoords = null;
     });
 
+    // Typing in a text box (here or anywhere on the page) is never a command
+    const isEditable = (t) => !!t && (t.isContentEditable ||
+      /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ""));
+
+    // 'C' (D17 / R3-02): only while the pointer is over a panel, without
+    // Ctrl/Cmd/Alt, and not while typing. A handled key is consumed so the
+    // host (e.g. a notebook's command mode) does not also act on it; the
+    // capture phase lets the widget see it first.
     const keydownListener = (e) => {
-      if (!model.get("sync_on_hover")) return;
-      if ((e.key === "c" || e.key === "C") && currentHoverCoords) {
-        model.set("hover_coords", {
-          ...currentHoverCoords,
-          't': Date.now()
-        });
-        model.save_changes();
-      }
+      if (e.key !== "c" && e.key !== "C") return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (!currentHoverCoords || !model.get("sync_on_hover")) return;
+      const target = (e.composedPath && e.composedPath()[0]) || e.target;
+      if (isEditable(target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      model.set("hover_coords", {
+        ...currentHoverCoords,
+        't': Date.now()
+      });
+      model.save_changes();
     };
 
     // Removed by the cleanup returned from render(): anywidget removes a
     // view's model listeners before calling it, so a 'destroy' handler would
     // never run, and the model outlives views of re-run cells.
-    document.addEventListener("keydown", keydownListener);
+    document.addEventListener("keydown", keydownListener, true);
 
     uiTogglesContainer.appendChild(warningSpan);
 
@@ -1201,6 +1280,7 @@ export default {
     controlsDiv.appendChild(channelsContainer);
     controlsDiv.appendChild(slidersContainer);
     controlsDiv.appendChild(saveContainer);
+    controlsDiv.appendChild(statusLine);
 
     el.appendChild(controlsDiv);
 
@@ -1218,7 +1298,7 @@ export default {
     // everything registered outside this view's element, which would
     // otherwise keep the whole view (model, image, canvases) alive.
     return () => {
-      document.removeEventListener("keydown", keydownListener);
+      document.removeEventListener("keydown", keydownListener, true);
       for (const ro of histogramObservers) ro.disconnect();
       histogramObservers.length = 0;
       for (const pending of [pendingPng, pendingKwargs]) {

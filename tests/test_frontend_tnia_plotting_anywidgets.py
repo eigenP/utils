@@ -7,10 +7,48 @@ import tempfile
 import threading
 from pathlib import Path
 
+import matplotlib
+import numpy as np
 import pytest
 
 from conftest import create_sham_volume
-from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+from eigenp_utils.tnia_plotting_anywidgets import show_iso_scatter, show_zyx_max_slice_interactive
+
+# Traits the front end reads, copied from a Python widget into a mock model
+_GUI_TRAITS = (
+    "image_data", "x_s", "y_s", "z_s", "x_t", "y_t", "z_t",
+    "x_start", "x_end", "x_max_pos", "sx", "y_start", "y_end", "y_max_pos", "sy",
+    "z_start", "z_end", "z_max_pos", "sz",
+    "channel_names", "channel_dtypes", "channel_colors", "vmin_list", "vmax_list",
+    "vmin_auto", "vmax_auto", "channel_controls", "range_display",
+    "gamma_list", "opacity_list", "histograms_data", "show_crosshair", "sync_on_hover",
+    "scale_bar_show", "scale_bar_fontsize_pt", "warning_msg", "status_msg", "save_filename",
+)
+
+
+def _gui_state(w, **extra):
+    """JSON-ready dict of the traits the front end reads (lists copied)."""
+    state = {k: (list(v) if isinstance(v, (list, tuple)) else v)
+             for k, v in ((k, getattr(w, k)) for k in _GUI_TRAITS)}
+    state.update(extra)
+    return state
+
+
+_MOCK_MODEL_JS = """
+    const listeners = {};
+    window.mockModel = {
+      state: STATE,
+      get(key) { return this.state[key]; },
+      set(key, val) {
+        this.state[key] = val;
+        (listeners[`change:${key}`] || []).forEach(cb => cb());
+      },
+      save_changes() { window.saveTriggered = true; },
+      on(evt, cb) { (listeners[evt] = listeners[evt] || []).push(cb); },
+    };
+    window.listenerCount = (evt) => (listeners[evt] || []).length;
+    window.totalListeners = () => Object.values(listeners).reduce((a, l) => a + l.length, 0);
+"""
 
 
 @pytest.fixture(scope="module")
@@ -35,33 +73,58 @@ def static_widget_server():
     )
 
     (base_path / "tnia_plotting_anywidgets.js").write_text(w._esm)
+    # anywidget injects _css into the page; the harnesses link it
+    (base_path / "tnia_plotting_anywidgets.css").write_text(w._css)
 
-    full_state = {
-        "image_data": w.image_data,
-        "x_s": w.x_s, "y_s": w.y_s, "z_s": w.z_s,
-        "x_t": w.x_t, "y_t": w.y_t, "z_t": w.z_t,
-        "x_start": w.x_start, "x_end": w.x_end, "x_max_pos": w.x_max_pos, "sx": w.sx,
-        "y_start": w.y_start, "y_end": w.y_end, "y_max_pos": w.y_max_pos, "sy": w.sy,
-        "z_start": w.z_start, "z_end": w.z_end, "z_max_pos": w.z_max_pos, "sz": w.sz,
-        "channel_names": list(w.channel_names),
-        "channel_dtypes": list(w.channel_dtypes),
-        "channel_colors": list(w.channel_colors),
-        "vmin_list": list(w.vmin_list),
-        "vmax_list": list(w.vmax_list),
-        "gamma_list": list(w.gamma_list),
-        "opacity_list": list(w.opacity_list),
-        "histograms_data": w.histograms_data,
-        "show_crosshair": w.show_crosshair,
-        "sync_on_hover": w.sync_on_hover,
-        "scale_bar_show": w.scale_bar_show,
-        "scale_bar_fontsize_pt": w.scale_bar_fontsize_pt,
-        "warning_msg": w.warning_msg,
-        "save_filename": w.save_filename,
-    }
+    full_state = _gui_state(w)
+
+    # Built while the host asks for 200 dpi figures (as in this sandbox's
+    # system matplotlibrc): display_dpi keeps the frame at 100 dpi.
+    with matplotlib.rc_context({"figure.dpi": 200, "savefig.dpi": "figure"}):
+        w200 = show_zyx_max_slice_interactive(
+            [vol[0], vol[1]], colormap=["magenta", "green"], channel_labels=["Cube", "Circle"],
+            pixel_sizes=(2.0, 0.5, 0.5))
+    dpi_html = f"""<!DOCTYPE html>
+<html>
+<head><link rel="stylesheet" href="tnia_plotting_anywidgets.css"></head>
+<body style="margin: 0; padding: 20px;">
+  <div id="widget-container"></div>
+  <script type="module">
+    import widget from './tnia_plotting_anywidgets.js';
+    {_MOCK_MODEL_JS.replace("STATE", json.dumps(_gui_state(w200)))}
+    widget.render({{ model: window.mockModel, el: document.getElementById('widget-container') }});
+    window.rendered = true;
+  </script>
+</body>
+</html>
+"""
+    (base_path / "dpi200.html").write_text(dpi_html)
+
+    # IsoScatter shares the theme and the status line
+    rng = np.random.default_rng(0)
+    iso = show_iso_scatter(rng.random(30), rng.random(30), rng.random(30), figsize=(4, 3))
+    (base_path / "iso_scatter.js").write_text(iso._esm)
+    iso_state = {k: getattr(iso, k) for k in ("image_data", "elev", "azim", "save_filename", "status_msg")}
+    iso_html = f"""<!DOCTYPE html>
+<html>
+<head><link rel="stylesheet" href="tnia_plotting_anywidgets.css"></head>
+<body style="margin: 0;">
+  <div id="widget-container"></div>
+  <script type="module">
+    import widget from './iso_scatter.js';
+    {_MOCK_MODEL_JS.replace("STATE", json.dumps(iso_state))}
+    widget.render({{ model: window.mockModel, el: document.getElementById('widget-container') }});
+    window.rendered = true;
+  </script>
+</body>
+</html>
+"""
+    (base_path / "iso.html").write_text(iso_html)
 
     full_html = f"""<!DOCTYPE html>
 <html>
 <head>
+  <link rel="stylesheet" href="tnia_plotting_anywidgets.css">
   <style>
     body {{ font-family: sans-serif; padding: 20px; }}
   </style>
@@ -150,6 +213,7 @@ def static_widget_server():
 <html>
 <body style="margin: 0;">
   <div id="widget-container"></div>
+  <input id="elsewhere" type="text" aria-label="another cell's text box">
   <script type="module">
     const keydown = new Set();
     const addDoc = document.addEventListener.bind(document);
@@ -200,6 +264,14 @@ def static_widget_server():
       }},
       save_changes() {{}},
       on(evt, cb) {{ (listeners[evt] = listeners[evt] || []).push(cb); }},
+    }};
+    window.totalListeners = () => Object.values(listeners).reduce((a, l) => a + l.length, 0);
+    // A re-run cell: a new view of the same model in a fresh element
+    window.renderAgain = () => {{
+      const el = document.createElement('div');
+      document.body.appendChild(el);
+      const cleanup = widget.render({{ model: window.mockModel, el }});
+      return () => {{ cleanup(); el.remove(); }};
     }};
     window.cleanup = widget.render({{ model: window.mockModel, el: document.getElementById('widget-container') }});
     window.rendered = true;
@@ -707,3 +779,286 @@ def test_frontend_view_cleanup_releases_document_listener_and_observers(page, st
     page.evaluate("window.mockModel.state.hover_coords = null")
     page.keyboard.press("c")
     assert page.evaluate("window.mockModel.get('hover_coords')") is None
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 (viewer front end): layout, theme, keys, status line, ranges
+# ---------------------------------------------------------------------------
+
+def _hover_xy(page):
+    """Move the pointer to the centre of the XY panel of the (single) widget image."""
+    box = page.locator("#widget-container img").bounding_box()
+    x0, y0, bw, bh = page.evaluate("window.mockModel.get('axis_bounds').xy.bbox")
+    page.mouse.move(box["x"] + (x0 + bw / 2) * box["width"], box["y"] + (y0 + bh / 2) * box["height"])
+
+
+def test_frontend_rerendering_ten_times_keeps_listener_counts_constant(page, static_widget_server):
+    """R3-01 follow-up: ten views of one model (re-run cells) each add the same listeners and release theirs.
+
+    Strategy: in the instrumented harness, render and dispose a new view ten
+    times, then push ten new frames and histograms into the model.
+    Expected outcome: every render adds exactly as many model listeners as
+    the first; after each cleanup no extra document keydown listener or
+    ResizeObserver is left; model updates add no listener.
+    """
+    page.goto(f"{static_widget_server}/dispose.html")
+    page.wait_for_function("window.rendered === true")
+    base = page.evaluate("[window.totalListeners(), window.docKeydownCount(), window.liveObservers()]")
+    added = page.evaluate("""() => {
+        const out = [];
+        for (let i = 0; i < 10; i++) {
+            const before = window.totalListeners();
+            const dispose = window.renderAgain();
+            out.push([window.totalListeners() - before, window.docKeydownCount(), window.liveObservers()]);
+            dispose();
+        }
+        return out;
+    }""")
+    per_view = added[0][0]
+    assert per_view > 0
+    assert all(a == [per_view, base[1] + 1, base[2] * 2] for a in added), added
+    assert page.evaluate("[window.docKeydownCount(), window.liveObservers()]") == base[1:]
+    total = page.evaluate("window.totalListeners()")
+    page.evaluate("""() => {
+        const m = window.mockModel;
+        for (let i = 0; i < 10; i++) {
+            m.set('image_data', m.get('image_data'));
+            m.set('histograms_data', m.get('histograms_data'));
+            m.set('channel_names', ['a' + i, 'b' + i]);
+        }
+    }""")
+    assert page.evaluate("window.totalListeners()") == total
+
+
+def test_frontend_controls_fit_beside_or_below_the_image_at_200_dpi(page, static_widget_server):
+    """D14 / R3-05: with figure.dpi = 200 on the host, the frame is 100 dpi and the controls stay on screen.
+
+    The widget behind ``dpi200.html`` was built under
+    ``rcParams['figure.dpi'] = 200``. Strategy: at 1100 and 700 px wide
+    viewports, measure the image, the page overflow and the right edge of
+    every control.
+    Expected outcome: the PNG's natural width is figsize x 100 px (not x 200);
+    no horizontal page overflow and every button / input / slider thumb lies
+    inside the viewport (the row wraps and the image shrinks); the widget
+    root carries the dark theme (dark background, light text).
+    """
+    for width in (1100, 700):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.goto(f"{static_widget_server}/dpi200.html")
+        page.wait_for_function("window.rendered === true && document.querySelector('img').naturalWidth > 0")
+        m = page.evaluate("""() => {
+            const img = document.querySelector('img');
+            const root = document.getElementById('widget-container');
+            const ctrls = [...root.querySelectorAll('button, input, select, [role=slider]')]
+                .filter(e => e.getClientRects().length > 0);
+            return {
+                natural: img.naturalWidth,
+                shown: img.getBoundingClientRect().width,
+                overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+                maxRight: Math.max(...ctrls.map(e => e.getBoundingClientRect().right)),
+                n: ctrls.length,
+                bg: getComputedStyle(root).backgroundColor,
+                fg: getComputedStyle(root).color,
+            };
+        }""")
+        assert m["natural"] < 1000, m  # 8-inch box at 100 dpi, not 1600 px
+        assert m["overflow"] <= 0, m
+        assert m["n"] > 10 and m["maxRight"] <= width, m
+        assert m["shown"] <= width, m
+        bg = [int(v) for v in m["bg"][m["bg"].index("(") + 1:-1].split(",")[:3]]
+        fg = [int(v) for v in m["fg"][m["fg"].index("(") + 1:-1].split(",")[:3]]
+        assert max(bg) < 60 and min(fg) > 180, m
+
+
+def test_frontend_c_key_needs_hover_no_modifier_and_no_text_box(page, static_widget_server):
+    """D17 / R3-02: 'C' syncs only while hovering a panel, without modifiers, and never while typing.
+
+    Strategy: hover the XY panel, then (a) type 'c' into a text box elsewhere
+    on the page while the pointer stays on the panel, (b) press Ctrl+C,
+    (c) press 'c' with nothing focused, (d) move off the image and press 'c'.
+    Expected outcome: only (c) sends ``hover_coords``, and that keydown is
+    consumed (defaultPrevented, and it never bubbles up to the window) so the
+    host page does not also act on it; the ignored keys still reach the host.
+    """
+    page.goto(f"{static_widget_server}/dispose.html")
+    page.wait_for_function("window.rendered === true")
+    page.locator("#widget-container img").wait_for(state="visible")
+    _hover_xy(page)
+    page.evaluate("window.mockModel.state.hover_coords = null")
+
+    page.evaluate("""() => { window.lastC = null; window.hostSaw = 0;
+        // after the widget's capture listener on the same node: sees its preventDefault
+        document.addEventListener('keydown', e => { if (e.key === 'c') window.lastC = e.defaultPrevented; }, true);
+        window.addEventListener('keydown', e => { if (e.key === 'c') window.hostSaw++; }); }""")
+    page.evaluate("document.getElementById('elsewhere').focus()")
+    page.keyboard.type("cc")
+    assert page.evaluate("document.getElementById('elsewhere').value") == "cc"
+    assert page.evaluate("window.mockModel.get('hover_coords')") is None
+    assert page.evaluate("[window.lastC, window.hostSaw]") == [False, 2]
+
+    page.evaluate("document.activeElement.blur()")
+    page.keyboard.press("Control+c")
+    assert page.evaluate("window.mockModel.get('hover_coords')") is None
+
+    page.keyboard.press("c")
+    assert page.evaluate("window.mockModel.get('hover_coords')")["plane"] == "xy"
+    assert page.evaluate("[window.lastC, window.hostSaw]") == [True, 3]
+
+    page.evaluate("window.mockModel.state.hover_coords = null")
+    page.mouse.move(2, 2)
+    page.keyboard.press("c")
+    assert page.evaluate("window.mockModel.get('hover_coords')") is None
+
+
+def test_frontend_export_status_line_shows_python_outcome(page, static_widget_server):
+    """D15 / R3-12: the save outcome appears in a status line inside the widget.
+
+    Strategy: click the save button (bumps ``save_trigger``), then answer as
+    Python does with ``status_msg`` = 'saved /abs/fig_1.svg', then an error.
+    Expected outcome: the status line, inside the widget container and
+    announced politely (aria-live), shows each message; the error is marked
+    as such (class ``tnia-error``) and the success is not.
+    """
+    page.goto(static_widget_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+    before = page.evaluate("window.mockModel.get('save_trigger') || 0")
+    page.get_by_role("button", name="Save", exact=False).first.click()
+    assert page.evaluate("window.mockModel.get('save_trigger')") == before + 1
+
+    status = page.locator("#widget-container .tnia-status")
+    assert status.get_attribute("aria-live") == "polite"
+    page.evaluate("window.mockModel.set('status_msg', 'saved /abs/fig_1.svg')")
+    assert status.inner_text() == "saved /abs/fig_1.svg"
+    assert "tnia-error" not in (status.get_attribute("class") or "")
+    page.evaluate("window.mockModel.set('status_msg', 'error: could not save x.svg: denied')")
+    assert status.inner_text().startswith("error:")
+    assert "tnia-error" in status.get_attribute("class")
+
+
+def test_frontend_range_boxes_show_physical_values_with_units(page, static_widget_server):
+    """R3-08 / D10: range boxes show (index + offset) x scale with the unit; uncalibrated ones show indices.
+
+    Strategy: the 200-dpi page has pixel sizes (2, 0.5, 0.5) µm; read the X
+    label, box values and steps; type a physical value; then set a scatter-
+    like offset of 100. On the default page (uncalibrated) read the labels.
+    Expected outcome: 'X Range (µm)' with start = x_start x 0.5 and step
+    '0.5'; typing 10 µm sets x_start = 20; with offset 100 the start box
+    shows (x_start + 100) x 0.5. Uncalibrated: 'X Range (px)' and integer
+    steps.
+    """
+    page.goto(f"{static_widget_server}/dpi200.html")
+    page.wait_for_function("window.rendered === true")
+    assert page.get_by_text("X Range (µm)").is_visible()
+    xs, ye = page.evaluate("[window.mockModel.get('x_start'), window.mockModel.get('x_end')]")
+    boxes = page.locator("input[type=number]")
+    assert float(boxes.nth(0).input_value()) == pytest.approx(xs * 0.5)
+    assert boxes.nth(0).get_attribute("step") == "0.5"
+    boxes.nth(0).fill("10")
+    boxes.nth(0).dispatch_event("change")
+    assert page.evaluate("window.mockModel.get('x_start')") == 20
+    page.evaluate("""() => { const m = window.mockModel; const rd = structuredClone(m.get('range_display'));
+        rd.x.offset = 100; m.set('range_display', rd); }""")
+    assert float(boxes.nth(0).input_value()) == pytest.approx((20 + 100) * 0.5)
+
+    page.goto(static_widget_server)
+    page.get_by_text("X Range (px)").wait_for(state="visible")
+    assert page.get_by_text("Z Range (px)").is_visible()
+
+
+def test_frontend_cleared_vmax_box_shows_and_uses_the_auto_value(page, static_widget_server):
+    """R3-04: a cleared box shows 'auto <value>' and the slider sits at the automatic value, as Python renders.
+
+    Strategy: set vmax_auto[0] to 64 on a uint8 channel (track 0..255) and
+    clear the vmax box.
+    Expected outcome: the box is empty with placeholder 'auto 64' and the
+    vmax thumb sits at about 25% of the track (not at its end).
+    """
+    page.goto(static_widget_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+    page.evaluate("window.mockModel.set('vmax_auto', [64, 255])")
+    _type_into_channel_box(page, "vmax", 0, "")
+    assert page.evaluate("window.mockModel.get('vmax_list')[0]") == ""
+    box = page.locator("input[aria-label='vmax of channel Cube']")
+    assert box.input_value() == "" and box.get_attribute("placeholder") == "auto 64"
+    pos = page.evaluate("""() => {
+        const t = document.querySelector("div[title='vmax']");
+        return parseFloat(t.style.left); }""")
+    assert 20 < pos < 30
+
+
+def test_frontend_sliders_work_from_the_keyboard_and_are_labelled(page, static_widget_server):
+    """R3-13: range and histogram thumbs are focusable sliders with ARIA values and arrow keys.
+
+    Strategy: focus the X end thumb and press ArrowRight, then the X middle
+    thumb and ArrowLeft; focus channel 0's vmax thumb and press ArrowLeft.
+    Expected outcome: role 'slider', tabindex 0 and an aria-valuenow on each
+    thumb; x_end grows by 1; the middle thumb shifts both ends by -1; vmax
+    drops by 1 (uint8 channel). Every channel box has an aria-label.
+    """
+    page.goto(static_widget_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+    end = page.locator("div[title='End']").first
+    assert end.get_attribute("role") == "slider" and end.get_attribute("tabindex") == "0"
+    xs, xe = page.evaluate("[window.mockModel.get('x_start'), window.mockModel.get('x_end')]")
+    end.focus()
+    page.keyboard.press("ArrowRight")
+    assert page.evaluate("window.mockModel.get('x_end')") == xe + 1
+    assert end.get_attribute("aria-valuenow") == str(xe + 1)
+    page.locator("div[title='Translate Range']").first.focus()
+    page.keyboard.press("ArrowLeft")
+    assert page.evaluate("[window.mockModel.get('x_start'), window.mockModel.get('x_end')]") == [xs - 1, xe]
+
+    vmax0 = page.evaluate("window.mockModel.get('vmax_list')[0]")
+    page.locator("div[title='vmax']").first.focus()
+    page.keyboard.press("ArrowLeft")
+    assert page.evaluate("window.mockModel.get('vmax_list')[0]") == vmax0 - 1
+    unlabelled = page.evaluate("""() => [...document.querySelectorAll('#widget-container input')]
+        .filter(i => !i.getAttribute('aria-label') && !i.closest('label')).length""")
+    assert unlabelled == 0
+
+
+def test_frontend_channel_rows_show_names_and_only_the_controls_that_act(page, static_widget_server):
+    """D14 / R3-10 / R3-09: row headers carry the channel name; 'opacity'-only channels hide the rest.
+
+    Strategy: read the row headers; then set ``channel_controls`` to
+    ['opacity', 'all'] and rebuild the rows.
+    Expected outcome: headers read '0: Cube' and '1: Circle' (full name in
+    the title); channel 0 then has an opacity box only (no vmin, vmax, gamma,
+    histogram or slider), channel 1 keeps all of them.
+    """
+    page.goto(static_widget_server)
+    page.get_by_text("X Range").wait_for(state="visible")
+    heads = page.evaluate("() => [...document.querySelectorAll('.tnia-cname')].map(h => [h.textContent, h.title])")
+    assert heads == [["0: Cube", "Cube"], ["1: Circle", "Circle"]]
+
+    page.evaluate("window.mockModel.state.channel_controls = ['opacity', 'all']")
+    page.evaluate("window.mockModel.set('channel_names', ['Cube', 'Circle'])")
+    labels = page.evaluate("""() => [...document.querySelectorAll('.tnia-chan')].map(row =>
+        [[...row.querySelectorAll('input')].map(i => i.getAttribute('aria-label')),
+         row.querySelectorAll('canvas').length, row.querySelectorAll('[role=slider]').length])""")
+    assert labels[0] == [["opacity of channel Cube"], 0, 0]
+    assert labels[1][0] == ["vmin of channel Circle", "vmax of channel Circle",
+                            "gamma of channel Circle", "opacity of channel Circle"]
+    assert labels[1][1:] == [1, 3]
+
+
+def test_frontend_iso_scatter_has_the_dark_theme_and_an_export_status_line(page, static_widget_server):
+    """D14 / D15: IsoScatter uses the viewers' dark theme and reports the save outcome in the widget.
+
+    Strategy: render the IsoScatter front end with the package CSS, click the
+    save button and answer with ``status_msg`` as Python does.
+    Expected outcome: dark root background with light text; the click bumps
+    ``save_trigger``; the status line shows the message and marks an error.
+    """
+    page.goto(f"{static_widget_server}/iso.html")
+    page.wait_for_function("window.rendered === true")
+    bg, fg = page.evaluate("""() => { const s = getComputedStyle(document.getElementById('widget-container'));
+        return [s.backgroundColor, s.color]; }""")
+    assert bg == "rgb(30, 30, 30)" and fg == "rgb(221, 221, 221)"
+    page.get_by_role("button", name="Save", exact=False).click()
+    assert page.evaluate("window.mockModel.get('save_trigger')") == 1
+    status = page.locator("#widget-container .tnia-status")
+    page.evaluate("window.mockModel.set('status_msg', 'saved /abs/iso_1.svg')")
+    assert status.inner_text() == "saved /abs/iso_1.svg"
+    page.evaluate("window.mockModel.set('status_msg', 'error: could not save')")
+    assert "tnia-error" in status.get_attribute("class")
