@@ -5018,3 +5018,42 @@ def test_widget_auto_figsize_uses_physical_extents_and_classes_match_factories()
     np.testing.assert_allclose(cls.figsize, ws.figsize)
     vol = _structured_volume()
     np.testing.assert_allclose(TNIASliceWidget(vol).figsize, show_zyx_max_slice_interactive(vol).figsize)
+
+
+def test_widget_classes_reject_unknown_kwargs_and_honour_trait_kwargs():
+    """D12 / R2-14: the widget classes raise TypeError on unknown kwargs instead of swallowing them.
+
+    Strategy: misspelled kwargs (``pixelsizes``, ``colours``) on
+    ``TNIASliceWidget``, ``TNIAAnnotatorWidget`` and ``TNIAScatterWidget``;
+    then a trait passed as a kwarg (``save_filename``).
+    Expected outcome: TypeError naming the argument (they were dropped
+    silently); the trait kwarg is applied.
+    """
+    vol = _structured_volume()
+    pts = np.random.default_rng(0).uniform(0, 20, (30, 3))
+    for make in (lambda **k: TNIASliceWidget(vol, **k),
+                 lambda **k: tpa.TNIAAnnotatorWidget(vol, **k),
+                 lambda **k: tpa.TNIAScatterWidget(pts[:, 2], pts[:, 1], pts[:, 0], **k)):
+        with pytest.raises(TypeError, match="pixelsizes"):
+            make(pixelsizes=(1, 1, 1))
+        with pytest.raises(TypeError, match="colours"):
+            make(colours="red")
+        assert make(save_filename="mine.svg").save_filename == "mine.svg"
+
+
+def test_image_factories_share_one_argument_preparation():
+    """D12 / R2-13: both image factories go through ``_prepare_viewer_args`` and accept ``channel_axis``.
+
+    Strategy: call ``_prepare_viewer_args`` and both factories with a CZYX
+    ndarray and ``channel_axis=0``.
+    Expected outcome: the prepared image is a channel list; both factories
+    build the same channels and figure size.
+    """
+    rng = np.random.default_rng(0)
+    czyx = rng.random((2, 6, 20, 24)).astype(np.float32)
+    prep = tpa._prepare_viewer_args(czyx, channel_axis=0)
+    assert isinstance(prep["im"], list) and len(prep["im"]) == 2
+    a = show_zyx_max_slice_interactive(czyx, channel_axis=0)
+    b = show_zyx_max_slice_interactive_point_annotator(czyx, channel_axis=0)
+    assert a.num_channels == 2 and b.num_channels == 3  # + the annotation channel
+    np.testing.assert_allclose(a.figsize, b.figsize)

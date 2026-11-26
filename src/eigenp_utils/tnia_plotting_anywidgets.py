@@ -459,9 +459,15 @@ def resolve_color(c):
 
     return c
 
+def _join_docs(doc, extra):
+    """A docstring followed by a shared section, both dedented (consistent on every Python version)."""
+    import inspect
+    return inspect.cleandoc(doc or '') + '\n\n' + inspect.cleandoc(extra) + '\n'
+
+
 def _static_doc(func):
     """Append the input forms and display keywords shared by the static wrappers to a docstring."""
-    func.__doc__ = (func.__doc__ or '').rstrip() + '\n' + _STATIC_DOC
+    func.__doc__ = _join_docs(func.__doc__, _STATIC_DOC)
     return func
 
 
@@ -2334,6 +2340,21 @@ class TNIAWidgetBase(anywidget.AnyWidget):
     def _render(self):
         raise NotImplementedError
 
+    def _check_trait_kwargs(self, kwargs):
+        """Reject keyword arguments that are neither parameters nor traits (D12: no silent typos)."""
+        traits = set(type(self).class_trait_names())
+        unknown = [k for k in kwargs if k not in traits]
+        if unknown:
+            raise TypeError(f"{type(self).__name__}() got unexpected keyword argument(s): "
+                            + ", ".join(repr(k) for k in unknown))
+
+    def _apply_trait_kwargs(self, kwargs):
+        """Set traits passed as keyword arguments (after the widget is built, so observers see them)."""
+        if kwargs:
+            with self.hold_trait_notifications():
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
     def _slab_origin(self):
         """Data coordinate (z, y, x) of widget index 0 (copy-kwargs positions are measured from 0)."""
         return (0, 0, 0)
@@ -2468,6 +2489,7 @@ class TNIASliceWidget(TNIAWidgetBase):
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
                  blending=None, projection=None, attenuation=0.05, bit_depth=None, colors=None, channel_axis=None,
                  **kwargs):
+        self._check_trait_kwargs(kwargs)
         if colors is not None:
             warn_deprecated("The 'colors' parameter", "'colormap'")
             if colormap is None:
@@ -2607,6 +2629,7 @@ class TNIASliceWidget(TNIAWidgetBase):
 
         # Initialize observers and render
         self._init_observers()
+        self._apply_trait_kwargs(kwargs)
 
     def _render(self):
         Z, Y, X = self.dims
@@ -3186,6 +3209,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, subplot_bg=None, slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
                  blending=None, **kwargs):
+        self._check_trait_kwargs(kwargs)
         # Keyword-only channel compositing (not in the GUI); see `show_zyx`.
         # 'minimum' also switches to a white canvas and inverted default colours.
         self.blending = _check_blending(blending)
@@ -3439,6 +3463,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
 
         # Initialize observers and render
         self._init_observers()
+        self._apply_trait_kwargs(kwargs)
 
     # Widget index 0 is the data minimum of each axis (``_copy_params_lines``)
     def _slab_origin(self):
@@ -3965,6 +3990,135 @@ def _ortho_input(im, colormap=None, channel_labels=None, pixel_sizes=None, chann
     return im, colormap, channel_labels, pixel_sizes
 
 
+def _legacy_viewer_kwargs(colors=None, colormap=None, sxy=None, sz=None, pixel_sizes=None,
+                         x_s=None, y_s=None, z_s=None, slabs_position=None,
+                         x_t=None, y_t=None, z_t=None, slabs_thickness=None, stacklevel=5):
+    """
+    Resolve the deprecated viewer names (D08, FutureWarning): ``colors`` ->
+    ``colormap``, ``sxy``/``sz`` -> ``pixel_sizes``, ``x_s..z_s`` ->
+    ``slabs_position``, ``x_t..z_t`` -> ``slabs_thickness``. The new names
+    win when both are given. ``stacklevel`` is counted from
+    ``warn_deprecated`` up to the user's call.
+    """
+    colormap = _legacy_colors(colors, colormap, stacklevel=stacklevel)
+    if sxy is not None or sz is not None:
+        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'", stacklevel=stacklevel - 1)
+        if pixel_sizes is None:
+            pixel_sizes = (1.0 if sz is None else sz, 1.0 if sxy is None else sxy, 1.0 if sxy is None else sxy)
+    if any(v is not None for v in (x_s, y_s, z_s)):
+        warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'", stacklevel=stacklevel - 1)
+        if slabs_position is None:
+            slabs_position = (z_s, y_s, x_s)
+    if any(v is not None for v in (x_t, y_t, z_t)):
+        warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'", stacklevel=stacklevel - 1)
+        if slabs_thickness is None:
+            slabs_thickness = (z_t, y_t, x_t)
+    return colormap, pixel_sizes, slabs_position, slabs_thickness
+
+
+def _prepare_viewer_args(im, pixel_sizes=None, sxy=None, sz=None, colormap=None, colors=None,
+                         channel_labels=None, channel_axis=None, figsize=None, figsize_scale=1,
+                         rotate_view=None, channel_label_fontsize_pt=None,
+                         slabs_position=None, x_s=None, y_s=None, z_s=None,
+                         slabs_thickness=None, x_t=None, y_t=None, z_t=None, _stacklevel=6):
+    """
+    The argument preparation shared by the image-viewer factories (D12).
+
+    Resolves the deprecated names, normalises the input (`_ortho_input`:
+    DataArray, tuple, ``channel_axis``, 2D), and computes the automatic
+    figure size (physical extents in an 8-inch box, the rule the classes
+    use) times ``figsize_scale``. Returns a dict of keyword arguments for
+    ``TNIASliceWidget`` / ``TNIAAnnotatorWidget`` (slab defaults are the
+    classes'): im, pixel_sizes, colormap, channel_labels, figsize,
+    slabs_position, slabs_thickness.
+    """
+    colormap, pixel_sizes, slabs_position, slabs_thickness = _legacy_viewer_kwargs(
+        colors, colormap, sxy, sz, pixel_sizes, x_s, y_s, z_s, slabs_position,
+        x_t, y_t, z_t, slabs_thickness, stacklevel=_stacklevel)
+    # after resolving the deprecated names, so they still apply to DataArray input
+    im, colormap, channel_labels, pixel_sizes = _ortho_input(im, colormap, channel_labels, pixel_sizes, channel_axis)
+    if figsize is None:
+        # The widget parses pixel_sizes again and warns about missing axes once
+        (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
+        Z, Y, X = np.shape(im[0] if isinstance(im, list) else im)
+        cols, rows = _ortho_extents(X * px, Y * py, Z * pz, rotate_view)
+        figsize = _auto_figsize(cols, rows, True, box=(8.0, 8.0), label_fontsize_pt=channel_label_fontsize_pt)
+    if figsize_scale != 1:
+        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
+    return dict(im=im, pixel_sizes=pixel_sizes, colormap=colormap, channel_labels=channel_labels,
+                figsize=figsize, slabs_position=slabs_position, slabs_thickness=slabs_thickness)
+
+
+def _viewer_doc(func):
+    """Append the parameters shared by the interactive viewers to a factory docstring."""
+    func.__doc__ = _join_docs(func.__doc__, _VIEWER_DOC)
+    return func
+
+
+_VIEWER_DOC = """
+Parameters shared by the interactive viewers
+--------------------------------------------
+pixel_sizes : dict or (Z, Y, X) sequence, optional
+    Voxel size per axis. A dict may carry a 'unit' (known length units are
+    converted to µm); without one the numbers are taken as µm. Missing X/Y
+    sizes draw the panels in pixels with a 'px' scale bar; a missing Z with
+    known X/Y takes the finest of them (with a warning).
+figsize : (width, height) in inches, optional
+    None (default): fit the physical extents of the (rotated) panels and the
+    channel-label row in an 8-inch box. ``figsize_scale`` multiplies it.
+colormap : colour, colormap name, registered Colormap, or a list of them
+    One per channel; None takes the package palette ('white', 'lime',
+    'magenta', ...). ``colors`` is the deprecated name (FutureWarning).
+vmin, vmax : float or per-channel list, optional (data units)
+    Display range. In the image viewers None (per channel) is the default
+    display range of the whole channel volume (0, or the data minimum if
+    negative; robust 99.99th percentile), which a box cleared in the GUI
+    restores; for the scatter viewer see its own entry.
+gamma, opacity : float or per-channel list
+    Gamma after the linear window (1 = linear); opacity 0..1 (0 hides).
+slabs_position : (Z, Y, X) or dict, optional (physical units, µm)
+    Centre of the slab of each axis; None centres it. Half-voxel values are
+    allowed (copy-kwargs emits them for even widths).
+slabs_thickness : (Z, Y, X) or dict, optional (physical units, µm)
+    Half-thickness of each slab: the slab spans centre +/- half-thickness
+    (inclusive voxel range). None is 1/64 of the axis (at least one voxel);
+    a value beyond the volume shows the whole axis. ``x_s, y_s, z_s`` /
+    ``x_t, y_t, z_t`` are deprecated per-axis aliases (FutureWarning).
+sxy, sz : float, deprecated
+    Use ``pixel_sizes=(sz, sxy, sxy)`` (FutureWarning).
+rotate_view : float or (Z, Y, X) degrees, optional
+    Rotates the XY panel (a float) or the XY, XZ and ZY panels
+    counter-clockwise for display only; slabs stay along the array axes.
+channel_labels : list of str, optional
+    Names drawn above the panels and in the GUI rows.
+channel_label_fontsize_pt : float, optional
+    Label font size in points; None is 3% of the figure width (8..24 pt).
+blending : str, optional
+    'additive', 'maximum', 'screen' or 'minimum' (white canvas); None picks
+    additive for colours, maximum with a colormap name, minimum when every
+    colormap starts at white. Keyword only; not in the GUI.
+show_crosshair : bool
+    Draw the slab boundaries on the panels.
+sync_on_hover : bool
+    Enables hover sync: pressing 'C' while the pointer is over a panel
+    moves the other slabs to the voxel under it (keeping their widths).
+scale_bar_show : bool
+    Draw the scale bar (also a GUI checkbox).
+scale_bar_fontsize_pt : float, optional
+    Scale-bar label size in points (None = auto, as the channel labels; 0
+    hides the label but keeps the bar). Also a GUI box (empty = auto).
+
+Exports: the SVG / PNG buttons save the figure; "kwargs" copies the
+current view as keyword arguments (physical slab centre / half-thickness,
+display ranges) that rebuild the same view.
+
+Changed (D12, 2026-11): factories and classes share one argument
+preparation (`_prepare_viewer_args`) and one automatic figsize rule; the
+classes raise TypeError for unknown keyword arguments.
+"""
+
+
+@_viewer_doc
 def show_zyx_max_slice_interactive(
     im,
     pixel_sizes=None, sxy=None, sz=None,
@@ -3977,139 +4131,56 @@ def show_zyx_max_slice_interactive(
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
     blending=None, projection=None, attenuation=0.05, bit_depth=None,
+    channel_axis=None,
 ):
     """
-    Interactive 3D slice viewer using AnyWidget.
+    Interactive ortho-slab viewer of a 3D image (anywidget): XY, XZ and ZY
+    projections of movable slabs, per-channel display controls, histograms.
 
-    Inspired by show_zyx_max_slice_interactive in tnia_plotting_3d.py (ipywidgets version).
+    Returns a `TNIASliceWidget`.
 
     Parameters
     ----------
-    im : ndarray, list of ndarrays, or xarray.DataArray
-        ZYX (or YX) array, a list of them (one per channel), or a DataArray
-        with C/Z/Y/X dims (e.g. STCZYX from ``image_io``; other dims must have
-        size 1). For a DataArray, ``channel_labels`` default to the ``C``
-        coordinate, ``colormap`` to a ``color`` coordinate along ``C`` (see
-        ``image_io.set_channel_info``) and ``pixel_sizes`` to the calibrated
+    im : ndarray, list/tuple of ndarrays, or xarray.DataArray
+        ZYX (or YX) array, a list of them (one per channel), an ndarray with
+        a channel axis given by ``channel_axis`` (e.g. 0 for CZYX; a 4D array
+        without it raises), or a DataArray with C/Z/Y/X dims (other dims of
+        size 1, e.g. STCZYX from ``image_io``). For a DataArray,
+        ``channel_labels`` default to the ``C`` coordinate, ``colormap`` to a
+        ``color`` coordinate along ``C`` and ``pixel_sizes`` to the calibrated
         coordinates; explicit arguments win.
-    blending : str, optional
-        Channel compositing: 'additive', 'maximum', 'screen' or 'minimum'
-        (white background with white->colour or inverted colormaps). None
-        keeps the default. Keyword only; not in the GUI.
+    channel_axis : int, optional
+        Axis of ``im`` holding the channels (ndarray input).
     projection : str, optional
         Slab projection: 'mip' (default), 'minip', 'average' or
-        'attenuated_mip' (napari's rendering names). Keyword only.
+        'attenuated_mip' (napari's names). Keyword only; not in the GUI.
     attenuation : float, optional
-        Attenuation per voxel for 'attenuated_mip' (default 0.05).
+        Attenuation per voxel along the ray for 'attenuated_mip' (default 0.05).
     bit_depth : None, 'auto', int, 'dtype', 'data' or list, optional
-        Range of the channel histograms. By default the detector bit depth is
-        inferred from the data (the smallest of 8, 10, 12, 14, 16, ... bits
-        holding the maximum, e.g. 0..4095 for 12-bit data stored as uint16).
-        An int (e.g. 12) enforces a bit depth, 'dtype' uses the full dtype
-        range, 'data' the data range; a list sets it per channel.
-    scale_bar_show : bool, optional
-        Draw the scale bar (default True; also a GUI checkbox).
-    scale_bar_fontsize_pt : float, optional
-        Font size of the scale-bar label in points; the bar's line width
-        follows it. None (default) sizes it from the figure height; 0 hides
-        the label but keeps the bar (``scale_bar_show`` toggles the bar).
-        Also a GUI box (empty = auto).
-    rotate_view : float or tuple of floats, optional
-        Rotates the 2D projected views purely for visualization.
-        If a single float is provided, it rotates the XY projection (in degrees).
-        If a tuple of three floats is provided `(Z, Y, X)`, it rotates the XY, XZ, and ZY projections independently.
-        Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
-        For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
+        Range of the channel histograms: by default the detector bit depth
+        inferred from the data (e.g. 0..4095 for 12-bit data stored as
+        uint16); an int enforces one, 'dtype' the dtype range, 'data' the
+        data range; a list sets it per channel.
+    figsize_scale : float
+        Multiplies ``figsize`` (automatic or given).
 
-    Notes:
-        - When `vmax` is not explicitly provided (or its box is cleared in the GUI), it defaults to
-          the 99.99th percentile of each channel's finite values, so a few hot pixels do not set the
-          display range (the maximum when the signal covers less than 0.01% of the voxels; 1.0 for an
-          all-NaN channel); `vmin` defaults to 0, or the data minimum when the channel has negative
-          values (a cleared vmin box restores that value). Changed (D02, 2026-11): `vmin` was 0 always.
-        - Interactive widgets compute a 128-bin histogram per channel in the Python backend (excluding NaNs for floats)
-          and synchronize it with the JS frontend via a `histograms_data` traitlet. The frontend renders this on a `<canvas>`
-          underneath the channel controls, overlaid with a curve reflecting the current `vmin`, `vmax`, and `gamma` settings.
+    Histograms: 128 bins per channel (NaN excluded), log counts, drawn under
+    each channel's controls with the current vmin / vmax / gamma curve.
     """
-
-    if colors is not None:
-        warn_deprecated("The 'colors' parameter", "'colormap'")
-        if colormap is None:
-            colormap = colors
-
-    if sxy is not None or sz is not None:
-        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
-        if pixel_sizes is None:
-            _sxy = sxy if sxy is not None else 1.0
-            _sz = sz if sz is not None else 1.0
-            pixel_sizes = (_sz, _sxy, _sxy)
-
-    # after resolving the deprecated colors/sxy/sz, so they still apply to DataArray input
-    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
-
-    # The widget parses pixel_sizes again and warns about missing axes once
-    (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
-
-    if any(x is not None for x in [x_s, y_s, z_s]):
-        warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'")
-        if slabs_position is None:
-            slabs_position = (z_s, y_s, x_s)
-
-    if any(x is not None for x in [x_t, y_t, z_t]):
-        warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'")
-        if slabs_thickness is None:
-            slabs_thickness = (z_t, y_t, x_t)
-
-    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
-    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
-
-    if isinstance(im, list):
-        if im[0].ndim == 2:
-            im = [img[np.newaxis, ...] for img in im]
-    elif im.ndim == 2:
-        im = im[np.newaxis, ...]
-    im_shape = (im[0].shape if isinstance(im, list) else im.shape)
-    Z, Y, X = im_shape
-
-    # Calculate physical layout dimensions (microns)
-    if figsize is None:
-        # The class's automatic size (physical extents, label row, 8-inch box)
-        cols, rows = _ortho_extents(X * px, Y * py, Z * pz, rotate_view)
-        figsize = _auto_figsize(cols, rows, True, box=(8.0, 8.0), label_fontsize_pt=channel_label_fontsize_pt)
-    if figsize_scale != 1.0:
-        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
-
-    def _default_t(n): return max(1, n // 64)
-    if x_t is None: x_t = _default_t(X) * px
-    if y_t is None: y_t = _default_t(Y) * py
-    if z_t is None: z_t = _default_t(Z) * pz
-
-    # Defaults for s are handled in init (midpoint)
-    if x_s is None: x_s = (X // 2) * px
-    if y_s is None: y_s = (Y // 2) * py
-    if z_s is None: z_s = (Z // 2) * pz
-
-    # Override for max projection if thickness exceeds shape
-    if x_t >= X * px:
-        x_t = max(1, X // 2) * px
-        x_s = (X // 2) * px
-    if y_t >= Y * py:
-        y_t = max(1, Y // 2) * py
-        y_s = (Y // 2) * py
-    if z_t >= Z * pz:
-        z_t = max(1, Z // 2) * pz
-        z_s = (Z // 2) * pz
-
-    w = TNIASliceWidget(
-        im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
-        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
-        channel_label_fontsize_pt=channel_label_fontsize_pt,
-        blending=blending, projection=projection, attenuation=attenuation,
-        bit_depth=bit_depth,
+    a = _prepare_viewer_args(
+        im, pixel_sizes, sxy, sz, colormap, colors, channel_labels, channel_axis, figsize, figsize_scale,
+        rotate_view, channel_label_fontsize_pt, slabs_position, x_s, y_s, z_s, slabs_thickness, x_t, y_t, z_t)
+    return TNIASliceWidget(
+        a['im'], pixel_sizes=a['pixel_sizes'], figsize=a['figsize'], colormap=a['colormap'],
+        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair,
+        sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
+        slabs_position=a['slabs_position'], slabs_thickness=a['slabs_thickness'], rotate_view=rotate_view,
+        channel_labels=a['channel_labels'], channel_label_fontsize_pt=channel_label_fontsize_pt,
+        blending=blending, projection=projection, attenuation=attenuation, bit_depth=bit_depth,
     )
-    return w
 
+
+@_viewer_doc
 def show_zyx_max_slice_interactive_point_annotator(
     im,
     pixel_sizes=None, sxy=None, sz=None,
@@ -4125,129 +4196,47 @@ def show_zyx_max_slice_interactive_point_annotator(
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
     blending=None, projection=None, attenuation=0.05, bit_depth=None,
+    channel_axis=None,
 ):
     """
-    Interactive 3D slice viewer with point annotation using AnyWidget.
-    Features the same visualization as show_zyx_max_slice_interactive, but adds:
-    - Point annotation toggle
-    - Left-click on any projection to add or delete points.
-    Returns a widget instance `w`. The list of annotated points is accessible via `w.points`.
+    Interactive ortho-slab viewer with point annotation (anywidget).
+
+    The same viewer as `show_zyx_max_slice_interactive` (same ``im``,
+    ``channel_axis``, ``projection``, ``attenuation`` and ``bit_depth``),
+    plus an annotation toggle: a left click on a panel adds a point, or in
+    delete mode removes the nearest point drawn within about 12 screen
+    pixels among the points inside the panel's slab. Returns a
+    `TNIAAnnotatorWidget`; ``w.points`` is the list of points as voxel
+    indices ``[z, y, x]`` (not physical coordinates), and the CSV button
+    writes them as ``z,y,x`` rows.
 
     Parameters
     ----------
-    im : ndarray, list of ndarrays, or xarray.DataArray
-        ZYX (or YX) array, a list of them (one per channel), or a DataArray
-        with C/Z/Y/X dims (e.g. STCZYX from ``image_io``; other dims must have
-        size 1). For a DataArray, ``channel_labels`` default to the ``C``
-        coordinate, ``colormap`` to a ``color`` coordinate along ``C`` (see
-        ``image_io.set_channel_info``) and ``pixel_sizes`` to the calibrated
-        coordinates; explicit arguments win.
-    blending : str, optional
-        Channel compositing: 'additive', 'maximum', 'screen' or 'minimum'
-        (white background with white->colour or inverted colormaps). None
-        keeps the default. Keyword only; not in the GUI.
-    projection : str, optional
-        Slab projection: 'mip' (default), 'minip', 'average' or
-        'attenuated_mip' (napari's rendering names). Keyword only.
-    attenuation : float, optional
-        Attenuation per voxel for 'attenuated_mip' (default 0.05).
-    bit_depth : None, 'auto', int, 'dtype', 'data' or list, optional
-        Range of the channel histograms. By default the detector bit depth is
-        inferred from the data (the smallest of 8, 10, 12, 14, 16, ... bits
-        holding the maximum, e.g. 0..4095 for 12-bit data stored as uint16).
-        An int (e.g. 12) enforces a bit depth, 'dtype' uses the full dtype
-        range, 'data' the data range; a list sets it per channel.
-    scale_bar_show : bool, optional
-        Draw the scale bar (default True; also a GUI checkbox).
-    scale_bar_fontsize_pt : float, optional
-        Font size of the scale-bar label in points; the bar's line width
-        follows it. None (default) sizes it from the figure height; 0 hides
-        the label but keeps the bar (``scale_bar_show`` toggles the bar).
-        Also a GUI box (empty = auto).
-    rotate_view : float or tuple of floats, optional
-        Rotates the 2D projected views purely for visualization.
-        If a single float is provided, it rotates the XY projection (in degrees).
-        If a tuple of three floats is provided `(Z, Y, X)`, it rotates the XY, XZ, and ZY projections independently.
-        Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
-        For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
+    point_size_scale : float
+        Marker size as a fraction of min(X, Y) in voxels (at least 3).
+    annotate : bool
+        Start with annotation mode on.
+    snap_depth : bool
+        A click on a projection stores the depth of the voxel the projection
+        shows there (argmax of the visible channels inside the slab, argmin
+        for 'minip'; the slab centre for flat profiles or 'average'). False
+        stores the slab centre.
     """
-
-    if colors is not None:
-        warn_deprecated("The 'colors' parameter", "'colormap'")
-        if colormap is None:
-            colormap = colors
-
-    if sxy is not None or sz is not None:
-        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
-        if pixel_sizes is None:
-            _sxy = sxy if sxy is not None else 1.0
-            _sz = sz if sz is not None else 1.0
-            pixel_sizes = (_sz, _sxy, _sxy)
-
-    # after resolving the deprecated colors/sxy/sz, so they still apply to DataArray input
-    im, colormap, channel_labels, pixel_sizes = _viewer_input_from_xarray(im, colormap, channel_labels, pixel_sizes)
-
-    # The widget parses pixel_sizes again and warns about missing axes once
-    (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
-
-    if any(x is not None for x in [x_s, y_s, z_s]):
-        warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'")
-        if slabs_position is None:
-            slabs_position = (z_s, y_s, x_s)
-
-    if any(x is not None for x in [x_t, y_t, z_t]):
-        warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'")
-        if slabs_thickness is None:
-            slabs_thickness = (z_t, y_t, x_t)
-
-    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
-    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
-
-    if isinstance(im, list):
-        if im[0].ndim == 2:
-            im = [img[np.newaxis, ...] for img in im]
-    elif im.ndim == 2:
-        im = im[np.newaxis, ...]
-    im_shape = (im[0].shape if isinstance(im, list) else im.shape)
-    Z, Y, X = im_shape
-
-    if figsize is None:
-        # The class's automatic size (physical extents, label row, 8-inch box)
-        cols, rows = _ortho_extents(X * px, Y * py, Z * pz, rotate_view)
-        figsize = _auto_figsize(cols, rows, True, box=(8.0, 8.0), label_fontsize_pt=channel_label_fontsize_pt)
-    if figsize_scale != 1.0:
-        figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
-
-    def _default_t(n): return max(1, n // 64)
-    if x_t is None: x_t = _default_t(X) * px
-    if y_t is None: y_t = _default_t(Y) * py
-    if z_t is None: z_t = _default_t(Z) * pz
-
-    if x_s is None: x_s = (X // 2) * px
-    if y_s is None: y_s = (Y // 2) * py
-    if z_s is None: z_s = (Z // 2) * pz
-
-    if x_t >= X * px:
-        x_t = max(1, X // 2) * px
-        x_s = (X // 2) * px
-    if y_t >= Y * py:
-        y_t = max(1, Y // 2) * py
-        y_s = (Y // 2) * py
-    if z_t >= Z * pz:
-        z_t = max(1, Z // 2) * pz
-        z_s = (Z // 2) * pz
-
-    w = TNIAAnnotatorWidget(
-        im, pixel_sizes=pixel_sizes, figsize=figsize, colormap=colormap if colormap is not None else colors,
-        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
+    a = _prepare_viewer_args(
+        im, pixel_sizes, sxy, sz, colormap, colors, channel_labels, channel_axis, figsize, figsize_scale,
+        rotate_view, channel_label_fontsize_pt, slabs_position, x_s, y_s, z_s, slabs_thickness, x_t, y_t, z_t)
+    return TNIAAnnotatorWidget(
+        a['im'], pixel_sizes=a['pixel_sizes'], figsize=a['figsize'], colormap=a['colormap'],
+        vmin=vmin, vmax=vmax, gamma=gamma, opacity=opacity, show_crosshair=show_crosshair,
+        sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
         point_size_scale=point_size_scale, annotate=annotate, snap_depth=snap_depth,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t), rotate_view=rotate_view, channel_labels=channel_labels,
-        channel_label_fontsize_pt=channel_label_fontsize_pt,
-        blending=blending, projection=projection, attenuation=attenuation,
-        bit_depth=bit_depth,
+        slabs_position=a['slabs_position'], slabs_thickness=a['slabs_thickness'], rotate_view=rotate_view,
+        channel_labels=a['channel_labels'], channel_label_fontsize_pt=channel_label_fontsize_pt,
+        blending=blending, projection=projection, attenuation=attenuation, bit_depth=bit_depth,
     )
-    return w
 
+
+@_viewer_doc
 def show_zyx_max_scatter_interactive(
     points,
     channels=None,
@@ -4266,31 +4255,37 @@ def show_zyx_max_scatter_interactive(
     blending=None,
 ):
     """
-    Shows interactive sliders for XY, XZ, and YZ projection of 3D point coordinates.
+    Interactive ortho-slab viewer of a 3D point cloud (anywidget): the
+    points inside each slab, projected onto the XY, XZ and ZY panels.
+
+    Returns a `TNIAScatterWidget`.
 
     Parameters
     ----------
-    blending : str, optional
-        Channel compositing: 'additive' (default), 'maximum', 'screen' or
-        'minimum' (white canvas; each channel from white to its colour).
-        Keyword only; not in the GUI.
-    subplot_bg : str, optional
-        Panel background; defaults to black ('white' with blending='minimum').
-    rotate_view : float or tuple of floats, optional
-        Rotates the 2D projected views purely for visualization.
-        If a single float is provided, it rotates the XY projection (in degrees).
-        If a tuple of three floats is provided `(Z, Y, X)`, it rotates the XY, XZ, and ZY projections independently.
-        Note: This only rotates the 2D projected views to avoid overhead. Slicing still occurs along the original unrotated axes.
-        For true 3D rotation before slicing, pre-rotate the 3D volume using e.g., `scipy.ndimage.rotate` before passing it to this function.
-
-    Notes:
-        - When hiding axes to maintain custom subplot backgrounds (e.g. `subplot_bg`), the code
-          manually hides ticks and spines instead of using `ax.axis('off')`, as `ax.axis('off')`
-          inadvertently disables the background patch in matplotlib.
-        - When `vmax` is not explicitly provided, it defaults to the largest finite value of each
-          channel (1.0 for an all-NaN channel); `vmin` defaults to 0.
-        - The function dynamically determines its rendering mode: if `render=None`, it defaults to
-          `'points'` for point counts under 10,000, and `'density'` for larger datasets to optimize interactive performance.
+    points : (N, 3) or (3, N) array, or a tuple/list of 3 arrays
+        Coordinates in (Z, Y, X) order, in data units: one unit is one voxel,
+        so physical position = coordinate x pixel size. Points with a
+        non-finite coordinate are dropped (with a warning).
+    channels : array or list, optional
+        How points are coloured (see ``channel_mode``): one value per point
+        (a continuous channel), an (N, C) array or a list of C per-point
+        arrays (C continuous channels), one integer label per point
+        (categories: one channel per label), or a list of index arrays
+        (index lists: channel c is the points ``channels[c]``).
+    render : 'points', 'density' or None
+        Scatter markers, or 2D histograms of the slab (``bins``); None picks
+        'points' below 10,000 points.
+    bins : int or (int, int)
+        Density bins along X and Y (Z gets bins of about the same physical size).
+    point_size : float
+        Marker area in points^2 (matplotlib ``s``).
+    alpha : float
+        Marker transparency in points mode.
+    subplot_bg : colour, optional
+        Panel background; black, or white with blending='minimum'.
+    vmin, vmax : float or per-channel list (values of the channels)
+        For continuous channels; vmin defaults to 0 and vmax to the largest
+        finite value.
 
     Changed (D10, 2026-11): `slabs_position` / `slabs_thickness` are physical
     (data coordinate x pixel size), centre and half-thickness, as in the image
@@ -4302,33 +4297,11 @@ def show_zyx_max_scatter_interactive(
     longer than the number of channels raises ValueError (extra entries used
     to be dropped silently); None entries take the default.
     """
-    if colors is not None:
-        warn_deprecated("The 'colors' parameter", "'colormap'")
-        if colormap is None:
-            colormap = colors
-
-    if sxy is not None or sz is not None:
-        warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")
-        if pixel_sizes is None:
-            _sxy = sxy if sxy is not None else 1.0
-            _sz = sz if sz is not None else 1.0
-            pixel_sizes = (_sz, _sxy, _sxy)
-
+    colormap, pixel_sizes, slabs_position, slabs_thickness = _legacy_viewer_kwargs(
+        colors, colormap, sxy, sz, pixel_sizes, x_s, y_s, z_s, slabs_position,
+        x_t, y_t, z_t, slabs_thickness, stacklevel=5)
     # The widget parses pixel_sizes again and warns about missing axes once
     (pz, py, px), _, _ = _viewer_pixel_sizes(pixel_sizes, warn=False)
-
-    if any(x is not None for x in [x_s, y_s, z_s]):
-        warn_deprecated("Passing 'x_s'/'y_s'/'z_s'", "'slabs_position'")
-        if slabs_position is None:
-            slabs_position = (z_s, y_s, x_s)
-
-    if any(x is not None for x in [x_t, y_t, z_t]):
-        warn_deprecated("Passing 'x_t'/'y_t'/'z_t'", "'slabs_thickness'")
-        if slabs_thickness is None:
-            slabs_thickness = (z_t, y_t, x_t)
-
-    z_t, y_t, x_t = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
-    z_s, y_s, x_s = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
 
     if isinstance(points, (tuple, list)) and len(points) == 3:
         # points is a tuple or list of 3 arrays: (Z, Y, X)
@@ -4374,7 +4347,7 @@ def show_zyx_max_scatter_interactive(
     w = TNIAScatterWidget(
         X, Y, Z,
         channels=channels, pixel_sizes=pixel_sizes, render=render, bins=bins,
-        point_size=point_size, alpha=alpha, colormap=colormap if colormap is not None else colors, opacity=opacity,
+        point_size=point_size, alpha=alpha, colormap=colormap, opacity=opacity,
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
         subplot_bg=subplot_bg,
         slabs_position=slabs_position, slabs_thickness=slabs_thickness,
