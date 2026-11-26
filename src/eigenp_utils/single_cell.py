@@ -22,6 +22,7 @@ from matplotlib.lines import Line2D
 import re
 from .plotting_utils import get_nice_number
 from .stats import robust_standardize
+from ._conventions import warn_deprecated
 
 logger = logging.getLogger(__name__)
 
@@ -4074,12 +4075,14 @@ def annotate_clusters_by_markers(
         have finite differences. `uncertainty = 1 - softmax_p * consensus_frac`, where
         `consensus_frac` is the fraction of the cluster's cells whose own best type is the
         assigned type.
+
+    Changed (D08, 2026-11): passing the ignored `beta` emits a FutureWarning (removal in
+    eigenp_utils 0.1.0); it was a DeprecationWarning.
     """
     if beta is not None:
-        warnings.warn(
-            "The `beta` parameter is deprecated and ignored. `annotate_clusters_by_markers` now uses a parameter-free probabilistic confidence score.",
-            DeprecationWarning,
-            stacklevel=2,
+        warn_deprecated(
+            "The `beta` parameter of annotate_clusters_by_markers (ignored: the "
+            "confidence score is parameter-free)"
         )
 
     # Get per-cell scores S only if not provided

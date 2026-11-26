@@ -168,6 +168,171 @@ def test_import_is_lazy_and_works_without_scikit_image():
 
 
 # ---------------------------------------------------------------------------
+# D08: every legacy name emits FutureWarning naming 0.1.0
+# ---------------------------------------------------------------------------
+
+def _vol():
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    return (rng.random((6, 24, 24)) * 1000).astype(np.uint16)
+
+
+def _hist_imshow():
+    import matplotlib.pyplot as plt
+    from eigenp_utils.plotting_utils import hist_imshow
+
+    import numpy as np
+    try:
+        hist_imshow(np.arange(16.0).reshape(4, 4))
+    finally:
+        plt.close("all")
+
+
+def _savefig_without_fig(tmp_path):
+    import matplotlib.pyplot as plt
+    from eigenp_utils.plotting_utils import savefig_svg
+
+    fig, ax = plt.subplots()
+    try:
+        savefig_svg(str(tmp_path / "x.svg"))
+    finally:
+        plt.close(fig)
+
+
+def _tnia_plotting_3d():
+    sys.modules.pop("eigenp_utils.tnia_plotting_3d", None)
+    importlib.import_module("eigenp_utils.tnia_plotting_3d")
+
+
+def _annotate_beta():
+    pytest.importorskip("scanpy")
+    import numpy as np
+    import pandas as pd
+    from anndata import AnnData
+    from eigenp_utils.single_cell import annotate_clusters_by_markers
+
+    X = np.array([[10.0, 0, 1], [0, 10.0, 1], [9.0, 0, 2], [8.0, 0, 1]])
+    adata = AnnData(X=X, obs=pd.DataFrame({"leiden": ["0", "1", "0", "0"]}, index=list("abcd")),
+                    var=pd.DataFrame(index=["CD3E", "CD19", "GAPDH"]))
+    adata.raw = adata
+    annotate_clusters_by_markers(adata, cluster_key="leiden", beta=2.0, score_method="binned",
+                                 cell_type_markers_dict={"T": ["CD3E"], "B": ["CD19"]})
+
+
+def _call(module, func, *args, **kwargs):
+    def run(tmp_path):
+        f = getattr(importlib.import_module(f"eigenp_utils.{module}"), func)
+        a = [x() if callable(x) else x for x in args]
+        return f(*a, **kwargs)
+    return run
+
+
+def _drift():
+    import numpy as np
+    from eigenp_utils.maxproj_registration import estimate_drift
+
+    a = _vol()[0].astype(float)
+    estimate_drift(a, np.roll(a, 1, axis=0), return_ccm=True, order="xy")
+
+
+def _spline_resolution():
+    import numpy as np
+    from eigenp_utils.spline_utils import calculate_spline_length
+
+    calculate_spline_length(np.array([[0.0, 1.0, 2.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),
+                            resolution=(1.0, 1.0, 1.0))
+
+
+def _bicubic():
+    import numpy as np
+    from eigenp_utils.image_and_labels_utils import sample_volume_plane
+
+    sample_volume_plane(_vol().astype(float), pixel_sizes=(1, 1, 1),
+                        p0_phys=np.array([3.0, 12.0, 12.0]), normal_phys=np.array([1.0, 0, 0]),
+                        u_range_um=(-2, 2), v_range_um=(-2, 2), u_res=4, v_res=4, method="bicubic")
+
+
+def _widget(**kw):
+    def run(tmp_path):
+        import matplotlib.pyplot as plt
+        from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
+
+        try:
+            show_zyx_max_slice_interactive(_vol(), **kw)
+        finally:
+            plt.close("all")
+    return run
+
+
+def _iso_scatter(tmp_path):
+    import numpy as np
+    from eigenp_utils.tnia_plotting_anywidgets import show_iso_scatter
+
+    x = np.arange(5.0)
+    show_iso_scatter(x, x, x, sxy=1.0, sz=2.0)
+
+
+LEGACY = {
+    # Viewers
+    "colors=": _widget(colors=["lime"]),
+    "sxy/sz": _widget(sxy=0.5, sz=1.0),
+    "x_s..z_s": _widget(x_s=3),
+    "x_t..z_t": _widget(x_t=3),
+    "IsoScatter sxy/sz": _iso_scatter,
+    "tnia_plotting_3d": lambda tmp_path: _tnia_plotting_3d(),
+    # Plotting / I/O
+    "hist_imshow": lambda tmp_path: _hist_imshow(),
+    "numpy_to_stczyx_xarray": _call("image_io", "numpy_to_stczyx_xarray", _vol, "ZYX"),
+    "savefig_svg without fig": _savefig_without_fig,
+    # Intensity
+    "_my_clahe_": _call("clahe_equalize_adapthist", "_my_clahe_", lambda: _vol()[0]),
+    "adjust_gamma_per_slice": _call("intensity_rescaling", "adjust_gamma_per_slice", _vol),
+    "adjust_brightness_per_slice": _call("intensity_rescaling", "adjust_brightness_per_slice", _vol),
+    "test_z_axis_orientation": _call("intensity_rescaling", "test_z_axis_orientation", _vol),
+    "contrast_stretching(p_max=)": _call("intensity_rescaling", "contrast_stretching", _vol, p_max=99.0),
+    "normalize_image(upper_percentile=)": _call("intensity_rescaling", "normalize_image", _vol,
+                                                upper_percentile=99.0),
+    "normalize_image(dtype=)": _call("intensity_rescaling", "normalize_image", _vol, dtype="float32"),
+    "contrast_stretch_per_slice(p_min_array=)": _call(
+        "intensity_rescaling", "contrast_stretch_per_slice", _vol,
+        p_min_array=[0] * 6, p_max_array=[1000] * 6),
+    # Geometry
+    "dask_extract_surface": _call("surface_extraction", "dask_extract_surface"),
+    "best_focus_image(test=)": _call("extended_depth_of_focus", "best_focus_image", _vol, test=True),
+    "estimate_drift(return_ccm=)": lambda tmp_path: _drift(),
+    "apply_subpixel_drift_correction(drift=)": _call(
+        "maxproj_registration", "apply_subpixel_drift_correction", _vol, drift=(0.0, 0.0, 0.0)),
+    "spacing=": _call("image_and_labels_utils", "voronoi_otsu_labeling", _vol, spacing=(1, 1, 1)),
+    "calculate_spline_length(resolution=)": lambda tmp_path: _spline_resolution(),
+    "interpolation='bicubic'": lambda tmp_path: _bicubic(),
+    # Single cell
+    "annotate_clusters_by_markers(beta=)": lambda tmp_path: _annotate_beta(),
+}
+
+
+@pytest.mark.parametrize("name", list(LEGACY))
+def test_every_legacy_name_emits_future_warning_naming_0_1_0(name, tmp_path):
+    """D08: each legacy name in the plan's table emits a FutureWarning through
+    ``warn_deprecated``: "... will be removed in eigenp_utils 0.1.0 ...".
+
+    (+) the call emits such a FutureWarning (not only a DeprecationWarning, which
+        Python hides when attributed to library code).
+    (-) the warning is attributed to this test file or the importing line, not
+        to the library frame that emitted it (stacklevel is right) -- checked
+        for the plain function calls, where the caller is this file.
+    """
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        LEGACY[name](tmp_path)
+    ours = [w for w in rec if issubclass(w.category, FutureWarning)
+            and "will be removed in eigenp_utils 0.1.0" in str(w.message)]
+    assert ours, [f"{w.category.__name__}: {w.message}" for w in rec]
+    assert not any(issubclass(w.category, DeprecationWarning) and "eigenp" in w.filename
+                   for w in rec if "deprecated" in str(w.message))
+
+
+# ---------------------------------------------------------------------------
 # D07: output policy
 # ---------------------------------------------------------------------------
 

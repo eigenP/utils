@@ -1500,7 +1500,8 @@ def test_annotate_clusters_validation_and_deprecation():
     with pytest.raises(ValueError, match="Provide `cell_type_markers_dict`"):
         annotate_clusters_by_markers(adata, cluster_key="leiden", scores=None)
 
-    with pytest.warns(DeprecationWarning, match="beta.*deprecated"):
+    # Changed (D08): FutureWarning naming the removal version (was DeprecationWarning).
+    with pytest.warns(FutureWarning, match="beta.*deprecated.*0.1.0"):
         annotate_clusters_by_markers(
             adata,
             cluster_key="leiden",
