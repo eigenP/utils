@@ -1594,6 +1594,41 @@ def test_channel_label_height_and_fontsize_invariants():
 
 
 @pytest.mark.parametrize("kind", ["slice", "scatter"])
+def test_channel_label_bar_x_edges_are_bit_identical_to_the_xy_panel(kind):
+    """The label bar's x edges equal the XY panel's in display space, bit for bit.
+
+    Regression for a Pyodide-only failure: the bar was placed in the label
+    axes' coordinates while the panel went through the XY axes, whose
+    aspect-adjusted position differs in the last bits. With the panel edge on
+    a half pixel (0.05 in margin at 150 dpi: 7.49999... vs 7.50000...1), wasm
+    rounded the two to different pixel columns. The pixel test only fails
+    where the rounding flips; this checks the floats directly, so it fails on
+    every platform if the bar and the panel stop sharing one transform path.
+    """
+    rng = np.random.default_rng(0)
+    for shape in [(8, 32, 48), (5, 17, 91), (30, 64, 20)]:
+        if kind == "slice":
+            w = show_zyx_max_slice_interactive(rng.random(shape).astype(np.float32), channel_labels=["BF"])
+        else:
+            w = show_zyx_max_scatter_interactive(rng.random((50, 3)) * list(shape), channel_labels=["A"])
+        fig = w._render()
+        try:
+            ax_xy, ax_labels = fig.axXY, fig.axLabels
+            for dpi in (72, 100, 150, 200, 300):
+                fig.set_dpi(dpi)
+                fig.canvas.draw()
+                if kind == "slice":
+                    bar = ax_labels.get_images()[0].get_window_extent()
+                    ref = ax_xy.get_images()[0].get_window_extent()
+                else:
+                    bar = ax_labels.patches[0].get_window_extent()
+                    ref = ax_xy.get_window_extent()
+                assert (bar.x0, bar.x1) == (ref.x0, ref.x1), (kind, shape, dpi, bar, ref)
+        finally:
+            plt.close(fig)
+
+
+@pytest.mark.parametrize("kind", ["slice", "scatter"])
 def test_channel_label_bar_spans_exactly_the_xy_panel_pixels(kind):
     """The grey bar under the channel labels covers exactly the XY panel's pixel columns.
 
