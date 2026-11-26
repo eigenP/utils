@@ -242,12 +242,19 @@ class _PanelRotation:
                 self.s * dx + self.c * dy + self.cy)
 
     def warp(self, image, order=3, cval=0.0):
-        """Resample a 2D or channels-last image onto the rotated canvas (corners filled with ``cval``)."""
+        """Resample a 2D or channels-last image onto the rotated canvas.
+
+        The corners outside the input are filled with ``cval``; ``cval=nan``
+        marks them as missing (the viewers then show the panel background).
+        """
         image = np.asarray(image)
         if self.angle == 0.0:
             return image
         if not np.issubdtype(image.dtype, np.floating):
             image = image.astype(np.float64)
+        nan_fill = cval is not None and np.isnan(cval)
+        if nan_fill:
+            cval = 0.0
 
         def _warp(plane):
             finite = np.isfinite(plane)
@@ -256,7 +263,13 @@ class _PanelRotation:
             out = ndi.affine_transform(src, self.M, offset=self.offset, output_shape=self.out_shape,
                                        order=order, mode='grid-constant', cval=cval)
             if order > 1 and src.size:
-                out = np.clip(out, min(src.min(), cval), max(src.max(), cval))
+                lo, hi = (src.min(), src.max()) if nan_fill else (min(src.min(), cval), max(src.max(), cval))
+                out = np.clip(out, lo, hi)
+            if nan_fill:
+                inside = ndi.affine_transform(np.ones(src.shape), self.M, offset=self.offset,
+                                              output_shape=self.out_shape, order=1,
+                                              mode='grid-constant', cval=0.0)
+                out[inside < 0.5] = np.nan
             if not all_finite:
                 # Keep non-finite pixels local instead of letting the spline
                 # spread one NaN over the whole panel.
@@ -284,6 +297,9 @@ def _rotate_expand(image, angle_deg, order=3, pixel_size=None):
 
     ``pixel_size=(s_h, s_w)`` rotates in physical space instead; the output then
     has isotropic pixels (see ``_PanelRotation``).
+
+    Kept as the skimage-equivalence test oracle (the viewers use
+    ``_PanelRotation`` directly).
     """
     s_h, s_w = (1.0, 1.0) if pixel_size is None else pixel_size
     return _PanelRotation(np.shape(image)[:2], angle_deg, s_h, s_w).warp(image, order=order)
@@ -314,19 +330,12 @@ def _rotate_points_2d(px, py, angle_deg, cx, cy):
     return rx, ry
 
 
-def _unrotate_2d(phys_x, phys_y, angle_deg, orig_dim_x, orig_dim_y, sx, sy):
-    """
-    Unrotates physical coordinate (phys_x, phys_y) on a rotated 2D view back to
-    the original unrotated physical space.
-    """
-    if angle_deg == 0.0 or angle_deg is None:
-        return phys_x, phys_y
-    return _PanelRotation((orig_dim_y, orig_dim_x), angle_deg, sy, sx).inverse(phys_x, phys_y)
-
-
 def _get_rotated_line(x0, y0, x1, y1, angle_deg, orig_dim_w, orig_dim_h, s_w, s_h):
     """
     Transforms a 2D line segment (x0,y0)->(x1,y1) in physical space through 2D rotation.
+
+    Kept as a test oracle (``_PanelRotation.forward`` on two points); the
+    viewers use ``_PanelRotation`` directly.
     """
     if angle_deg == 0.0 or angle_deg is None:
         return [x0, x1], [y0, y1]
@@ -448,15 +457,6 @@ def resolve_color(c):
         pass
 
     return c
-
-def _norm(arr, symmetric=False, eps=1e-12, dtype=np.float32):
-    a = arr.astype(dtype, copy=False)
-    if symmetric:
-        d = max(eps, float(np.abs(a).max()))
-    else:
-        d = max(eps, float(a.max()))
-    return a / d
-
 
 # Copyright tnia 2021 - BSD License
 def show_zyx_slice(image_to_show, x, y, z, pixel_sizes=None, figsize=(10,10), colormap=None, vmin = None, vmax=None, gamma = 1, use_plt=False, opacity=None, scale_bar_show=True, scale_bar_fontsize_pt=None):
@@ -630,6 +630,10 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
             bar's line width follows it. None sizes it from the figure height;
             0 hides the label but keeps the bar (at the auto width).
             ``scale_bar_show`` toggles the bar.
+        subplot_bg (colour, optional): panel background. None (default) is
+            the theme background: black, or white for ``blending='minimum'``.
+            NaN pixels, rotation corners and faded (opacity < 1) channels
+            show it.
         use_plt (bool, optional): create the figure with ``pyplot.figure``
             (registered with pyplot, shown by ``plt.show()``). Default False:
             a plain ``matplotlib.figure.Figure``, which Jupyter and marimo
@@ -639,7 +643,11 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
 
     Changed (D05, 2026-11): ``use_plt`` defaults to False (the object-oriented
     interface; figures no longer pile up in pyplot), and the figure is no
-    longer drawn before it is returned.
+    longer drawn before it is returned. Changed (WP2, 2026-11): the panels
+    default to the theme background (they kept rcParams' white axes colour,
+    so single-channel NaN pixels and opacity looked like saturated signal);
+    NaN pixels take that colour, and the corners added by ``rotate_view`` to a
+    single-channel panel are background, not the colour of value 0.
 
     Changed (D01-D04, 2026-11): a single channel defaults to grey, not
     viridis; the default vmin/vmax is the robust default display range, not
@@ -663,9 +671,13 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         # One colour per channel, then the blending=None rule (D04)
         colormap, blending = _resolve_channels(colormap, len(xy), blending)
     white_theme = blending == 'minimum'
-    if white_theme and subplot_bg is None:
-        subplot_bg = 'white'
-    # Value used for the corners that rotation adds to a panel
+    if subplot_bg is None:
+        # The theme background, never rcParams' (white) axes colour: NaN
+        # pixels and opacity show it, so it must not look like signal (R1-03).
+        subplot_bg = 'white' if white_theme else 'black'
+    # Value used for the corners that rotation adds to a panel: the panel
+    # background of a composite, missing (NaN, drawn as the background) for a
+    # single channel (R1-10).
     pad_value = 0.0
 
     (pz, py, px), xy_given, length_unit = _viewer_pixel_sizes(pixel_sizes)
@@ -715,11 +727,15 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
         if colormap is not None:
             c = channel_spec(colormap)  # a registered Colormap instance -> its name
             orig_colormap = c
-            colormap = c if is_colormap(c) else to_cmap(resolve_color(c))
+            colormap = matplotlib.colormaps[c] if is_colormap(c) else to_cmap(resolve_color(c))
+            # NaN pixels take the panel background (matplotlib's 'bad' colour
+            # is transparent, which showed whatever lay behind the panel)
+            colormap = colormap.with_extremes(bad=subplot_bg)
 
-        if white_theme:
-            # Corners added by rotation take the colour of the low end of the range
-            pad_value = 1.0 if np.ndim(xy) == 3 else (vmin if vmin is not None else 0.0)
+        if np.ndim(xy) == 3:
+            pad_value = 1.0 if white_theme else 0.0
+        else:
+            pad_value = np.nan
 
     rot_z, rot_y, rot_x = _parse_rotate_view(rotate_view)
 
@@ -870,7 +886,7 @@ def show_zyx(xy, xz, zy, pixel_sizes=None, figsize=(10,10), colormap=None, vmin=
     axXZ.set_xlim([0, xz_w]); axXZ.set_ylim([xz_h, 0])
 
     for i, ax in enumerate([axXY, axZY, axXZ, axBar]):
-        if i < 3 and subplot_bg is not None:
+        if i < 3:
             ax.set_facecolor(subplot_bg)
         elif ax == axBar:
             ax.patch.set_visible(False)

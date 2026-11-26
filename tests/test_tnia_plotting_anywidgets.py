@@ -4537,3 +4537,74 @@ def test_no_pyplot_figures_after_rendering_every_viewer_with_defaults(tmp_path):
         plt.close("all")
     for f in figs:
         plt.close(f)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): NaN / theme background, dead helpers (WP2)
+# ---------------------------------------------------------------------------
+
+def _rendered_rgb_at(fig, ax, fx, fy):
+    """RGB (0..255) of the rendered figure at axes fraction ``(fx, fy)`` of ``ax``."""
+    fig.canvas.draw()
+    buf = np.asarray(fig.canvas.buffer_rgba())
+    x, y = ax.transAxes.transform((fx, fy))
+    return buf[int(buf.shape[0] - y), int(x), :3].astype(int)
+
+
+def test_nan_pixels_and_opacity_show_the_theme_background_not_white():
+    """R1-03: single-channel NaN pixels and opacity fade to the panel background.
+
+    Strategy: a volume of 10 whose top half is NaN, drawn grey on the dark
+    theme, and with ``blending='minimum'`` (white theme); then a 0..1 ramp
+    with ``opacity=0.5``.
+    Expected outcome: NaN pixels render black on the dark theme (white on
+    the white theme), like the multichannel composite; data pixels stay white
+    (positive control); opacity fades value 0 to black, not to grey. (They
+    used to show the white axes background: NaN looked like saturated signal.)
+    """
+    v = np.full((4, 16, 16), 10.0, dtype=np.float32)
+    v[:, :8, :] = np.nan
+    fig = show_zyx_max(v, colormap="gray", figsize=(4, 4))
+    assert list(_rendered_rgb_at(fig, fig.axXY, 0.5, 0.75)) == [0, 0, 0]       # NaN (top half)
+    assert list(_rendered_rgb_at(fig, fig.axXY, 0.5, 0.25)) == [255, 255, 255]  # data
+    fig_multi = show_zyx_max([v, 0 * v], figsize=(4, 4))
+    assert list(_rendered_rgb_at(fig_multi, fig_multi.axXY, 0.5, 0.75)) == [0, 0, 0]
+    fig_min = show_zyx_max(v, colormap="red", blending="minimum", figsize=(4, 4))
+    assert list(_rendered_rgb_at(fig_min, fig_min.axXY, 0.5, 0.75)) == [255, 255, 255]
+
+    ramp = np.zeros((4, 16, 16), dtype=np.float32)
+    ramp[:, :, 8:] = 1.0
+    fig_op = show_zyx_max(ramp, colormap="gray", vmin=0, vmax=1, opacity=0.5, figsize=(4, 4))
+    assert list(_rendered_rgb_at(fig_op, fig_op.axXY, 0.25, 0.5)) == [0, 0, 0]
+    assert _rendered_rgb_at(fig_op, fig_op.axXY, 0.75, 0.5)[0] in range(120, 135)
+    for f in (fig, fig_multi, fig_min, fig_op):
+        plt.close(f)
+
+
+def test_rotation_corners_show_the_background_not_value_zero():
+    """R1-10: corners added by ``rotate_view`` are background, not the colour of 0.
+
+    Strategy: signed data in [-1, 1] drawn grey (clim [-1, 1], so 0 is
+    mid-grey) with the XY panel rotated by 45 degrees.
+    Expected outcome: a corner of the XY panel renders black (the panel
+    background) instead of grey 128, and the image centre is not black
+    (positive control). The corners are NaN in the panel array.
+    """
+    rng = np.random.default_rng(0)
+    xy = rng.uniform(-1, 1, (32, 32)).astype(np.float32)
+    fig = show_zyx(xy, xy[:8], xy[:, :8], colormap="gray", vmin=-1, vmax=1,
+                   rotate_view=(45, 0, 0), figsize=(4, 4))
+    arr = np.asarray(fig.axXY.images[0].get_array(), dtype=float)
+    assert np.isnan(arr[0, 0]) and np.isfinite(arr[arr.shape[0] // 2, arr.shape[1] // 2])
+    assert list(_rendered_rgb_at(fig, fig.axXY, 0.02, 0.98)) == [0, 0, 0]
+    plt.close(fig)
+
+
+def test_dead_rotation_and_normalisation_helpers_are_gone():
+    """R1-21: the unused private helpers ``_norm`` and ``_unrotate_2d`` are removed.
+
+    ``_rotate_expand`` and ``_get_rotated_line`` stay as the documented
+    skimage-equivalence test oracles.
+    """
+    assert not hasattr(tpa, "_norm") and not hasattr(tpa, "_unrotate_2d")
+    assert callable(tpa._rotate_expand) and callable(tpa._get_rotated_line)
