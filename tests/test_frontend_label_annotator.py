@@ -900,3 +900,291 @@ def test_view_cleanup_removes_window_listener_and_resize_observer(page, serve):
     }"""
     )
     assert out == [1, 1, True, 1]
+
+
+# ------------------------------------------------- stage 2: channel controls, keys, wheel, paint cost
+def _push_traits(page, w, names):
+    """Copy Python traits into the mock model (what the host would sync), one ``set`` per trait."""
+    for name in names:
+        page.evaluate(f"window.mockModel.set({json.dumps(name)}, {json.dumps(getattr(w, name))})")
+
+
+def test_channel_rows_follow_python_changes_in_data_units(page, serve):
+    """Channel controls refresh in place on Python-side changes and work in data units (R4-20, R4-07).
+
+    Strategy: a 2-channel 12-bit image; read the min/max sliders; change
+    ``vmin``/``vmax``/``gamma``/``channel_colors``/``channel_visible`` in
+    Python and push them to the page; then drag the first max slider with
+    the keyboard (focus + ArrowLeft).
+    Expected outcome: the sliders span the data (0..4095, step 1) and start
+    at the default range; after the push every control shows the new value
+    without the rows being rebuilt (the same DOM nodes; before, only the
+    image re-composited and the controls stayed stale); ArrowLeft lowers
+    ``vmax`` by one data unit (keyboard operable).
+    """
+    img = np.zeros((2, H, W), np.uint16)
+    img[0] = np.arange(W) * 100
+    img[1, ::2] = 4095
+    w = LabelAnnotator(img, axes="CYX")
+    _open(page, serve(w))
+    rows = page.locator(".lbl-chan")
+    assert rows.count() == 2
+    hi0 = page.locator("input.lbl-vmax").first
+    assert hi0.get_attribute("max") == "3900" and hi0.get_attribute("step") == "1"
+    assert float(hi0.input_value()) == w.vmax[0]
+    page.evaluate("window.firstRow = document.querySelector('.lbl-chan')")
+    w.vmin, w.vmax, w.gamma = [100.0, 0.0], [2000.0, 4095.0], [0.5, 1.0]
+    w.channel_colors = ["#ff0000", w.channel_colors[1]]
+    w.channel_visible = [True, False]
+    _push_traits(page, w, ["vmin", "vmax", "gamma", "channel_colors", "channel_visible", "data_range"])
+    assert page.evaluate("window.firstRow === document.querySelector('.lbl-chan')"), "rows are refreshed, not rebuilt"
+    assert page.locator("input.lbl-vmin").first.input_value() == "100"
+    assert hi0.input_value() == "2000"
+    assert page.locator("input.lbl-gamma").first.input_value() == "50"
+    assert page.locator(".lbl-chan input[type=color]").first.input_value() == "#ff0000"
+    assert page.locator(".lbl-chan input[type=checkbox]").nth(1).is_checked() is False
+    hi0.focus()
+    page.keyboard.press("ArrowLeft")
+    assert _get(page, "vmax")[0] == 1999
+
+
+def test_dragging_a_range_slider_coalesces_model_updates(page, serve):
+    """A slider drag sends a few vmin/vmax updates, not one per ``input`` event (R4-07, review fix).
+
+    Strategy: a 12-bit image; fire 50 ``input`` events on the first max
+    slider in one task (a fast drag; each update makes Python re-quantise
+    and re-send the slice), then the closing ``change``; then a second drag
+    on the min slider that ends without ``change``.
+    Expected outcome: (+) the drag sends at most one update while it runs
+    (it sent 50), the readout follows every step, and ``change`` sends the
+    final value; (−) without ``change`` the final value still arrives after
+    the throttle interval, and the min slider stays one step below max.
+    """
+    img = np.zeros((1, H, W), np.uint16)
+    img[0] = np.arange(W) * 100
+    w = LabelAnnotator(img, axes="CYX")
+    _open(page, serve(w))
+    res = page.evaluate(
+        """() => {
+            const hi = document.querySelector('input.lbl-vmax');
+            const n0 = window.sent.length;
+            for (let v = 3000; v > 2950; v--) { hi.value = String(v); hi.dispatchEvent(new Event('input')); }
+            const during = window.sent.length - n0;
+            const text = hi.parentElement.querySelector('.lbl-val').textContent;
+            hi.dispatchEvent(new Event('change'));
+            return [during, text, window.sent.length - n0, window.mockModel.get('vmax')[0]];
+        }"""
+    )
+    assert res[0] <= 1 and res[1] == "2951"
+    assert res[2] <= 2 and res[3] == 2951
+    res = page.evaluate(
+        """() => {
+            const lo = document.querySelector('input.lbl-vmin');
+            const n0 = window.sent.length;
+            for (let v = 10; v < 3000; v += 10) { lo.value = String(v); lo.dispatchEvent(new Event('input')); }
+            return window.sent.length - n0;
+        }"""
+    )
+    assert res <= 1
+    page.wait_for_function("window.mockModel.get('vmin')[0] === 2950")
+
+
+def test_controls_have_accessible_names(page, serve):
+    """Every input and select of the widget has an accessible name (R3-13).
+
+    Strategy: render a 2-channel 3D widget with two stacks and list each
+    input/select without an ``aria-label`` and outside a ``<label>``.
+    Expected outcome: none (the channel sliders and toolbar boxes used to be
+    announced without names).
+    """
+    img = np.zeros((2, 3, H, W), np.float32)
+    w = LabelAnnotator([img, img], axes="CZYX")
+    _open(page, serve(w))
+    unnamed = page.evaluate(
+        """() => [...document.querySelectorAll('#c input, #c select')]
+            .filter((e) => !e.getAttribute('aria-label') && !e.closest('label'))
+            .map((e) => e.className || e.type)"""
+    )
+    assert unnamed == []
+
+
+def test_handled_keys_do_not_reach_the_host(page, serve):
+    """Keys the widget handles stop at the viewport; others reach the host (D17, R4-06).
+
+    Strategy: a document-level keydown listener (where JupyterLab's command
+    mode listens) records keys while the focused viewport receives the
+    annotator's single-letter keys, digits, brackets, arrows, PageDown and
+    ctrl+z; then keys the widget does not handle (``q``, ctrl+s).
+    Expected outcome (+): none of the handled keys reaches the document (they
+    used to bubble: b, x, m, 0, ... are JupyterLab cell commands) and the
+    viewport carries ``data-lm-suppress-shortcuts`` (Lumino skips shortcut
+    matching inside it); the tools still switch. (−) unhandled keys and
+    modified letters still reach the host.
+    """
+    w, _ = _widget3d()
+    _open(page, serve(w))
+    assert page.get_attribute(".lbl-viewport", "data-lm-suppress-shortcuts") is not None
+    page.evaluate("window.hostKeys = []; document.addEventListener('keydown', (e) => window.hostKeys.push(e.key))")
+    page.locator(".lbl-viewport").focus()
+    for key in ("b", "x", "m", "s", "f", "e", "p", "o", "n", "0", "[", "]", "ArrowUp", "ArrowDown",
+                "Alt+ArrowRight", "PageDown", "Control+z", "o"):
+        page.keyboard.press(key)
+    assert [k for k in page.evaluate("window.hostKeys") if k not in ("Control", "Alt", "Shift", "Meta")] == []
+    assert _get(page, "tool") == "picker"
+    page.evaluate("window.hostKeys = []")
+    page.keyboard.press("q")
+    page.keyboard.press("Control+s")
+    assert page.evaluate("window.hostKeys") == ["q", "Control", "s"]
+
+
+def _zoom(page):
+    return page.evaluate("document.querySelector('.lbl-stage').style.transform")
+
+
+def test_plain_wheel_zooms_only_after_the_viewport_is_focused(page, serve):
+    """A plain wheel over an unfocused widget scrolls the page; zoom needs a click/focus or ctrl (D17, R4-16).
+
+    Strategy: make the page taller than the window, put the pointer over the
+    viewport while focus is elsewhere and turn the wheel; then the same with
+    ctrl held; then focus the viewport and turn the plain wheel.
+    Expected outcome: (−) unfocused plain wheel leaves the zoom alone and the
+    page scrolls (the wheel used to always zoom: a scroll trap); (+) ctrl
+    (trackpad pinch) zooms without focus; after focusing, the plain wheel
+    zooms and does not scroll the page.
+    """
+    w = _widget()
+    _open(page, serve(w))
+    page.evaluate("document.body.appendChild(Object.assign(document.createElement('div'), {style: 'height: 3000px'}))")
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    page.mouse.move(*_client_xy(page, 20, 20))
+    z0 = _zoom(page)
+    page.mouse.wheel(0, 200)
+    page.wait_for_timeout(200)
+    assert _zoom(page) == z0, "unfocused plain wheel must not zoom"
+    assert page.evaluate("window.scrollY") > 0, "the page scrolls"
+    page.evaluate("window.scrollTo(0, 0)")
+    page.mouse.move(*_client_xy(page, 20, 20))
+    page.keyboard.down("Control")
+    page.mouse.wheel(0, -200)
+    page.keyboard.up("Control")
+    z1 = _zoom(page)
+    assert z1 != z0, "ctrl+wheel (pinch) zooms without focus"
+    page.locator(".lbl-viewport").focus()
+    y = page.evaluate("window.scrollY")
+    page.mouse.move(*_client_xy(page, 20, 20))
+    page.mouse.wheel(0, -200)
+    page.wait_for_timeout(200)
+    assert _zoom(page) != z1 and page.evaluate("window.scrollY") == y
+
+
+_BIG = 2048
+
+
+def _paint_latency(page, display):
+    """Median ms per pointermove over 5 strokes of 30 moves on the big slice (handler time only)."""
+    page.evaluate(f"window.mockModel.set('display', {json.dumps(display)})")
+    page.evaluate(
+        """() => {
+        window.moveMs = [];
+        let t0 = 0;
+        window.addEventListener('pointermove', () => { t0 = performance.now(); }, true);
+        window.addEventListener('pointermove', () => { window.moveMs.push(performance.now() - t0); });
+    }"""
+    )
+    box = page.evaluate("(() => { const b = document.querySelector('canvas.lbl-img').getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; })()")
+
+    def at(x, y):
+        return box[0] + (x + 0.5) * box[2] / _BIG, box[1] + (y + 0.5) * box[3] / _BIG
+
+    runs = []
+    for k in range(5):
+        page.evaluate("window.moveMs = []")
+        y = 300 + 300 * k
+        page.mouse.move(*at(200, y))
+        page.mouse.down()
+        for i in range(1, 31):
+            page.mouse.move(*at(200 + 20 * i, y + (i % 3)))
+        page.mouse.up()
+        ms = page.evaluate("window.moveMs")
+        runs.append(float(np.median(ms)))
+    return float(np.median(runs)), runs
+
+
+def test_paint_latency_on_a_2048_slice_is_bounded(page, serve):
+    """Painting redraws only the dirty rectangle, so a stroke on a 2048² slice stays interactive (R4-17).
+
+    Strategy: a 2048 x 2048 two-channel slice with 400 masks, brush radius
+    5; five strokes of 30 pointer moves each, timing the widget's
+    pointermove handling in the page, in the filled and the outlined
+    display. Then undo the last stroke and check the undo buffer size.
+    Expected outcome: the median per-move time (median over the 5 runs,
+    printed) is below a generous 10 ms in both displays (every move used to
+    rebuild the whole 4-megapixel label image: 29 ms filled and 49 ms
+    outlined per move here); the undo entry of a stroke holds only its bounding
+    box (a few kB instead of a full 8 MB slice copy) and still restores it.
+    """
+    rng = np.random.default_rng(0)
+    img = rng.random((2, _BIG, _BIG), dtype=np.float32)
+    lab = np.zeros((_BIG, _BIG), np.uint32)
+    for k in range(400):
+        y, x = rng.integers(0, _BIG - 40, 2)
+        lab[y:y + 30, x:x + 30] = k + 1
+    w = LabelAnnotator(img, axes="CYX", labels=lab, brush_radius=5)
+    w.auto_fill = False
+    _open_big = serve(w)
+    page.set_viewport_size({"width": 900, "height": 900})
+    page.goto(_open_big)
+    page.wait_for_function("window.ready === true")
+    page.wait_for_function(f"document.querySelector('canvas.lbl-img').width === {_BIG}")
+    page.wait_for_function("document.querySelector('.lbl-stage').style.transform.includes('scale(')")
+    filled, runs_f = _paint_latency(page, "filled")
+    outlined, runs_o = _paint_latency(page, "outlined")
+    print(f"\npaint latency per move on a 2048^2 slice: filled {filled:.2f} ms {runs_f}, "
+          f"outlined {outlined:.2f} ms {runs_o}")
+    assert filled < 10 and outlined < 10
+    nbytes = page.evaluate("document.getElementById('c').__lblDebug.undoBytes()")
+    assert 0 < nbytes < 2 * _BIG * _BIG // 10, f"undo holds {nbytes} bytes for 10 strokes"
+    before = _last_labels(page)[1]
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("Control+z")
+    after = _last_labels(page)[1]
+    changed = np.argwhere(before != after)
+    assert changed.size
+    assert changed[:, 0].min() >= 1490, "only the last stroke (y ~ 1500) was undone"
+
+
+@pytest.mark.parametrize("display", ["filled", "outlined"])
+def test_partial_redraw_matches_a_full_redraw(page, serve, display):
+    """The dirty-rectangle redraw paints exactly what a full redraw would (R4-17).
+
+    Strategy: masks next to each other, ``outline_px=3`` and a 2-px border
+    (the widest stamp reach); paint and erase strokes that touch, split and
+    cross them, then erase again and undo that; read the label canvas, then
+    force a full redraw (re-set ``opacity``) and read it again.
+    Expected outcome: identical RGBA everywhere (no stale outline or fill
+    pixels left at the edge of the redrawn rectangles).
+    """
+    lab = np.zeros((H, W), np.uint32)
+    lab[5:15, 5:15] = 1
+    lab[5:15, 15:25] = 2
+    lab[20:30, 8:30] = 3
+    w = _widget(labels=lab)
+    w.auto_fill = False
+    w.display = display
+    w.outline_px = 3
+    w.outline_border_px = 2
+    w.brush_radius = 1
+    _open(page, serve(w))
+    _stroke(page, [(2, 10), (35, 10)])
+    page.locator(".lbl-viewport").focus()
+    page.keyboard.press("e")
+    _stroke(page, [(20, 2), (20, 35)])
+    _stroke(page, [(2, 25), (35, 25)])
+    page.keyboard.press("Control+z")
+    read = """() => { const c = document.querySelector('canvas.lbl-lab');
+        return Array.from(c.getContext('2d').getImageData(0, 0, c.width, c.height).data); }"""
+    partial = np.asarray(page.evaluate(read))
+    page.evaluate("window.mockModel.set('opacity', window.mockModel.get('opacity'))")
+    full = np.asarray(page.evaluate(read))
+    assert (full.reshape(H, W, 4)[..., 3] > 0).any()
+    np.testing.assert_array_equal(partial, full)

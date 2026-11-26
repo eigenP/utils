@@ -87,3 +87,55 @@ def test_dev_extra_includes_pytest_playwright():
     pkg_names = {re.split(r"[<>=!~;\[\s]", d, maxsplit=1)[0].strip().lower() for d in dev}
     assert "pytest-playwright" in pkg_names
     assert not (pyproject.parent / "requirements-dev.txt").exists()
+
+
+ALL_NOTEBOOKS = sorted((Path(__file__).parents[1] / "notebooks").glob("*.py"))
+
+# deprecated names (D08) that the demos must not use any more
+DEPRECATED_NAMES = {
+    "_my_clahe_", "adjust_brightness_per_slice", "adjust_gamma_per_slice", "hist_imshow",
+    "plotly_scatter_3d", "plotly_scatter_3d_from_adata_obsm", "numpy_to_stczyx_xarray",
+    "test_z_axis_orientation", "dask_extract_surface", "tnia_plotting_3d",
+}
+DEPRECATED_VIEWER_KWARGS = {"colors", "sxy", "sz", "x_s", "y_s", "z_s", "x_t", "y_t", "z_t"}
+
+
+def _call_name(call):
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+
+
+@pytest.mark.parametrize("path", ALL_NOTEBOOKS, ids=lambda p: p.name)
+def test_notebooks_use_no_deprecated_names(path):
+    """R8-22 / D08: the demo notebooks show the current API only.
+
+    Strategy: AST-scan the notebook code (markdown strings are not code, so a
+    sentence mentioning ``_my_clahe_`` is fine).
+    (+) no deprecated function / module name is imported, referenced or called, and
+        no viewer (``show_*`` / ``TNIA*``) call passes a deprecated keyword.
+    (-) a viewer called with ``pixel_sizes=`` gets ``slabs_thickness`` /
+        ``slabs_position`` in µm, not a literal tuple of voxel counts (they are
+        physical once pixel sizes are given).
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    bad = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in DEPRECATED_NAMES:
+            bad.append(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in DEPRECATED_NAMES:
+            bad.append(node.attr)
+        elif isinstance(node, ast.alias) and node.name.split(".")[-1] in DEPRECATED_NAMES:
+            bad.append(node.name)
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] in DEPRECATED_NAMES:
+            bad.append(node.module)
+        elif isinstance(node, ast.Call):
+            name = _call_name(node)
+            if not (name.startswith("show_") or name.startswith("TNIA")):
+                continue
+            kw = {k.arg: k.value for k in node.keywords if k.arg}
+            bad += [f"{name}({k}=)" for k in DEPRECATED_VIEWER_KWARGS & set(kw)]
+            if "pixel_sizes" in kw:
+                bad += [f"{name}({k}=<voxel tuple> with pixel_sizes)"
+                        for k in ("slabs_thickness", "slabs_position")
+                        if isinstance(kw.get(k), (ast.Tuple, ast.List))]
+    assert not bad, bad

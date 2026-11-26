@@ -14,8 +14,9 @@ from eigenp_utils.intensity_rescaling import (
     ensure_float_and_restore_dtype,
     fit_basic_shading,
     normalize_image,
-    test_z_axis_orientation as _z_orientation,
+    check_z_axis_orientation as _z_orientation,
 )
+from eigenp_utils.intensity_rescaling import test_z_axis_orientation as _legacy_z_orientation
 
 
 def _radial_gradient(sizes):
@@ -104,7 +105,11 @@ def test_basic_fit_recovers_shading(fitting_mode, get_darkfield):
     expected = 200.0 * flat_true[None] * gains[:, None, None] + dark_offset
     images = rng.poisson(expected).astype(float)
 
-    res = fit_basic_shading(images, fitting_mode=fitting_mode, get_darkfield=get_darkfield)
+    if fitting_mode == "ladmap" and get_darkfield:
+        with pytest.warns(UserWarning, match="ladmap.*approximate"):
+            res = fit_basic_shading(images, fitting_mode=fitting_mode, get_darkfield=get_darkfield)
+    else:
+        res = fit_basic_shading(images, fitting_mode=fitting_mode, get_darkfield=get_darkfield)
 
     assert res["flatfield"].shape == sizes
     assert res["darkfield"].shape == sizes
@@ -305,7 +310,7 @@ def test_ensure_float_and_restore_dtype_decorator():
 def test_contrast_stretching_uint8_preserves_dynamic_range():
     """Stretching a uint8 gradient preserves smooth dynamic range across [0, 255]."""
     img_uint8 = np.linspace(20, 200, 10000, dtype=np.uint8).reshape(100, 100)
-    stretched = contrast_stretching(img_uint8, p_min=0.0, p_max=100.0)
+    stretched = contrast_stretching(img_uint8, percentiles=(0.0, 100.0))
 
     assert stretched.dtype == np.uint8
     assert len(np.unique(stretched)) > 100
@@ -337,7 +342,7 @@ def test_sparse_signal_is_not_blanked_by_degenerate_percentiles():
     ramp = np.linspace(0, 1, 40_000, dtype=np.float32).reshape(200, 200)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        lo, hi = np.percentile(ramp, (0.5, 99.9))
+        lo, hi = np.percentile(ramp, (0.1, 99.9))  # Changed (D27): default lower was 0.5
         np.testing.assert_allclose(normalize_image(ramp), np.clip((ramp - lo) / (hi - lo), 0, 1), atol=1e-6)
 
 
@@ -350,25 +355,44 @@ def test_large_images_keep_exact_percentiles():
     Expected outcome: equal to float precision (a sampled estimate differed by
     up to ~1% of the output range). Negative control: a small image is exact
     either way (covered by the ramp check above).
+    Changed (D27): both functions now default to the shared processing
+    percentiles (0.1, 99.9); they were (0.5, 99.9) and (0.0, 99.9).
     """
     img = np.random.default_rng(0).gamma(2.0, 50.0, (1100, 1000)).astype(np.float32)
-    lo, hi = np.nanpercentile(img, (0.5, 99.9))
+    lo, hi = np.nanpercentile(img, (0.1, 99.9))
     np.testing.assert_allclose(normalize_image(img), np.clip((img - lo) / (hi - lo), 0, 1), atol=1e-5)
-    lo, hi = np.nanpercentile(img, (0.0, 99.9))
     np.testing.assert_allclose(contrast_stretching(img), np.clip((img - lo) / (hi - lo), 0, 1), atol=1e-5)
 
 
+def test_contrast_stretching_constant_image_maps_inf_like_the_general_path():
+    """R6-11/D27: in a constant image, +inf maps to 1 and -inf to 0, as in a non-constant image; NaN stays NaN.
+
+    Strategy: [2, 2, nan, inf, -inf]. Before the fix the constant branch
+    mapped +/-inf to 0. Negative control (-): a non-constant image already
+    maps +inf to 1 and -inf to 0.
+    """
+    out = contrast_stretching(np.array([2.0, 2.0, np.nan, np.inf, -np.inf]))
+    np.testing.assert_array_equal(out, [0.0, 0.0, np.nan, 1.0, 0.0])
+    out = contrast_stretching(np.array([1.0, 2.0, 3.0, np.nan, np.inf, -np.inf]), percentiles=(0, 100))
+    np.testing.assert_array_equal(out[[3, 4, 5]], [np.nan, 1.0, 0.0])
+
+
 def test_contrast_stretching_and_normalize_image_constant_and_dtypes():
-    """Constant images produce finite outputs without NaNs, and normalize_image converts dtypes."""
+    """Constant images map to 0 in both functions, without NaNs, and normalize_image converts dtypes.
+
+    Changed (D27, R6-11): contrast_stretching returned a constant image
+    unchanged (0.42 stayed 0.42, raw units outside [0, 1]) while
+    normalize_image returned zeros; both now return zeros.
+    """
     const_f32 = np.full((16, 16), 0.42, dtype=np.float32)
     out_cs_f32 = contrast_stretching(const_f32)
     assert out_cs_f32.dtype == np.float32
-    np.testing.assert_allclose(out_cs_f32, const_f32)
+    np.testing.assert_array_equal(out_cs_f32, np.zeros_like(const_f32))
 
     const_u8 = np.full((16, 16), 77, dtype=np.uint8)
     out_cs_u8 = contrast_stretching(const_u8)
     assert out_cs_u8.dtype == np.uint8
-    np.testing.assert_array_equal(out_cs_u8, const_u8)
+    np.testing.assert_array_equal(out_cs_u8, np.zeros_like(const_u8))
 
     out_norm_const = normalize_image(const_f32)
     assert out_norm_const.dtype == np.float32
@@ -377,18 +401,91 @@ def test_contrast_stretching_and_normalize_image_constant_and_dtypes():
 
     # Explicit dtype conversions in normalize_image
     ramp_f32 = np.linspace(10.0, 210.0, 256, dtype=np.float32).reshape(16, 16)
-    norm_u8 = normalize_image(ramp_f32, lower_percentile=0.0, upper_percentile=100.0, dtype=np.uint8)
+    norm_u8 = normalize_image(ramp_f32, percentiles=(0.0, 100.0), output_dtype=np.uint8)
     assert norm_u8.dtype == np.uint8
     assert norm_u8.min() == 0 and norm_u8.max() == 255
 
-    norm_u16 = normalize_image(ramp_f32, lower_percentile=0.0, upper_percentile=100.0, dtype=np.uint16)
+    norm_u16 = normalize_image(ramp_f32, percentiles=(0.0, 100.0), output_dtype=np.uint16)
     assert norm_u16.dtype == np.uint16
     assert norm_u16.min() == 0 and norm_u16.max() == 65535
 
     ramp_u16 = np.linspace(100, 50000, 256, dtype=np.uint16).reshape(16, 16)
-    norm_f32 = normalize_image(ramp_u16, lower_percentile=0.0, upper_percentile=100.0, dtype=np.float32)
+    norm_f32 = normalize_image(ramp_u16, percentiles=(0.0, 100.0), output_dtype=np.float32)
     assert norm_f32.dtype == np.float32
     np.testing.assert_allclose([norm_f32.min(), norm_f32.max()], [0.0, 1.0], atol=1e-6)
+
+
+def test_processing_percentile_defaults_are_shared():
+    """D27 / D02 (i): contrast_stretching, normalize_image and clahe_u8 share the (0.1, 99.9) default.
+
+    Strategy: a float image with a dead pixel (0) and a hot pixel; compare
+    each function's default with explicit (0.1, 99.9). Before, the defaults
+    were (0.0, 99.9), (0.5, 99.9) and (0.1, 99.9), so a single dead pixel set
+    contrast_stretching's floor. Expected outcome: identical outputs, and
+    contrast_stretching == normalize_image for float input.
+    """
+    import inspect
+
+    from eigenp_utils.clahe_equalize_adapthist import clahe_u8
+
+    img = np.random.default_rng(5).gamma(4.0, 50.0, (64, 64)).astype(np.float32)
+    img[0, 0], img[1, 1] = 0.0, 1e5
+    np.testing.assert_array_equal(contrast_stretching(img), contrast_stretching(img, percentiles=(0.1, 99.9)))
+    np.testing.assert_array_equal(normalize_image(img), normalize_image(img, percentiles=(0.1, 99.9)))
+    np.testing.assert_allclose(contrast_stretching(img), normalize_image(img), atol=1e-6)
+    assert inspect.signature(clahe_u8).parameters["percentiles"].default == (0.1, 99.9)
+
+
+def test_percentile_and_dtype_names_have_deprecated_aliases():
+    """R6-21: percentiles=(lo, hi) and output_dtype= are the names; the old ones still work with a FutureWarning.
+
+    Strategy: call each function with the new names, and with the old
+    keywords and positional forms (contrast_stretching(img, p_min, p_max),
+    normalize_image(img, lower, upper, dtype)). Expected outcome: identical
+    results; each old form warns (FutureWarning naming 0.1.0); passing both a
+    new name and its alias raises TypeError. Negative control: the new names
+    do not warn.
+    """
+    img = np.random.default_rng(6).gamma(3.0, 40.0, (32, 32)).astype(np.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        cs = contrast_stretching(img, percentiles=(1.0, 99.0))
+        ni = normalize_image(img, percentiles=(1.0, 99.0), output_dtype=np.uint16)
+    for call in (lambda: contrast_stretching(img, 1.0, 99.0),
+                 lambda: contrast_stretching(img, p_min=1.0, p_max=99.0)):
+        with pytest.warns(FutureWarning, match=r"removed in eigenp_utils 0\.1\.0.*percentiles"):
+            np.testing.assert_array_equal(call(), cs)
+    for call in (lambda: normalize_image(img, 1.0, 99.0, np.uint16),
+                 lambda: normalize_image(img, lower_percentile=1.0, upper_percentile=99.0, dtype=np.uint16)):
+        with pytest.warns(FutureWarning, match=r"removed in eigenp_utils 0\.1\.0"):
+            np.testing.assert_array_equal(call(), ni)
+    with pytest.raises(TypeError, match="p_min"):
+        contrast_stretching(img, percentiles=(1.0, 99.0), p_min=1.0)
+    with pytest.raises(TypeError, match="dtype"):
+        normalize_image(img, output_dtype=np.uint8, dtype=np.uint8)
+
+
+def test_contrast_stretch_per_slice_names_and_deprecated_aliases():
+    """R6-10 / R6-21: in_min / in_max (absolute intensities) and flip_z replace p_min_array / p_max_array / FLIP_Z_AXIS.
+
+    The old names meant intensities while p_min elsewhere is a percentile.
+    Expected outcome: the old keywords give the same result with a
+    FutureWarning; the new names do not warn; both forms together raise.
+    """
+    base = np.array([[0.0, 100.0], [200.0, 400.0]], dtype=np.float64)
+    img = np.stack([base, base, base], axis=0)
+    lo = np.array([0.0, 50.0, 100.0])
+    hi = np.array([100.0, 200.0, 400.0])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        new = contrast_stretch_per_slice(img, in_min=lo, in_max=hi, flip_z=True)
+    with pytest.warns(FutureWarning, match="deprecated") as rec:
+        old = contrast_stretch_per_slice(img, p_min_array=lo, p_max_array=hi, FLIP_Z_AXIS=True)
+    assert any("in_min" in str(w.message) for w in rec)
+    np.testing.assert_array_equal(old, new)
+    np.testing.assert_allclose(new, contrast_stretch_per_slice(img, lo[::-1], hi[::-1]))
+    with pytest.raises(TypeError, match="p_min_array"):
+        contrast_stretch_per_slice(img, in_min=lo, p_min_array=lo)
 
 
 # --- Z-axis intensity decay correction & deprecated wrappers ---
@@ -492,19 +589,32 @@ def test_return_diagnostic_dict():
 
 
 def test_deprecated_z_decay_wrappers():
-    """Deprecated adjust_gamma_per_slice and adjust_brightness_per_slice warn and remap kwargs."""
+    """Deprecated adjust_gamma_per_slice and adjust_brightness_per_slice warn and remap kwargs.
+
+    Changed (D08, R6-14): they emit a FutureWarning naming the removal version
+    (was DeprecationWarning, hidden from users), and FLIP_Z_AXIS=True is no
+    longer dropped silently: it is still ignored (the result equals the
+    unflipped correction) but a UserWarning says so and how to flip.
+    FLIP_Z_AXIS=False stays silent.
+    """
     stack, _ = _generate_trend_stack(shape=(8, 32, 32), decay_func=lambda z: 0.8 * np.exp(-0.1 * z), seed=9)
 
     ref_gamma = correct_z_intensity_decay(stack, method="gamma", fit_model="linear")
-    with pytest.warns(DeprecationWarning, match="adjust_gamma_per_slice is deprecated"):
-        out_gamma = adjust_gamma_per_slice(stack, gamma_fit_func="linear", FLIP_Z_AXIS=True)
+    with pytest.warns(FutureWarning, match=r"adjust_gamma_per_slice is deprecated and will be removed in eigenp_utils 0\.1\.0"):
+        with pytest.warns(UserWarning, match="FLIP_Z_AXIS"):
+            out_gamma = adjust_gamma_per_slice(stack, gamma_fit_func="linear", FLIP_Z_AXIS=True)
     np.testing.assert_array_equal(out_gamma, ref_gamma)
 
     ref_gain = correct_z_intensity_decay(stack, method="gain", fit_model="exponential")
-    with pytest.warns(DeprecationWarning, match="adjust_brightness_per_slice is deprecated"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         out_gain = adjust_brightness_per_slice(
             stack, method="gain", gamma_fit_func="exponential", FLIP_Z_AXIS=False
         )
+    assert [str(w.message) for w in caught if w.category is FutureWarning][0].startswith(
+        "adjust_brightness_per_slice is deprecated")
+    assert not [w for w in caught if "FLIP_Z_AXIS" in str(w.message)]
+    assert all(w.filename == __file__ for w in caught)
     np.testing.assert_array_equal(out_gain, ref_gain)
 
 
@@ -610,7 +720,7 @@ def test_basic_identical_samples_darkfield_stays_finite():
 def test_dtype_roundtrip_preserves_wide_integer_images(dtype):
     """32/64-bit integer images keep all 4096 ramp levels without collapsing or wrapping."""
     ramp = np.arange(4096).reshape(64, 64).astype(dtype)
-    out = contrast_stretching(ramp, 0, 100)
+    out = contrast_stretching(ramp, percentiles=(0, 100))
     assert out.dtype == dtype
     assert len(np.unique(out)) == 4096
     assert out.min() == 0 and out.max() == out.flat[-1]
@@ -624,7 +734,7 @@ def test_signed_integer_zero_background_stays_zero():
     stack[:, :4, :4] = 0
     for method in ("gain", "gamma"):
         assert correct_z_intensity_decay(stack, method=method)[:, :4, :4].max() == 0
-    assert contrast_stretching(stack, 0, 100).min() >= 0
+    assert contrast_stretching(stack, percentiles=(0, 100)).min() >= 0
 
 
 def test_normalize_image_wide_ints_and_nans():
@@ -652,7 +762,7 @@ def test_gamma_correction_near_full_scale_does_not_flood():
     """Gamma correction stays well-behaved when the reference percentile is near 1.0."""
     rng = np.random.default_rng(0)
     decay = np.exp(np.log(0.5) * np.arange(10) / 9)[:, None, None]
-    stack = normalize_image(rng.uniform(0, 1, (10, 32, 32)) * decay, 0.5, 99.9)
+    stack = normalize_image(rng.uniform(0, 1, (10, 32, 32)) * decay, percentiles=(0.5, 99.9))
     out = correct_z_intensity_decay(stack, method="gamma")
     p99 = np.array([np.percentile(out[i], 99) for i in range(10)])
     assert np.allclose(p99, p99[0], rtol=0.05)
@@ -660,16 +770,266 @@ def test_gamma_correction_near_full_scale_does_not_flood():
     assert means.max() < 1.5 * means[0]
 
 
-def test_gamma_correction_unchanged_for_mid_range_unit_data():
-    """For [0, 1] data with reference percentile <= 0.5, the classic power formula is preserved."""
+def test_gamma_correction_is_anchored_at_half_of_twice_the_reference():
+    """D21(b): gamma always uses t = 0.5, s = 2 * y_ref, I -> s * (I / s) ** g, g = log(0.5) / log(0.5 * y_fit / y_ref).
+
+    Changed (D21b, 2026-11): replaces test_gamma_correction_unchanged_for_mid_range_unit_data,
+    which pinned the classic I ** g formula for [0, 1] data with y_ref <= 0.5
+    (t = min(y_ref, 0.5)); that branch made the result depend on the dtype
+    container. The decision breaks that test on purpose.
+    """
     rng = np.random.default_rng(1)
     decay = np.exp(np.log(0.5) * np.arange(6) / 5)[:, None, None]
     stack = (rng.uniform(0, 0.4, (6, 16, 16)) * decay).astype(np.float32)
     out = correct_z_intensity_decay(stack, method="gamma", return_diagnostic=True)
-    y_fit = np.clip(out["diagnostic_data"]["y_fit_norm"], 1e-9, 1.0)
-    g = np.clip(np.log(y_fit.max()) / np.log(y_fit), 0.1, 10.0)
-    expected = np.stack([stack[i] ** g[i] for i in range(6)])
+    y_fit = np.asarray(out["diagnostic_data"]["y_fit_norm"], np.float64)
+    y_ref = y_fit.max()
+    g = np.clip(np.log(0.5) / np.log(0.5 * y_fit / y_ref), 0.1, 10.0)
+    s = 2 * y_ref
+    expected = np.stack([s * (stack[i] / s) ** g[i] for i in range(6)])
     np.testing.assert_allclose(out["image"], expected, rtol=1e-5, atol=1e-6)
+
+
+def test_gamma_correction_is_independent_of_the_dtype_container():
+    """D21(b) (+): the same counts stored as uint8, uint16 and float32 give the same gamma correction.
+
+    Strategy: a decaying stack of 8-bit counts (p99 ~ 100, max < 128, so no
+    container clips), stored in three dtypes; compare outputs in counts.
+    Before D21(b) uint16 took the classic I ** g branch (values ~ 0.002 after
+    the decorator) and differed by up to 61 levels. Expected outcome: max
+    |difference| <= 1 count (rounding). Negative control (-): gain was already
+    container-independent and stays so.
+    """
+    rng = np.random.default_rng(3)
+    decay = np.exp(np.log(0.4) * np.arange(8) / 7)[:, None, None]
+    counts = np.round(rng.uniform(0, 120, (8, 24, 24)) * decay)
+    outs = {}
+    for dt in (np.uint8, np.uint16, np.float32):
+        for method in ("gamma", "gain"):
+            outs[dt, method] = correct_z_intensity_decay(counts.astype(dt), method=method).astype(np.float64)
+    for method in ("gamma", "gain"):
+        ref = outs[np.float32, method]
+        for dt in (np.uint8, np.uint16):
+            d = np.abs(outs[dt, method] - ref).max()
+            assert d <= 1.0, (method, dt, d)
+
+
+@pytest.mark.parametrize("dt", [np.int32, np.int64, np.uint32])
+def test_wide_integer_z_decay_saturates_at_the_input_maximum(dt):
+    """D21(b): 32/64-bit integers saturate at the input data maximum, for gamma and gain alike.
+
+    Strategy: the dtype decorator scales 32/64-bit integers by their data
+    maximum, so their [0, 1] working range is [0, data max] and the output is
+    clipped there, while uint8 can reach 255. Expected outcome: the wide
+    integer output equals the uint8 output clipped at the input maximum
+    (within 1 count), with both methods. This pins the documented behaviour.
+    """
+    rng = np.random.default_rng(1)
+    m = 200 * np.exp(-np.arange(12) / 6)
+    counts = np.stack([rng.poisson(mi * rng.uniform(0.2, 1, (32, 32))) for mi in m]).clip(0, 255)
+    for method in ("gamma", "gain"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            ref = correct_z_intensity_decay(counts.astype(np.uint8), method=method).astype(np.float64)
+            out = correct_z_intensity_decay(counts.astype(dt), method=method).astype(np.float64)
+        assert out.max() <= counts.max()
+        d = np.abs(out - np.minimum(ref, counts.max())).max()
+        assert d <= 1.0, (method, d)
+
+
+def test_gamma_correction_is_clipped_like_gain():
+    """D21(b): gamma output stays within [0, 1] for [0, 1] data and does not trip the integer clip warning.
+
+    Strategy: a decaying uint8 stack with one bright object deep in Z (its
+    slice gets a strong gamma). Before, s * (I / s) ** g exceeded the dtype
+    for that object and the decorator clipped it with a RuntimeWarning; float
+    [0, 1] data came back up to ~1.5. Expected outcome: no 'Values outside'
+    RuntimeWarning, float output <= 1.
+    """
+    rng = np.random.default_rng(4)
+    decay = np.exp(np.log(0.3) * np.arange(10) / 9)[:, None, None]
+    stack = np.round(rng.uniform(0, 200, (10, 32, 32)) * decay).astype(np.uint8)
+    stack[9, :3, :3] = 250
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        out = correct_z_intensity_decay(stack, method="gamma")
+    assert out.dtype == np.uint8
+    out_f = correct_z_intensity_decay(stack.astype(np.float32) / 255, method="gamma")
+    assert float(out_f.max()) <= 1.0
+
+
+def _sparse_stack_with_empty_slices(seed=0):
+    """uint16 (20, 64, 64): background 100 +- 5 everywhere; 3% bright objects decaying with Z in z < 14 only."""
+    rng = np.random.default_rng(seed)
+    stack = rng.normal(100, 5, (20, 64, 64))
+    for z in range(14):
+        mask = rng.random((64, 64)) < 0.03
+        stack[z][mask] += 1000 * np.exp(-0.1 * z)
+    return np.round(stack).astype(np.uint16)
+
+
+@pytest.mark.parametrize("fit_model", ["exponential", "linear"])
+@pytest.mark.parametrize("method", ["gamma", "gain"])
+def test_z_decay_leaves_background_only_slices_out_of_the_fit(fit_model, method):
+    """D21(a) (+): background-only slices are left out of the fit, with a warning, and not amplified.
+
+    Strategy: the R6-03 case, a sparse stack whose slices 14-19 hold camera
+    background only. Before, their p99 (background) dragged the fit down and
+    the factors amplified that background 7-285x (linear gamma 285x).
+    Expected outcome: a UserWarning naming slices 14-19; those slices get
+    the factor of the deepest fitted slice (no extrapolation), so their
+    background comes out no brighter than slice 13's background.
+    """
+    stack = _sparse_stack_with_empty_slices()
+    with pytest.warns(UserWarning, match=r"background only.*\[14, 15, 16, 17, 18, 19\]"):
+        out = correct_z_intensity_decay(stack, method=method, fit_model=fit_model)
+    out = out.astype(np.float64)
+    bg13 = np.median(out[13])
+    for z in range(14, 20):
+        assert np.median(out[z]) <= 1.05 * bg13, (z, np.median(out[z]), bg13)
+    # the signal slices are still equalised: p99 of slice 13 close to slice 0's
+    p99 = [np.percentile(out[z], 99) for z in (0, 13)]
+    assert 0.7 < p99[1] / p99[0] < 1.3, p99
+
+
+def test_z_decay_dense_stacks_keep_every_slice_in_the_fit():
+    """D21(a) (-): dense stacks (every slice holds signal) are fitted on every slice, without a warning.
+
+    Strategy: the synthetic decay stacks of the restoration tests, uniform
+    intensities that decay 6.7x along Z (exp(-0.1 z)), and a 5x decay.
+    Expected outcome: no warning, and the same output as fitting all slices
+    (exclude_background=False).
+    """
+    for f in (lambda z: np.exp(-0.1 * z), lambda z: np.exp(np.log(0.2) * z / 19)):
+        stack, _ = _generate_trend_stack(shape=(20, 50, 50), decay_func=f)
+        for method in ("gain", "gamma"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                out = correct_z_intensity_decay(stack, method=method)
+            ref = correct_z_intensity_decay(stack, method=method, exclude_background=False)
+            np.testing.assert_array_equal(out, ref)
+
+
+def _dense_strong_decay_stacks():
+    """Dense stacks (signal in every slice) with 10x-50x decays, as (name, stack) pairs."""
+    rng = np.random.default_rng(1)
+    z40 = np.arange(40)
+    z20 = np.arange(20)
+    stacks = []
+    for L in (10, 15):  # 49x and 13x over 40 slices, noise 0.1 m + 2 (raw float units)
+        m = 1000 * np.exp(-z40 / L)
+        stacks.append((f"gauss_raw_L{L}", np.stack(
+            [rng.normal(mi, 0.1 * mi + 2, (64, 64)) for mi in m]).clip(0).astype(np.float32)))
+    for decay in (10, 33):  # low-texture unit-range signal, 0.5 +- 0.05 times the decay
+        f = np.exp(-np.log(decay) * z20 / 19)
+        stacks.append((f"gauss_unit_{decay}x", (rng.normal(0.5, 0.05, (20, 64, 64))
+                                               * f[:, None, None]).clip(0, 1).astype(np.float32)))
+    f = np.exp(-np.log(33) * z20 / 19)
+    stacks.append(("uniform_unit_33x", (rng.uniform(0, 1, (20, 64, 64))
+                                        * f[:, None, None]).astype(np.float32)))
+    return stacks
+
+
+@pytest.mark.parametrize("method", ["gain", "gamma"])
+def test_z_decay_dense_strongly_decaying_stacks_keep_every_slice_in_the_fit(method):
+    """D21(a) (-): dense stacks with strong (10-50x) decay keep every slice in the fit.
+
+    Strategy: stacks with signal in every slice whose intensity decays 10x,
+    13x, 33x and 49x along Z (Gaussian texture in raw and unit range, and
+    uniform texture). They contain no background-only slice, so the
+    background reference (the dimmest slice) is signal. Before the fix, the
+    deepest slices were compared against their own median, called
+    'background only', and held at the last fitted factor (up to 40%
+    under-corrected). Expected outcome: no 'background only' warning, and the
+    output identical to exclude_background=False.
+    """
+    for name, stack in _dense_strong_decay_stacks():
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            out = correct_z_intensity_decay(stack, method=method)
+        msgs = [str(w.message) for w in rec if "background only" in str(w.message)]
+        assert not msgs, (name, msgs)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ref = correct_z_intensity_decay(stack, method=method, exclude_background=False)
+        np.testing.assert_array_equal(out, ref, err_msg=name)
+
+
+def test_z_decay_constant_slices_are_not_background():
+    """D21(a) (-): flat slices with zero MAD are not called background when brighter slices are flat too.
+
+    Strategy: a brightening stack of constant slices 0.2/0.3/0.4/0.5. Before,
+    MAD = 0 made slice 0 'background only'. Expected outcome: the brightening
+    warning only, no 'background only' warning.
+    """
+    stack = np.stack([np.full((8, 8), v, np.float32) for v in (0.2, 0.3, 0.4, 0.5)])
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        correct_z_intensity_decay(stack, method="gain")
+    assert not [w for w in rec if "background only" in str(w.message)]
+
+
+def test_z_decay_warns_when_a_factor_hits_its_bound():
+    """D21(a): a correction factor clipped to its bound is reported with the slice indices.
+
+    Strategy: a custom fit_model whose fitted curve falls to 1e-4 of the top,
+    so the gain for the last slices would exceed 100x. Expected outcome: a
+    UserWarning naming the clipped slices; gains are capped at 100.
+    """
+    stack = np.full((5, 8, 8), 0.005, np.float32)
+
+    def steep(x, y):
+        return np.array([1.0, 0.5, 0.1, 1e-3, 1e-4])[: len(x)]
+
+    with pytest.warns(UserWarning, match=r"slices \[3, 4\] was clipped"):
+        out = correct_z_intensity_decay(stack, method="gain", fit_model=steep)
+    np.testing.assert_allclose(out[4], 0.5, rtol=1e-5)
+
+
+def test_z_decay_gain_with_linear_ramp_raises():
+    """D21(c): method='gain' with fit_model=None raises instead of using gamma exponents as gains.
+
+    Before, the final_gamma ramp (1 -> 0.8) multiplied the image, darkening
+    deep slices further. Negative control: method='gamma' with fit_model=None
+    still works.
+    """
+    stack = np.random.default_rng(0).uniform(0.1, 0.8, (5, 8, 8)).astype(np.float32)
+    with pytest.raises(ValueError, match="fit_model=None"):
+        correct_z_intensity_decay(stack, method="gain", fit_model=None)
+    assert correct_z_intensity_decay(stack, method="gamma", fit_model=None).shape == stack.shape
+
+
+def test_z_decay_warns_on_a_brightening_stack():
+    """D21(d): the exponential model keeps decay <= 0, and warns when intensity rises with Z.
+
+    Strategy: a stack whose p99 rises 2.5x along Z (acquired upside down).
+    Expected outcome: a UserWarning suggesting a flip; the output is
+    unchanged (factors 1). Negative control: the flipped stack corrects
+    without that warning.
+    """
+    stack, _ = _generate_trend_stack(shape=(10, 32, 32), decay_func=lambda z: 0.4 * np.exp(0.1 * z))
+    with pytest.warns(UserWarning, match="increases with Z"):
+        out = correct_z_intensity_decay(stack, method="gain")
+    np.testing.assert_allclose(out, stack, rtol=1e-6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        correct_z_intensity_decay(np.ascontiguousarray(stack[::-1]), method="gain")
+
+
+def test_z_decay_skips_all_nan_slices():
+    """R6-15: an all-NaN slice is left out of the fit instead of aborting with RuntimeError.
+
+    Expected outcome: the other slices are corrected as if the NaN slice were
+    absent (p99 equalised), and the NaN slice stays NaN.
+    """
+    stack, _ = _generate_trend_stack(shape=(10, 32, 32), decay_func=lambda z: np.exp(-0.1 * z))
+    stack[4] = np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        out = correct_z_intensity_decay(stack, method="gain")
+    assert np.isnan(out[4]).all()
+    p99 = np.array([np.percentile(out[z], 99) for z in range(10) if z != 4])
+    assert np.std(p99) / np.mean(p99) < 0.02
 
 
 def test_z_decay_rejects_unknown_method():
@@ -679,19 +1039,19 @@ def test_z_decay_rejects_unknown_method():
 
 
 def test_contrast_stretch_per_slice_single_bound():
-    """Passing only p_max_array or only p_min_array stretches against each slice's own other bound."""
+    """Passing only in_max or only in_min stretches against each slice's own other bound."""
     base = np.array([[0.0, 250.0], [500.0, 1000.0]], dtype=np.float64)
     img = np.stack([base, base, base], axis=0)
 
     p_max = np.array([500.0, 1000.0, 250.0])
-    out_max = contrast_stretch_per_slice(img, p_max_array=p_max)
+    out_max = contrast_stretch_per_slice(img, in_max=p_max)
     assert out_max.shape == img.shape
     np.testing.assert_allclose(out_max[0], [[0.0, 0.5], [1.0, 1.0]])
     np.testing.assert_allclose(out_max[1], [[0.0, 0.25], [0.5, 1.0]])
     np.testing.assert_allclose(out_max[2], [[0.0, 1.0], [1.0, 1.0]])
 
     p_min = np.array([0.0, 200.0, 500.0])
-    out_min = contrast_stretch_per_slice(img, p_min_array=p_min)
+    out_min = contrast_stretch_per_slice(img, in_min=p_min)
     assert out_min.shape == img.shape
     np.testing.assert_allclose(out_min[0], [[0.0, 0.25], [0.5, 1.0]])
     np.testing.assert_allclose(out_min[1], [[0.0, 50.0 / 800.0], [300.0 / 800.0, 1.0]])
@@ -699,18 +1059,18 @@ def test_contrast_stretch_per_slice_single_bound():
 
 
 def test_contrast_stretch_per_slice_flip_z_axis_and_errors():
-    """FLIP_Z_AXIS=True reverses p_min_array/p_max_array along Z; missing bounds or non-3D raise."""
+    """flip_z=True reverses in_min/in_max along Z; missing bounds or non-3D raise."""
     base = np.array([[0.0, 100.0], [200.0, 400.0]], dtype=np.float64)
     img = np.stack([base, base, base], axis=0)
     p_min = np.array([0.0, 50.0, 100.0])
     p_max = np.array([100.0, 200.0, 400.0])
 
-    flipped = contrast_stretch_per_slice(img, p_min_array=p_min, p_max_array=p_max, FLIP_Z_AXIS=True)
-    direct = contrast_stretch_per_slice(img, p_min_array=p_min[::-1], p_max_array=p_max[::-1], FLIP_Z_AXIS=False)
+    flipped = contrast_stretch_per_slice(img, in_min=p_min, in_max=p_max, flip_z=True)
+    direct = contrast_stretch_per_slice(img, in_min=p_min[::-1], in_max=p_max[::-1], flip_z=False)
     np.testing.assert_allclose(flipped, direct)
 
     with pytest.raises(ValueError, match="3D numpy array"):
-        contrast_stretch_per_slice(base, p_max_array=p_max)
+        contrast_stretch_per_slice(base, in_max=p_max)
     with pytest.raises(ValueError, match="no difference"):
         contrast_stretch_per_slice(img)
 
@@ -720,7 +1080,7 @@ def test_contrast_stretch_per_slice_float_with_negative_lower_bound_maps_to_unit
 
     Strategy: stretch a float32 ramp from -1 to 9 between explicit bounds
     (-1, 9), and stack it with the same ramp shifted to 0..10; with only
-    p_max_array given, each slice's own minimum (-1 or 0) is the lower bound.
+    in_max given, each slice's own minimum (-1 or 0) is the lower bound.
     The sibling ``contrast_stretching`` already maps such data to [0, 1].
     Expected outcome: every slice spans exactly [0, 1] and equals
     (v - lower) / (upper - lower), so the shifted slices are identical whether
@@ -731,8 +1091,8 @@ def test_contrast_stretch_per_slice_float_with_negative_lower_bound_maps_to_unit
     expected = (ramp.astype(np.float64) + 1.0) / 10.0
     img = np.stack([ramp, ramp + 1.0])
 
-    both = contrast_stretch_per_slice(img, p_min_array=np.array([-1.0, 0.0]), p_max_array=np.array([9.0, 10.0]))
-    only_max = contrast_stretch_per_slice(img, p_max_array=np.array([9.0, 10.0]))
+    both = contrast_stretch_per_slice(img, in_min=np.array([-1.0, 0.0]), in_max=np.array([9.0, 10.0]))
+    only_max = contrast_stretch_per_slice(img, in_max=np.array([9.0, 10.0]))
     for out in (both, only_max):
         assert out.dtype == np.float32
         for z in range(2):
@@ -740,7 +1100,7 @@ def test_contrast_stretch_per_slice_float_with_negative_lower_bound_maps_to_unit
             np.testing.assert_allclose(out[z], expected, atol=1e-6)
 
     u16 = np.stack([np.linspace(100, 1000, 64).reshape(8, 8)] * 2).astype(np.uint16)
-    out_u16 = contrast_stretch_per_slice(u16, p_min_array=np.array([100, 100]), p_max_array=np.array([1000, 1000]))
+    out_u16 = contrast_stretch_per_slice(u16, in_min=np.array([100, 100]), in_max=np.array([1000, 1000]))
     assert out_u16.dtype == np.uint16
     assert out_u16.min() == 0 and out_u16.max() == 65535
 
@@ -794,6 +1154,80 @@ def test_z_axis_orientation_return_image_and_invalid_channel_dims():
 
     with pytest.raises(ValueError, match="channel given"):
         _z_orientation(np.zeros((8, 8)), channel=0, return_image=False)
+
+
+def test_z_axis_orientation_check_is_quiet_nan_safe_and_renamed(capsys):
+    """R6-16 / R6-15: check_z_axis_orientation prints nothing, ignores NaN voxels, and the old name warns.
+
+    Strategy: (1) a stack brighter at the bottom with one NaN voxel in the
+    top half: np.percentile made the comparison False (no flip, no warning);
+    (2) the deprecated name test_z_axis_orientation; (3) an all-NaN half.
+    Expected outcome: (1) True and nothing on stdout; (2) a FutureWarning
+    and the same result; (3) a UserWarning and no flip.
+    """
+    vol = np.zeros((4, 8, 8), np.float32)
+    vol[3] = 1.0
+    vol[0, 0, 0] = np.nan
+    assert _z_orientation(vol, return_image=False) is True
+    assert capsys.readouterr().out == ""
+
+    with pytest.warns(FutureWarning, match="test_z_axis_orientation is deprecated.*check_z_axis_orientation"):
+        assert _legacy_z_orientation(vol, return_image=False) is True
+
+    half_nan = vol.copy()
+    half_nan[:2] = np.nan
+    with pytest.warns(UserWarning, match="NaN"):
+        out, flag = _z_orientation(half_nan, return_image=True)
+    assert flag is False and out is half_nan
+
+
+def test_basic_rejects_non_finite_input():
+    """R6-15: one NaN (or inf) pixel raises a clear ValueError instead of LinAlgError from the SVD.
+
+    Negative control: the same images without the NaN fit normally.
+    """
+    rng = np.random.default_rng(2)
+    images = rng.poisson(100, (4, 32, 32)).astype(float)
+    fit_basic_shading(images)
+    for bad in (np.nan, np.inf):
+        broken = images.copy()
+        broken[1, 5, 5] = bad
+        with pytest.raises(ValueError, match="1 non-finite"):
+            fit_basic_shading(broken)
+
+
+def test_basic_warns_when_sparse_cost_darkfield_is_ignored():
+    """R6-17: sparse_cost_darkfield only acts in 'ladmap' mode; passing it in 'approximate' mode warns.
+
+    Negative control: the default (None) and 'ladmap' mode do not warn about it.
+    """
+    rng = np.random.default_rng(3)
+    images = rng.poisson(100, (4, 32, 32)).astype(float)
+    with pytest.warns(UserWarning, match="sparse_cost_darkfield"):
+        fit_basic_shading(images, sparse_cost_darkfield=0.5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fit_basic_shading(images)
+        fit_basic_shading(images, fitting_mode="ladmap", sparse_cost_darkfield=0.5)
+
+
+def test_basic_reweight_score_tracks_the_darkfield():
+    """R6-17: the reweighting convergence score includes the darkfield change (as MATLAB BaSiC).
+
+    Before, the 'darkfield' term recomputed the flatfield change (BaSiCPy
+    quirk) and last_D was never read, so a changing darkfield could not
+    keep the reweighting going. Expected outcome: with an unchanged
+    flatfield, a darkfield that changed by 10% scores 0.1; an unchanged
+    darkfield (or none) scores 0.
+    """
+    from eigenp_utils.intensity_rescaling import _reweight_score
+
+    S = np.ones((8, 8))
+    D = np.full((8, 8), 10.0)
+    assert _reweight_score(S, S.copy(), 1.1 * D, D) == pytest.approx(0.1)
+    assert _reweight_score(S, S.copy(), D, D.copy()) == 0.0
+    assert _reweight_score(S, S.copy(), np.zeros((8, 8)), np.zeros((8, 8))) == 0.0
+    assert _reweight_score(1.2 * S, S, D, D.copy()) == pytest.approx(0.2)
 
 
 def test_basic_rejects_zero_reweight_iterations():

@@ -19,13 +19,21 @@ Design
 - The browser does all compositing and painting. Python sends the current
   z-slice once as 8-bit channels (display only) plus its uint16 labels; the
   browser sends the edited slice labels back after every stroke. Python keeps
-  the authoritative label volume (``uint32``).
+  the authoritative label volume (stored as ``uint16``, returned as ``uint32``).
 - Wire format (little-endian):
   image : ``uint32[4] = (z, C, Y, X)`` header, then ``C*Y*X`` ``uint8``
   labels: ``uint32[3] = (z, Y, X)`` header, then ``Y*X`` ``uint16``
   Labels > 65535 cannot be edited in the widget (checked on input).
 - Display scaling (8-bit conversion) is for viewing only; exported images are
-  the original, unscaled array.
+  the original, unscaled array. The 8-bit slice spans each channel's
+  ``vmin``..``vmax`` in data units (default: the package's default display
+  range, as in the ortho viewers); a range change re-quantises the slice in
+  Python, the browser applies gamma and colour.
+- Labels are always (Z)YX, whatever the spatial order of ``axes``.
+- The browser redraws only the dirty rectangle of each brush stamp and keeps
+  its per-slice undo as bounding-box diffs. Keys act only while the image
+  viewport has focus and do not reach the notebook; a plain wheel zooms only
+  after the viewport was clicked.
 - z-linking (instance mode): one id across z = one 3D object. Python also
   sends the labels of slices z-1 / z+1 (``labels_prev_to_js`` /
   ``labels_next_to_js``, same encoding, empty when out of range or when
@@ -40,8 +48,10 @@ Design
   background, 1..65534 cells. ``labels_signed`` / ``save(signed=True)`` give
   the signed convention (-1 background) used for sparse Cellpose training.
 
-Only numpy, anywidget and traitlets are required (core dependencies; also
-works in marimo WASM). ``tifffile`` is imported lazily by ``save``.
+Requires numpy, anywidget, traitlets and matplotlib (colour names; all core
+dependencies; also works in marimo WASM). ``tifffile`` is imported lazily by
+``save``; DataArray input is unpacked by ``tnia_plotting_anywidgets``
+(imported only then).
 """
 
 from __future__ import annotations
@@ -58,7 +68,18 @@ import anywidget
 import numpy as np
 import traitlets
 
-from ._conventions import PALETTE, _is_single_colour, channel_color_hex, channel_spec, default_colors, default_display_range, robust_range
+from ._conventions import (
+    PALETTE,
+    UM,
+    _is_single_colour,
+    _sample_and_extremes,
+    channel_color_hex,
+    default_colors,
+    default_display_range,
+    per_channel,
+    resolve_pixel_sizes,
+    robust_range,
+)
 from .labels_cmap_data import LABELS_CMAP_COLORS
 
 _ASSETS = Path(__file__).parent
@@ -67,6 +88,11 @@ _LBL_HDR = struct.Struct("<3I")
 _MAX_WIRE_LABEL = np.iinfo(np.uint16).max
 BACKGROUND_ID = _MAX_WIRE_LABEL  # reserved id for annotated background (background=True)
 _TRACK_UNDO_MAX = 20  # whole-volume operations kept for undo
+# ... and at most this many bytes of them (the newest one is always kept)
+_TRACK_UNDO_MAX_BYTES = 512 * 2**20
+# internal label storage: ids are at most 65535 (the uint16 wire), so uint16
+# halves the memory of uint32; the public getters still return uint32 (R4-19)
+_STORE = np.uint16
 
 # The package palette (white, lime, magenta, ...), shared with the ortho viewers
 # and cycled for more channels (D03). It used to start with magenta and fail
@@ -107,18 +133,107 @@ def _channel_colors(given, c: int) -> list[str]:
     return [channel_color_hex(s) for s in default_colors(given, c)]
 
 
-def _colors_from_coord(values) -> list | None:
-    """Channel colours from a DataArray ``color`` coordinate (names, hex or RGB tuples); unusable entries -> None."""
-    out = []
-    for v in list(values):
-        try:
-            out.append(channel_spec(v))
-        except (TypeError, ValueError):
-            if not (v is None or (isinstance(v, str) and not v) or (isinstance(v, float) and np.isnan(v))):
-                warnings.warn(f"channel colour {v!r} is not a colour or colormap name; using the default.",
-                              UserWarning, stacklevel=3)
-            out.append(None)
-    return None if all(v is None for v in out) else out
+def _is_dataarray(x) -> bool:
+    return hasattr(x, "dims") and hasattr(x, "isel") and hasattr(x, "coords")
+
+
+def _unpack(image, axes, colors, names, pixel_sizes):
+    """One stack as ``(CZYX view, input axes, colors, names, pixel_sizes)``.
+
+    A DataArray goes through the ortho viewers' ``_viewer_input_from_xarray``
+    (one rule for both: other dims must have size 1; names, colours and pixel
+    sizes come from the coordinates unless given; a missing colour entry
+    takes a palette colour without dropping the others).
+    """
+    if _is_dataarray(image):
+        # imported lazily: only DataArray input needs it (xarray is then installed)
+        from .tnia_plotting_anywidgets import _viewer_input_from_xarray
+
+        out, colors, names, pixel_sizes = _viewer_input_from_xarray(image, colors, names, pixel_sizes)
+        spatial = "".join(d for d in "ZYX" if d in image.dims)
+        if isinstance(out, list):
+            image, axes = np.stack(out), "C" + spatial
+        else:
+            image, axes = out, spatial
+    czyx, input_axes = _to_czyx(image, axes)
+    return czyx, input_axes, colors, names, pixel_sizes
+
+
+def _parse_pixel_sizes(ps, has_z: bool = True) -> dict:
+    """``{'Z', 'Y', 'X', 'unit'}`` in µm (None where unknown), by the package's pixel-size parser.
+
+    An image without a Z axis also takes a ``(Y, X)`` pair (or a ZYX triple,
+    whose Z is ignored); an image with Z needs ``(Z, Y, X)``.
+    """
+    if ps is None:
+        return {"Z": None, "Y": None, "X": None, "unit": UM}
+    values, _, unit = resolve_pixel_sizes(ps, 3 if has_z else 2, fill_z=False, warn=False, stacklevel=4)
+    if not has_z:
+        values = (None, *values)
+    return {"Z": values[0], "Y": values[1], "X": values[2], "unit": unit}
+
+
+def _channel_ranges(czyx: np.ndarray, percentiles, vmin, vmax):
+    """Per channel: the automatic range, the start range and the slider range.
+
+    Returns ``(auto, vmin, vmax, data_range)``: ``auto`` the default display
+    limits (data units), ``vmin``/``vmax`` the given values (None entries take
+    ``auto``), and ``data_range`` ``[lo, hi, step, auto_lo, auto_hi]`` for the
+    browser's sliders (the finite data extent, widened to hold the range).
+    """
+    c = czyx.shape[0]
+    auto = [_display_limits(czyx[i], percentiles) for i in range(c)]
+    lo_in, hi_in = per_channel(vmin, c, "vmin"), per_channel(vmax, c, "vmax")
+    vmin_out, vmax_out, ranges = [], [], []
+    integer = czyx.dtype.kind in "iub"
+    for i in range(c):
+        a_lo, a_hi = auto[i]
+        lo = a_lo if lo_in[i] is None else _finite(lo_in[i], "vmin")
+        hi = a_hi if hi_in[i] is None else _finite(hi_in[i], "vmax")
+        if hi <= lo:
+            raise ValueError(f"channel {i}: vmax ({hi}) must exceed vmin ({lo})")
+        _, mn, mx = _sample_and_extremes(czyx[i], n=1)
+        vmin_out.append(lo)
+        vmax_out.append(hi)
+        ranges.append(_slider_range(mn, mx, lo, hi, a_lo, a_hi, integer))
+    return auto, vmin_out, vmax_out, ranges
+
+
+def _slider_range(mn, mx, lo, hi, a_lo, a_hi, integer):
+    s_lo = min(v for v in (mn, lo, a_lo) if v is not None)
+    s_hi = max(v for v in (mx, hi, a_hi) if v is not None)
+    span = s_hi - s_lo
+    step = 1.0 if integer and span <= 100_000 else (span / 1000.0 if span > 0 else 1.0)
+    return [float(s_lo), float(s_hi), float(step), float(a_lo), float(a_hi)]
+
+
+def _finite(v, name: str) -> float:
+    if isinstance(v, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a number, not a bool ({v!r})")
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number, got {v!r}") from None
+    if not np.isfinite(f):
+        raise ValueError(f"{name} must be finite, got {v!r}")
+    return f
+
+
+def _colour_list(v, name: str) -> list[str]:
+    """A list of plain colours (``class_colors``, ``instance_palette``); a lone string is refused."""
+    if isinstance(v, (str, bytes)) or not isinstance(v, (Sequence, np.ndarray)):
+        raise ValueError(f"{name} must be a list of colours, got {v!r}")
+    return [_plain_color_hex(c) for c in v]
+
+
+def _plain_color_hex(c) -> str:
+    """Hex of a plain matplotlib colour (class and instance colours: no colormaps); ValueError otherwise."""
+    from matplotlib.colors import to_hex
+
+    try:
+        return to_hex(c)
+    except (TypeError, ValueError):
+        raise ValueError(f"{c!r} is not a colour") from None
 
 
 def _rgb_hex(rgb) -> str:
@@ -126,24 +241,13 @@ def _rgb_hex(rgb) -> str:
 
 
 def _to_czyx(image, axes: str | None) -> tuple[np.ndarray, str]:
-    """Return (view with axes C, Z, Y, X; the input's axes string)."""
-    dims = getattr(image, "dims", None)
-    if dims is not None:  # xarray.DataArray, e.g. STCZYX from eigenp_utils.image_io
-        da = image
-        for d in list(da.dims):
-            if d not in ("C", "Z", "Y", "X"):
-                if da.sizes[d] != 1:
-                    raise ValueError(f"dimension {d!r} has size {da.sizes[d]}; select a single index first")
-                da = da.isel({d: 0})
-        axes = "".join(str(d) for d in da.dims)
-        arr = np.asarray(da.values)
-    else:
-        arr = np.asarray(image)
-        if axes is None:
-            if arr.ndim == 2:
-                axes = "YX"
-            else:
-                raise ValueError("pass axes= (e.g. 'CYX', 'ZYX', 'CZYX') for arrays with ndim > 2")
+    """Return (view with axes C, Z, Y, X; the input's axes string). DataArrays go through :func:`_unpack`."""
+    arr = np.asarray(image)
+    if axes is None:
+        if arr.ndim == 2:
+            axes = "YX"
+        else:
+            raise ValueError("pass axes= (e.g. 'CYX', 'ZYX', 'CZYX') for arrays with ndim > 2")
     axes = axes.upper()
     if len(axes) != arr.ndim or set(axes) - set("CZYX") or len(set(axes)) != len(axes):
         raise ValueError(f"axes={axes!r} does not match an array of shape {arr.shape}")
@@ -159,7 +263,7 @@ def _to_czyx(image, axes: str | None) -> tuple[np.ndarray, str]:
 
 
 def _restore_axes(labels_zyx: np.ndarray, spatial_axes: str) -> np.ndarray:
-    """Squeeze a (Z, Y, X) label volume back to the input's spatial axes."""
+    """Squeeze a (Z, Y, X) label volume to YX when the input has no Z (labels are always (Z)YX)."""
     return labels_zyx[0] if "Z" not in spatial_axes else labels_zyx
 
 
@@ -186,7 +290,7 @@ def _display_limits(arr: np.ndarray, percentiles) -> tuple[float, float]:
 
 
 def _coerce_label_values(lab: np.ndarray, background: bool) -> np.ndarray:
-    """Validate label values and return them as ``uint32`` (a copy).
+    """Validate label values and return them as ``uint16`` (a copy; the internal storage dtype).
 
     Accepts unsigned ids in ``[0, 65535]``; with ``background`` also negative
     values (signed convention), which become ``BACKGROUND_ID``. Float arrays
@@ -206,8 +310,8 @@ def _coerce_label_values(lab: np.ndarray, background: bool) -> np.ndarray:
                 hint += " (relabel sparse ids first, e.g. skimage.segmentation.relabel_sequential)"
             raise ValueError(f"labels must be in [0, {_MAX_WIRE_LABEL}]{hint}")
         if lo < 0:
-            return np.where(lab < 0, BACKGROUND_ID, lab).astype(np.uint32)
-    return lab.astype(np.uint32, copy=True)
+            return np.where(lab < 0, BACKGROUND_ID, lab).astype(_STORE)
+    return lab.astype(_STORE, copy=True)
 
 
 def encode_image_slice(slice_cyx_u8: np.ndarray, z: int) -> bytes:
@@ -238,21 +342,29 @@ class LabelAnnotator(anywidget.AnyWidget):
     ----------
     image : array-like, xarray.DataArray or list of these
         2D/3D/4D image. Axes given by ``axes`` (subset of ``"CZYX"`` in any
-        order) or by DataArray dims (other dims must have size 1). For a
-        DataArray, channel names default to the ``C`` coordinate and colours to
-        a ``color`` coordinate along ``C`` (``image_io.set_channel_info``).
+        order) or by DataArray dims (other dims must have size 1). A DataArray
+        is unpacked exactly as by the ortho viewers
+        (``tnia_plotting_anywidgets``): channel names default to the ``C``
+        coordinate, colours to a ``color`` coordinate along ``C``
+        (``image_io.set_channel_info``; a missing entry takes a palette
+        colour) and ``pixel_sizes`` to the calibrated coordinates.
         A **list of stacks** (e.g. one 3D stack per cage / field of view; same
-        channels, shapes may differ) shows one at a time with a stack selector
-        (toolbar, ``stack`` trait, PageUp / PageDown). ``labels`` is then a
-        matching list (or None), ``stack_names`` the names. Each stack keeps its
-        own labels, z position and track-op undo history; ``labels`` returns the
-        shown stack, :attr:`stack_labels` all of them, ``save(..., stacks="all")``
-        writes all. ``axes`` applies to every stack.
+        channels, shapes may differ; arrays or DataArrays) shows one at a time
+        with a stack selector (toolbar, ``stack`` trait, PageUp / PageDown).
+        ``labels`` is then a matching sequence (or None, or an array stacked
+        along axis 0), ``stack_names`` the names. Each stack keeps its own
+        labels, z position, display range, pixel sizes and track-op undo
+        history; ``labels`` returns the shown stack, :attr:`stack_labels` all
+        of them, ``save(..., stacks="all")`` writes all. ``axes`` applies to
+        every stack.
     axes : str, optional
         Axis letters of ``image`` (e.g. ``"CYX"``, ``"ZYX"``, ``"CZYX"``);
         required for ndarrays with ndim > 2.
     labels : array-like, optional
-        Initial labels with the spatial axes of ``image`` (``YX`` or ``ZYX``).
+        Initial labels in **(Z)YX order** (``YX`` or ``ZYX``), whatever the
+        order of the spatial letters in ``axes``: labels are always canonical
+        (Z)YX, in and out (``labels``, ``stack_labels``, ``save``). For
+        ``axes="XY"`` pass and receive ``(Y, X)`` labels.
     mode : {"instance", "semantic"}
         ``"instance"``: every new object gets a new id (Cellpose training
         masks); strokes are closed and filled by default.
@@ -266,18 +378,38 @@ class LabelAnnotator(anywidget.AnyWidget):
         maps to its end colour). Missing colours take the package palette
         ('white', 'lime', 'magenta', 'yellow', 'cyan', 'red', 'blue'), cycled,
         as in the ortho viewers.
+    colormap, channel_labels : optional, keyword only
+        The ortho viewers' names for ``channel_colors`` and ``channel_names``
+        (aliases; passing both spellings raises ``TypeError``).
     percentiles : (float, float), optional
-        Display scaling to 8 bit, per channel over the whole volume. None
-        (default) uses the package's default display range, the same as the
-        ortho viewers: 0 (or the data minimum if negative) to the robust
+        Automatic display range per channel over the whole volume (stack).
+        None (default) uses the package's default display range, the same as
+        the ortho viewers: 0 (or the data minimum if negative) to the robust
         99.99th percentile (the maximum for signal sparser than 0.01%).
         Explicit percentiles (e.g. ``(0.1, 99.99)``, the old default) fall
         back to the data maximum, with a warning, when they coincide.
-
-    Changed (D02/D03, 2026-11): the default range was (p0.1, p99.99) with
-    ``lo + 1`` for sparse channels (rendered binary); the default colours
-    were magenta, green, cyan, ... and more than 8 channels raised;
-    RGB-tuple colours in a DataArray ``color`` coordinate were ignored.
+    vmin, vmax : float or list of float, optional, keyword only
+        Display range per channel in **data units** (a scalar applies to
+        every channel; None entries take the automatic range). The browser
+        shows an 8-bit slice that spans ``vmin..vmax``; changing the ``vmin``
+        / ``vmax`` traits (Python or the channel sliders, which span the data
+        range) re-quantises the slice in Python, so the range can be widened
+        as well as narrowed (a slider drag sends at most one update per
+        100 ms, and its final value). Double-click a slider to restore the automatic
+        value.
+    gamma : float or list of float, optional, keyword only
+        Display gamma per channel (> 0, default 1), applied in the browser.
+    pixel_sizes : dict, sequence or float, optional, keyword only
+        ``{'Z', 'Y', 'X', 'unit'}``, ``(Z, Y, X)`` (``(Y, X)`` also for an
+        image without Z) or an isotropic size, in
+        µm unless a ``'unit'`` says otherwise (known length units are
+        converted). Stored as :attr:`pixel_sizes` and written by :meth:`save`
+        as TIFF resolution. Painting and display stay in pixels.
+    z : int, optional, keyword only
+        First z-slice shown (default: the middle one); of stack ``stack``.
+    auto_fill : bool, optional, keyword only
+        Close and fill each brush stroke (default True in instance mode,
+        False in semantic mode).
     brush_radius : int
         Brush radius in pixels.
     keep_label : bool
@@ -306,12 +438,26 @@ class LabelAnnotator(anywidget.AnyWidget):
         as a cell id, merge / split refuse it, and it is drawn in a fixed
         neutral grey (hatched) in every display mode. ``labels`` may then
         also be signed (negative values = background). Default False: 65535
-        is an ordinary id and nothing changes.
+        is an ordinary id and nothing changes. ``mode`` and ``background``
+        cannot be changed after construction (``TraitError``).
+    **kwargs
+        Any other trait, e.g. ``opacity`` (0..1), ``display``,
+        ``outline_px``, ``tool`` (one of the toolbar's tools),
+        ``active_label``, ``channel_visible`` (bool or list of bools),
+        ``class_colors`` / ``instance_palette`` (lists of colours),
+        ``auto_increment`` (instance mode only), ``stack``. The ones the
+        constructor also sets are applied after its defaults; malformed
+        values of these, of ``opacity`` and of ``tool`` raise ``ValueError``
+        (or ``TraitError``), and the remaining traits get traitlets' type
+        check. Traits the widget computes (``shape_zyx``, ``image_to_js``,
+        ...) and unknown names raise ``TypeError``.
 
     Attributes
     ----------
     labels : np.ndarray
-        Current labels (``uint32``), spatial axes of the input.
+        Current labels (``uint32``), (Z)YX order.
+    pixel_sizes : dict
+        ``{'Z', 'Y', 'X', 'unit'}`` of the shown stack, in µm.
     BACKGROUND_ID : int
         65535, the reserved annotated-background id (with ``background=True``).
     active_label_extent : str
@@ -340,12 +486,39 @@ class LabelAnnotator(anywidget.AnyWidget):
     labelling convention only: training code must map it to its own loss
     (e.g. mask out 0); Cellpose itself does not interpret -1.
 
-    Keyboard (viewport focused): o toggle filled/outlined display, b/e/f/p brush/eraser/fill/picker, g
+    Keyboard (only while the image viewport has focus: click it first): o
+    toggle filled/outlined display, b/e/f/p brush/eraser/fill/picker, g
     background brush (``background=True``), x delete mask (shift+click: all
     slices), m/s merge/split track, n new id, [ / ] brush radius,
-    ArrowUp/ArrowDown or Alt+ArrowRight/Alt+ArrowLeft z+1/z-1, 0 fit, ctrl+z
-    undo, space+drag or right/middle drag pan, wheel zoom, 1-9 class
-    (semantic mode).
+    ArrowUp/ArrowDown or Alt+ArrowRight/Alt+ArrowLeft z+1/z-1,
+    PageUp/PageDown previous/next stack, 0 fit, ctrl+z undo, space+drag or
+    right/middle drag pan, 1-9 class (semantic mode). Keys the widget handles
+    do not reach the notebook (no JupyterLab command-mode side effects); other
+    keys and modified letters (ctrl+s, ...) do. Mouse wheel: zooms once the
+    viewport was clicked (focused), otherwise scrolls the page; ctrl+wheel and
+    trackpad pinch always zoom.
+
+    Changed (D17, 2026-11): handled keys used to bubble to the host, and the
+    plain wheel always zoomed (the page could not be scrolled past the widget).
+
+    Changed (D02/D03, 2026-11): the default range was (p0.1, p99.99) with
+    ``lo + 1`` for sparse channels (rendered binary); the default colours
+    were magenta, green, cyan, ... and more than 8 channels raised;
+    RGB-tuple colours in a DataArray ``color`` coordinate were ignored.
+
+    Changed (D18/R4-07, 2026-11): ``vmin``/``vmax`` are data units (they
+    were 0..255 steps of a fixed 8-bit pre-quantisation, so the GUI could
+    only narrow the range); trait kwargs such as ``z``, ``vmin``,
+    ``active_label`` or ``stack`` are honoured (they were overwritten);
+    unknown kwargs raise ``TypeError`` (they were ignored); ``mode`` and
+    ``background`` are read-only after construction; a list of DataArrays
+    keeps the coordinates' names, colours and pixel sizes; ``save`` writes
+    axes and pixel sizes; labels are stored as uint16 internally (the
+    getters still return uint32); ``opacity``, ``tool``,
+    ``channel_visible``, colour lists, bool ``vmin``/``vmax``/``gamma`` and
+    ``auto_increment`` in semantic mode are validated (they were coerced or
+    ignored); a 2D image takes ``pixel_sizes=(Y, X)``; the 8-bit slice is
+    computed in float64 (a narrow window on data far from 0 lost levels).
     """
 
     BACKGROUND_ID = BACKGROUND_ID
@@ -376,13 +549,16 @@ class LabelAnnotator(anywidget.AnyWidget):
     # current slice if labels_to_js is stale (strokes are never echoed)
     labels_resync = traitlets.Int(0).tag(sync=True)
 
-    # display (client-side only)
+    # display (composited in the browser; vmin / vmax re-quantise the 8-bit slice in Python)
     channel_names = traitlets.List(traitlets.Unicode()).tag(sync=True)
     channel_colors = traitlets.List(traitlets.Unicode()).tag(sync=True)
     channel_visible = traitlets.List(traitlets.Bool()).tag(sync=True)
-    vmin = traitlets.List(traitlets.Int()).tag(sync=True)
-    vmax = traitlets.List(traitlets.Int()).tag(sync=True)
+    # display range per channel in DATA units (the 8-bit slice spans vmin..vmax)
+    vmin = traitlets.List(traitlets.Float()).tag(sync=True)
+    vmax = traitlets.List(traitlets.Float()).tag(sync=True)
     gamma = traitlets.List(traitlets.Float()).tag(sync=True)
+    # per channel [lo, hi, step, auto vmin, auto vmax] for the browser's sliders (Python -> JS)
+    data_range = traitlets.List(traitlets.List(traitlets.Float())).tag(sync=True)
     opacity = traitlets.Float(0.45).tag(sync=True)
     # "filled" (default) | "outlined": per-label coloured boundary (outline_px wide)
     # over an opaque black border band (outline_border_px wide), faint interior
@@ -422,6 +598,16 @@ class LabelAnnotator(anywidget.AnyWidget):
     # serials of the undoable track operations, oldest first (Python -> JS)
     track_undo_ids = traitlets.List(traitlets.Int()).tag(sync=True)
 
+    # the browser's tools (label_annotator.js ``tools``)
+    _TOOLS = ("brush", "eraser", "fill", "picker", "background", "delete", "merge", "split")
+
+    # traits the widget computes: not constructor kwargs
+    _COMPUTED = frozenset({
+        "shape_zyx", "image_to_js", "labels_to_js", "labels_prev_to_js", "labels_next_to_js", "labels_rev",
+        "undo_epoch", "labels_from_js", "labels_resync", "data_range", "class_names", "counts_text", "status",
+        "active_label_extent", "track_request", "track_undo_ids", "new_label_trigger",
+    })
+
     def __init__(
         self,
         image,
@@ -437,6 +623,15 @@ class LabelAnnotator(anywidget.AnyWidget):
         show_adjacent: bool = False,
         background: bool = False,
         stack_names: list[str] | None = None,
+        *,
+        colormap=None,
+        channel_labels: list[str] | None = None,
+        pixel_sizes=None,
+        vmin=None,
+        vmax=None,
+        gamma=None,
+        z: int | None = None,
+        auto_fill: bool | None = None,
         **kwargs,
     ):
         if mode not in ("instance", "semantic"):
@@ -444,13 +639,28 @@ class LabelAnnotator(anywidget.AnyWidget):
         background = bool(background)
         if background and mode != "instance":
             raise ValueError("background=True is for instance mode; in semantic mode add a background class")
-        if getattr(image, "dims", None) is not None and "C" in image.dims:
-            # channel names / colours from the DataArray (image_io.set_channel_info)
-            if channel_names is None and "C" in image.coords:
-                channel_names = [str(v) for v in image.coords["C"].values]
-            if channel_colors is None and "color" in image.coords and image.coords["color"].dims == ("C",):
-                channel_colors = _colors_from_coord(image.coords["color"].values)
-        extra = []  # further stacks (list input): [(czyx, labels or None)]
+        # tnia-style aliases (D18): one spelling per call
+        if colormap is not None:
+            if channel_colors is not None:
+                raise TypeError("pass channel_colors or its alias colormap, not both")
+            channel_colors = colormap
+        if channel_labels is not None:
+            if channel_names is not None:
+                raise TypeError("pass channel_names or its alias channel_labels, not both")
+            channel_names = channel_labels
+        # trait kwargs: computed traits and unknown names raise (they used to be ignored);
+        # the traits the constructor sets are applied after its defaults, validated
+        traits = type(self).class_trait_names()
+        for k in kwargs:
+            if k in self._COMPUTED:
+                raise TypeError(f"{k!r} is computed by LabelAnnotator and cannot be passed")
+            if k not in traits:
+                raise TypeError(f"LabelAnnotator got an unexpected keyword argument {k!r}")
+        managed = {k: kwargs.pop(k) for k in
+                   ("active_label", "class_colors", "stack", "channel_visible", "auto_increment", "instance_palette")
+                   if k in kwargs}
+
+        given_ps = pixel_sizes
         if isinstance(image, (list, tuple)):
             if not image:
                 raise ValueError("image: empty list of stacks")
@@ -471,95 +681,209 @@ class LabelAnnotator(anywidget.AnyWidget):
             if stack_names is not None and len(stack_names) != len(imgs):
                 raise ValueError(f"{len(imgs)} stacks but {len(stack_names)} stack_names")
             names_in = list(stack_names) if stack_names is not None else [f"stack {i}" for i in range(len(imgs))]
-            for im, lb in zip(imgs[1:], labs[1:]):
-                extra.append((_to_czyx(im, axes)[0], lb))
-            image, labels = imgs[0], labs[0]
         else:
-            names_in = []
-        czyx, input_axes = _to_czyx(image, axes)
-        for e, _ in extra:
-            if e.shape[0] != czyx.shape[0]:
-                raise ValueError(f"all stacks need the same channels: {czyx.shape[0]} vs {e.shape[0]}")
-        self._image = czyx
-        self._spatial_axes = "".join(a for a in input_axes if a in "ZYX")
-        c, nz, ny, nx = czyx.shape
-        self._limits = [_display_limits(czyx[i], percentiles) for i in range(c)]
-
-        if labels is None:
-            self._labels = np.zeros((nz, ny, nx), dtype=np.uint32)
-        else:
-            lab = np.asarray(labels)
-            lab = lab[np.newaxis] if lab.ndim == 2 else lab
-            if lab.shape != (nz, ny, nx):
-                raise ValueError(f"labels shape {np.asarray(labels).shape} does not match image spatial shape {(nz, ny, nx)}")
-            self._labels = _coerce_label_values(lab, background)
+            imgs, labs, names_in = [image], [labels], []
+        # every stack (a DataArray in a list too) is unpacked by the viewers' rule;
+        # names / colours come from the first stack unless given, pixel sizes per stack
+        stacks = []
+        for k, im in enumerate(imgs):
+            czyx, in_axes, channel_colors, channel_names, ps = _unpack(im, axes, channel_colors, channel_names, given_ps)
+            if k == 0:
+                input_axes = in_axes
+            elif czyx.shape[0] != stacks[0][0].shape[0]:
+                raise ValueError(f"all stacks need the same channels: {stacks[0][0].shape[0]} vs {czyx.shape[0]}")
+            stacks.append((czyx, _parse_pixel_sizes(ps, has_z="Z" in in_axes)))
+        czyx = stacks[0][0]
+        c = czyx.shape[0]
 
         names = list(channel_names) if channel_names else [f"ch{i}" for i in range(c)]
         if len(names) != c:
             raise ValueError(f"need {c} channel names/colors")
         colors = _channel_colors(channel_colors, c)
         classes = list(classes) if classes else (["foreground"] if mode == "semantic" else [])
+        gamma = [_finite(g, "gamma") for g in per_channel(gamma, c, "gamma", default=1.0)]
+        if any(g <= 0 for g in gamma):
+            raise ValueError(f"gamma must be > 0, got {gamma}")
+        visible = managed.pop("channel_visible", None)
+        if isinstance(visible, (str, bytes)):
+            raise ValueError(f"channel_visible must be a bool or a list of bools, got {visible!r}")
+        visible = per_channel(visible, c, "channel_visible", True)
+        if not all(isinstance(v, (bool, np.bool_)) for v in visible):
+            raise ValueError(f"channel_visible must be bools, got {visible!r}")
+        visible = [bool(v) for v in visible]
+        class_colors = managed.pop("class_colors", None)
+        if class_colors is not None:
+            class_colors = _colour_list(class_colors, "class_colors")
+            if len(class_colors) != len(classes):
+                raise ValueError(f"{len(class_colors)} class_colors for {len(classes)} classes")
+        palette = managed.pop("instance_palette", None)
+        if palette is not None:
+            palette = _colour_list(palette, "instance_palette")
+            if not palette:
+                raise ValueError("instance_palette must not be empty")
+        auto_increment = managed.pop("auto_increment", None)
+        if auto_increment is not None and keep_label and auto_increment:
+            raise ValueError("keep_label=True means auto_increment=False; pass one of them")
+        if auto_increment and mode == "semantic":
+            raise ValueError("auto_increment is for instance mode (semantic mode paints fixed class ids)")
+        auto_increment = (not keep_label) if auto_increment is None else bool(auto_increment)
+        stack = managed.pop("stack", None)
+        if stack is not None and not 0 <= int(stack) < len(stacks):
+            raise ValueError(f"stack={stack} out of range [0, {len(stacks) - 1}]")
+        active = managed.pop("active_label", None)
+        if active is not None and mode == "semantic" and not 0 <= int(active) <= len(classes):
+            raise ValueError(f"active_label={active} out of range [0, {len(classes)}] (semantic classes)")
+
         # cached (nonzero ids, pixel counts) per slice: extent / counts readouts, next id
-        self._slice_hist: list[tuple[np.ndarray, np.ndarray] | None] = [None] * nz
-        # (serial, flat idx, old values, value written, what)
-        self._track_undo: list[tuple[int, np.ndarray, np.ndarray, int, str]] = []
-        # one counter for the whole widget (not per stack): serials never repeat, so
+        # (serial, flat idx, old values, value written, what) per track op
+        # one track serial for the whole widget (not per stack): serials never repeat, so
         # the browser can tell a new op from one it has mirrored already
         self._track_serial = 0
-
-        # inactive stacks are parked here; the active one lives in self._image & co
+        self._ready = False
+        self._spatial_axes = "".join(a for a in input_axes if a in "ZYX")
+        # every stack's state; the shown one is unparked into self._image & co below
         self._stack_idx = 0
-        self._parked: list[dict | None] = [None] * (1 + len(extra))
-        for k, (e_img, e_lab) in enumerate(extra, start=1):
-            ez, ey, ex = e_img.shape[1:]
-            if e_lab is None:
-                el = np.zeros((ez, ey, ex), dtype=np.uint32)
+        self._parked: list[dict | None] = []
+        for k, ((s_img, ps), s_lab) in enumerate(zip(stacks, labs)):
+            sz, sy, sx = s_img.shape[1:]
+            if s_lab is None:
+                sl = np.zeros((sz, sy, sx), dtype=_STORE)
             else:
-                el = np.asarray(e_lab)
-                el = el[np.newaxis] if el.ndim == 2 else el
-                if el.shape != (ez, ey, ex):
-                    raise ValueError(f"stack {k}: labels shape {el.shape} does not match image {(ez, ey, ex)}")
-                el = _coerce_label_values(el, background)
-            self._parked[k] = dict(
-                image=e_img, labels=el, limits=[_display_limits(e_img[i], percentiles) for i in range(c)],
-                hist=[None] * ez, undo=[], z=ez // 2,
-            )
+                sl = np.asarray(s_lab)
+                sl = sl[np.newaxis] if sl.ndim == 2 else sl
+                if sl.shape != (sz, sy, sx):
+                    where = "image spatial shape" if len(stacks) == 1 else f"stack {k}: image"
+                    raise ValueError(f"labels shape {np.asarray(s_lab).shape} does not match {where} {(sz, sy, sx)}")
+                sl = _coerce_label_values(sl, background)
+            auto, lo, hi, drange = _channel_ranges(s_img, percentiles, vmin, vmax)
+            self._parked.append(dict(
+                image=s_img, labels=sl, limits=auto, vmin=lo, vmax=hi, data_range=drange, ps=ps,
+                hist=[None] * sz, undo=[], z=sz // 2,
+            ))
+        st = self._unpark(0)
 
         super().__init__(**kwargs)
+        nz, ny, nx = self._labels.shape
         with self.hold_sync():
             self.stack_names = names_in
             self.shape_zyx = [nz, ny, nx]
             self.channel_names = names
             self.channel_colors = colors
-            self.channel_visible = [True] * c
-            self.vmin = [0] * c
-            self.vmax = [255] * c
-            self.gamma = [1.0] * c
+            self.channel_visible = visible
+            self.data_range = st["data_range"]
+            self.vmin = st["vmin"]
+            self.vmax = st["vmax"]
+            self.gamma = gamma
             self.mode = mode
             self.class_names = classes
-            self.class_colors = _class_palette(len(classes))
-            self.instance_palette = [_rgb_hex(c) for c in LABELS_CMAP_COLORS]
-            self.auto_fill = mode == "instance"
-            self.auto_increment = mode == "instance" and not keep_label
+            self.class_colors = class_colors if class_colors is not None else _class_palette(len(classes))
+            self.instance_palette = palette if palette is not None else [_rgb_hex(c) for c in LABELS_CMAP_COLORS]
+            self.auto_fill = (mode == "instance") if auto_fill is None else bool(auto_fill)
+            self.auto_increment = mode == "instance" and auto_increment
             self.brush_radius = brush_radius
             self.show_adjacent = bool(show_adjacent)
             self.background = background
             self.active_label = self._next_label() if mode == "instance" else 1
-            self.z = nz // 2
+            self.z = st["z"]
+            self._ready = True
+            self._frozen = True  # mode / background are fixed from here on
             self._send_slice()
             self._update_extent()
             self._update_counts()
+        # the user's choices, applied once the geometry is known (stack, then z, then the id)
+        if stack is not None:
+            self.stack = int(stack)
+        if z is not None:
+            nz = self._labels.shape[0]
+            if not 0 <= int(z) < nz:
+                raise ValueError(f"z={z} out of range [0, {nz - 1}]")
+            self.z = int(z)
+        if active is not None:
+            self.active_label = int(active)
 
     # ------------------------------------------------------------------ sync
     def _slice_u8(self, z: int) -> np.ndarray:
+        """The 8-bit display slice: each channel scaled from ``vmin`` (0) to ``vmax`` (255), in data units.
+
+        Computed in float64 (``vmin`` is subtracted before any rounding, so a
+        narrow window on data far from 0 keeps its 256 levels). The last
+        slice is cached per channel: a range change re-reads only the
+        channels whose ``vmin``/``vmax`` changed.
+        """
+        key = (id(self._image), int(z))
+        cache = getattr(self, "_u8_cache", None)
+        if cache is not None and cache[0] != key:
+            cache = None
         out = np.empty(self._image.shape[:1] + self._image.shape[2:], dtype=np.uint8)
-        for i, (lo, hi) in enumerate(self._limits):
-            s = (np.asarray(self._image[i, z], dtype=np.float32) - lo) * (255.0 / (hi - lo))
+        ranges = []
+        for i in range(out.shape[0]):
+            lo, hi = float(self.vmin[i]), float(self.vmax[i])
+            ranges.append((lo, hi))
+            if cache is not None and cache[1][i] == (lo, hi):
+                out[i] = cache[2][i]
+                continue
+            s = np.asarray(self._image[i, z], dtype=np.float64)
+            if hi > lo:
+                s = (s - lo) * (255.0 / (hi - lo))
+            else:  # crossed sliders: a threshold
+                s = np.where(s > lo, 255.0, 0.0)
             # NaN survives the clip and would warn in the uint8 cast: show it as 0
             np.nan_to_num(s, copy=False, nan=0.0, posinf=255.0, neginf=0.0)
             np.clip(s, 0, 255, out=s)
             out[i] = s.astype(np.uint8)
+        self._u8_cache = (key, ranges, out)
         return out
+
+    @traitlets.validate("vmin", "vmax", "gamma")
+    def _valid_range(self, proposal):
+        v = list(proposal["value"])
+        name = proposal["trait"].name
+        if getattr(self, "_ready", False) and len(v) != self._image.shape[0]:
+            raise traitlets.TraitError(f"{name} needs {self._image.shape[0]} values (one per channel), got {len(v)}")
+        if not all(np.isfinite(x) for x in v):
+            raise traitlets.TraitError(f"{name} values must be finite, got {v}")
+        if name == "gamma" and any(x <= 0 for x in v):
+            raise traitlets.TraitError(f"gamma values must be > 0, got {v}")
+        return v
+
+    @traitlets.observe("vmin", "vmax")
+    def _on_range(self, change):
+        """Re-quantise the shown slice for the new range (labels are not re-sent)."""
+        if not getattr(self, "_ready", False) or getattr(self, "_switching", False):
+            return
+        dr = [list(r) for r in self.data_range]
+        changed = False
+        for i, r in enumerate(dr):
+            lo, hi = min(r[0], self.vmin[i], self.vmax[i]), max(r[1], self.vmin[i], self.vmax[i])
+            if (lo, hi) != (r[0], r[1]):
+                r[0], r[1], changed = lo, hi, True
+        with self.hold_sync():
+            if changed:  # the sliders must be able to show the new value
+                self.data_range = dr
+            self.image_to_js = encode_image_slice(self._slice_u8(self.z), self.z)
+
+    @traitlets.validate("mode", "background")
+    def _valid_fixed(self, proposal):
+        name, v = proposal["trait"].name, proposal["value"]
+        if getattr(self, "_frozen", False) and v != getattr(self, name):
+            raise traitlets.TraitError(
+                f"{name} is fixed at construction (labels and ids depend on it); create a new LabelAnnotator"
+            )
+        return v
+
+    @traitlets.validate("opacity")
+    def _valid_opacity(self, proposal):
+        v = proposal["value"]
+        if not 0.0 <= v <= 1.0:
+            raise traitlets.TraitError(f"opacity must be in [0, 1], got {v}")
+        return v
+
+    @traitlets.validate("tool")
+    def _valid_tool(self, proposal):
+        v = proposal["value"]
+        if v not in self._TOOLS:
+            raise traitlets.TraitError(f"tool must be one of {', '.join(self._TOOLS)}; got {v!r}")
+        return v
 
     def _send_slice(self):
         z = self.z
@@ -599,8 +923,28 @@ class LabelAnnotator(anywidget.AnyWidget):
     def _park(self) -> dict:
         return dict(
             image=self._image, labels=self._labels, limits=self._limits, hist=self._slice_hist,
-            undo=self._track_undo, z=int(self.z),
+            undo=self._track_undo, z=int(self.z), ps=self._ps,
+            vmin=list(self.vmin), vmax=list(self.vmax), data_range=[list(r) for r in self.data_range],
         )
+
+    def _unpark(self, k: int) -> dict:
+        """Make stack ``k`` the shown one (Python state only); returns its parked dict."""
+        st = self._parked[k]
+        self._parked[k] = None
+        self._stack_idx = k
+        self._image, self._labels, self._limits = st["image"], st["labels"], st["limits"]
+        self._slice_hist, self._track_undo, self._ps = st["hist"], st["undo"], st["ps"]
+        return st
+
+    @property
+    def pixel_sizes(self) -> dict:
+        """Pixel sizes of the shown stack, ``{'Z', 'Y', 'X', 'unit'}`` in µm (None where unknown).
+
+        From ``pixel_sizes=`` (any form the package accepts; known length units
+        are converted to µm) or, for a DataArray, its calibrated coordinates.
+        :meth:`save` writes Y/X as TIFF resolution. Display stays in pixels.
+        """
+        return dict(self._ps)
 
     @traitlets.validate("stack")
     def _valid_stack(self, proposal):
@@ -612,14 +956,17 @@ class LabelAnnotator(anywidget.AnyWidget):
         if not hasattr(self, "_parked") or change["new"] == self._stack_idx:
             return
         self._parked[self._stack_idx] = self._park()
-        self._stack_idx = new = change["new"]
-        st = self._parked[new]
-        self._parked[new] = None
-        self._image, self._labels, self._limits = st["image"], st["labels"], st["limits"]
-        self._slice_hist, self._track_undo = st["hist"], st["undo"]
+        st = self._unpark(change["new"])
         with self.hold_sync():
             nz, ny, nx = self._labels.shape
             self.shape_zyx = [nz, ny, nx]
+            # each stack keeps its own display range; the slice is sent once below
+            self._switching = True
+            try:
+                self.data_range = st["data_range"]
+                self.vmin, self.vmax = st["vmin"], st["vmax"]
+            finally:
+                self._switching = False
             self.track_undo_ids = [u[0] for u in self._track_undo]
             self.z = st["z"]  # triggers _send_slice when it differs; resend anyway below
             self._send_slice()
@@ -632,11 +979,11 @@ class LabelAnnotator(anywidget.AnyWidget):
 
     @property
     def stack_labels(self) -> list[np.ndarray]:
-        """Labels of every stack (copies, ``uint32``, the input's spatial axes), in input order."""
+        """Labels of every stack (copies, ``uint32``, (Z)YX), in input order."""
         out = []
         for k, p in enumerate(self._parked):
             lab = self._labels if k == self._stack_idx else p["labels"]
-            out.append(_restore_axes(lab.copy(), self._spatial_axes))
+            out.append(_restore_axes(lab.astype(np.uint32), self._spatial_axes))
         return out
 
     @traitlets.validate("z")
@@ -843,8 +1190,13 @@ class LabelAnnotator(anywidget.AnyWidget):
         """Write the id ``new_values`` at flat indices ``idx``, record the old values for undo, refresh."""
         flat = self._labels.reshape(-1)
         self._track_serial += 1
+        # compact undo entry: int32 indices when they fit, uint16 old values (R4-19)
+        if flat.size <= np.iinfo(np.int32).max:
+            idx = idx.astype(np.int32, copy=False)
         self._track_undo.append((self._track_serial, idx, flat[idx].copy(), int(new_values), what))
         del self._track_undo[:-_TRACK_UNDO_MAX]
+        while len(self._track_undo) > 1 and sum(u[1].nbytes + u[2].nbytes for u in self._track_undo) > _TRACK_UNDO_MAX_BYTES:
+            del self._track_undo[0]
         flat[idx] = new_values
         self._after_volume_edit(idx)
         self.status = what
@@ -1012,11 +1364,11 @@ class LabelAnnotator(anywidget.AnyWidget):
     # ------------------------------------------------------------------ API
     @property
     def labels(self) -> np.ndarray:
-        """Copy of the labels (``uint32``) with the input's spatial axes."""
-        return _restore_axes(self._labels.copy(), self._spatial_axes)
+        """Copy of the labels (``uint32``) in (Z)YX order (YX without Z), whatever the input's axis order."""
+        return _restore_axes(self._labels.astype(np.uint32), self._spatial_axes)
 
     def labels_signed(self) -> np.ndarray:
-        """Copy of the labels as ``int32`` with ``BACKGROUND_ID`` -> -1 (input's spatial axes).
+        """Copy of the labels as ``int32`` with ``BACKGROUND_ID`` -> -1 ((Z)YX).
 
         Signed convention for sparse training: 0 unannotated, -1 annotated
         background, 1.. cells. Without ``background`` there is no background
@@ -1031,7 +1383,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         return out
 
     def set_labels(self, labels) -> None:
-        """Replace all labels (spatial axes of the input) and refresh the view.
+        """Replace all labels ((Z)YX order) and refresh the view.
 
         Accepts unsigned ids in ``[0, 65535]`` and, with ``background=True``,
         the signed convention of :meth:`labels_signed` (negative values become
@@ -1087,6 +1439,18 @@ class LabelAnnotator(anywidget.AnyWidget):
 
         Warns (and returns ``[]``) when no slice is selected, e.g. nothing is
         annotated yet.
+
+        Both files carry tifffile ``axes`` metadata (``YX`` or ``CYX``) and,
+        when :attr:`pixel_sizes` gives Y and X in µm, the Y/X pixel size as
+        TIFF resolution tags (pixels per cm), which ``image_io.load_image``
+        reads back. Images are written ``photometric="minisblack"``: a 3- or
+        4-channel slice stays channels, never an RGB(A) picture. Plain
+        ``tifffile.imread`` (what Cellpose uses) returns the same arrays.
+
+        Changed (D18/R8-10, 2026-11): the files had no axes or resolution
+        metadata (``load_image`` raised on their 'QYX' axes, and pixel
+        sizes were lost), and a 3- or 4-channel slice was left to tifffile's default,
+        planar RGB(A) with a DeprecationWarning.
         """
         import tifffile
 
@@ -1094,20 +1458,23 @@ class LabelAnnotator(anywidget.AnyWidget):
             raise ValueError(f"slices must be one of 'annotated', 'all', 'current', got {slices!r}")
         if stacks not in ("current", "all"):
             raise ValueError(f"stacks must be one of 'current', 'all', got {stacks!r}")
-        # (image, labels, current z, file stem) per stack; parked stacks are read in
-        # place, so saving never switches the shown stack
-        jobs = [(self._image, self._labels, int(self.z), name)]
+        # (image, labels, current z, pixel sizes, file stem) per stack; parked stacks are
+        # read in place, so saving never switches the shown stack
+        jobs = [(self._image, self._labels, int(self.z), self._ps, name)]
         if stacks == "all" and len(self._parked) > 1:
             jobs = []
             for k, p in enumerate(self._parked):
-                image, labels, zc = (self._image, self._labels, int(self.z)) if k == self._stack_idx else (p["image"], p["labels"], p["z"])
+                image, labels, zc, ps = (
+                    (self._image, self._labels, int(self.z), self._ps) if k == self._stack_idx
+                    else (p["image"], p["labels"], p["z"], p["ps"])
+                )
                 tag = re.sub(r"[^\w.-]+", "_", (self.stack_names[k] if k < len(self.stack_names) else f"stack{k}")).strip("_")
-                jobs.append((image, labels, zc, f"{name}_{tag or k}"))
+                jobs.append((image, labels, zc, ps, f"{name}_{tag or k}"))
 
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         targets = []
-        for image, labels, zc, stem0 in jobs:
+        for image, labels, zc, ps, stem0 in jobs:
             nz = labels.shape[0]
             if slices == "annotated":
                 zs = [int(z) for z in np.flatnonzero(labels.reshape(nz, -1).any(axis=1))]
@@ -1115,7 +1482,7 @@ class LabelAnnotator(anywidget.AnyWidget):
                 zs = list(range(nz)) if slices == "all" else [zc]
             for z in zs:
                 stem = stem0 if nz == 1 else f"{stem0}_z{z:03d}"
-                targets.append((image, labels, z, out / f"{stem}_img.tif", out / f"{stem}_masks.tif"))
+                targets.append((image, labels, z, ps, out / f"{stem}_img.tif", out / f"{stem}_masks.tif"))
         # check everything first so a refused save writes nothing
         paths = [p for *_, pi, pm in targets for p in (pi, pm)]
         dup = sorted(str(p) for p, n in Counter(paths).items() if n > 1)
@@ -1129,9 +1496,18 @@ class LabelAnnotator(anywidget.AnyWidget):
             warnings.warn(f"save: no {slices} slices to write; nothing written", UserWarning, stacklevel=2)
             return []
         written = []
-        for image, labels, z, pi, pm in targets:
+        for image, labels, z, ps, pi, pm in targets:
             img = image[:, z]
-            tifffile.imwrite(pi, img[0] if img.shape[0] == 1 else img, compression="zlib")
-            tifffile.imwrite(pm, self._signed(labels[z]) if signed else labels[z], compression="zlib")
+            # axes (tifffile's shaped metadata) and the Y/X calibration (resolution tags in
+            # pixels per cm), so image_io.load_image reads the pair back; Cellpose ignores both
+            cal = {}
+            if ps["unit"] == UM and ps["Y"] and ps["X"]:
+                cal = dict(resolution=(1e4 / ps["X"], 1e4 / ps["Y"]), resolutionunit="CENTIMETER")
+            one = img.shape[0] == 1
+            # minisblack: 3 or 4 channels are channels, not an RGB(A) picture
+            tifffile.imwrite(pi, img[0] if one else img, compression="zlib", photometric="minisblack",
+                             metadata={"axes": "YX" if one else "CYX"}, **cal)
+            tifffile.imwrite(pm, self._signed(labels[z]) if signed else labels[z].astype(np.uint32),
+                             compression="zlib", metadata={"axes": "YX"}, **cal)
             written += [pi, pm]
         return written

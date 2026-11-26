@@ -18,6 +18,11 @@ from scipy.interpolate import RegularGridInterpolator
 from skimage.filters import median
 from skimage.morphology import disk
 
+from ._conventions import check_zyx_input, warn_deprecated
+
+#: Default lateral patch size of `best_focus_image`, in pixels
+DEFAULT_PATCH_SIZE = 32
+
 
 def apply_median_filter(height_map):
     """
@@ -138,10 +143,32 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
     Dimension order expected: ZYX
 
     `image_or_path` is a (Z, Y, X) array or a path (str or os.PathLike) to one.
-    `patch_size` defaults to 1/10 of the smaller lateral size (at least 3 px).
+    `patch_size` (pixels) sets the lateral resolution of the focus height map: one
+    focus estimate per patch, patches overlapping by a third. The default (None)
+    is 32 px, capped at min(Y, X).
     With `return_heightmap=True` the per-pixel best-focus slice index, clipped to
     [0, Z-1], is returned as well.
+
+    Returns the fused (Y, X) image as float32 whatever the input dtype (cast it back
+    if needed; Catmull-Rom interpolation between slices can exceed the input
+    range), and the float32 height map when requested. `test` is deprecated and
+    unused.
+
+    Changed (D24, R7-08, 2026-11): the default patch size is a fixed 32 px capped at
+    min(Y, X); it was min(Y, X) // 10 (at least 3), which tied the focus resolution
+    to the field of view, so a crop and the full image disagreed on the same pixels.
+
+    Changed (D08, R7-15, 2026-11): passing `test` emits a FutureWarning; it will be
+    removed in eigenp_utils 0.1.0.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image_or_path, "best_focus_image")
+    if test is not None:
+        warn_deprecated("best_focus_image(test=...)")
+
     # 1. Load the image
     if isinstance(image_or_path, (str, os.PathLike)):
         img = skimage.io.imread(os.fspath(image_or_path))
@@ -156,7 +183,7 @@ def best_focus_image(image_or_path, patch_size=None, return_heightmap=False, tes
 
     # 2. Determine patch size and padding
     if patch_size is None:
-        patch_size = max(min(original_shape) // 10, 3)
+        patch_size = min(DEFAULT_PATCH_SIZE, H, W)
     patch_size = int(patch_size)
     if patch_size < 1:
         raise ValueError(f"patch_size must be >= 1, got {patch_size}")

@@ -53,7 +53,8 @@ def _bits(a):
 # Networks
 # ---------------------------------------------------------------------------
 
-def test_networks_sort_columns_and_select_median():
+@pytest.mark.parametrize("k", [3, 5])
+def test_networks_sort_columns_and_select_median(k):
     """The column and window comparator networks are correct (0-1 principle).
 
     A comparator network commutes with monotone maps, so it sorts (selects)
@@ -62,9 +63,9 @@ def test_networks_sort_columns_and_select_median():
     0-1 inputs whose k columns are each sorted ((k + 1) ** k cases).
     Expected: the column network sorts all 2 ** k binary vectors; the window
     network leaves the median (k * k // 2-th smallest) on its output wire.
-    Only the 3 x 3 networks (the default) are tested.
+    Both hand-built networks are checked: 3 x 3 (64 window cases) and 5 x 5
+    (6 ** 5 = 7776 window cases); R6-18 added 5 x 5.
     """
-    k = 3
     colsort, window, out_wire = mf._NETWORKS[k]
 
     vecs = np.array(list(itertools.product([False, True], repeat=k)))
@@ -89,23 +90,24 @@ SHAPES = [(1, 1), (1, 9), (9, 1), (2, 2), (2, 3), (4, 4), (31, 17), (3, 13, 19),
 
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_matches_scipy_reflect(backend, dtype):
+@pytest.mark.parametrize("size", [3, 5, 7])
+def test_matches_scipy_reflect(backend, dtype, size):
     """Bit-for-bit equal to scipy.ndimage.median_filter(mode='reflect').
 
     Strategy: odd shapes, 1-pixel-wide rows/columns, images smaller than the
     window (reflection past the far edge), 3D and 4D stacks (scipy size 1 on
     leading axes), each with full-range values and with 4 levels (ties), for
-    the default 3 x 3 window.
+    the 3 x 3 and 5 x 5 networks and the k >= 7 selection path (R6-18).
     Expected: identical arrays, input dtype kept.
     """
     rng = np.random.default_rng(0)
     for shape in SHAPES:
         for levels in (None, 4):
             a = _random(shape, dtype, rng, levels)
-            out = median_filter_fast(a, backend=backend)
+            out = median_filter_fast(a, size, backend=backend)
             assert out.dtype == a.dtype and out.shape == a.shape
             np.testing.assert_array_equal(
-                out, _scipy(a, 3), err_msg=f"{shape} levels={levels}")
+                out, _scipy(a, size), err_msg=f"{shape} levels={levels}")
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -204,6 +206,23 @@ def test_nan_propagates_to_every_window_containing_it(backend, dtype):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("size", [5, 7])
+def test_nan_policy_for_larger_windows(backend, size):
+    """The NaN policy also holds for the 5 x 5 network and the k >= 7 path (R6-18).
+
+    Strategy: random NaNs (incl. corners and borders) in a float32 stack.
+    Expected: equal to np.median over the same reflected k x k windows, and
+    NaN-free pixels far from every NaN equal the scipy result.
+    """
+    rng = np.random.default_rng(30 + size)
+    stack = _random((2, 17, 19), np.float32, rng)
+    stack[rng.random(stack.shape) < 0.01] = np.nan
+    stack[0, 0, 0] = stack[1, -1, 5] = np.nan
+    np.testing.assert_array_equal(median_filter_fast(stack, size, backend=backend),
+                                  _nan_oracle(stack, size))
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_zero_median_is_positive_zero(backend):
     """-0.0 and +0.0 tie; a zero median is returned as +0.0 on both backends.
 
@@ -226,20 +245,22 @@ def test_numba_bit_identical_to_numpy():
     """The numba and NumPy backends return bit-identical arrays.
 
     Both compute exact order statistics with the same NaN and signed-zero
-    rules. Strategy: all supported dtypes, 3 x 3, data with ties, and
-    for floats NaN, +-inf and +-0.0; compare raw bits. Expected: identical.
+    rules. Strategy: all supported dtypes, 3 x 3, 5 x 5 and 7 x 7 (R6-18),
+    data with ties, and for floats NaN, +-inf and +-0.0; compare raw bits.
+    Expected: identical.
     """
     pytest.importorskip("numba")
     rng = np.random.default_rng(4)
-    for dtype in DTYPES:
-        a = _random((3, 37, 41), dtype, rng, levels=8)
-        if np.dtype(dtype).kind == "f":
-            special = np.array([np.nan, np.inf, -np.inf, 0.0, -0.0], dtype)
-            mask = rng.random(a.shape) < 0.1
-            a[mask] = rng.choice(special, mask.sum())
-        x = median_filter_fast(a, backend="numba")
-        y = median_filter_fast(a, backend="numpy")
-        np.testing.assert_array_equal(_bits(x), _bits(y), err_msg=str(dtype))
+    for size in (3, 5, 7):
+        for dtype in DTYPES:
+            a = _random((3, 37, 41), dtype, rng, levels=8)
+            if np.dtype(dtype).kind == "f":
+                special = np.array([np.nan, np.inf, -np.inf, 0.0, -0.0], dtype)
+                mask = rng.random(a.shape) < 0.1
+                a[mask] = rng.choice(special, mask.sum())
+            x = median_filter_fast(a, size, backend="numba")
+            y = median_filter_fast(a, size, backend="numpy")
+            np.testing.assert_array_equal(_bits(x), _bits(y), err_msg=f"{dtype} k={size}")
 
 
 def test_auto_falls_back_to_numpy_without_numba(monkeypatch):
@@ -345,3 +366,26 @@ def test_rejects_bad_arguments():
             median_filter_fast(img.astype(dtype))
     empty = np.zeros((0, 5, 4), np.uint8)
     assert median_filter_fast(empty).shape == empty.shape
+
+
+def test_warns_when_a_trailing_colour_axis_is_filtered():
+    """C-07: a trailing axis of length 3 or 4 among the filtered axes gives a UserWarning.
+
+    Strategy: a channel-last (32, 32, 3) float image, as ``color_coded_projection``
+    returns, with the default axes (-2, -1), which filter X and the colour
+    axis together. Expected outcome: a UserWarning pointing to axes=(0, 1).
+    Negative controls: axes=(0, 1) on the same image, a (3, 32, 32)
+    channel-first stack and a 2D (32, 3) image do not warn, and the filtered
+    output is unchanged by the warning.
+    """
+    import warnings
+
+    rgb = np.random.default_rng(9).random((32, 32, 3)).astype(np.float32)
+    with pytest.warns(UserWarning, match=r"axes=\(0, 1\)"):
+        out = median_filter_fast(rgb)
+    np.testing.assert_array_equal(out, _scipy(rgb, 3))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        median_filter_fast(rgb, axes=(0, 1))
+        median_filter_fast(np.moveaxis(rgb, -1, 0))
+        median_filter_fast(rgb[:, 0, :])

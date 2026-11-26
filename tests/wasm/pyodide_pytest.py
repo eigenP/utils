@@ -32,7 +32,7 @@ print("download_file_async (pyfetch) OK")
 # 2. Optional extras that have Pyodide builds, then the regular test suite.
 await micropip.install([
     "scikit-image", "xarray", "tifffile",
-    "plotly", "statannotations", "statsmodels",
+    "statannotations", "statsmodels",
     "scikit-learn",  # imported by single_cell
     "pytest",
 ])

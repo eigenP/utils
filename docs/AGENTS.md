@@ -24,7 +24,7 @@ Each persona file starts with a charter (mission, scope, operating procedure, de
 - Install the test dependencies once: `uv sync --all-extras` (the `dev` extra includes pytest and pytest-playwright), then `uv run playwright install chromium` for the browser tests in `tests/test_frontend_*.py`.
 - Run the suite with `uv run pytest tests/`. Without pytest-playwright or a browser the frontend tests are skipped locally; in CI (`CI=true`) they error instead.
 - The Pyodide (WASM) suite: `uv build --wheel`, `npm install --no-save --prefix tests/wasm pyodide@314.0.0`, then `node tests/wasm/run_pyodide_tests.mjs` (see the `pyodide` job in `.github/workflows/ci.yml`).
-- Test files mirror source modules 1:1: tests for `src/eigenp_utils/<module>.py` live in `tests/test_<module>.py` (e.g. `tests/test_single_cell.py` for `single_cell.py`). Do not create new, narrowly scoped test files.
+- Test files mirror source modules 1:1: tests for `src/eigenp_utils/<module>.py` live in `tests/test_<module>.py` (e.g. `tests/test_single_cell.py` for `single_cell.py`). Do not create new, narrowly scoped test files. Explicit exemptions: `tests/test_integration_seams.py` (seam tests where one module's output feeds another, e.g. `load_image` -> viewers, `estimate_drift` -> `apply_subpixel_drift_correction`; each test crosses at least two modules), `tests/test_package_metadata.py` (package surface, legacy names, no-print and PEP 723 header checks) and the environment tests `tests/test_clahe_no_skimage.py` / `tests/test_notebook_setup.py`.
 - Every test function has a docstring stating what it tests, the strategy and the expected outcome (no trivial auto-generated summaries).
 - Test public wrappers (e.g. `show_zyx_max_slice_interactive`) rather than internal widget classes (`TNIASliceWidget`) where possible.
 - Ensure all tests pass locally before submission.
@@ -47,12 +47,18 @@ Each persona file starts with a charter (mission, scope, operating procedure, de
       # ///
       ```
     - Start with permissive versioning (e.g., just the package name) unless a specific version is required.
-    - Each header in `src/` must list the same third-party dependencies the module imports and say `requires-python = ">=3.11"` (matching `pyproject.toml`); a CI consistency check for this is being added.
+    - Each module in `src/` with unconditional third-party imports keeps a header that lists them under their `pyproject.toml` distribution names (e.g. `scikit-image`, not `skimage`) and says `requires-python = ">=3.11"`. Imports guarded by `try/except ImportError` are optional and may be left out; a header may list only distributions `pyproject.toml` declares. Modules without third-party imports need no header. `tests/test_package_metadata.py` enforces this (`task_calendar_scheduler.py`, a marimo notebook kept in `src/`, is exempt).
 
 ## Matplotlib (object-oriented interface)
 - Library code never touches pyplot global state: no `plt.figure()`, `plt.gcf()`, `plt.gca()`, `plt.tight_layout()` or `plt.get_fignums()` on figures or axes that belong to the caller.
 - Widgets render with `matplotlib.figure.Figure` (not `plt.figure`/`plt.subplots`), so they never register figures with pyplot.
 - Functions that draw take `fig`/`ax` explicitly and return the figure (and axes) they drew on. Lay out only figures the function created itself (e.g. `layout='tight'` at creation), never one passed in by the caller.
+- Save with `savefig_svg(path, fig=fig)`; omitting `fig` is deprecated (FutureWarning) until 0.1.0. The static ortho viewers default to `use_plt=False` and return a plain `Figure` that pyplot does not track.
+
+## Output, warnings and deprecations
+- Library code never calls `print` and never logs on the root logger: information goes to a module logger (`logging.getLogger(__name__)`), anything the user can act on is a `warnings.warn(..., UserWarning)`. `tests/test_package_metadata.py` enforces this for `src/` (`task_calendar_scheduler.py` is exempt). A function that stops printing gets a `Changed (D07, ...)` docstring note.
+- Deprecate through `_conventions.warn_deprecated(old, new)`: a `FutureWarning` saying the name "will be removed in eigenp_utils 0.1.0", attributed to the caller. Add every new legacy name to `LEGACY` in `tests/test_package_metadata.py`.
+- Every behaviour or default change gets a `Changed (<decision>, <date>): ...` note in the function's docstring.
 
 ## Python Versions
 - The project requires Python 3.11 or later (3.10 reached end-of-life in October 2026). The stdlib `tomllib` can be used without a `tomli` fallback.

@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "numba",
+# ]
+# ///
 """numba kernels for `median_filter.median_filter_fast` (imported lazily).
 
 Importing this module raises ImportError when numba is missing, which makes

@@ -1,3 +1,13 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "pandas",
+#     "scipy",
+#     "statannotations",
+#     "statsmodels",
+# ]
+# ///
 import numpy as np
 import pandas as pd
 from scipy import stats

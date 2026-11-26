@@ -1,10 +1,10 @@
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "marimo",
-#     "matplotlib==3.10.6",
-#     "numpy==2.2.6",
-#     "scikit-image==0.25.2",
+#     "matplotlib",
+#     "numpy",
+#     "scikit-image",
 #     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main ; sys_platform != 'emscripten'",
 # ]
 # ///
@@ -125,7 +125,8 @@ def _():
 
 @app.cell
 def _(mo):
-
+    # plasma / inferno / magma code depth as brightness (early frames look dark);
+    # turbo or hsv keep the brightness of every frame equal
     colormap_dropdown = mo.ui.dropdown(
         label="Projection colormap",
         options=[
@@ -134,6 +135,8 @@ def _(mo):
             ("inferno"),
             ("magma"),
             ("cividis"),
+            ("turbo"),
+            ("hsv"),
         ],
         value="plasma",
     )

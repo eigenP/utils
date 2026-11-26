@@ -3,7 +3,7 @@ import pytest
 import xarray as xr
 from scipy import ndimage
 
-from eigenp_utils.image_io import array_to_stczyx_xarray
+from eigenp_utils.image_io import array_to_stczyx_xarray, get_stczyx_pixel_sizes
 from eigenp_utils.stitching import _solve_positions, stitch_tiles
 
 pytestmark = pytest.mark.filterwarnings("ignore:stitch_tiles is a minimal:UserWarning")
@@ -219,9 +219,17 @@ def test_stitch_tiles_max_shift_disjoint_and_noise_robustness():
     np.testing.assert_array_equal(m_noisy.attrs['stitching']['positions_px'], true - true.min(axis=0))
 
 
-def test_stitch_tiles_rejects_bad_input_and_warns():
+def test_stitch_tiles_rejects_bad_input_and_warns(monkeypatch):
     """Missing stage coords, missing pixel sizes, wrong dims, bad options, and bad transforms raise;
-    every call points users to multiview-stitcher."""
+    the pointer to multiview-stitcher is shown once per process.
+
+    Changed deliberately (D32): the warning used to fire on every call; it now fires on the
+    first call of the process only (the module flag is reset here to observe it).
+    """
+    import warnings
+
+    import eigenp_utils.stitching as st
+
     tiles = np.zeros((2, 8, 8))
     no_stage = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes=(1, 1, 1))
     with pytest.raises(ValueError, match="stage_y"):
@@ -247,8 +255,79 @@ def test_stitch_tiles_rejects_bad_input_and_warns():
         stitch_tiles(ok, stage_to_image=np.eye(3))
     with pytest.raises(KeyError):
         stitch_tiles(ok, registration_channel='missing_channel')
+
+    monkeypatch.setattr(st, "_MINIMAL_WARNING_SHOWN", False)
     with pytest.warns(UserWarning, match="multiview-stitcher"):
         stitch_tiles(ok, min_overlap=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        stitch_tiles(ok, min_overlap=4)  # second call: silent
+
+
+def test_stitch_tiles_register_false_places_tiles_at_stage_positions():
+    """D32: register=False is the stage-only mode (no pair is registered), replacing min_ncc=1.1.
+
+    (+) jittered tiles: register=False gives exactly the stage grid and n_pairs_registered == 0.
+    (-) it equals the old min_ncc=1.1 idiom, and register=True (default) still recovers the truth.
+    """
+    scene = _scene()
+    cuts, true, nominal = _tiles(scene)
+    da = array_to_stczyx_xarray(cuts, 'SYX', pixel_sizes=(1.0, 1.0, 1.0),
+                                stage_positions={'Y': nominal[:, 0], 'X': nominal[:, 1]})
+    stage_only = stitch_tiles(da, register=False)
+    st = stage_only.attrs['stitching']
+    assert st['n_pairs_registered'] == 0 and st['n_pairs'] == 0
+    np.testing.assert_array_equal(st['positions_px'], nominal - nominal.min(axis=0))
+    xr.testing.assert_identical(stage_only, stitch_tiles(da, min_ncc=1.1))
+    registered = stitch_tiles(da)
+    np.testing.assert_array_equal(registered.attrs['stitching']['positions_px'], true - true.min(axis=0))
+
+
+def test_stitch_tiles_converts_stage_units_to_the_pixel_unit():
+    """R8-11: stage positions in nm with pixel sizes in µm are converted, not read as µm.
+
+    (+) stage coords in nm (units='nm'): same positions as the same stage given in µm.
+    (-) an unconvertible stage unit raises a clear ValueError naming both units.
+    """
+    scene = _scene()
+    cuts, true, nominal = _tiles(scene)
+    px = 0.5  # µm
+    um = array_to_stczyx_xarray(cuts, 'SYX', pixel_sizes={'Z': 1, 'Y': px, 'X': px, 'unit': 'µm'},
+                                stage_positions={'Y': nominal[:, 0] * px, 'X': nominal[:, 1] * px})
+    nm = um.assign_coords(
+        stage_y=('S', um.stage_y.values * 1000, {'units': 'nm'}),
+        stage_x=('S', um.stage_x.values * 1000, {'units': 'nm'}),
+    )
+    a = stitch_tiles(um, register=False).attrs['stitching']['positions_px']
+    b = stitch_tiles(nm, register=False).attrs['stitching']['positions_px']
+    assert a == b
+    bad = um.assign_coords(stage_y=('S', um.stage_y.values, {'units': 'furlong'}),
+                           stage_x=('S', um.stage_x.values, {'units': 'furlong'}))
+    with pytest.raises(ValueError, match="furlong"):
+        stitch_tiles(bad, register=False)
+
+
+def test_stitch_tiles_refuses_an_implausibly_large_canvas():
+    """R8-11: stage positions far apart relative to the tiles (e.g. nm read as µm) raise before allocating.
+
+    (+) stage values 1000x too large: ValueError mentioning the canvas size, instead of a
+        34 GiB allocation; max_area_ratio=None lifts the check.
+    (-) a normal mosaic (area ~ n_tiles * tile area) passes.
+    """
+    tiles = np.zeros((2, 64, 64), np.uint16)
+    big = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes=(1.0, 1.0, 1.0),
+                                 stage_positions={'Y': [0, 48000], 'X': [0, 48000]})
+    with pytest.raises(ValueError, match="canvas"):
+        stitch_tiles(big, register=False)
+    near = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes=(1.0, 1.0, 1.0),
+                                  stage_positions={'Y': [0, 0], 'X': [0, 50]})
+    assert stitch_tiles(near, register=False).sizes['X'] == 114
+    # two tiles 1000 px apart: 64 x 1064 canvas > 4 x the tile area, refused unless asked for
+    far = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes=(1.0, 1.0, 1.0),
+                                 stage_positions={'Y': [0, 0], 'X': [0, 1000]})
+    with pytest.raises(ValueError, match="max_area_ratio"):
+        stitch_tiles(far, register=False)
+    assert stitch_tiles(far, register=False, max_area_ratio=None).sizes['X'] == 1064
 
 
 @pytest.mark.parametrize("seed", range(2, 12))
@@ -385,3 +464,41 @@ def test_stitch_tiles_keeps_channel_and_plane_aux_coords():
     assert mosaic.attrs['stitching'] == reference.attrs['stitching']
     np.testing.assert_array_equal(mosaic.attrs['stitching']['positions_px'], true - true.min(axis=0))
     assert 'stage_y' not in mosaic.coords and 'stage_x' not in mosaic.coords
+
+
+@pytest.mark.parametrize("unit, scale", [("mm", 1e-3), ("nm", 1e3)])
+def test_stitch_tiles_converts_stage_units_when_pixel_sizes_have_no_unit(unit, scale):
+    """R8-11/D01: unit-less pixel sizes are µm, so stage coords in mm or nm are still converted.
+
+    (+) stage in mm or nm with pixel_sizes given as a plain tuple (unit None): same positions
+        as the stage given in µm (before the fix, mm stacked both tiles at 0 and nm raised a
+        misleading canvas-size error).
+    (-) the same stage given without a unit keeps the pixel unit (reference positions).
+    """
+    tiles = np.zeros((2, 32, 32), np.uint8)
+    um = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes=(1.0, 0.5, 0.5),
+                                stage_positions={'Y': [0, 0], 'X': [0, 14]})
+    assert get_stczyx_pixel_sizes(um)['unit'] is None
+    ref = stitch_tiles(um, register=False).attrs['stitching']['positions_px']
+    assert np.array_equal(ref, [[0, 0], [0, 28]])
+    other = um.assign_coords(
+        stage_y=('S', um.stage_y.values * scale, {'units': unit}),
+        stage_x=('S', um.stage_x.values * scale, {'units': unit}),
+    )
+    np.testing.assert_array_equal(stitch_tiles(other, register=False).attrs['stitching']['positions_px'], ref)
+
+
+def test_stitch_tiles_canvas_check_accepts_a_diagonal_strip():
+    """R8-11: a diagonal strip of touching tiles is a legitimate layout and is not refused.
+
+    (+) five 100 x 100 tiles stepping (90, 90) px: a 460 x 460 canvas is stitched (it was
+        refused at 4.23x the summed tile area).
+    (-) the 1000x-too-large stage in test_stitch_tiles_refuses_an_implausibly_large_canvas
+        is still refused.
+    """
+    tiles = np.ones((5, 100, 100), np.uint8)
+    steps = np.arange(5) * 90.0
+    da = array_to_stczyx_xarray(tiles, 'SYX', pixel_sizes=(1.0, 1.0, 1.0),
+                                stage_positions={'Y': steps, 'X': steps})
+    out = stitch_tiles(da, register=False)
+    assert out.sizes['Y'] == 460 and out.sizes['X'] == 460

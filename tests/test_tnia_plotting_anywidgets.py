@@ -396,12 +396,13 @@ def test_slice_widget_colormap_resolution_and_padding(n_channels, colormap, expe
     ],
 )
 def test_deprecated_colors_warns_once_at_caller(caller):
-    """Verify passing deprecated ``colors=`` emits exactly one ``DeprecationWarning`` pointing to the caller.
+    """Verify passing deprecated ``colors=`` emits exactly one ``FutureWarning`` pointing to the caller.
 
     Strategy: invoke each static and interactive entry point with ``colors='red'``
     while recording warnings.
-    Expected outcome: exactly one ``DeprecationWarning`` mentioning ``'colors'``
-    is emitted, with ``filename == __file__``.
+    Expected outcome: exactly one ``FutureWarning`` mentioning ``'colors'`` and
+    the removal version 0.1.0 is emitted, with ``filename == __file__``.
+    (Changed by D08: it was a DeprecationWarning, hidden by default.)
     """
     rng = np.random.default_rng(0)
     im = rng.random((4, 8, 8)).astype(np.float32)
@@ -425,9 +426,10 @@ def test_deprecated_colors_warns_once_at_caller(caller):
         else:
             show_zyx_max_scatter_interactive(pts, colors="red", render="points")
 
-    dep = [r for r in rec if issubclass(r.category, DeprecationWarning) and "'colors'" in str(r.message)]
+    dep = [r for r in rec if issubclass(r.category, FutureWarning) and "'colors'" in str(r.message)]
     assert len(dep) == 1, dep
     assert dep[0].filename == __file__
+    assert "eigenp_utils 0.1.0" in str(dep[0].message)
 
 
 @pytest.mark.parametrize(
@@ -435,12 +437,13 @@ def test_deprecated_colors_warns_once_at_caller(caller):
     ["slice", "annotator", "scatter"],
 )
 def test_deprecation_warnings_interactive_legacy_kwargs(kind):
-    """Verify legacy ``sxy``/``sz``, ``x_s``/``y_s``/``z_s``, and ``x_t``/``y_t``/``z_t`` kwargs emit ``DeprecationWarning``.
+    """Verify legacy ``sxy``/``sz``, ``x_s``/``y_s``/``z_s``, and ``x_t``/``y_t``/``z_t`` kwargs emit ``FutureWarning``.
 
     Strategy: call each interactive factory function with each deprecated
     parameter group.
-    Expected outcome: each call emits a ``DeprecationWarning`` pointing to the
+    Expected outcome: each call emits a ``FutureWarning`` pointing to the
     replacement parameter (``pixel_sizes``, ``slabs_position``, ``slabs_thickness``).
+    (Changed by D08: it was a DeprecationWarning, hidden by default.)
     """
     rng = np.random.default_rng(2)
     im = np.zeros((10, 20, 30), dtype=np.float32)
@@ -453,11 +456,11 @@ def test_deprecation_warnings_interactive_legacy_kwargs(kind):
             return show_zyx_max_slice_interactive_point_annotator(im, **kw)
         return show_zyx_max_scatter_interactive(pts, render="points", **kw)
 
-    with pytest.warns(DeprecationWarning, match="The 'sxy' and 'sz' parameters are deprecated"):
+    with pytest.warns(FutureWarning, match=r"'sxy'/'sz' is deprecated .*0\.1\.0.*'pixel_sizes'"):
         _call(sxy=0.5, sz=2.0)
-    with pytest.warns(DeprecationWarning, match="The 'x_s', 'y_s', 'z_s' parameters are deprecated"):
+    with pytest.warns(FutureWarning, match=r"'x_s'/'y_s'/'z_s' is deprecated .*'slabs_position'"):
         _call(x_s=5, y_s=10, z_s=5)
-    with pytest.warns(DeprecationWarning, match="The 'x_t', 'y_t', 'z_t' parameters are deprecated"):
+    with pytest.warns(FutureWarning, match=r"'x_t'/'y_t'/'z_t' is deprecated .*'slabs_thickness'"):
         _call(x_t=2, y_t=3, z_t=4)
 
 
@@ -544,13 +547,15 @@ def test_pixel_size_dict_with_missing_axis_falls_back_to_one():
 
 
 def test_deprecated_tnia_plotting_3d_warning():
-    """Verify importing ``tnia_plotting_3d`` emits a ``DeprecationWarning`` and re-exports every name in ``__all__``.
+    """Verify importing ``tnia_plotting_3d`` emits a ``FutureWarning`` and re-exports every name in ``__all__``.
 
     Strategy: evict ``eigenp_utils.tnia_plotting_3d`` from ``sys.modules``,
     re-import under ``warnings.catch_warnings``, and compare every symbol in
     ``__all__`` against ``eigenp_utils.tnia_plotting_anywidgets``.
-    Expected outcome: emits one ``DeprecationWarning`` and every name in
-    ``__all__`` resolves to the identical object on ``tnia_plotting_anywidgets``.
+    Expected outcome: emits one ``FutureWarning`` naming the removal version
+    0.1.0, and every name in ``__all__`` resolves to the identical object on
+    ``tnia_plotting_anywidgets``. (Changed by D08: it was a DeprecationWarning
+    without a removal version.)
     """
     if "eigenp_utils.tnia_plotting_3d" in sys.modules:
         del sys.modules["eigenp_utils.tnia_plotting_3d"]
@@ -560,8 +565,8 @@ def test_deprecated_tnia_plotting_3d_warning():
         import eigenp_utils.tnia_plotting_3d as tnia3d
 
         assert len(w) == 1
-        assert issubclass(w[-1].category, DeprecationWarning)
-        assert "deprecated" in str(w[-1].message)
+        assert issubclass(w[-1].category, FutureWarning)
+        assert "deprecated" in str(w[-1].message) and "eigenp_utils 0.1.0" in str(w[-1].message)
 
     assert len(tnia3d.__all__) > 0
     for name in tnia3d.__all__:
@@ -766,8 +771,11 @@ def test_interactive_kwargs_scatter():
 
     Strategy: pass seeded ``(Z, Y, X)`` point arrays in ``[0, 1]`` with explicit
     ``slabs_thickness``, ``slabs_position``, and ``pixel_sizes``.
-    Expected outcome: thickness traits equal ``(2, 3, 4)``, out-of-range
-    positions clamp to ``1``, and pixel size traits match.
+    Expected outcome: the slabs are in physical units, as in the image
+    viewers (D10): thickness ``(2, 3, 4)`` with pixel sizes ``(2, 1, 0.5)``
+    gives index half-thicknesses ``(1, 3, 8)``; out-of-range positions clamp
+    to ``1``, and pixel size traits match. (Changed by D10: the scatter took
+    slabs in data units, so ``z_t`` was 2 and ``x_t`` 4.)
     """
     rng = np.random.default_rng(4)
     Z, Y, X = rng.random(10), rng.random(10), rng.random(10)
@@ -781,7 +789,7 @@ def test_interactive_kwargs_scatter():
     )
     assert w.show_crosshair is False
     assert w.sync_on_hover is True
-    assert w.z_t == 2 and w.y_t == 3 and w.x_t == 4
+    assert w.z_t == 1 and w.y_t == 3 and w.x_t == 8
     assert w.z_s == 1 and w.y_s == 1 and w.x_s == 1
     assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
 
@@ -842,7 +850,8 @@ def test_show_zyx_max_scatter_interactive_colormap(render):
         slabs_thickness=(100, 100, 100), bins=32,
     )
     assert w1.colors_use == ["viridis"]
-    assert w1.channel_colors == [get_gui_channel_color("viridis")]
+    # The GUI colour is the end colour (Changed, D14: no 75% darkening on the dark GUI)
+    assert w1.channel_colors == [mcolors.to_hex(matplotlib.colormaps["viridis"](1.0))]
     fig1 = w1._render()
     try:
         if render == "points":
@@ -859,7 +868,7 @@ def test_show_zyx_max_scatter_interactive_colormap(render):
         slabs_thickness=(100, 100, 100), bins=32,
     )
     assert w2.colors_use == ["viridis", "plasma"]
-    assert w2.channel_colors == [get_gui_channel_color("viridis"), get_gui_channel_color("plasma")]
+    assert w2.channel_colors == [tpa._gui_channel_color("viridis"), tpa._gui_channel_color("plasma")]
     fig2 = w2._render()
     try:
         if render == "points":
@@ -948,7 +957,9 @@ def test_tnia_annotator_widget(tmp_path, monkeypatch):
 
     Strategy: create an annotator via the public factory, add two points, set
     ``save_csv_filename`` using an environment variable, and bump ``save_csv_trigger``.
-    Expected outcome: writes ``z,y,x\\n5,4,3\\n6,7,8\\n`` to the expanded path.
+    Expected outcome: writes the indices plus their physical columns
+    (``*_px`` here: no pixel sizes) to the expanded path. (Changed, D15: the
+    CSV used to hold ``z,y,x`` only.)
     """
     monkeypatch.setenv("TEST_DIR", str(tmp_path))
     im = np.random.default_rng(0).integers(0, 255, (10, 10, 10), dtype=np.uint8)
@@ -959,7 +970,7 @@ def test_tnia_annotator_widget(tmp_path, monkeypatch):
 
     out = tmp_path / "test_points.csv"
     assert out.exists()
-    assert out.read_text() == "z,y,x\n5,4,3\n6,7,8\n"
+    assert out.read_text() == "z,y,x,z_px,y_px,x_px\n5,4,3,5.0,4.0,3.0\n6,7,8,6.0,7.0,8.0\n"
 
 
 def test_annotator_annotate_kwarg_and_property():
@@ -1505,25 +1516,26 @@ def test_scatter_widget_physical_axes_gap(render_mode):
 
 
 def test_channel_label_height_and_fontsize_invariants():
-    """Verify ``axLabels`` height and font size respond to figure height, explicit pt size, and stay anisotropy-invariant.
+    """Verify ``axLabels`` height and font size respond to figure width, explicit pt size, and stay anisotropy-invariant.
 
-    Strategy: (a) compare auto label sizing on ``(8, 4)`` vs ``(8, 12)`` figures;
+    Strategy: (a) compare auto label sizing on ``(4, 8)`` vs ``(12, 8)`` figures
+    (changed by D12 / R1-23: the auto font follows the width, not the height);
     (b) compare explicit ``channel_label_fontsize_pt`` 12 vs 24; (c) compare a
     highly anisotropic ``(5, 10, 500)`` volume against an isotropic ``(5, 50, 50)``
     volume at the same ``figsize`` and font size; (d) verify propagation through
     interactive slice and scatter factories.
-    Expected outcome: taller figures and larger font sizes strictly increase
+    Expected outcome: wider figures and larger font sizes strictly increase
     both rendered font size and ``axLabels`` physical height in inches; height is
     independent of image aspect ratio; interactive wrappers honour the kwarg.
     """
     im = np.zeros((10, 20, 20), dtype=np.float32)
     labels = ["Ch0", "Ch1"]
 
-    fig_small = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(8, 4), channel_labels=labels)
-    fig_large = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(8, 12), channel_labels=labels)
+    fig_small = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(4, 8), channel_labels=labels)
+    fig_large = show_zyx(im[5], im[:, 10, :], im[:, :, 10], figsize=(12, 8), channel_labels=labels)
     try:
-        h_small_in = fig_small.axLabels.get_position().height * 4.0
-        h_large_in = fig_large.axLabels.get_position().height * 12.0
+        h_small_in = fig_small.axLabels.get_position().height * 8.0
+        h_large_in = fig_large.axLabels.get_position().height * 8.0
         fs_small = _label_fontsize(fig_small)
         fs_large = _label_fontsize(fig_large)
         assert 0 < h_small_in < h_large_in
@@ -1582,6 +1594,41 @@ def test_channel_label_height_and_fontsize_invariants():
         assert fig_sc.axLabels is not None and _label_fontsize(fig_sc) == 14.0
     finally:
         plt.close(fig_sc)
+
+
+@pytest.mark.parametrize("kind", ["slice", "scatter"])
+def test_channel_label_bar_x_edges_are_bit_identical_to_the_xy_panel(kind):
+    """The label bar's x edges equal the XY panel's in display space, bit for bit.
+
+    Regression for a Pyodide-only failure: the bar was placed in the label
+    axes' coordinates while the panel went through the XY axes, whose
+    aspect-adjusted position differs in the last bits. With the panel edge on
+    a half pixel (0.05 in margin at 150 dpi: 7.49999... vs 7.50000...1), wasm
+    rounded the two to different pixel columns. The pixel test only fails
+    where the rounding flips; this checks the floats directly, so it fails on
+    every platform if the bar and the panel stop sharing one transform path.
+    """
+    rng = np.random.default_rng(0)
+    for shape in [(8, 32, 48), (5, 17, 91), (30, 64, 20)]:
+        if kind == "slice":
+            w = show_zyx_max_slice_interactive(rng.random(shape).astype(np.float32), channel_labels=["BF"])
+        else:
+            w = show_zyx_max_scatter_interactive(rng.random((50, 3)) * list(shape), channel_labels=["A"])
+        fig = w._render()
+        try:
+            ax_xy, ax_labels = fig.axXY, fig.axLabels
+            for dpi in (72, 100, 150, 200, 300):
+                fig.set_dpi(dpi)
+                fig.canvas.draw()
+                if kind == "slice":
+                    bar = ax_labels.get_images()[0].get_window_extent()
+                    ref = ax_xy.get_images()[0].get_window_extent()
+                else:
+                    bar = ax_labels.patches[0].get_window_extent()
+                    ref = ax_xy.get_window_extent()
+                assert (bar.x0, bar.x1) == (ref.x0, ref.x1), (kind, shape, dpi, bar, ref)
+        finally:
+            plt.close(fig)
 
 
 @pytest.mark.parametrize("kind", ["slice", "scatter"])
@@ -2691,7 +2738,8 @@ def test_iso_scatter_subsamples_above_max_points():
     X, Y, Z = _iso_points(n=400)
     color = np.arange(X.size, dtype=float)
 
-    w = show_iso_scatter(X, Y, Z, color=color, max_points=200, figsize=(4, 4))
+    with pytest.warns(UserWarning, match=r"random subset of 200 of 400 points"):
+        w = show_iso_scatter(X, Y, Z, color=color, max_points=200, figsize=(4, 4))
 
     assert w.X_orig.size == 200
     assert w.Y_orig.size == 200
@@ -3887,7 +3935,9 @@ def test_slice_widget_blending_and_projection_kwargs():
     ``blending='minimum'``, ``projection='attenuated_mip'``, and ``attenuation=0.2``,
     inspect traits, GUI colors, figure theme, and ``copy_params_string``.
     Expected outcome: options are not exposed as traitlets, dark ink lifts to
-    ``#9e9e9e``, figure background is white, and ``copy_params`` emits all three kwargs.
+    a readable grey (luma 0.45, ``#737373``; Changed, D14: it was ``#9e9e9e``
+    for every dark ink), figure background is white, and ``copy_params``
+    emits all three kwargs.
     """
     rng = np.random.default_rng(3)
     chans = [rng.random((6, 12, 14)).astype(np.float32) for _ in range(2)]
@@ -3896,7 +3946,7 @@ def test_slice_widget_blending_and_projection_kwargs():
     )
     assert not {"blending", "projection", "attenuation"} & set(w.trait_names())
     assert w.colors_resolved == ["black", "magenta"]
-    assert w.channel_colors[0] == "#9e9e9e"  # dark ink lifted for the dark GUI
+    assert w.channel_colors[0] == "#737373"  # dark ink lifted for the dark GUI
     fig = w._render()
     try:
         assert mcolors.to_hex(fig.patch.get_facecolor()) == "#ffffff"
@@ -4036,10 +4086,11 @@ def test_viewer_deprecated_colors_arg_applies_to_dataarray():
 
     Strategy: pass a DataArray with a ``color`` coordinate along ``C`` together
     with deprecated ``colors=['red', 'blue']`` to ``show_zyx_max_slice_interactive``.
-    Expected outcome: emits ``DeprecationWarning`` and applies ``['red', 'blue']``.
+    Expected outcome: emits ``FutureWarning`` and applies ``['red', 'blue']``.
+    (Changed by D08: it was a DeprecationWarning.)
     """
     da = _xarray_viewer_da().sel(C=["DAPI", "TBXT"])
-    with pytest.warns(DeprecationWarning):
+    with pytest.warns(FutureWarning):
         w = show_zyx_max_slice_interactive(da, colors=["red", "blue"])
     assert w.colors_resolved == ["red", "blue"]
 
@@ -4478,3 +4529,1294 @@ def test_histogram_sample_does_not_alias_and_int8_range_is_capped():
     assert not tpa._is_integer_valued(f)
     assert infer_bit_depth(np.array([0, 100], np.int8)) == (7, False)
     assert infer_histogram_range(np.array([0, 100], np.int8))[0] == (-0.5, 127.5)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): matplotlib OO interface (D05)
+# ---------------------------------------------------------------------------
+
+def test_no_pyplot_figures_after_rendering_every_viewer_with_defaults(tmp_path):
+    """D05 control: no viewer registers a figure with pyplot (OO interface only).
+
+    Strategy: close every pyplot figure, then build and use every static view
+    and every widget type with the default arguments (including the "No
+    Channels Visible" placeholder, copy-PNG, SVG export and IsoScatter's
+    camera), and finally open a user figure before rendering a scatter in
+    points mode (whose figure type used to depend on that global state).
+    Expected outcome: ``plt.get_fignums()`` stays empty throughout, then holds
+    only the user's figure; ``show_zyx`` returns a plain ``Figure`` whose
+    canvas is not pyplot-managed. (Changed by D05: ``use_plt`` defaulted to
+    True and every render created a pyplot figure.)
+    """
+    plt.close("all")
+    rng = np.random.default_rng(0)
+    vol = rng.random((6, 16, 20)).astype(np.float32)
+    figs = [
+        show_zyx(vol[3], vol[:, 8, :], np.flip(np.rot90(vol[:, :, 10], 1), 0)),
+        show_zyx_slice(vol, 5, 5, 3),
+        show_zyx_max(vol),
+        show_zyx_projection(vol),
+        show_zyx_max_slabs(vol),
+        tpa.show_zyx_projection_slabs(vol, slice(None), slice(None), slice(None)),
+    ]
+    assert all(type(f) is Figure for f in figs)
+    assert all(f.canvas.manager is None for f in figs)
+    assert plt.get_fignums() == []
+
+    w = show_zyx_max_slice_interactive(vol)
+    w.opacity_list = [0.0]  # placeholder figure
+    w.opacity_list = [1.0]
+    w.copy_png_trigger += 1
+    w.save_filename = str(tmp_path / "v.svg")
+    w.save_trigger += 1
+    multi = show_zyx_max_slice_interactive([vol, vol])
+    multi.opacity_list = [0.0, 0.0]
+    a = show_zyx_max_slice_interactive_point_annotator(vol)
+    a.points = [[3, 8, 10]]
+    pts = rng.random((50, 3)) * [6, 16, 20]
+    show_zyx_max_scatter_interactive(pts, render="points")
+    show_zyx_max_scatter_interactive(pts, render="density", bins=16)
+    iso = show_iso_scatter(*_iso_points(n=30), figsize=(4, 4))
+    iso.azim = iso.azim + 10
+    assert plt.get_fignums() == []
+
+    user_fig = plt.figure()
+    try:
+        show_zyx_max_scatter_interactive(pts, render="points")
+        assert plt.get_fignums() == [user_fig.number]
+    finally:
+        plt.close("all")
+    for f in figs:
+        plt.close(f)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): NaN / theme background, dead helpers (WP2)
+# ---------------------------------------------------------------------------
+
+def _rendered_rgb_at(fig, ax, fx, fy):
+    """RGB (0..255) of the rendered figure at axes fraction ``(fx, fy)`` of ``ax``."""
+    fig.canvas.draw()
+    buf = np.asarray(fig.canvas.buffer_rgba())
+    x, y = ax.transAxes.transform((fx, fy))
+    return buf[int(buf.shape[0] - y), int(x), :3].astype(int)
+
+
+def test_nan_pixels_and_opacity_show_the_theme_background_not_white():
+    """R1-03: single-channel NaN pixels and opacity fade to the panel background.
+
+    Strategy: a volume of 10 whose top half is NaN, drawn grey on the dark
+    theme, and with ``blending='minimum'`` (white theme); then a 0..1 ramp
+    with ``opacity=0.5``.
+    Expected outcome: NaN pixels render black on the dark theme (white on
+    the white theme), like the multichannel composite; data pixels stay white
+    (positive control); opacity fades value 0 to black, not to grey. (They
+    used to show the white axes background: NaN looked like saturated signal.)
+    """
+    v = np.full((4, 16, 16), 10.0, dtype=np.float32)
+    v[:, :8, :] = np.nan
+    fig = show_zyx_max(v, colormap="gray", figsize=(4, 4))
+    assert list(_rendered_rgb_at(fig, fig.axXY, 0.5, 0.75)) == [0, 0, 0]       # NaN (top half)
+    assert list(_rendered_rgb_at(fig, fig.axXY, 0.5, 0.25)) == [255, 255, 255]  # data
+    fig_multi = show_zyx_max([v, 0 * v], figsize=(4, 4))
+    assert list(_rendered_rgb_at(fig_multi, fig_multi.axXY, 0.5, 0.75)) == [0, 0, 0]
+    fig_min = show_zyx_max(v, colormap="red", blending="minimum", figsize=(4, 4))
+    assert list(_rendered_rgb_at(fig_min, fig_min.axXY, 0.5, 0.75)) == [255, 255, 255]
+
+    ramp = np.zeros((4, 16, 16), dtype=np.float32)
+    ramp[:, :, 8:] = 1.0
+    fig_op = show_zyx_max(ramp, colormap="gray", vmin=0, vmax=1, opacity=0.5, figsize=(4, 4))
+    assert list(_rendered_rgb_at(fig_op, fig_op.axXY, 0.25, 0.5)) == [0, 0, 0]
+    assert _rendered_rgb_at(fig_op, fig_op.axXY, 0.75, 0.5)[0] in range(120, 135)
+    for f in (fig, fig_multi, fig_min, fig_op):
+        plt.close(f)
+
+
+def test_rotation_corners_show_the_background_not_value_zero():
+    """R1-10: corners added by ``rotate_view`` are background, not the colour of 0.
+
+    Strategy: signed data in [-1, 1] drawn grey (clim [-1, 1], so 0 is
+    mid-grey) with the XY panel rotated by 45 degrees.
+    Expected outcome: a corner of the XY panel renders black (the panel
+    background) instead of grey 128, and the image centre is not black
+    (positive control). The corners are NaN in the panel array.
+    """
+    rng = np.random.default_rng(0)
+    xy = rng.uniform(-1, 1, (32, 32)).astype(np.float32)
+    fig = show_zyx(xy, xy[:8], xy[:, :8], colormap="gray", vmin=-1, vmax=1,
+                   rotate_view=(45, 0, 0), figsize=(4, 4))
+    arr = np.asarray(fig.axXY.images[0].get_array(), dtype=float)
+    assert np.isnan(arr[0, 0]) and np.isfinite(arr[arr.shape[0] // 2, arr.shape[1] // 2])
+    assert list(_rendered_rgb_at(fig, fig.axXY, 0.02, 0.98)) == [0, 0, 0]
+    plt.close(fig)
+
+
+def test_dead_rotation_and_normalisation_helpers_are_gone():
+    """R1-21: the unused private helpers ``_norm`` and ``_unrotate_2d`` are removed.
+
+    ``_rotate_expand`` and ``_get_rotated_line`` stay as the documented
+    skimage-equivalence test oracles.
+    """
+    assert not hasattr(tpa, "_norm") and not hasattr(tpa, "_unrotate_2d")
+    assert callable(tpa._rotate_expand) and callable(tpa._get_rotated_line)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): deprecations (D08)
+# ---------------------------------------------------------------------------
+
+def test_widget_classes_deprecate_legacy_kwargs_and_still_apply_them():
+    """D08 / R8-09 / R2-14: the widget classes warn on legacy names and keep honouring them.
+
+    Strategy: build ``TNIASliceWidget(colors=...)`` and
+    ``TNIAScatterWidget(..., x_s=..., x_t=...)`` directly.
+    Expected outcome: each emits a ``FutureWarning`` naming the replacement
+    and removal version 0.1.0; the colour is applied and the scatter slab is
+    placed (it used to be dropped silently).
+    """
+    vol = _structured_volume()
+    with pytest.warns(FutureWarning, match=r"'colors'.*0\.1\.0.*'colormap'"):
+        w = TNIASliceWidget(vol, colors="red")
+    assert w.colors_resolved == ["red"]
+
+    rng = np.random.default_rng(0)
+    pts = rng.uniform(0, 40, (200, 3))
+    with pytest.warns(FutureWarning, match="'x_s'/'y_s'/'z_s'.*'slabs_position'"):
+        ws = tpa.TNIAScatterWidget(pts[:, 2], pts[:, 1], pts[:, 0], x_s=10, y_s=20, z_s=20)
+    assert ws.x_s == 10 - int(ws.xmin)
+    with pytest.warns(FutureWarning, match="'x_t'/'y_t'/'z_t'.*'slabs_thickness'"):
+        ws = tpa.TNIAScatterWidget(pts[:, 2], pts[:, 1], pts[:, 0], x_t=3, y_t=3, z_t=3)
+    assert ws.x_t == 3
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): slab semantics (D10)
+# ---------------------------------------------------------------------------
+
+def _eval_copy_params(w):
+    w.copy_params_trigger += 1
+    return eval(f"dict({w.copy_params_string})", {"__builtins__": {"dict": dict}}, {})
+
+
+_SLABS = ("x_start", "x_end", "y_start", "y_end", "z_start", "z_end")
+
+
+@pytest.mark.parametrize("factory", [show_zyx_max_slice_interactive, show_zyx_max_slice_interactive_point_annotator])
+def test_copy_kwargs_round_trip_even_and_odd_width_slabs(factory):
+    """D10 controls: copy-kwargs of an even-width slab rebuild the identical view.
+
+    Strategy: set an even-width X slab [10, 13] (4 voxels) and odd-width Y/Z
+    slabs, copy the kwargs and rebuild the widget from them.
+    Expected outcome (+): every inclusive [start, end] matches, so the drawn
+    slabs are identical; the emitted position/thickness hold half-voxels
+    (11.5 and 1.5 voxels). (−) The odd widths give the same integer
+    centre/half-thickness as before. (The (s, t) form used to drop one voxel
+    of an even width: [10, 13] came back as [10, 12].)
+    """
+    vol = _structured_volume((16, 48, 48))
+    ps = {"Z": 2.0, "Y": 0.5, "X": 0.5}
+    w = factory(vol, pixel_sizes=ps, figsize=(4, 4))
+    w.x_start, w.x_end = 10, 13
+    w.y_start, w.y_end = 20, 26
+    w.z_start, w.z_end = 4, 8
+    params = _eval_copy_params(w)
+    assert params["slabs_position"] == (6 * 2.0, 23 * 0.5, 11.5 * 0.5)
+    assert params["slabs_thickness"] == (2 * 2.0, 3 * 0.5, 1.5 * 0.5)
+    rebuilt = factory(vol, pixel_sizes=ps, figsize=(4, 4),
+                      slabs_position=params["slabs_position"], slabs_thickness=params["slabs_thickness"])
+    assert [getattr(rebuilt, a) for a in _SLABS] == [10, 13, 20, 26, 4, 8]
+    assert (rebuilt.y_s, rebuilt.y_t, rebuilt.z_s, rebuilt.z_t) == (23, 3, 6, 2)
+
+
+def test_scatter_slabs_are_physical_like_the_image_viewer_and_round_trip():
+    """D10 / R2-12 / R8-09: the same slab kwargs select the same slabs in the image and scatter viewers.
+
+    Strategy: pixel sizes (2, 0.5, 0.5), position (20, 50, 50) and thickness
+    (4, 5, 5) (physical), for a 40 x 200 x 200 image and for points covering
+    the same index box (data coordinates 0..39, 0..199, 0..199); then an
+    even-width scatter slab through copy-kwargs.
+    Expected outcome: both viewers select X [90, 110] and Z [8, 12] (the
+    scatter used to take the numbers as data units: X [45, 55], Z [16, 24]);
+    the even-width scatter slab round-trips exactly.
+    """
+    ps = (2.0, 0.5, 0.5)
+    kw = dict(pixel_sizes=ps, slabs_position=(20, 50, 50), slabs_thickness=(4, 5, 5))
+    wi = show_zyx_max_slice_interactive(np.zeros((40, 200, 200), np.uint8), figsize=(4, 4), **kw)
+    corners = np.array([[0, 0, 0], [39, 199, 199]], dtype=float)
+    rng = np.random.default_rng(0)
+    pts = np.vstack([corners, rng.uniform(0, 1, (100, 3)) * [39, 199, 199]])
+    wsc = show_zyx_max_scatter_interactive(pts, render="points", figsize=(4, 4), **kw)
+    for w in (wi, wsc):
+        assert (w.x_start, w.x_end, w.z_start, w.z_end) == (90, 110, 8, 12)
+
+    wsc.x_start, wsc.x_end = 41, 50
+    params = _eval_copy_params(wsc)
+    rebuilt = show_zyx_max_scatter_interactive(
+        pts, render="points", figsize=(4, 4), pixel_sizes=ps,
+        slabs_position=params["slabs_position"], slabs_thickness=params["slabs_thickness"])
+    assert [getattr(rebuilt, a) for a in _SLABS] == [getattr(wsc, a) for a in _SLABS]
+
+
+def test_hover_sync_keeps_an_even_slab_width():
+    """D10 / R2-01: hover sync moves the drawn slab without changing its width.
+
+    Strategy: an even-width X slab [10, 13] (4 voxels), then hover the XY
+    panel over voxel x = 30.
+    Expected outcome: the slab becomes [29, 32] (centre index 30, still 4
+    voxels; the (s, t) path made it 3 voxels wide); Y keeps its width too.
+    """
+    w = show_zyx_max_slice_interactive(_structured_volume((16, 48, 48)), figsize=(4, 4))
+    w.x_start, w.x_end = 10, 13
+    y_width = w.y_end - w.y_start
+    fig = w._render()
+    fx, fy = _fig_frac(fig, fig.axXY, 30.5, 20.5)
+    w.hover_coords = {"plane": "xy", "x": fx, "y": fy, "t": 1}
+    assert (w.x_start, w.x_end) == (29, 32) and w.x_s == 30
+    assert w.y_end - w.y_start == y_width and w.y_s == 20
+
+
+def test_annotator_delete_uses_the_drawn_slab_and_a_screen_pixel_radius():
+    """D10 / R2-01 / R2-06: deletion selects points in the drawn slab, within ~12 screen px.
+
+    Strategy: 60 x 256 x 256 volume with pixel sizes (5, 0.2, 0.2) (the Z
+    panels are wide on screen), even-width Z slab; (a) a point on the last
+    plane of the even slab, clicked exactly; (b) a ZY click 19 z-slices
+    (95 µm) from a point; (c) an XY click about 6 screen px from a point;
+    (d) an XY click about 30 screen px away.
+    Expected outcome: (a) deleted (the (s, t) form excluded that plane);
+    (b) kept (it was deleted: the radius was 20 voxel indices); (c) deleted;
+    (d) kept.
+    """
+    vol = np.zeros((60, 256, 256), np.uint8)
+    w = show_zyx_max_slice_interactive_point_annotator(vol, pixel_sizes=(5, 0.2, 0.2), figsize=(8, 8))
+    w.annotation_mode = True
+    w.annotation_action = "delete"
+
+    def click(plane, a, b, t):
+        fig = w._render()
+        ax = getattr(fig, f"ax{plane.upper()}")
+        fx, fy = _fig_frac(fig, ax, a, b)
+        w.click_coords = {"plane": plane, "x": fx, "y": fy, "t": t}
+
+    w.z_start, w.z_end = 30, 33
+    w.points = [[33, 128, 128]]
+    click("xy", 128.5 * 0.2, 128.5 * 0.2, 1)
+    assert w.points == []
+
+    w.points = [[30, 128, 128]]
+    w.x_start, w.x_end = 127, 129
+    click("zy", (30 + 19 + 0.5) * 5, 128.5 * 0.2, 2)
+    assert w.points == [[30, 128, 128]]
+
+    fig = w._render()
+    um_per_px = (fig.axXY.get_xlim()[1] - fig.axXY.get_xlim()[0]) / (
+        w.axis_bounds["xy"]["x1"] - w.axis_bounds["xy"]["x0"]) / (fig.get_figwidth() * fig.dpi)
+    w.z_start, w.z_end = 29, 31
+    click("xy", 128.5 * 0.2 + 6 * um_per_px, 128.5 * 0.2, 3)
+    assert w.points == []
+
+    w.points = [[30, 128, 128]]
+    click("xy", 128.5 * 0.2 + 30 * um_per_px, 128.5 * 0.2, 4)
+    assert w.points == [[30, 128, 128]]
+
+
+def test_half_voxel_slab_kwargs_select_even_widths():
+    """D10: ``(s, t)`` accepts half-voxels, so even widths can be requested directly.
+
+    Strategy: position 11.5 voxels and half-thickness 1.5 voxels on X (unit
+    pixel sizes); negative control: integer position 11 with half-thickness 1.
+    Expected outcome: X [10, 13] (4 voxels) and X [10, 12] (3 voxels).
+    """
+    vol = _structured_volume((16, 48, 48))
+    w = show_zyx_max_slice_interactive(vol, slabs_position=(8, 24, 11.5), slabs_thickness=(1, 1, 1.5), figsize=(4, 4))
+    assert (w.x_start, w.x_end) == (10, 13)
+    w = show_zyx_max_slice_interactive(vol, slabs_position=(8, 24, 11), slabs_thickness=(1, 1, 1), figsize=(4, 4))
+    assert (w.x_start, w.x_end) == (10, 12)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): depth of annotated points (D11)
+# ---------------------------------------------------------------------------
+
+def _click_voxel(w, plane, z, y, x, t):
+    fig = w._render()
+    ax = getattr(fig, f"ax{plane.upper()}")
+    a, b = {"xy": (x, y), "zy": (z, y), "xz": (x, z)}[plane]
+    sa, sb = {"xy": (w.sx, w.sy), "zy": (w.sz, w.sy), "xz": (w.sx, w.sz)}[plane]
+    fx, fy = _fig_frac(fig, ax, (a + 0.5) * sa, (b + 0.5) * sb)
+    w.click_coords = {"plane": plane, "x": fx, "y": fy, "t": t}
+
+
+@pytest.mark.parametrize("plane", ["xy", "zy", "xz"])
+def test_annotation_on_a_projection_snaps_to_the_depth_of_the_clicked_object(plane):
+    """D11 / R2-08: a click on a thick-slab MIP stores the depth of the bright voxel, not the slab centre.
+
+    Strategy: a spot at (z, y, x) = (5, 30, 40) in a 40 x 64 x 64 volume,
+    full-volume slabs, click the spot on each panel; then the same with
+    ``snap_depth=False``, and a hidden (opacity 0) bright channel elsewhere
+    on the same ray.
+    Expected outcome: the stored point is (5, 30, 40) (the slab centre used
+    to be stored: e.g. z = 20 on XY); with ``snap_depth=False`` the
+    out-of-plane coordinate is the slab centre; the hidden channel is
+    ignored.
+    """
+    vol = np.zeros((40, 64, 64), np.float32)
+    vol[5, 30, 40] = 100.0
+    other = np.zeros_like(vol)
+    other[30, 30, 40] = other[25, 30, 40] = 1000.0
+    other[5, 50, 40] = other[5, 30, 60] = 1000.0
+    full = dict(slabs_thickness=(1000, 1000, 1000), figsize=(4, 4))
+
+    w = show_zyx_max_slice_interactive_point_annotator([vol, other], opacity=[1, 0], annotate=True, **full)
+    _click_voxel(w, plane, 5, 30, 40, 1)
+    assert w.points == [[5, 30, 40]]
+
+    w = show_zyx_max_slice_interactive_point_annotator(vol, annotate=True, snap_depth=False, **full)
+    _click_voxel(w, plane, 5, 30, 40, 1)
+    centre = {"xy": [20, 30, 40], "zy": [5, 30, 32], "xz": [5, 32, 40]}[plane]
+    assert w.points == [centre]
+
+
+def test_snap_depth_falls_back_to_the_centre_for_flat_profiles_and_average():
+    """D11 negative controls: a flat ray and the 'average' projection keep the slab centre.
+
+    Strategy: click an all-zero volume (flat profile), and a spot volume drawn
+    with ``projection='average'`` (no single voxel is shown).
+    Expected outcome: the stored depth is the slab centre in both cases.
+    """
+    vol = np.zeros((40, 64, 64), np.float32)
+    w = show_zyx_max_slice_interactive_point_annotator(vol, annotate=True, slabs_thickness=(1000, 1000, 1000))
+    _click_voxel(w, "xy", 5, 30, 40, 1)
+    assert w.points == [[20, 30, 40]]
+    vol[5, 30, 40] = 1.0
+    w = show_zyx_max_slice_interactive_point_annotator(vol, annotate=True, projection="average",
+                                                       slabs_thickness=(1000, 1000, 1000))
+    _click_voxel(w, "xy", 5, 30, 40, 1)
+    assert w.points == [[20, 30, 40]]
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): static wrapper API (D12)
+# ---------------------------------------------------------------------------
+
+def test_show_zyx_max_slabs_defaults_to_the_full_range_and_clamps_with_a_warning():
+    """D12 / R1-17: ``show_zyx_max_slabs`` without ranges is the full MIP; ranges are clamped with a warning.
+
+    Strategy: one bright voxel at (5, 15, 15) of a 10 x 30 x 30 volume;
+    (a) no x/y/z; (b) x=[-1, 31] (beyond both ends); (c) x=[30, 31] and
+    x=[40, 50] (entirely outside); (d) a valid range (negative control).
+    Expected outcome: (a) every panel equals ``show_zyx_max`` (the XY max was
+    0: only plane 0 was projected); (b) a UserWarning and the full X range;
+    (c) a ValueError naming the empty range (it was 'zero-size array to
+    reduction operation'); (d) no warning.
+    """
+    v = np.zeros((10, 30, 30), np.float32)
+    v[5, 15, 15] = 1.0
+    fig, ref = show_zyx_max_slabs(v), show_zyx_max(v)
+    for name in ("axXY", "axXZ", "axZY"):
+        np.testing.assert_array_equal(_panel_rgb(fig, name), _panel_rgb(ref, name))
+    assert _panel_rgb(fig).max() == 1.0
+
+    with pytest.warns(UserWarning, match="clipped"):
+        fig = show_zyx_max_slabs(v, x=[-1, 31], y=[0, 30], z=[0, 10])
+    np.testing.assert_array_equal(_panel_rgb(fig, "axXZ"), _panel_rgb(ref, "axXZ"))
+    for bad in ([30, 31], [40, 50]):
+        with pytest.raises(ValueError, match="x range"):
+            show_zyx_max_slabs(v, x=bad, y=[0, 30], z=[0, 10])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        show_zyx_max_slabs(v, x=[10, 20], y=[0, 30], z=[0, 10])
+    assert inspect.signature(show_zyx_max_slabs).parameters["x"].default is None
+
+
+_DISPLAY_KWARGS = {
+    "pixel_sizes", "figsize", "colormap", "vmin", "vmax", "gamma", "opacity", "blending",
+    "rotate_view", "channel_labels", "channel_label_fontsize_pt", "scale_bar_show",
+    "scale_bar_fontsize_pt", "subplot_bg", "use_plt", "channel_axis", "colors",
+}
+
+
+def test_every_static_wrapper_takes_the_same_display_kwargs_and_input_forms():
+    """D12 / R1-16 / R8-08: one keyword set and one input normaliser for every static wrapper.
+
+    Strategy: compare the signatures of show_zyx_slice / _max / _projection /
+    _max_slabs / _projection_slabs; then draw the same two channels as a
+    list, a tuple, a CZYX ndarray with ``channel_axis=0`` and a CZYX
+    DataArray (with a ``color`` coordinate); then a 2D image.
+    Expected outcome: every wrapper takes the shared display kwargs; all
+    input forms give identical panels (the tuple, ndarray and DataArray
+    raised cryptic TypeErrors); a 4D ndarray without ``channel_axis`` raises
+    a ValueError asking for it (no guessing between CZYX and TZYX); a 2D
+    image draws in every wrapper; ``show_zyx_slice`` takes a channel list.
+    """
+    wrappers = [show_zyx_slice, show_zyx_max, show_zyx_projection, show_zyx_max_slabs,
+                tpa.show_zyx_projection_slabs]
+    for f in wrappers:
+        missing = _DISPLAY_KWARGS - set(inspect.signature(f).parameters)
+        assert not missing, (f.__name__, missing)
+    for f in wrappers[1:]:
+        assert {"projection", "attenuation"} <= set(inspect.signature(f).parameters), f.__name__
+
+    rng = np.random.default_rng(0)
+    c0, c1 = (rng.random((4, 12, 10)).astype(np.float32) for _ in range(2))
+    kw = dict(colormap=["cyan", "yellow"], figsize=(4, 4))
+    ref = show_zyx_max([c0, c1], **kw)
+    for im, extra in (((c0, c1), {}), (np.stack([c0, c1]), {"channel_axis": 0}),
+                      (np.stack([c0, c1], axis=-1), {"channel_axis": -1})):
+        fig = show_zyx_max(im, **kw, **extra)
+        np.testing.assert_array_equal(_panel_rgb(fig), _panel_rgb(ref))
+    with pytest.raises(ValueError, match="channel_axis"):
+        show_zyx_max(np.stack([c0, c1]))
+
+    xr = pytest.importorskip("xarray")
+    da = xr.DataArray(np.stack([c0, c1]), dims=("C", "Z", "Y", "X"),
+                      coords={"C": ["a", "b"], "color": ("C", ["cyan", "yellow"])})
+    fig = show_zyx_max(da, figsize=(4, 4))
+    np.testing.assert_array_equal(_panel_rgb(fig), _panel_rgb(ref))
+    assert fig.axLabels is not None  # channel labels from the C coordinate
+    w = TNIASliceWidget(da)
+    assert w.channel_names == ["a", "b"] and w.colors_resolved == ["cyan", "yellow"]
+
+    img2d = rng.random((12, 10)).astype(np.float32)
+    for f, args in ((show_zyx_max, ()), (show_zyx_projection, ()), (show_zyx_max_slabs, ()),
+                    (tpa.show_zyx_projection_slabs, (None, None, None)), (show_zyx_slice, (2, 3, 0))):
+        assert _panel_rgb(f(img2d, *args, figsize=(4, 4))).shape == (12, 10)
+    fig = show_zyx_slice([c0, c1], 2, 3, 1, colormap=["cyan", "yellow"], figsize=(4, 4))
+    assert _panel_rgb(fig).shape == (12, 10, 3)
+
+
+def _panel_block_fraction(fig):
+    """Fraction of the figure height and width spanned by the ortho panels (and label row)."""
+    axes = [fig.axXY, fig.axXZ, fig.axZY] + ([fig.axLabels] if fig.axLabels is not None else [])
+    boxes = [a.get_position() for a in axes]
+    return (max(b.y1 for b in boxes) - min(b.y0 for b in boxes),
+            max(b.x1 for b in boxes) - min(b.x0 for b in boxes))
+
+
+def test_auto_figsize_follows_the_physical_extents():
+    """D12 / R1-18: ``figsize=None`` (now the default) sizes the figure from the data's physical extents.
+
+    Strategy: a flat 20 x 100 x 1000 volume and a cube through ``show_zyx_max``
+    (default figsize); the flat volume again with channel labels.
+    Expected outcome: the panels fill the figure (> 90% of its height and
+    width; they filled 12% of a fixed 10 x 10 figure); the figure fits a 10 in
+    box; an explicit figsize is kept.
+    """
+    flat = np.zeros((20, 100, 1000), np.uint8)
+    for im, labels in ((flat, None), (flat, ["a"]), (np.zeros((30, 30, 30), np.uint8), None)):
+        fig = show_zyx_max([im] if labels else im, channel_labels=labels)
+        fh, fw = _panel_block_fraction(fig)
+        assert fh > 0.9 and fw > 0.9, (im.shape, labels, fh, fw)
+        assert max(fig.get_size_inches()) == pytest.approx(10.0)
+    assert tuple(show_zyx_max(flat, figsize=(6, 5)).get_size_inches()) == (6, 5)
+    for f in (show_zyx_slice, show_zyx_max, show_zyx_projection, show_zyx_max_slabs, tpa.show_zyx_projection_slabs, show_zyx):
+        assert inspect.signature(f).parameters["figsize"].default is None, f.__name__
+
+
+def test_one_auto_font_size_tied_to_the_figure_width():
+    """R1-23 / D12: channel labels and the scale bar share one auto font size, set by the figure width.
+
+    Strategy: draw the same volume with channel labels at figsize (8, 3) and
+    (8, 12), and at (4, 8) and (12, 8).
+    Expected outcome: the label and the scale-bar text have the same size;
+    it does not change with the height (thin volumes keep readable text) and
+    grows with the width. (The two formulas differed, 10-24 pt from 3.5% vs
+    8-24 pt from 3% of the height.)
+    """
+    vol = np.random.default_rng(0).random((10, 40, 40)).astype(np.float32)
+
+    def sizes(figsize):
+        fig = show_zyx_max([vol], channel_labels=["a"], pixel_sizes=(1, 1, 1), figsize=figsize)
+        return _label_fontsize(fig), _scale_bar_artists(fig)[1].get_fontsize()
+
+    a, b = sizes((8, 3)), sizes((8, 12))
+    assert a[0] == a[1] and a == b
+    narrow, wide = sizes((4, 8)), sizes((12, 8))
+    assert narrow[0] == narrow[1] and narrow[0] < wide[0]
+
+
+def test_widget_auto_figsize_uses_physical_extents_and_classes_match_factories():
+    """D12 / R2-22 / R2-13: every viewer uses one auto-figsize rule, from physical extents.
+
+    Strategy: points covering X 0..500 and Y 0..500 with pixel sizes
+    (1, 4, 1) (Y physically 4x longer), through the scatter factory; an
+    image of the same physical shape through the slice factory; the classes
+    built directly without ``figsize``.
+    Expected outcome: both factory figures are about 4x taller than wide
+    (the scatter one ignored py and was square); a class built without
+    figsize gets the same figure size as its factory (the classes used to
+    draw at 10 x 10).
+    """
+    rng = np.random.default_rng(0)
+    pts = np.vstack([[0, 0, 0], [10, 500, 500], rng.uniform(0, 1, (50, 3)) * [10, 500, 500]])
+    ws = show_zyx_max_scatter_interactive(pts, pixel_sizes=(1, 4, 1), render="points")
+    w_h = ws.figsize[1] / ws.figsize[0]
+    assert 3.0 < w_h < 4.5, ws.figsize
+    wi = show_zyx_max_slice_interactive(np.zeros((11, 501, 501), np.uint8), pixel_sizes=(1, 4, 1))
+    assert 3.0 < wi.figsize[1] / wi.figsize[0] < 4.5, wi.figsize
+
+    cls = tpa.TNIAScatterWidget(pts[:, 2], pts[:, 1], pts[:, 0], pixel_sizes=(1, 4, 1))
+    np.testing.assert_allclose(cls.figsize, ws.figsize)
+    vol = _structured_volume()
+    np.testing.assert_allclose(TNIASliceWidget(vol).figsize, show_zyx_max_slice_interactive(vol).figsize)
+
+
+def test_widget_classes_reject_unknown_kwargs_and_honour_trait_kwargs():
+    """D12 / R2-14: the widget classes raise TypeError on unknown kwargs instead of swallowing them.
+
+    Strategy: misspelled kwargs (``pixelsizes``, ``colours``) on
+    ``TNIASliceWidget``, ``TNIAAnnotatorWidget`` and ``TNIAScatterWidget``;
+    then a trait passed as a kwarg (``save_filename``).
+    Expected outcome: TypeError naming the argument (they were dropped
+    silently); the trait kwarg is applied.
+    """
+    vol = _structured_volume()
+    pts = np.random.default_rng(0).uniform(0, 20, (30, 3))
+    for make in (lambda **k: TNIASliceWidget(vol, **k),
+                 lambda **k: tpa.TNIAAnnotatorWidget(vol, **k),
+                 lambda **k: tpa.TNIAScatterWidget(pts[:, 2], pts[:, 1], pts[:, 0], **k)):
+        with pytest.raises(TypeError, match="pixelsizes"):
+            make(pixelsizes=(1, 1, 1))
+        with pytest.raises(TypeError, match="colours"):
+            make(colours="red")
+        assert make(save_filename="mine.svg").save_filename == "mine.svg"
+
+
+def test_image_factories_share_one_argument_preparation():
+    """D12 / R2-13: both image factories go through ``_prepare_viewer_args`` and accept ``channel_axis``.
+
+    Strategy: call ``_prepare_viewer_args`` and both factories with a CZYX
+    ndarray and ``channel_axis=0``.
+    Expected outcome: the prepared image is a channel list; both factories
+    build the same channels and figure size.
+    """
+    rng = np.random.default_rng(0)
+    czyx = rng.random((2, 6, 20, 24)).astype(np.float32)
+    prep = tpa._prepare_viewer_args(czyx, channel_axis=0)
+    assert isinstance(prep["im"], list) and len(prep["im"]) == 2
+    a = show_zyx_max_slice_interactive(czyx, channel_axis=0)
+    b = show_zyx_max_slice_interactive_point_annotator(czyx, channel_axis=0)
+    assert a.num_channels == 2 and b.num_channels == 3  # + the annotation channel
+    np.testing.assert_allclose(a.figsize, b.figsize)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): scatter channel interpretation (D13)
+# ---------------------------------------------------------------------------
+
+def _scatter_pts(n=200, seed=0):
+    rng = np.random.default_rng(seed)
+    return rng.uniform(0, 30, (n, 3)), rng
+
+
+def test_scatter_integer_value_lists_are_values_not_index_lists():
+    """D13 / R2-02: a list of per-point integer values is read as values.
+
+    Strategy: two per-point uint16 intensity arrays (with repeats, so they
+    cannot be index lists) as a list, and the same data as an (N, 2) array.
+    Expected outcome: both give the continuous multi-channel mode with the
+    same values (the list used to become index lists: values used as point
+    indices, arbitrary points drawn).
+    """
+    pts, rng = _scatter_pts()
+    vals = [rng.integers(0, 4000, 200).astype(np.uint16) for _ in range(2)]
+    w_list = show_zyx_max_scatter_interactive(pts, channels=vals, render="points")
+    w_arr = show_zyx_max_scatter_interactive(pts, channels=np.stack(vals, axis=1), render="points")
+    assert w_list.mode == w_arr.mode == "cont_multi"
+    np.testing.assert_array_equal(w_list.cont_multi, w_arr.cont_multi)
+
+
+def test_scatter_ambiguous_integer_channels_raise_in_auto_mode():
+    """D13: ``channel_mode='auto'`` raises on ambiguous input and the explicit modes resolve it.
+
+    Strategy: (a) a single uint16 array with thousands of distinct values;
+    (b) two equal-length integer arrays that are both valid index lists
+    (permutations of the points).
+    Expected outcome: ValueError naming ``channel_mode`` in both cases (they
+    used to become 4001 category channels and index lists silently);
+    ``channel_mode='values'`` gives one continuous channel,
+    ``'categories'`` one channel per distinct value, ``'index_lists'`` the
+    index lists.
+    """
+    pts, rng = _scatter_pts()
+    intens = rng.integers(0, 4000, 200).astype(np.uint16)
+    with pytest.raises(ValueError, match="channel_mode"):
+        show_zyx_max_scatter_interactive(pts, channels=intens, render="points")
+    w = show_zyx_max_scatter_interactive(pts, channels=intens, channel_mode="values", render="points")
+    assert w.mode == "cont_single" and w.C == 1 and len(w.channel_names) == 1
+    w = show_zyx_max_scatter_interactive(pts, channels=intens, channel_mode="categories", render="points")
+    assert w.mode == "ids" and w.C == len(np.unique(intens))
+
+    perms = [rng.permutation(200), rng.permutation(200)]
+    with pytest.raises(ValueError, match="channel_mode"):
+        show_zyx_max_scatter_interactive(pts, channels=perms, render="points")
+    w = show_zyx_max_scatter_interactive(pts, channels=perms, channel_mode="index_lists", render="points")
+    assert w.mode == "idx_lists" and w.C == 2
+    w = show_zyx_max_scatter_interactive(pts, channels=perms, channel_mode="values", render="points")
+    assert w.mode == "cont_multi"
+    with pytest.raises(ValueError, match="channel_mode"):
+        show_zyx_max_scatter_interactive(pts, channels=perms, channel_mode="bogus")
+
+
+def test_scatter_categories_keep_negative_and_sparse_labels():
+    """D13 / R2-02: category labels go through ``np.unique``; -1 (noise) is kept.
+
+    Strategy: labels -1, 0 and 7 (sparse), and string labels.
+    Expected outcome: three channels named '-1', '0', '7' and every point
+    drawn (points labelled -1 used to vanish, and label 7 created 8
+    channels); string labels are categories too.
+    """
+    pts, rng = _scatter_pts(90)
+    labels = np.repeat([-1, 0, 7], 30)
+    w = show_zyx_max_scatter_interactive(pts, channels=labels, render="points", slabs_thickness=(1e3, 1e3, 1e3))
+    assert w.mode == "ids" and w.C == 3 and w.channel_names == ["-1", "0", "7"]
+    fig = w._render()
+    drawn = sum(len(c.get_offsets()) for c in fig.axXY.collections if isinstance(c, mcollections.PathCollection))
+    assert drawn == 90
+    w = show_zyx_max_scatter_interactive(pts, channels=np.repeat(["a", "b", "c"], 30), render="points")
+    assert w.mode == "ids" and w.channel_names == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): IsoScatter (D16)
+# ---------------------------------------------------------------------------
+
+def test_iso_scatter_integer_colours_are_categories():
+    """D16 / R2-16: integer (and bool) colour arrays are categories with a legend, not a gradient.
+
+    Strategy: integer cluster labels including -1, and a bool mask; float
+    values as the negative control.
+    Expected outcome: categorical with one legend entry per label (they were
+    drawn as a continuous colormap); floats stay continuous.
+    """
+    X, Y, Z = _iso_points(n=60)
+    w = show_iso_scatter(X, Y, Z, color=np.repeat([-1, 0, 3], 20), figsize=(4, 4))
+    assert w.is_categorical and not w.is_continuous
+    assert list(w.unique_cats) == [-1, 0, 3]
+    w = show_iso_scatter(X, Y, Z, color=np.arange(60) % 2 == 0, figsize=(4, 4))
+    assert w.is_categorical
+    w = show_iso_scatter(X, Y, Z, color=np.linspace(0, 1, 60), figsize=(4, 4))
+    assert w.is_continuous and not w.is_categorical
+
+
+def test_iso_scatter_sxy_sz_are_deprecated_and_still_apply():
+    """D16 / D08 / R2-15 / R8-17: IsoScatter's ``sxy``/``sz`` warn and still apply, also for empty input.
+
+    Strategy: pass ``sxy=0.2, sz=2`` to ``show_iso_scatter`` with points and
+    with empty arrays; then no ``sxy``/``sz`` (negative control).
+    Expected outcome: a FutureWarning naming 'pixel_sizes' and 0.1.0, and
+    the sizes applied (the empty path used 1.0 and nothing warned); no
+    warning without them; one figsize default for widget and factory.
+    """
+    X, Y, Z = _iso_points(n=30)
+    with pytest.warns(FutureWarning, match=r"'sxy'/'sz'.*0\.1\.0.*'pixel_sizes'"):
+        w = show_iso_scatter(X, Y, Z, sxy=0.2, sz=2.0, figsize=(4, 4))
+    assert (w.sx, w.sy, w.sz) == (0.2, 0.2, 2.0)
+    with pytest.warns(FutureWarning, match="'sxy'/'sz'"):
+        w = IsoScatterWidget(np.array([]), np.array([]), np.array([]), sxy=0.2, sz=2.0, figsize=(4, 4))
+    assert (w.sx, w.sz) == (0.2, 2.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        show_iso_scatter(X, Y, Z, figsize=(4, 4))
+    assert (inspect.signature(IsoScatterWidget).parameters["figsize"].default
+            == inspect.signature(show_iso_scatter).parameters["figsize"].default)
+
+
+def test_exports_report_through_warnings_and_the_module_logger_not_print(tmp_path, capsys, caplog):
+    """Global rule (D07): exports never ``print``; failures warn, successes go to the module logger.
+
+    Strategy: save an SVG (success), save into a missing directory (failure),
+    and save a CSV without points, capturing stdout, warnings and logs.
+    Expected outcome: nothing on stdout; a UserWarning for each failure; an
+    INFO record from ``eigenp_utils.tnia_plotting_anywidgets`` for the save.
+    (Changed: these messages were printed, invisible in a JupyterLab cell.)
+    """
+    import logging
+    w = show_zyx_max_slice_interactive_point_annotator(_structured_volume(), figsize=(4, 4))
+    with caplog.at_level(logging.INFO, logger="eigenp_utils.tnia_plotting_anywidgets"):
+        w.save_filename = str(tmp_path / "ok.svg")
+        w.save_trigger += 1
+    assert any("ok.svg" in r.getMessage() for r in caplog.records)
+    with pytest.warns(UserWarning, match="Error saving"):
+        w.save_filename = str(tmp_path / "missing" / "x.svg")
+        w.save_trigger += 1
+    # The CSV is now written even without points (D15): keep it in tmp_path
+    w.save_csv_filename = str(tmp_path / "points.csv")
+    with pytest.warns(UserWarning, match="No points"):
+        w.save_csv_trigger += 1
+    assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): review fixes
+# ---------------------------------------------------------------------------
+
+def test_snap_depth_ignores_nan_voxels_like_the_projection():
+    """D11 / R2-08: a NaN voxel on the ray never becomes the snapped depth ('minip' and 'mip').
+
+    Strategy: a column of 5.0 with a NaN at z=3 and the visible minimum
+    1.0 at z=12, whole-Z slab, vmin=0, vmax=10, click on 'minip'; the same
+    with the visible maximum 9.0 at z=12 on 'mip'; and a flat column with
+    one NaN (negative control).
+    Expected outcome: z=12 is stored in both cases (the NaN voxel z=3 used to
+    win the 'minip' argmin, since NaN became 0); the flat column with a NaN
+    keeps the slab centre.
+    """
+    full = dict(slabs_thickness=(1000, 1000, 1000), figsize=(4, 4), vmin=0, vmax=10, annotate=True)
+    for projection, value in (("minip", 1.0), ("mip", 9.0)):
+        vol = np.full((20, 24, 24), 5.0, np.float32)
+        vol[3, 10, 10] = np.nan
+        vol[12, 10, 10] = value
+        w = show_zyx_max_slice_interactive_point_annotator(vol, projection=projection, **full)
+        _click_voxel(w, "xy", 12, 10, 10, 1)
+        assert w.points == [[12, 10, 10]], projection
+    vol = np.full((20, 24, 24), 5.0, np.float32)
+    vol[3, 10, 10] = np.nan
+    w = show_zyx_max_slice_interactive_point_annotator(vol, projection="minip", **full)
+    _click_voxel(w, "xy", 12, 10, 10, 1)
+    assert w.points == [[w.z_s, 10, 10]]
+
+
+def test_snap_depth_follows_the_attenuated_projection():
+    """D11 / R2-08: on 'attenuated_mip' the snap stores the voxel the attenuated projection shows.
+
+    Strategy: a ray with 0.9 at z=2 (front), 0.1 behind it and 1.0 at z=35,
+    attenuation 0.05, vmin=0, vmax=1, whole-Z slab; then attenuation 0
+    (negative control: the plain maximum).
+    Expected outcome: z=2, the front voxel that wins the display (the raw
+    argmax z=35, hidden behind it, used to be stored); with attenuation 0,
+    z=35.
+    """
+    vol = np.zeros((40, 24, 24), np.float32)
+    vol[2, 10, 10] = 0.9
+    vol[3:35, 10, 10] = 0.1
+    vol[35, 10, 10] = 1.0
+    full = dict(slabs_thickness=(1000, 1000, 1000), figsize=(4, 4), vmin=0, vmax=1, annotate=True,
+                projection="attenuated_mip")
+    w = show_zyx_max_slice_interactive_point_annotator(vol, attenuation=0.05, **full)
+    _click_voxel(w, "xy", 2, 10, 10, 1)
+    assert w.points == [[2, 10, 10]]
+    w = show_zyx_max_slice_interactive_point_annotator(vol, attenuation=0.0, **full)
+    _click_voxel(w, "xy", 2, 10, 10, 1)
+    assert w.points == [[35, 10, 10]]
+
+
+def test_scatter_empty_channel_list_is_zero_index_lists():
+    """D13 / R2-02: ``channels=[]`` builds an index-list viewer with no channel, not an ambiguity error.
+
+    Strategy: classify an empty list in 'auto' and 'index_lists' modes and
+    build the widget; then 'values' (negative control).
+    Expected outcome: ('idx_lists', []) and a rendered widget (the empty list
+    raised 'a list of 0 integer arrays ... valid point-index lists'); a
+    clear ValueError naming the empty list for 'values'.
+    """
+    assert tpa._classify_scatter_channels([], 10) == ('idx_lists', [])
+    assert tpa._classify_scatter_channels([], 10, 'index_lists') == ('idx_lists', [])
+    pts = np.random.default_rng(0).uniform(0, 20, (10, 3))
+    w = show_zyx_max_scatter_interactive(pts, channels=[], figsize=(4, 4))
+    assert w.mode == 'idx_lists' and w.image_data
+    with pytest.raises(ValueError, match="empty list"):
+        tpa._classify_scatter_channels([], 10, 'values')
+
+
+def test_iso_scatter_many_distinct_integers_stay_continuous():
+    """D16 / R2-16: integer colours are categories only up to 64 distinct values, like the ortho scatter.
+
+    Strategy: 3000 points coloured by integers drawn from 0..999 (about 950
+    distinct values); then 10 cluster labels (negative control).
+    Expected outcome: continuous with a UserWarning naming the 64 limit (it
+    drew one tab20 colour and legend entry per value, slowly); 10 labels
+    stay categorical with no warning.
+    """
+    rng = np.random.default_rng(0)
+    X, Y, Z = (rng.normal(size=3000) for _ in range(3))
+    with pytest.warns(UserWarning, match="more than 64"):
+        w = show_iso_scatter(X, Y, Z, color=rng.integers(0, 1000, 3000), figsize=(4, 4))
+    assert w.is_continuous and not w.is_categorical
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        w = show_iso_scatter(X, Y, Z, color=rng.integers(0, 10, 3000), figsize=(4, 4))
+    assert w.is_categorical and len(w.unique_cats) == 10
+
+
+def _legend_texts(w):
+    fig = w._render()
+    return [t.get_text() for ax in fig.axes if ax.get_legend() for t in ax.get_legend().get_texts()]
+
+
+def test_iso_scatter_channel_labels_name_the_legend():
+    """D16 / R2-15: IsoScatter's ``channel_labels`` names the legend entries (it was stored and never used).
+
+    Strategy: labels [-1, 0, 3] with a dict naming -1 and with a list of
+    three names; float colours with a string (colorbar label); default
+    names (negative control) and a wrong-length list.
+    Expected outcome: the legend reads the given names; the colorbar label
+    is the string; without channel_labels the legend shows the labels; a
+    wrong length raises ValueError.
+    """
+    X, Y, Z = _iso_points(n=60)
+    color = np.repeat([-1, 0, 3], 20)
+    w = show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4), channel_labels={-1: "noise"})
+    assert _legend_texts(w) == ["noise", "0", "3"]
+    w = show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4), channel_labels=["noise", "a", "b"])
+    assert _legend_texts(w) == ["noise", "a", "b"]
+    w = show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4))
+    assert _legend_texts(w) == ["-1", "0", "3"]
+    w = show_iso_scatter(X, Y, Z, color=np.linspace(0, 1, 60), figsize=(4, 4), channel_labels="depth (µm)")
+    fig = w._render()
+    assert "depth (µm)" in [ax.get_ylabel() for ax in fig.axes]
+    with pytest.raises(ValueError, match="one per category"):
+        show_iso_scatter(X, Y, Z, color=color, figsize=(4, 4), channel_labels=["a", "b"])
+
+
+def test_iso_scatter_does_not_warn_below_max_points():
+    """D16 / R2-16 negative control: no subsampling notice when every point is drawn.
+
+    Strategy: 100 points with ``max_points=100``.
+    Expected outcome: no warning, all points kept.
+    """
+    X, Y, Z = _iso_points(n=100)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        w = show_iso_scatter(X, Y, Z, max_points=100, figsize=(4, 4))
+    assert w.X_orig.size == 100
+
+
+def test_deprecated_tnia_plotting_3d_warning_points_at_the_importer():
+    """D08: the ``tnia_plotting_3d`` FutureWarning is attributed to the importing line, not the shim.
+
+    Strategy: evict the module and re-import it with a plain ``import``
+    statement from this test, recording warnings.
+    Expected outcome: one FutureWarning whose filename is this test file (it
+    pointed at tnia_plotting_3d.py, so per-module filters and the shown
+    location did not reach the user's code).
+    """
+    sys.modules.pop("eigenp_utils.tnia_plotting_3d", None)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        import eigenp_utils.tnia_plotting_3d  # noqa: F401
+    fw = [x for x in w if issubclass(x.category, FutureWarning)]
+    assert len(fw) == 1
+    assert Path(fw[0].filename).resolve() == Path(__file__).resolve()
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 (viewer front end): traits and exports
+# ---------------------------------------------------------------------------
+
+def _png_shape(b64):
+    """(rows, cols) of a base64 PNG."""
+    return mpimg.imread(io.BytesIO(base64.b64decode(b64))).shape[:2]
+
+
+def _scatter_points(n=60, seed=0):
+    """(n, 3) ZYX points in a 10 x 20 x 30 box."""
+    return np.random.default_rng(seed).random((n, 3)) * [10, 20, 30]
+
+
+def test_widget_png_size_follows_display_dpi_not_figure_dpi():
+    """D14 / R2-18 / R3-05: the on-screen PNG is rendered at ``display_dpi`` (default 100).
+
+    Strategy: build a slice widget with figsize (6, 4) under
+    ``rcParams['figure.dpi'] = 200`` and read the PNG size; then pass
+    ``display_dpi=50`` to the factory and change the trait afterwards; repeat
+    for the annotator and scatter factories.
+    Expected outcome: 600 x 400 px whatever figure.dpi says; 300 x 200 px at
+    display_dpi=50, and setting the trait re-renders at the new size.
+    Negative control: the 300-dpi copy-PNG is still larger than the frame.
+    """
+    vol = _structured_volume()
+    with matplotlib.rc_context({"figure.dpi": 200, "savefig.dpi": "figure"}):
+        w = show_zyx_max_slice_interactive(vol, figsize=(6, 4))
+        assert _png_shape(w.image_data) == (400, 600)
+        w2 = show_zyx_max_slice_interactive(vol, figsize=(6, 4), display_dpi=50)
+        assert _png_shape(w2.image_data) == (200, 300)
+        w2.display_dpi = 100
+        assert _png_shape(w2.image_data) == (400, 600)
+        w.copy_png_trigger += 1
+        assert _png_shape(w.copy_png_data)[1] > 600
+        a = show_zyx_max_slice_interactive_point_annotator(vol, figsize=(6, 4), display_dpi=50)
+        s = show_zyx_max_scatter_interactive(_scatter_points(), figsize=(6, 4), display_dpi=50)
+        assert _png_shape(a.image_data) == (200, 300)
+        assert _png_shape(s.image_data) == (200, 300)
+
+
+def test_annotation_mode_toggle_does_not_render():
+    """R3-16 / R2-21: toggling ``annotation_mode`` changes no pixel, so it must not re-render.
+
+    Strategy: count renders while toggling the mode on and off.
+    Expected outcome: zero renders. Positive control: adding a point renders.
+    """
+    w = show_zyx_max_slice_interactive_point_annotator(_structured_volume(), figsize=(4, 4))
+    counter = _count_renders(w)
+    w.annotation_mode = True
+    w.annotation_mode = False
+    assert counter["n"] == 0
+    w.points = [[8, 20, 20]]
+    assert counter["n"] == 1
+
+
+def test_unread_traits_are_removed_or_not_synced():
+    """R3-16 / R2-21: traits the front end never reads are gone or kept Python-only.
+
+    Expected outcome: ``min_thickness``, ``*_thick_max`` and ``*_min_pos`` no
+    longer exist; ``x_s`` ... ``z_t``, ``points`` and ``display_dpi`` are
+    traits without ``sync``; the traits the JS reads stay synced, and
+    ``x_max_pos`` is the last index. Writing ``x_s`` still moves the slab.
+    """
+    w = show_zyx_max_slice_interactive_point_annotator(_structured_volume((16, 40, 48)), figsize=(4, 4))
+    names = set(w.trait_names())
+    for gone in ("min_thickness", "x_thick_max", "y_thick_max", "z_thick_max",
+                 "x_min_pos", "y_min_pos", "z_min_pos"):
+        assert gone not in names
+    for local in ("x_s", "y_s", "z_s", "x_t", "y_t", "z_t", "points", "display_dpi"):
+        assert local in names and not w.trait_metadata(local, "sync")
+    for synced in ("x_start", "x_end", "x_max_pos", "sx", "annotation_mode", "status_msg",
+                   "vmin_auto", "vmax_auto", "range_display", "channel_controls"):
+        assert w.trait_metadata(synced, "sync")
+    assert (w.z_max_pos, w.y_max_pos, w.x_max_pos) == (15, 39, 47)
+    w.x_s = 10
+    assert (w.x_start + w.x_end) // 2 == 10
+
+
+def test_auto_display_range_is_synced_and_used_for_a_cleared_box():
+    """R3-04: a cleared vmin/vmax box has one meaning, the per-channel automatic value, synced to JS.
+
+    Strategy: slice widget on 12-bit-like data and a scatter widget with one
+    continuous channel in [5, 10]; read ``vmin_auto`` / ``vmax_auto``, then
+    clear the scatter's vmin box.
+    Expected outcome: the slice auto lists equal the default display range
+    (0, robust max); the scatter's are (0, data max); a cleared scatter vmin
+    renders exactly like vmin=0 (the auto value).
+    Negative control: it differs from vmin=5 (the data minimum, which "" used
+    to mean in points mode).
+    """
+    vol = np.zeros((8, 32, 32), dtype=np.uint16)
+    vol[2:6, 8:24, 8:24] = 999
+    w = show_zyx_max_slice_interactive(vol, figsize=(4, 4))
+    assert w.vmin_auto == [0.0] and w.vmax_auto == [pytest.approx(999.0)]
+    assert w.vmin_auto == w.vmin_list and w.vmax_auto == w.vmax_list
+
+    pts = _scatter_points()
+    vals = np.linspace(5, 10, len(pts))
+    s = show_zyx_max_scatter_interactive(pts, channels=vals, figsize=(4, 4), point_size=40, alpha=1.0)
+    assert s.vmin_auto == [0.0] and s.vmax_auto == [pytest.approx(10.0)]
+    s.vmin_list = [0.0]
+    ref = s.image_data
+    s.vmin_list = [""]
+    assert s.image_data == ref
+    s.vmin_list = [5.0]
+    assert s.image_data != ref
+
+
+def test_range_display_carries_unit_scale_and_offset():
+    """R3-08 / D10: the range boxes get a unit, a display scale and the scatter's data offset.
+
+    Strategy: a calibrated slice widget (Z 2 µm, Y/X 0.5 µm), an
+    uncalibrated one, one in the nm range, and a scatter widget whose X data
+    span [100, 200] with X pixel size 0.5.
+    Expected outcome: calibrated axes show index x pixel size in µm (offset
+    0); uncalibrated axes show the index ('px', scale 1); the 5-nm voxels
+    switch the unit to nm (scale 5); the scatter X offset is the data minimum,
+    so ``(x_start + offset) * scale`` is the physical start of the slab.
+    """
+    vol = _structured_volume()
+    w = show_zyx_max_slice_interactive(vol, pixel_sizes=(2.0, 0.5, 0.5), figsize=(4, 4))
+    assert w.range_display["x"] == {"offset": 0.0, "scale": 0.5, "unit": "µm", "calibrated": True}
+    assert w.range_display["z"]["scale"] == 2.0
+    u = show_zyx_max_slice_interactive(vol, figsize=(4, 4))
+    assert u.range_display["y"] == {"offset": 0.0, "scale": 1.0, "unit": "px", "calibrated": False}
+    nm = show_zyx_max_slice_interactive(vol, pixel_sizes=(0.005, 0.005, 0.005), figsize=(4, 4))
+    assert nm.range_display["x"]["unit"] == "nm"
+    assert nm.range_display["x"]["scale"] == pytest.approx(5.0)
+
+    rng = np.random.default_rng(0)
+    pts = np.column_stack([rng.random(200) * 10, rng.random(200) * 20, 100 + rng.random(200) * 100])
+    pts[0, 2], pts[1, 2] = 100.0, 200.0
+    s = show_zyx_max_scatter_interactive(pts, pixel_sizes=(2.0, 0.5, 0.5), figsize=(4, 4))
+    rx = s.range_display["x"]
+    assert rx["offset"] == s.xmin == 100 and rx["scale"] == 0.5 and rx["unit"] == "µm"
+    assert (s.x_start + rx["offset"]) * rx["scale"] == pytest.approx((s.xmin + s.x_start) * s.sx)
+
+
+def test_gui_channel_colours_keep_hue_and_stay_readable_on_the_dark_theme():
+    """D14 / R3-10: GUI colours are lifted towards white keeping their hue; nothing collapses to one grey.
+
+    Strategy: the default 'minimum' colours (black, magenta, lime, blue, red,
+    ...) through ``_gui_channel_color``, and a 5-channel minimum widget.
+    Expected outcome: every GUI colour has luma >= 0.45; black, blue and red
+    are distinct, blue stays blue-dominant and red red-dominant; the
+    widget's channel colours are pairwise distinct.
+    Negative control: a light colour (white, yellow) is unchanged.
+    """
+    def luma(h):
+        r, g, b = mcolors.to_rgb(h)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    got = {c: tpa._gui_channel_color(c, "minimum") for c in ("black", "blue", "red", "navy", "darkred")}
+    assert len(set(got.values())) == len(got)
+    assert all(luma(h) >= 0.445 for h in got.values())  # hex rounding
+    r, g, b = mcolors.to_rgb(got["blue"])
+    assert b > r and b > g
+    r, g, b = mcolors.to_rgb(got["red"])
+    assert r > g and r > b
+    assert tpa._gui_channel_color("white") == "#ffffff"
+    assert tpa._gui_channel_color("yellow") == "#ffff00"
+
+    vol = _structured_volume((4, 16, 16))
+    w = show_zyx_max_slice_interactive([vol] * 5, blending="minimum", figsize=(4, 4))
+    assert len(set(w.channel_colors)) == 5
+
+
+def test_scatter_points_mode_applies_opacity_and_gamma():
+    """D14 / R3-09 / R2-23: points mode honours the per-channel opacity and (continuous) gamma.
+
+    Strategy: cont_single points: set opacity 0, then gamma 0.3; ids points:
+    opacity 0 for every channel; cont_multi: opacity 0 for every channel.
+    Expected outcome: each change alters the frame; opacity 0 everywhere
+    gives the frame of a widget with the channel hidden (no points drawn:
+    equal to a frame where all opacities are 0 for any data).
+    Negative control: opacity 1 and gamma 1 leave the frame unchanged.
+    """
+    pts = _scatter_points(80)
+    vals = np.linspace(0, 1, len(pts))
+    w = show_zyx_max_scatter_interactive(pts, channels=vals, figsize=(4, 4), point_size=30)
+    ref = w.image_data
+    w.opacity_list = [1.0]
+    w.gamma_list = [1.0]
+    assert w.image_data == ref
+    w.gamma_list = [0.3]
+    assert w.image_data != ref
+    w.gamma_list = [1.0]
+    w.opacity_list = [0.0]
+    hidden = w.image_data
+    assert hidden != ref
+
+    ids = np.arange(len(pts)) % 3
+    c = show_zyx_max_scatter_interactive(pts, channels=ids, channel_mode="categories", figsize=(4, 4), point_size=30)
+    ref_ids = c.image_data
+    c.opacity_list = [0.5, 0.5, 0.5]
+    assert c.image_data != ref_ids
+    c.opacity_list = [0.0, 0.0, 0.0]
+    assert c.image_data == hidden
+
+    multi = np.column_stack([vals, vals[::-1]])
+    m = show_zyx_max_scatter_interactive(pts, channels=multi, figsize=(4, 4), point_size=30)
+    ref_m = m.image_data
+    m.opacity_list = [0.0, 1.0]
+    assert m.image_data != ref_m
+    m.opacity_list = [0.0, 0.0]
+    assert m.image_data == hidden
+
+
+def test_scatter_channel_controls_hide_inert_inputs_and_the_id_histogram():
+    """D14 / R3-09: categorical points channels expose only opacity, and ids get no histogram of ID values.
+
+    Expected outcome: ``channel_controls`` is 'opacity' per channel for
+    categories, index lists and the single colour in points mode; 'all' for
+    continuous channels, for density mode and for the image viewers. The ids
+    channels' histograms are empty.
+    """
+    pts = _scatter_points(60)
+    ids = np.arange(len(pts)) % 3
+    c = show_zyx_max_scatter_interactive(pts, channels=ids, channel_mode="categories", figsize=(4, 4))
+    assert c.channel_controls == ["opacity"] * 3
+    assert all(len(h["counts"]) == 0 for h in c.histograms_data)
+    assert show_zyx_max_scatter_interactive(pts, figsize=(4, 4)).channel_controls == ["opacity"]
+    vals = np.linspace(0, 1, len(pts))
+    assert show_zyx_max_scatter_interactive(pts, channels=vals, figsize=(4, 4)).channel_controls == ["all"]
+    d = show_zyx_max_scatter_interactive(pts, channels=ids, channel_mode="categories", render="density",
+                                         bins=16, figsize=(4, 4))
+    assert d.channel_controls == ["all"] * 3
+    assert all(len(h["counts"]) == 0 for h in d.histograms_data)
+    assert show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4)).channel_controls == ["all"]
+
+
+def test_svg_export_never_overwrites_and_reports_in_the_status_line(tmp_path):
+    """D15 / R2-10 / R3-12: exports add a numbered suffix, follow the extension and report in ``status_msg``.
+
+    Strategy: save to ``fig.svg`` three times, with a pre-existing precious
+    ``fig_1.svg``; then save to ``.png`` and ``.pdf``; then to a missing
+    directory; repeat a save with the IsoScatter widget.
+    Expected outcome: fig.svg, fig_2.svg and fig_3.svg are written and the
+    precious file is untouched; the SVG keeps its text editable (``<text``);
+    the PNG and PDF carry their own magic bytes; each success puts
+    'saved <absolute path>' in ``status_msg``; the failure warns and puts
+    'error: ...' there.
+    """
+    w = show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4), channel_labels=["ch"])
+    (tmp_path / "fig_1.svg").write_text("precious")
+    w.save_filename = str(tmp_path / "fig.svg")
+    for _ in range(3):
+        w.save_trigger += 1
+    assert (tmp_path / "fig_1.svg").read_text() == "precious"
+    for name in ("fig.svg", "fig_2.svg", "fig_3.svg"):
+        assert (tmp_path / name).read_bytes().lstrip().startswith(b"<?xml")
+    assert w.status_msg == f"saved {tmp_path / 'fig_3.svg'}"
+    assert "<text" in (tmp_path / "fig.svg").read_text()
+
+    w.save_filename = str(tmp_path / "fig.png")
+    w.save_trigger += 1
+    assert (tmp_path / "fig.png").read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    w.save_filename = str(tmp_path / "fig.pdf")
+    w.save_trigger += 1
+    assert (tmp_path / "fig.pdf").read_bytes()[:4] == b"%PDF"
+
+    with pytest.warns(UserWarning, match="Error saving"):
+        w.save_filename = str(tmp_path / "missing" / "x.svg")
+        w.save_trigger += 1
+    assert w.status_msg.startswith("error:")
+
+    iso = show_iso_scatter(*_iso_points(n=30), figsize=(4, 4))
+    iso.save_filename = str(tmp_path / "iso.svg")
+    iso.save_trigger += 1
+    iso.save_trigger += 1
+    assert (tmp_path / "iso.svg").exists() and (tmp_path / "iso_1.svg").exists()
+    assert iso.status_msg == f"saved {tmp_path / 'iso_1.svg'}"
+
+
+def test_points_csv_has_physical_columns_is_always_written_and_never_overwritten(tmp_path):
+    """D15 / R2-10: the CSV holds voxel indices plus physical columns, and saving with no points still writes.
+
+    Strategy: annotator with pixel sizes (2, 0.5, 0.25) µm; save two points;
+    delete every point and save again; then an uncalibrated annotator.
+    Expected outcome: ``z,y,x,z_um,y_um,x_um`` rows (index x pixel size);
+    the second save writes a header-only ``points_1.csv`` (a stale file with
+    the deleted points is never the latest), and ``status_msg`` names it;
+    uncalibrated columns are ``*_px``.
+    """
+    vol = _structured_volume()
+    w = show_zyx_max_slice_interactive_point_annotator(vol, pixel_sizes=(2.0, 0.5, 0.25), figsize=(4, 4))
+    w.points = [[5, 4, 3], [6, 7, 8]]
+    w.save_csv_filename = str(tmp_path / "points.csv")
+    w.save_csv_trigger += 1
+    assert (tmp_path / "points.csv").read_text() == (
+        "z,y,x,z_um,y_um,x_um\n5,4,3,10.0,2.0,0.75\n6,7,8,12.0,3.5,2.0\n")
+    assert w.status_msg == f"saved 2 points to {tmp_path / 'points.csv'}"
+    w.points = []
+    with pytest.warns(UserWarning, match="No points"):
+        w.save_csv_trigger += 1
+    assert (tmp_path / "points_1.csv").read_text() == "z,y,x,z_um,y_um,x_um\n"
+    assert w.status_msg == f"saved 0 points to {tmp_path / 'points_1.csv'}"
+
+    u = show_zyx_max_slice_interactive_point_annotator(vol, figsize=(4, 4))
+    u.points = [[1, 2, 3]]
+    u.save_csv_filename = str(tmp_path / "u.csv")
+    u.save_csv_trigger += 1
+    assert (tmp_path / "u.csv").read_text() == "z,y,x,z_px,y_px,x_px\n1,2,3,1.0,2.0,3.0\n"
+
+
+def test_scatter_auto_vmin_follows_negative_data():
+    """R3-04 (verifier note): the scatter's automatic vmin is 0, or the data minimum when the data go below 0.
+
+    Strategy: a points-mode scatter whose one continuous channel lies in
+    [-5, -1] (vmin and vmax left automatic); then clear the vmin box.
+    Expected outcome: ``vmin_auto`` (and the initial vmin) is the data
+    minimum, the start image and the cleared box render without the
+    'vmin > vmax' warning, and a cleared box renders exactly like
+    vmin = data minimum.
+    Negative control: non-negative data in [5, 10] keep ``vmin_auto == [0.0]``.
+    """
+    pts = _scatter_points()
+    vals = -np.linspace(1, 5, len(pts))
+    s = show_zyx_max_scatter_interactive(pts, channels=vals, figsize=(4, 4), point_size=40, alpha=1.0)
+    assert s.vmin_auto == [pytest.approx(-5.0)] and s.vmax_auto == [pytest.approx(-1.0)]
+    assert s.vmin_list == s.vmin_auto
+    assert s.warning_msg == ""
+    s.vmin_list = [-5.0]
+    ref = s.image_data
+    s.vmin_list = [""]
+    assert s.warning_msg == ""
+    assert s.image_data == ref
+
+    pos = show_zyx_max_scatter_interactive(pts, channels=np.linspace(5, 10, len(pts)), figsize=(4, 4))
+    assert pos.vmin_auto == [0.0]
+
+
+def test_scatter_density_categorical_auto_vmax_is_the_count_maximum():
+    """R3-04: in density mode a categorical channel's automatic vmax is its largest bin count, not 1.
+
+    Strategy: 20 points on the diagonal (i, i, i) plus 7 more copies of
+    (3, 3, 3), unit pixel sizes and 20 bins, so every bin is one unit wide
+    and the fullest bin holds 8 points in each panel. Clear the vmax box.
+    Expected outcome: ``vmax_auto == [8.0]``, and a cleared box renders like
+    vmax = 8.
+    Negative control: points mode keeps ``vmax_auto == [1.0]`` (vmax does not
+    act on categorical points), and vmax = 1 renders differently from the
+    cleared box in density mode.
+    """
+    diag = np.repeat(np.arange(20.0)[:, None], 3, axis=1)
+    pts = np.vstack([diag, np.full((7, 3), 3.0)])
+    d = show_zyx_max_scatter_interactive(pts, render="density", bins=20, pixel_sizes=(1, 1, 1), figsize=(4, 4))
+    assert d.vmax_auto == [8.0]
+    d.vmax_list = [8.0]
+    ref = d.image_data
+    d.vmax_list = [""]
+    assert d.image_data == ref
+    d.vmax_list = [1.0]
+    assert d.image_data != ref
+
+    p = show_zyx_max_scatter_interactive(pts, render="points", pixel_sizes=(1, 1, 1), figsize=(4, 4))
+    assert p.vmax_auto == [1.0]
+
+
+def test_repeated_failing_save_reports_every_attempt(tmp_path):
+    """R3-12 / D15: each save reports its outcome to ``status_msg``, even when it repeats the last message.
+
+    The front end writes 'saving…' on click and waits for a change of
+    ``status_msg``; traitlets sends nothing when the value is unchanged, so
+    a repeated error used to leave 'saving…' on screen.
+    Strategy: observe ``status_msg``; save the figure twice to a missing
+    directory (slice widget and IsoScatter), and the points CSV twice
+    (annotator).
+    Expected outcome: two 'error: ...' notifications per widget, and the
+    final value is the error.
+    Negative control: a successful save after the errors notifies 'saved ...'.
+    """
+    def outcomes(widget, trigger, attr, value):
+        seen = []
+        widget.observe(lambda c: c["new"] and seen.append(c["new"]), names="status_msg")
+        setattr(widget, attr, value)
+        with pytest.warns(UserWarning):
+            for _ in range(2):
+                setattr(widget, trigger, getattr(widget, trigger) + 1)
+        return seen
+
+    missing = str(tmp_path / "missing" / "fig.svg")
+    w = show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4))
+    seen = outcomes(w, "save_trigger", "save_filename", missing)
+    assert len(seen) == 2 and all(m.startswith("error:") for m in seen)
+    assert w.status_msg.startswith("error:")
+    w.save_filename = str(tmp_path / "ok.svg")
+    w.save_trigger += 1
+    assert seen[-1].startswith("saved ")
+
+    iso = show_iso_scatter(*_iso_points(n=30), figsize=(4, 4))
+    seen = outcomes(iso, "save_trigger", "save_filename", missing)
+    assert len(seen) == 2 and all(m.startswith("error:") for m in seen)
+
+    a = show_zyx_max_slice_interactive_point_annotator(_structured_volume(), figsize=(4, 4))
+    a.points = [[1, 2, 3]]
+    seen = outcomes(a, "save_csv_trigger", "save_csv_filename", str(tmp_path / "missing" / "p.csv"))
+    assert len(seen) == 2 and all(m.startswith("error:") for m in seen)
+
+
+@pytest.mark.parametrize("bad", [0, -5, float("nan"), float("inf")])
+def test_display_dpi_must_be_positive_and_finite(bad):
+    """D14: ``display_dpi`` rejects values that cannot render (TraitError), on the trait and in the factory.
+
+    Strategy: set ``display_dpi`` to 0, -5, NaN and inf on a built widget and
+    pass it to the factory.
+    Expected outcome: TraitError, and the widget keeps its previous value
+    and image.
+    Positive control: 150 is accepted and re-renders.
+    """
+    w = show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4))
+    img = w.image_data
+    with pytest.raises(traitlets.TraitError):
+        w.display_dpi = bad
+    assert w.display_dpi == 100.0 and w.image_data == img
+    with pytest.raises(traitlets.TraitError):
+        show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4), display_dpi=bad)
+    w.display_dpi = 150
+    assert w.image_data != img

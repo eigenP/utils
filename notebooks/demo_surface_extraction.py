@@ -112,7 +112,11 @@ def _():
     from eigenp_utils.surface_extraction import extract_surface
     from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_slice_interactive
 
+    # skimage.data.cells3d: voxel size (Z, Y, X) = (0.29, 0.26, 0.26) µm
+    CELLS3D_PIXEL_SIZES = {'Z': 0.29, 'Y': 0.26, 'X': 0.26, 'unit': 'µm'}
+
     return (
+        CELLS3D_PIXEL_SIZES,
         download_file_async,
         extract_surface,
         imread,
@@ -142,9 +146,9 @@ def _(cells_path, imread):
 
 
 @app.cell
-def _(cells, membrane, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, cells, membrane, show_zyx_max_slice_interactive):
     nuclei = cells[:, 1, :, :]
-    show_zyx_max_slice_interactive([nuclei, membrane], colors=['lime', 'magenta'])
+    show_zyx_max_slice_interactive([nuclei, membrane], colormap=['lime', 'magenta'], pixel_sizes=CELLS3D_PIXEL_SIZES)
     return
 
 
@@ -168,8 +172,8 @@ def _(downscale_slider, extract_surface, roi, sigma_slider):
 
 
 @app.cell
-def _(roi, show_zyx_max_slice_interactive, surface_mask):
-    show_zyx_max_slice_interactive([roi, surface_mask], colors=['gray', 'yellow'])
+def _(CELLS3D_PIXEL_SIZES, roi, show_zyx_max_slice_interactive, surface_mask):
+    show_zyx_max_slice_interactive([roi, surface_mask], colormap=['gray', 'yellow'], pixel_sizes=CELLS3D_PIXEL_SIZES)
     return
 
 

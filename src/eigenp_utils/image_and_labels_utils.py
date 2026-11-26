@@ -1,4 +1,13 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "scipy",
+#     "scikit-image",
+# ]
+# ///
 import inspect
+import logging
 import warnings
 from itertools import product
 from typing import Optional, Tuple, Dict, List, Union
@@ -13,7 +22,29 @@ from scipy.interpolate import RegularGridInterpolator
 from skimage import filters, feature, segmentation
 from skimage.segmentation import expand_labels
 
-from ._conventions import UM, resolve_pixel_sizes
+from ._conventions import UM, check_zyx_input, resolve_pixel_sizes, warn_deprecated
+
+logger = logging.getLogger(__name__)
+
+#: Interpolation names shared by the samplers, mapped to spline orders
+_INTERPOLATION_ORDERS = {'nearest': 0, 'linear': 1, 'cubic': 3}
+
+
+def _interpolation_order(name, param, stacklevel=4):
+    """Spline order for 'nearest' | 'linear' | 'cubic' ('bicubic': deprecated alias of 'cubic')."""
+    if name == 'bicubic':
+        warn_deprecated(f"{param}='bicubic'", f"{param}='cubic'", stacklevel=stacklevel)
+        name = 'cubic'
+    if name not in _INTERPOLATION_ORDERS:
+        raise ValueError(
+            f"{param} must be one of 'nearest', 'linear' or 'cubic', got {name!r}."
+        )
+    return _INTERPOLATION_ORDERS[name]
+
+
+def _warn_spacing_alias(stacklevel):
+    """FutureWarning for the legacy `spacing=` parameter; `stacklevel` counts from warn_deprecated."""
+    warn_deprecated("spacing=", "pixel_sizes=", stacklevel=stacklevel)
 
 
 def _pixel_sizes_to_spacing(pixel_sizes, ndim: int, stacklevel: int = 2) -> tuple[float, ...]:
@@ -60,7 +91,7 @@ def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pi
             If `pixel_sizes` is provided, this is assumed to be in physical units.
     - outline_sigma: Sigma for the Gaussian blur used to create the watershed outline. Can be scalar or tuple.
             If `pixel_sizes` is provided, this is assumed to be in physical units.
-    - spacing: Deprecated. Use `pixel_sizes` instead.
+    - spacing: Deprecated alias of `pixel_sizes` (FutureWarning; removed in 0.1.0).
     - pixel_sizes: Optional dict mapping dimension to pixel size, e.g., {'Z': 1.0, 'Y': 0.5, 'X': 0.5},
             or a per-axis sequence in (Z)YX order.
 
@@ -77,9 +108,17 @@ def voronoi_otsu_labeling(image, spot_sigma=2, outline_sigma=2, spacing=None, pi
     the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
     count as unknown, strings / booleans raise ValueError, and a scalar means
     isotropic voxels.
+
+    Changed (D08, 2026-11): `spacing=` emits a FutureWarning (it was a
+    DeprecationWarning, which Python hides when attributed to library code).
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image, "voronoi_otsu_labeling")
     if spacing is not None:
-        warnings.warn("The 'spacing' parameter is deprecated. Use 'pixel_sizes' instead.", DeprecationWarning, stacklevel=2)
+        _warn_spacing_alias(stacklevel=4)
         if pixel_sizes is None:
             pixel_sizes = spacing
 
@@ -161,8 +200,15 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
             the first and last slices are not dimmed by the padding.
         pixel_sizes (dict, optional): Dictionary specifying physical pixel dimensions, e.g., {'Z': 0.79, 'Y': 0.468, 'X': 0.468}.
 
+    The window (in pixels after the conversion from physical units) is at least 1
+    and odd: an even size is widened by one pixel so the window is centred.
+
     Returns:
-        np.ndarray: An image array with the thick z-slice operation applied.
+        np.ndarray: An image array with the thick z-slice operation applied: the
+        input dtype for 'max', float64 for 'average'.
+
+    Changed (R7-09, 2026-11): widening an even window is logged at DEBUG level on the
+    module logger instead of printed.
 
     Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
     (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
@@ -170,7 +216,12 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
     the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
     count as unknown, strings / booleans raise ValueError, and a scalar means
     isotropic voxels.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(nuclei_image, "windowed_slice_projection")
     if operation not in ('max', 'average'):
         raise ValueError(f"operation must be 'max' or 'average', got {operation!r}.")
 
@@ -188,7 +239,7 @@ def windowed_slice_projection(nuclei_image, window_size=11, axis=0, operation='m
 
     if window_size % 2 == 0:
         window_size += 1
-        print(f'Using window_size: {window_size} (need odd number)')
+        logger.debug("Using window_size: %d (an odd number is needed)", window_size)
 
     # Calculate the margin to adjust the slicing
     margin = window_size // 2
@@ -244,6 +295,9 @@ def optimized_entire_labels_touching_mask(labels_data, mask, distance=10, pixel_
     Returns:
         np.ndarray: A filtered label array where only entire labels touching the mask are retained.
 
+    Changed (R7-15, 2026-11): the always-true ``np.isin(dilated, labels)`` test (a
+    full-volume sort) is gone; the result is unchanged.
+
     Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
     (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
     converted to µm (it used to be ignored), a missing Z next to known Y/X takes
@@ -266,9 +320,10 @@ def optimized_entire_labels_touching_mask(labels_data, mask, distance=10, pixel_
     else:
         dilated_labels_data = expand_labels(labels_data, distance=distance)
 
-    # Find all labels that touch the dilated mask
-    touching_labels_mask = np.isin(dilated_labels_data, labels_data) & (mask > 0)
-    touching_labels = np.unique(dilated_labels_data[touching_labels_mask])
+    # Find all labels whose expansion touches the mask (every dilated value is a
+    # label of labels_data or 0, so no membership test is needed)
+    touching_labels = np.unique(dilated_labels_data[mask > 0])
+    touching_labels = touching_labels[touching_labels != 0]
 
     # Create a mask for the entire extent of touching labels
     entire_touching_labels_mask = np.isin(labels_data, touching_labels)
@@ -295,7 +350,9 @@ def sample_intensity_around_points(image_3d, points_3d, diameter=5, pixel_sizes=
     (diameter 3 px -> 3, 4 px -> 5, 5 px -> 5). Means are computed in float64.
 
     Returns:
-        list: A list of sampled mean intensities for each point. Out-of-bounds points will have NaN.
+        list: A list of sampled mean intensities (Python floats) for each point.
+        Out-of-bounds points will have NaN. (A list, unlike the ndarrays the other
+        samplers return; kept because callers compare it with lists.)
 
     Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
     (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
@@ -375,7 +432,8 @@ def sample_intensity_along_surface_normals(
     thickness: float = 3.0,
     num_steps: int = 5,
     interpolation: str = 'nearest',
-    pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None
+    pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None,
+    cval: float = 0.0,
 ) -> np.ndarray:
     """
     Samples an image along the normals of a precomputed surface grid, accounting for physical pixel sizes.
@@ -386,7 +444,8 @@ def sample_intensity_along_surface_normals(
         The 3D image volume to sample from. Assumed to be in (Z, Y, X) order.
     surface_points_grid : ndarray
         3D array of shape (U, V, 3) representing the spatial coordinates of the mesh in pixel space.
-        The last dimension must correspond to (Z, Y, X) coordinates.
+        The last dimension must correspond to (Z, Y, X) coordinates. U and V must be
+        at least 2 (normals come from the grid's gradients).
     thickness : float, optional
         The total sampling distance along the normal vector, centered at the surface point.
         Measured in physical units (if `pixel_sizes` is provided) or pixel units. Default is 3.
@@ -394,16 +453,26 @@ def sample_intensity_along_surface_normals(
         The number of discrete points to sample along the specified `thickness`.
         If `num_steps` is greater than `thickness`, this results in subpixel sampling. Default is 5.
     interpolation : str, optional
-        Interpolation method to use. Options are 'nearest' (order 0) or 'bicubic' (order 3).
-        Default is 'nearest'.
+        'nearest' (order 0, default), 'linear' (order 1) or 'cubic' (order 3), the
+        names `sample_volume_plane` uses. 'bicubic' is a deprecated alias of 'cubic'.
+        Other names raise ValueError.
     pixel_sizes : dict, list or ndarray, optional
         Dictionary specifying physical pixel dimensions, e.g., {'Z': 0.79, 'Y': 0.468, 'X': 0.468}.
         If provided, normals and offsets are computed in physical space. Assumes Z, Y, X order.
+    cval : float, optional
+        Value of samples outside the volume (default 0, which cannot be told apart
+        from a real zero; pass np.nan with a float image to mark them).
 
     Returns:
     --------
     sampled_3d : ndarray
-        A 3D array of shape (U, V, num_steps) containing the sampled intensities.
+        A 3D array of shape (U, V, num_steps) containing the sampled intensities
+        (the image dtype; scipy rounds and clamps integer output).
+
+    Changed (R7-10, 2026-11): 'linear' and 'cubic' are accepted ('linear', 'cubic'
+    and any other name silently used 'nearest'); unknown names raise ValueError;
+    'bicubic' warns (FutureWarning, removed in 0.1.0); new `cval`. A grid with a
+    single row or column raises ValueError (np.gradient crashed).
 
     Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
     (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
@@ -412,6 +481,14 @@ def sample_intensity_along_surface_normals(
     count as unknown, strings / booleans raise ValueError, and a scalar means
     isotropic voxels.
     """
+    order = _interpolation_order(interpolation, 'interpolation', stacklevel=4)
+    surface_points_grid = np.asarray(surface_points_grid, dtype=np.float64)
+    if surface_points_grid.ndim != 3 or surface_points_grid.shape[-1] != 3 \
+            or min(surface_points_grid.shape[:2]) < 2:
+        raise ValueError(
+            "surface_points_grid must have shape (U, V, 3) with U and V at least 2, got "
+            f"{surface_points_grid.shape}."
+        )
     spacing = _ensure_pixel_size_array(pixel_sizes)
 
     # 1. Convert grid to physical space for accurate normal computation
@@ -441,8 +518,7 @@ def sample_intensity_along_surface_normals(
     coords_reshaped = pixel_sampling_coords.reshape(-1, 3).T
 
     # 6. Perform Interpolation
-    order = 3 if interpolation == 'bicubic' else 0
-    sampled_flat = map_coordinates(image, coords_reshaped, order=order, mode='constant', cval=0)
+    sampled_flat = map_coordinates(image, coords_reshaped, order=order, mode='constant', cval=cval)
 
     # 7. Reshape back to (U, V, steps)
     return sampled_flat.reshape(surface_points_grid.shape[0], surface_points_grid.shape[1], num_steps)
@@ -459,9 +535,13 @@ def _resolve_spacing(
 ) -> tuple[float, ...]:
     """
     Resolves physical pixel spacing from either `pixel_sizes` or legacy `spacing` argument.
-    Emits UserWarning if neither is provided. Always called from a public function,
-    so warnings point at that function's caller.
+    Emits UserWarning if neither is provided, and a FutureWarning for `spacing`
+    (deprecated alias; `pixel_sizes` wins when both are given). Always called from
+    a public function, so warnings point at that function's caller.
     """
+    if spacing is not None:
+        _warn_spacing_alias(stacklevel=5)
+
     if pixel_sizes is not None:
         return _pixel_sizes_to_spacing(pixel_sizes, ndim, stacklevel=3)
 
@@ -496,6 +576,9 @@ def create_ellipsoid_struct(
     the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
     count as unknown, strings / booleans raise ValueError, and a scalar means
     isotropic voxels.
+
+    Changed (D08, R8-18, 2026-11): `spacing` (keyword or positional second argument)
+    is a deprecated alias of `pixel_sizes`: FutureWarning, removed in 0.1.0.
     """
     if ndim not in (2, 3):
         raise ValueError(f"ndim must be 2 (Y, X) or 3 (Z, Y, X), got {ndim}.")
@@ -534,6 +617,9 @@ def generate_morphological_surface_mask(
     the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
     count as unknown, strings / booleans raise ValueError, and a scalar means
     isotropic voxels.
+
+    Changed (D08, R8-18, 2026-11): `spacing` (keyword or positional second argument)
+    is a deprecated alias of `pixel_sizes`: FutureWarning, removed in 0.1.0.
     """
     if binary_mask.ndim not in (2, 3):
         raise ValueError(f"binary_mask must be 2D (Y, X) or 3D (Z, Y, X), got {binary_mask.ndim}D.")
@@ -566,7 +652,7 @@ def generate_morphological_surface_mask(
         effective_spacing = sp
 
     # 3. Anisotropic morphological closing with boundary padding to prevent edge erosion
-    struct = create_ellipsoid_struct(closing_radius_um, spacing=effective_spacing, ndim=binary_mask.ndim)
+    struct = create_ellipsoid_struct(closing_radius_um, pixel_sizes=effective_spacing, ndim=binary_mask.ndim)
     pad_width = tuple((s, s) for s in struct.shape)
     padded_binary = np.pad(downscaled_binary, pad_width, mode='constant', constant_values=False)
 
@@ -640,6 +726,9 @@ def estimate_inter_label_distance(
     the finest of them instead of 1.0, a missing dict key warns, 'pixel' units
     count as unknown, strings / booleans raise ValueError, and a scalar means
     isotropic voxels.
+
+    Changed (D08, R8-18, 2026-11): `spacing` (keyword or positional second argument)
+    is a deprecated alias of `pixel_sizes`: FutureWarning, removed in 0.1.0.
     """
     sp = _resolve_spacing(spacing, pixel_sizes, ndim=labels.ndim)
 
@@ -695,7 +784,8 @@ def fit_plane_ransac(
     points_zyx: np.ndarray,
     pixel_sizes: Optional[Union[Dict[str, float], List[float], np.ndarray]] = None,
     inlier_threshold_um: float = 1.0,
-    max_iters: int = 1000
+    max_iters: int = 1000,
+    seed: Optional[Union[int, np.random.Generator]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Converts pixel points to physical space, then fits a plane using RANSAC.
@@ -704,6 +794,21 @@ def fit_plane_ransac(
         points_zyx: (N, 3) array of point coordinates in voxel indices.
         pixel_sizes: Optional dict mapping dimension to pixel size, e.g., {'Z': 1.0, 'Y': 0.5, 'X': 0.5}.
         inlier_threshold_um: Distance threshold for inliers in physical units (microns).
+        max_iters: Number of random 3-point samples.
+        seed: None (fresh randomness), an int, or a np.random.Generator; an int or
+            Generator makes the result reproducible.
+
+    Returns:
+        (p0, normal): p0 is the centroid of the inliers in physical units (µm), (Z, Y, X);
+        normal is the unit normal of the least-squares plane through the inliers, with
+        Z component >= 0.
+
+    A sample is degenerate (skipped) when its two edge vectors are parallel to
+    within 1e-12 relative to their lengths, whatever the units.
+
+    Changed (R7-11, 2026-11): new `seed`; the degeneracy test is relative (an
+    absolute area cutoff of 1e-6 rejected every sample for tiny, e.g. metre-scale,
+    pixel sizes).
 
     Changed (D01, 2026-11): `pixel_sizes` go through the package's shared parser
     (`_conventions.resolve_pixel_sizes`): a dict's 'unit' (nm, mm, cm, ...) is
@@ -722,7 +827,7 @@ def fit_plane_ransac(
     best_inliers = []
     best_normal_phys = None
     best_p0_phys = None
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
 
     for _ in range(max_iters):
         idx = rng.choice(num_points, 3, replace=False)
@@ -732,11 +837,11 @@ def fit_plane_ransac(
         v2 = p3 - p1
         normal = np.cross(v1, v2)
 
-        area = 0.5 * np.linalg.norm(normal)
-        if area < 1e-6:
+        normal_norm = np.linalg.norm(normal)
+        if normal_norm <= 1e-12 * np.linalg.norm(v1) * np.linalg.norm(v2):
             continue
 
-        normal /= np.linalg.norm(normal)
+        normal /= normal_norm
         distances = np.abs(np.dot(points_phys - p1, normal))
         inliers = np.where(distances < inlier_threshold_um)[0]
 
@@ -784,7 +889,8 @@ def sample_volume_plane(
     v_res: Optional[int] = None,
     method: str = 'linear',
     num_offsets: int = 0,
-    offset_step_um: float = 1.0
+    offset_step_um: float = 1.0,
+    cval: float = 0.0,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """
     Samples an anisotropic 3D (Z, Y, X) volume on the plane through `p0_phys` with
@@ -792,7 +898,12 @@ def sample_volume_plane(
 
     Returns the sampled plane(s), shape (u_res, v_res) or (2*num_offsets+1, u_res, v_res),
     and their pixel sizes under the ZYX convention: {'Z': offset step, 'Y': u step,
-    'X': v step}. method='cubic' interpolates (spline prefiltered); 'linear' is trilinear.
+    'X': v step}. method='cubic' interpolates (spline prefiltered); 'linear' is trilinear;
+    'nearest' takes the nearest voxel. Other names raise ValueError. Samples outside
+    the volume take `cval` (default 0; cast to the volume dtype).
+
+    Changed (R7-10, 2026-11): 'nearest' is order 0 (it, and any other name, silently
+    fell back to 'linear'); unknown names raise ValueError; new `cval`.
 
     Changed (D01, 2026-11): for a single plane (``num_offsets=0``) 'Z' is None
     (no step), not 0.0, which every pixel-size parser rejects.
@@ -806,6 +917,7 @@ def sample_volume_plane(
     """
     if p0_phys is None or normal_phys is None:
         raise ValueError("p0_phys and normal_phys must be provided.")
+    spline_order = _interpolation_order(method, 'method', stacklevel=4)
 
     normal_phys = np.asarray(normal_phys, dtype=np.float64)
     normal_norm = np.linalg.norm(normal_phys)
@@ -846,8 +958,7 @@ def sample_volume_plane(
 
     offsets = np.arange(-num_offsets, num_offsets + 1, dtype=np.float32) * offset_step_um
 
-    # map_coordinates requires an integer order (1 for linear, 3 for cubic)
-    spline_order = 3 if method == 'cubic' else 1
+    # map_coordinates requires an integer order (0 nearest, 1 linear, 3 cubic)
 
     origin = np.zeros(3)
     if spline_order == 3:
@@ -891,7 +1002,7 @@ def sample_volume_plane(
 
         if spline_order == 3:
             plane = map_coordinates(
-                source, coords, order=3, mode='constant', cval=0,
+                source, coords, order=3, mode='constant', cval=cval,
                 output=np.float32, prefilter=False
             ).reshape(u_res, v_res)
             if is_int:
@@ -904,9 +1015,9 @@ def sample_volume_plane(
             sampled_volume[i] = map_coordinates(
                 source,
                 coords,
-                order=1,
+                order=spline_order,
                 mode='constant',
-                cval=0,
+                cval=cval,
                 output=volume.dtype,
                 prefilter=False
             ).reshape(u_res, v_res)

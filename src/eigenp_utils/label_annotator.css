@@ -32,3 +32,4 @@
 .lbl-help { color: #888; border: 1px solid #555; border-radius: 50%; width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; cursor: help; margin-left: 4px; }
 .lbl-counts { color: #8c8; min-height: 16px; font-family: ui-monospace, monospace; }
 .lbl-btn[data-tool="background"].lbl-active { background: #666; border-color: #888; }
+.lbl-val { min-width: 38px; text-align: right; font: 10px/1 ui-monospace, monospace; color: #9cf; }

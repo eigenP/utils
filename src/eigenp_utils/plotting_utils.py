@@ -19,38 +19,105 @@ import itertools
 import math
 import datetime
 import warnings
-from .stats import remove_outliers
-from ._conventions import channel_color_hex
+import logging
+from ._conventions import channel_color_hex, warn_deprecated
+
+logger = logging.getLogger(__name__)
 
 # --- Initialization: Load Font and Style ---
 ROOT_DIR = Path(__file__).parent
 font_path = ROOT_DIR / 'Inter-Regular.ttf'
 style_path = ROOT_DIR / 'scientific.mplstyle'
 
-# Load Style
+class PlottingStyle:
+    """Handle returned by :func:`set_plotting_style`: holds the rcParams from before the call.
+
+    ``restore()`` puts them back; used as a context manager
+    (``with set_plotting_style(): ...``) it restores on exit.
+    """
+
+    def __init__(self, saved):
+        self._saved = saved
+        self.restored = False
+
+    def restore(self):
+        """Restore every rcParam to its value before :func:`set_plotting_style` was called,
+        except ``backend``, which is left as it is (as ``plt.rc_context`` does)."""
+        import matplotlib as mpl
+
+        # dict.update bypasses re-validation and deprecation warnings, like plt.rc_context
+        dict.update(mpl.rcParams, self._saved)
+        self.restored = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.restore()
+        return False
+
 
 def set_plotting_style(editable_text=True):
+    """Apply the package's figure style (``scientific.mplstyle``, Inter font) to Matplotlib's rcParams.
+
+    The style changes global rcParams, so every later figure in the session
+    uses it; the returned handle undoes that.
+
+    Text uses the bundled Inter font with DejaVu Sans as fallback (for glyphs
+    and weights Inter-Regular lacks, e.g. bold), and math text uses
+    DejaVu Sans (``mathtext.fontset='dejavusans'``), so labels like
+    ``'Distance ($\\mu$m)'`` stay sans-serif and editable SVGs reference no
+    Computer Modern fonts.
+
+    Parameters
+    ----------
+    editable_text : bool, default True
+        True: SVG text stays text (``svg.fonttype='none'``, ASCII minus).
+        False: glyphs are outlined as paths.
+
+    Returns
+    -------
+    PlottingStyle
+        Handle with ``.restore()``; also a context manager::
+
+            with set_plotting_style():
+                fig, ax = plt.subplots()  # styled
+            # rcParams are back to what they were
+
+    Changed (D05, 2026-11): returns a handle (was None); a missing style or
+    font file gives a UserWarning (was a print).
+    Changed (D30, 2026-11): math text in DejaVu Sans (was Computer Modern, from
+    the style), and ``font.sans-serif`` is ``['Inter', 'DejaVu Sans']`` (was
+    Inter only, so bold fell back to Inter Regular).
+    """
+    import matplotlib as mpl
+
+    saved = dict(mpl.rcParams.copy())
+    # like plt.rc_context: never reset the backend (a later plt.switch_backend must survive restore())
+    saved.pop('backend', None)
+    handle = PlottingStyle(saved)
+
     # Load Style
     try:
         if style_path.exists():
             plt.style.use(str(style_path))
         else:
-            print(f"Warning: Style file not found at {style_path}")
+            warnings.warn(f"Style file not found at {style_path}", UserWarning, stacklevel=2)
     except Exception as e:
-        print(f"Warning: Failed to load style from {style_path}: {e}")
-    
-    # Load Font
+        warnings.warn(f"Failed to load style from {style_path}: {e}", UserWarning, stacklevel=2)
+
+    # Load Font: Inter first, DejaVu Sans (always shipped with Matplotlib) as fallback
     try:
         if font_path.exists():
             font_manager.fontManager.addfont(str(font_path))
             prop = font_manager.FontProperties(fname=str(font_path))
             plt.rcParams['font.family'] = 'sans-serif'
-            plt.rcParams['font.sans-serif'] = prop.get_name()
+            plt.rcParams['font.sans-serif'] = [prop.get_name(), 'DejaVu Sans']
         else:
-            # Fallback if file not found, though it should be there
-            print(f"Warning: Font file not found at {font_path}")
+            warnings.warn(f"Font file not found at {font_path}", UserWarning, stacklevel=2)
     except Exception as e:
-        print(f"Warning: Failed to load font from {font_path}: {e}")
+        warnings.warn(f"Failed to load font from {font_path}: {e}", UserWarning, stacklevel=2)
+    plt.rcParams['mathtext.fontset'] = 'dejavusans'
 
     # Set SVG export settings for editable text globally if requested
     if editable_text:
@@ -59,7 +126,7 @@ def set_plotting_style(editable_text=True):
     else:
         plt.rcParams['svg.fonttype'] = 'path'
         plt.rcParams['axes.unicode_minus'] = True
-
+    return handle
 
 
 # --- Initialization: Create labels_cmap ---
@@ -71,6 +138,10 @@ final_colors = [(0, 0, 0, 0)]
 # Add the 255 pre-calculated Glasbey-style maximally distant colors
 for r, g, b in LABELS_CMAP_COLORS:
     final_colors.append((r, g, b, 1.0))
+
+# Number of label colours (entries 1..255): id k uses entry ((k - 1) % 255) + 1,
+# LabelAnnotator's rule (instance_palette[(k - 1) % 255]).
+_N_LABEL_COLORS = len(LABELS_CMAP_COLORS)
 
 
 class _LabelsColormap(ListedColormap):
@@ -93,18 +164,121 @@ class _LabelsColormap(ListedColormap):
         return super().__call__(X, alpha=alpha, bytes=bytes)
 
 
+def make_labels_cmap(background=(0, 0, 0, 0), *, name="labels_cmap"):
+    """A fresh copy of :data:`labels_cmap` whose entry 0 (background, label 0) is ``background``.
+
+    The label colours (entries 1..255) are the same as ``labels_cmap``'s; the shared
+    ``labels_cmap`` object and the registered colormaps are not changed, and the copy
+    is not registered (pass it as ``cmap=`` or register it yourself).
+
+    The palette is tuned for a dark background (every colour has L* >= 40), so a
+    black background (``'labels_cmap_black'``) shows near-white labels best.
+
+    Parameters
+    ----------
+    background : color, default (0, 0, 0, 0)
+        Any Matplotlib colour; the default is transparent.
+    name : str
+        Name of the returned colormap.
+
+    Examples
+    --------
+    >>> ax.imshow(lab, cmap=make_labels_cmap('black'), norm=LabelNorm(), interpolation='nearest')
+    """
+    colors = [mcolors.to_rgba(background)] + [(r, g, b, 1.0) for r, g, b in LABELS_CMAP_COLORS]
+    return _LabelsColormap(colors, name=name)
+
+
 # Create the new colormap (entry i is final_colors[i])
 labels_cmap = _LabelsColormap(final_colors, name="labels_cmap")
+mpl_colormaps.register(labels_cmap, name="labels_cmap", force=True)
 
-try:
-    mpl_colormaps.register(labels_cmap, name="labels_cmap", force=True)
-except AttributeError:
-    # Fallback for older Matplotlib versions
-    plt.register_cmap(name="labels_cmap", cmap=labels_cmap)
+#: ``labels_cmap`` with an opaque black background, registered as ``'labels_cmap_black'``.
+#: Added (D06, 2026-11): the import-time hint that suggested mutating
+#: ``labels_cmap._lut`` is gone (it did not affect ``cmap='labels_cmap'``).
+labels_cmap_black = make_labels_cmap((0, 0, 0, 1), name="labels_cmap_black")
+mpl_colormaps.register(labels_cmap_black, name="labels_cmap_black", force=True)
 
-# Print a hint for users who might need the background to be black
-print("Hint: labels_cmap background is transparent by default. To set it to black, run:")
-print("labels_cmap._init(); labels_cmap._lut[0] = [0, 0, 0, 1]")
+
+def _label_lut_index(ids):
+    """LUT entry of each label id: 0 for background, ``((k - 1) % 255) + 1`` otherwise."""
+    ids = np.asarray(ids)
+    if ids.dtype == bool:
+        ids = ids.astype(np.uint8)
+    if ids.dtype.kind == "f":
+        if not np.all(np.isfinite(ids)) or not np.all(ids == np.rint(ids)):
+            raise ValueError("label ids must be finite integers")
+        ids = ids.astype(np.int64)
+    elif ids.dtype.kind not in "iu":
+        raise ValueError(f"label ids must be integers, got dtype {ids.dtype}")
+    if ids.dtype.kind == "i" and ids.size and ids.min() < 0:
+        raise ValueError("label ids must not be negative")
+    ids = ids.astype(np.int64, copy=False)
+    return np.where(ids > 0, (ids - 1) % _N_LABEL_COLORS + 1, 0)
+
+
+def label_rgba(labels, background=(0, 0, 0, 0)):
+    """RGBA colour of every label id, the same colour LabelAnnotator draws for that id.
+
+    Id ``k > 0`` gets ``labels_cmap.colors[((k - 1) % 255) + 1]`` (the palette cycles
+    every 255 ids), id 0 gets ``background``. A label's colour therefore does not
+    depend on the other ids in the image, unlike ``imshow(lab, cmap=labels_cmap)``,
+    whose autoscaled norm moves the colours with the image's maximum and squeezes
+    several neighbouring ids into one entry above 256 labels.
+
+    Added (D28, 2026-11).
+
+    Parameters
+    ----------
+    labels : int or array of int
+        Label ids (non-negative; integer-valued floats are accepted).
+    background : color, default (0, 0, 0, 0)
+        Colour of label 0 (transparent by default).
+
+    Returns
+    -------
+    numpy.ndarray
+        Float RGBA in [0, 1], shape ``labels.shape + (4,)``.
+
+    Examples
+    --------
+    >>> ax.imshow(label_rgba(lab), interpolation='nearest')
+    """
+    lut = np.asarray(labels_cmap.colors, dtype=float).copy()
+    lut[0] = mcolors.to_rgba(background)
+    return lut[_label_lut_index(labels)]
+
+
+class LabelNorm(mcolors.Normalize):
+    """Normalisation that maps label id ``k`` onto ``labels_cmap`` entry ``((k - 1) % 255) + 1``.
+
+    With ``imshow(lab, cmap=labels_cmap, norm=LabelNorm(), interpolation='nearest')``
+    each id is drawn with :func:`label_rgba`'s colour (LabelAnnotator's colour),
+    whatever the image's maximum id. Meant for 256-entry label colormaps
+    (``labels_cmap``, ``labels_cmap_black``, :func:`make_labels_cmap`). Values are
+    rounded to the nearest integer; negative ids map below the range (the
+    colormap's "under" colour). Not invertible, so no colorbar.
+
+    Added (D28, 2026-11).
+    """
+
+    def __init__(self):
+        super().__init__(vmin=0, vmax=None, clip=False)
+
+    def __call__(self, value, clip=None):
+        result, is_scalar = self.process_value(value)
+        self.autoscale_None(result)
+        data = np.ma.getdata(result).astype(float)
+        bad = np.ma.getmaskarray(result) | ~np.isfinite(data)
+        ids = np.rint(np.where(bad, 0, data)).astype(np.int64)
+        idx = np.where(ids > 0, (ids - 1) % _N_LABEL_COLORS + 1, 0)
+        out = np.where(idx > 0, (idx + 0.5) / (_N_LABEL_COLORS + 1), 0.0)
+        out = np.where(ids < 0, -1.0, out)
+        out = np.ma.array(out, mask=bad)
+        return out[0] if is_scalar else out
+
+    def inverse(self, value):
+        raise ValueError("LabelNorm is not invertible")
 
 
 # --- Color Stops (White -> Pastel -> Pure -> Deep Saturated) ---
@@ -142,12 +316,8 @@ i_slate = I_SERIES_COLORMAPS["I Slate"]
 for name, cmap in I_SERIES_COLORMAPS.items():
     alias_name = name.lower().replace(" ", "_")
 
-    # Matplotlib >= 3.7 registry pattern with backward-compatibility fallback
     for reg_name in (name, alias_name):
-        try:
-            mpl_colormaps.register(cmap, name=reg_name, force=True)
-        except AttributeError:
-            plt.register_cmap(name=reg_name, cmap=cmap)
+        mpl_colormaps.register(cmap, name=reg_name, force=True)
 
 
 def _image_info(image, shown=None):
@@ -382,8 +552,59 @@ def _info_html(rows, channels, shown_channel=None):
     return _HTML("".join(out))
 
 
+def _yx_dims(dims):
+    """The (Y, X) dims of a DataArray: named Y and X (case-insensitive), else the last two."""
+    by_name = {str(d).upper(): d for d in dims}
+    if "Y" in by_name and "X" in by_name:
+        return by_name["Y"], by_name["X"]
+    return dims[-2], dims[-1]
+
+
+def _rgb_plane(image, shape, strict=False):
+    """``(plane, leading_index)`` when ``image`` holds RGB(A) in a trailing axis of 3 or 4, else None.
+
+    Only uint8 data or floats within [0, 1] count as colour, so a (Y, X, 3) uint16
+    Z stack is not mistaken for RGB. Leading axes beyond (Y, X, 3|4) take their
+    middle index, indexed before conversion (a lazy volume loads one plane).
+    ``strict`` (``rgb=True``) raises instead of returning None.
+    """
+    dtype = np.dtype(getattr(image, "dtype", np.float64))
+    ok_shape = len(shape) >= 3 and shape[-1] in (3, 4)
+    if not ok_shape or dtype.kind not in "uf" or (dtype.kind == "u" and dtype != np.uint8):
+        if strict:
+            raise ValueError("rgb=True needs a trailing axis of length 3 or 4 holding uint8 "
+                             f"or floats in [0, 1]; got shape {shape}, dtype {dtype}")
+        return None
+    lead = tuple(s // 2 for s in shape[:-3])
+    plane = np.asarray(image[lead + (slice(None),) * 3] if lead else image)
+    if dtype.kind == "f":
+        finite = plane[np.isfinite(plane)]
+        if finite.size and (finite.min() < 0 or finite.max() > 1):
+            if strict:
+                raise ValueError("rgb=True needs float colour values in [0, 1]")
+            return None
+    return plane, lead
+
+
+def _integer_bin_edges(lo, hi, bins):
+    """Level-aligned histogram edges for integers ``lo..hi``: every bin covers the same
+    number of levels, ``ceil((hi - lo + 1) / bins)``, edges at half levels (so ``bins``
+    is an upper bound, and each level gets its own bin when there are few).
+
+    Ranges of more than 2**53 levels (64-bit data spanning most of the dtype) cannot be
+    resolved level by level in float64, so they get ``bins`` plain equal-width edges."""
+    lo, hi = int(lo), int(hi)
+    n_levels = hi - lo + 1
+    if n_levels > 2**53:
+        return np.linspace(float(lo), float(hi), int(bins) + 1)
+    width = max(1, math.ceil(n_levels / int(bins)))
+    n_bins = math.ceil(n_levels / width)
+    # float arithmetic: an int64 product could overflow
+    return (lo - 0.5) + float(width) * np.arange(n_bins + 1, dtype=np.float64)
+
+
 def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=None, image_size=4.0,
-                   **imshow_kwargs):
+                   rgb='auto', **imshow_kwargs):
     """
     Displays an image, its histogram and an info table, stacked in one column.
 
@@ -396,7 +617,11 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
 
     For inputs with more than two dimensions the middle slice of every extra
     dimension is shown; it is indexed before conversion to NumPy, so a lazy
-    (dask, zarr, memmap) volume loads only that plane. The info table lists
+    (dask, zarr, memmap) volume loads only that plane. A DataArray shows its
+    dims named Y and X (case-insensitive; else its last two dims). An array
+    whose trailing axis of length 3 or 4 holds uint8 or floats in [0, 1] is
+    shown as an RGB(A) image (``rgb``), e.g. the output of
+    :func:`color_coded_projection`. The info table lists
     the shape and dtype, or for an ``xarray.DataArray`` (e.g. STCZYX from ``image_io``) the source, dims,
     pixel sizes and which slice is shown, plus min / max / mean of the shown
     slice and, when set (``vmin``/``vmax``/``gamma``), the display range with
@@ -409,7 +634,10 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     image : array-like or xarray.DataArray
         The input image.
     bins : int, optional
-        The number of bins to use for the histogram. Default is 64.
+        The number of bins to use for the histogram. Default is 64. For
+        integer (and bool) data it is an upper bound: bins are aligned to
+        integer levels and each covers the same number of levels, so flat data
+        give a flat histogram.
     gamma : float, optional
         Display gamma (``PowerNorm``); ``vmin``/``vmax`` passed in ``imshow_kwargs``
         are applied to that norm. Cannot be combined with a ``norm``.
@@ -420,9 +648,16 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         as fit the figure width).
     image_size : float, optional
         Length in inches of the image's longer side.
+    rgb : {'auto', True, False}, default 'auto'
+        ``'auto'``: an ndarray whose trailing axis has length 3 or 4 and holds
+        uint8 or floats in [0, 1] is shown as colour, with one histogram per
+        colour channel (leading axes beyond it take their middle index).
+        ``True``: require such an image (ValueError otherwise). ``False``:
+        always slice the leading axes. DataArrays are never treated as RGB.
+        ``gamma``, ``norm``, ``vmin`` and ``vmax`` do not apply to colour.
     **imshow_kwargs
         Passed to ``imshow`` (``cmap``, ``vmin``, ``vmax``, ``norm``,
-        ``interpolation``, ...). Defaults: ``origin='lower'``, ``cmap='gray'``,
+        ``interpolation``, ...). Defaults: ``origin='upper'``, ``cmap='gray'``,
         ``interpolation='nearest'``.
 
     Returns
@@ -441,17 +676,27 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     >>> res["info_html"]  # last expression in a notebook cell: rendered table
 
     Formerly ``hist_imshow`` (deprecated alias).
+
+    Changed (D26, 2026-11): ``origin='upper'`` by default (row 0 at the top, as
+    the ortho viewers, LabelAnnotator, Fiji and napari; it was ``'lower'``).
+    RGB(A) arrays are shown as colour (``rgb='auto'``; they were sliced into a
+    strip 3 pixels wide). DataArrays pick Y/X by name.
+    Changed (R5-09, 2026-11): integer histograms use level-aligned bins.
     """
     ### SET DEFAULT KWARGS
-    imshow_kwargs.setdefault('origin', 'lower')
+    imshow_kwargs.setdefault('origin', 'upper')
     imshow_kwargs.setdefault('cmap', 'gray')
     imshow_kwargs.setdefault('interpolation', 'nearest')
+    if rgb not in ('auto', True, False):
+        raise ValueError(f"rgb must be 'auto', True or False, got {rgb!r}")
 
     shown = None
     shown_channel = None
+    is_rgb = False
     if hasattr(image, "dims") and hasattr(image, "isel"):
         da = image
-        extra = [d for d in da.dims[:-2]]
+        ydim, xdim = _yx_dims(da.dims)
+        extra = [d for d in da.dims if d not in (ydim, xdim)]
         sel = {d: da.sizes[d] // 2 for d in extra}
         if sel:
             parts = []
@@ -461,12 +706,20 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
             shown = ", ".join(parts)
         shown_channel = sel.get("C")
         info_src = da
-        image = np.asarray(da.isel(sel).values) if sel else np.asarray(da.values)
+        plane = da.isel(sel) if sel else da
+        image = np.asarray(plane.transpose(ydim, xdim).values)
     else:
         if not (hasattr(image, "shape") and hasattr(image, "__getitem__")):
             image = np.asarray(image)  # e.g. nested Python lists
         im_shape = tuple(image.shape)
-        if len(im_shape) > 2:
+        if rgb is not False:
+            candidate = _rgb_plane(image, im_shape, strict=rgb is True)
+            if candidate is not None:
+                image, lead = candidate
+                is_rgb = True
+                shown = ("RGBA" if im_shape[-1] == 4 else "RGB") + (
+                    f", middle slice {lead} of the leading dims" if lead else "")
+        if not is_rgb and len(im_shape) > 2:
             middle_indices = [s // 2 for s in im_shape[:-2]]
             shown = "middle slice " + str(tuple(middle_indices)) + " of the leading dims"
             # index before converting: a lazy (dask/zarr/memmap) volume loads one plane only
@@ -477,6 +730,12 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     if return_image_only:
         return image
 
+    if is_rgb:
+        if gamma != 1 or any(k in imshow_kwargs for k in ('norm', 'vmin', 'vmax')):
+            raise ValueError("gamma, norm, vmin and vmax do not apply to an RGB(A) image; "
+                             "pass rgb=False to show its slices with a colormap")
+        imshow_kwargs.pop('cmap')
+
     info_lines = _image_info_lines(info_src, shown)
     rows, channels = _image_info(info_src, shown)
 
@@ -485,9 +744,14 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
         # numpy cannot subtract booleans (needed by hist and by the stats below)
         image = image.astype(np.uint8)
 
-    finite = image[np.isfinite(image)] if image.dtype.kind in "fc" else image.ravel()
-    if finite.size:
-        stats = f"min {finite.min():.4g}  max {finite.max():.4g}  mean {finite.mean():.4g}"
+    if is_rgb:
+        finite = image  # per-channel histograms below; stats over the colour values
+        stat_vals = image[..., :3][np.isfinite(image[..., :3])]
+    else:
+        finite = image[np.isfinite(image)] if image.dtype.kind in "fc" else image.ravel()
+        stat_vals = finite
+    if stat_vals.size:
+        stats = f"min {stat_vals.min():.4g}  max {stat_vals.max():.4g}  mean {stat_vals.mean():.4g}"
     else:
         stats = "no finite values"
 
@@ -519,9 +783,24 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     vmin, vmax = im.norm.vmin, im.norm.vmax  # also the limits of a norm passed in
 
     frac = np.zeros(0)
-    if finite.size:
+    if finite.size and is_rgb:
+        # one step histogram per colour channel (alpha is not shown)
+        n_px = finite.shape[0] * finite.shape[1]
+        hist_bins = _integer_bin_edges(0, 255, bins) if dtype == np.uint8 else np.linspace(0, 1, int(bins) + 1)
+        fracs = []
+        for c, col in zip(range(3), ("#D62728", "#2CA02C", "#1F77B4")):
+            vals = finite[..., c].ravel()
+            vals = vals[np.isfinite(vals)]
+            f, _, _ = ax_hist.hist(vals, bins=hist_bins, histtype='step', color=col,
+                                   weights=np.full(vals.size, 1.0 / max(n_px, 1)))
+            fracs.append(f)
+        frac = np.concatenate(fracs)
+    elif finite.size:
+        hist_bins = bins
+        if dtype.kind in "iub" and isinstance(bins, (int, np.integer)):
+            hist_bins = _integer_bin_edges(finite.min(), finite.max(), bins)
         # fraction of pixels per bin: unit-free, unlike a density in 1/intensity
-        frac, _, _ = ax_hist.hist(finite.ravel(), bins=bins, histtype='stepfilled',
+        frac, _, _ = ax_hist.hist(finite.ravel(), bins=hist_bins, histtype='stepfilled',
                                   weights=np.full(finite.size, 1.0 / finite.size))
     nonzero = frac[frac > 0]
     if nonzero.size and nonzero.max() > 10 * nonzero.min():
@@ -537,7 +816,8 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
     # display range: dashed lines at vmin / vmax, intensities the display clips shaded
     # (only with finite data: without it the autoscaled limits mean nothing)
     display = None
-    if finite.size and vmin is not None and vmax is not None and np.isfinite([vmin, vmax]).all():
+    if (not is_rgb and finite.size and vmin is not None and vmax is not None
+            and np.isfinite([vmin, vmax]).all()):
         dmin, dmax = float(finite.min()), float(finite.max())
         lo, hi = min(dmin, vmin), max(dmax, vmax)
         if hi <= lo:
@@ -606,65 +886,133 @@ def describe_image(image, bins=64, gamma=1, return_image_only=False, info_width=
 
 
 def hist_imshow(*args, **kwargs):
-    """Deprecated alias of :func:`describe_image` (same arguments and return value)."""
-    import warnings
+    """Deprecated alias of :func:`describe_image` (same arguments and return value).
 
-    warnings.warn(
-        "hist_imshow is deprecated; use eigenp_utils.describe_image (same arguments and return value)",
-        DeprecationWarning,
-        stacklevel=2,
-    )
+    Changed (D08, 2026-11): emits a FutureWarning (was a DeprecationWarning); it
+    will be removed in eigenp_utils 0.1.0.
+    """
+    warn_deprecated("hist_imshow", "describe_image")
     return describe_image(*args, **kwargs)
 
 
-def color_coded_projection(image: np.ndarray, color_map='plasma') -> np.ndarray:
+def color_coded_projection(image: np.ndarray, color_map='plasma', *, normalize='global',
+                           vmin=None, vmax=None, percentiles=(0.1, 99.99), combine='max') -> np.ndarray:
     """
-    Pseudocolors each frame of a 3D image (time, y, x) using the specified color map.
+    Temporal colour code: pseudocolours each frame of a (time, y, x) stack by its
+    time index and projects the frames into one RGB image.
 
-    :param image: 3D array (time, y, x) representing the image
-    :param color_map: Name of the color map to use (default is 'plasma')
-    :return: RGB image with dimensions (y, x, channel)
+    Each frame's intensity, scaled to [0, 1], multiplies the colour
+    ``color_map(t / (T - 1))``; the frames are then combined per pixel
+    (``combine``).
+
+    Colormap trade-off: the default ``'plasma'`` (like viridis, inferno, magma)
+    is a brightness ramp, so time is also coded as brightness: an object in the
+    first frame is drawn about 13x darker (luminance 0.07) than the same object
+    in the last frame (0.91), and with inferno/magma early frames are nearly
+    invisible. For equal-brightness time coding pass a hue map such as
+    ``'turbo'`` or ``'hsv'``.
+
+    Parameters
+    ----------
+    image : array-like
+        3D array (time, y, x). NaN pixels count as 0.
+    color_map : str, default 'plasma'
+        Name of a registered Matplotlib colormap.
+    normalize : {'global', 'frame'}, default 'global'
+        ``'global'``: one display range for the whole stack (as Fiji's
+        Temporal-Color Code), the ``percentiles`` of its finite values, so
+        brightness can be compared between frames and frames holding only noise
+        stay dark. ``'frame'``: each frame is scaled to its own ``percentiles``
+        (e.g. to compensate bleaching); a frame without contrast becomes 0.
+    vmin, vmax : float, optional
+        Fix the global display range (either one or both); values are mapped
+        to ``(v - vmin) / (vmax - vmin)`` and clipped to [0, 1]. Only with
+        ``normalize='global'``.
+    percentiles : (float, float), default (0.1, 99.99)
+        Percentiles of the finite values that set the automatic range
+        (``_conventions.robust_range``, a fixed-seed sample above 10^6 values).
+        If the upper percentile does not exceed the lower one on non-constant
+        data (very sparse signal), the maximum is used, with a warning.
+    combine : {'max', 'argmax'}, default 'max'
+        ``'max'``: channel-wise maximum over frames (a pixel bright in several
+        frames gets a mixed colour that may not be in the colormap).
+        ``'argmax'``: the colour of the frame in which the pixel is brightest,
+        scaled by that intensity, so every colour is a colormap colour (ties:
+        the earliest frame).
+
+    Returns
+    -------
+    numpy.ndarray
+        float32 RGB image (y, x, 3) in [0, 1].
+
+    Changed (D25, 2026-11): normalisation is global and robust by default. It
+    used to be a min-max per frame, which stretched noise-only frames to full
+    brightness and let a constant frame flood the image; per-frame scaling is
+    now ``normalize='frame'``, with percentiles, and maps constant frames to 0.
+    Added ``vmin``/``vmax``, ``percentiles`` and ``combine``. The default
+    colormap stays ``'plasma'``.
     """
+    from ._conventions import robust_range
+
     # Ensure the input image has three dimensions (time, y, x)
     if image.ndim != 3:
         raise ValueError("Input image must have three dimensions (time, y, x)")
+    if normalize not in ("global", "frame"):
+        raise ValueError(f"normalize must be 'global' or 'frame', got {normalize!r}")
+    if combine not in ("max", "argmax"):
+        raise ValueError(f"combine must be 'max' or 'argmax', got {combine!r}")
+    if normalize == "frame" and (vmin is not None or vmax is not None):
+        raise ValueError("vmin/vmax fix the global range; they need normalize='global'")
+    pmin, pmax = percentiles
 
-    # Get the colormap
     cmap = mpl_colormaps[color_map]
-
-    # Get the time dimension
     time_dimension = image.shape[0]
 
-    # Initialize the result array (y, x, 3) for the maximum intensity projection
+    def scale(frame, lo, hi):
+        """(frame - lo) / (hi - lo) clipped to [0, 1], NaN -> 0; a degenerate range gives 0."""
+        if not hi > lo:
+            return np.zeros(frame.shape, np.float32)
+        out = (frame - np.float32(lo)) / np.float32(hi - lo)
+        return np.clip(np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+
+    if normalize == "global":
+        lo, hi = vmin, vmax
+        if lo is None or hi is None:
+            auto_lo, auto_hi = robust_range(image, pmin, pmax, stacklevel=3)
+            lo = auto_lo if lo is None else lo
+            hi = auto_hi if hi is None else hi
+        lo, hi = float(lo), float(hi)
+        if (vmin is not None or vmax is not None) and not hi > lo:
+            raise ValueError(f"vmin ({lo}) must be smaller than vmax ({hi})")
+
+    # The result (y, x, 3), updated frame by frame: no (time, y, x, 3) temporary
     rgb_image = np.zeros((image.shape[1], image.shape[2], 3), dtype=np.float32)
+    if combine == "argmax":
+        best = np.full(image.shape[1:], -1.0, dtype=np.float32)
+        best_t = np.zeros(image.shape[1:], dtype=np.intp)
 
-    # Loop through the time dimension and apply the colormap
     for t in range(time_dimension):
-        # Normalize the current frame to the range [0, 1], in float: integer
-        # differences overflow (int16 -20000..20000), and NaN pixels count as 0
-        frame = image[t].astype(np.float32)
-        frame_min = np.nanmin(frame) if np.isfinite(frame).any() else 0.0
-        frame_max = np.nanmax(frame) if np.isfinite(frame).any() else 0.0
-        if frame_max > frame_min:
-            frame_normalized = np.nan_to_num((frame - frame_min) / (frame_max - frame_min))
+        # float32: integer differences overflow (int16 -20000..20000)
+        frame = np.asarray(image[t]).astype(np.float32)
+        if normalize == "frame":
+            f_lo, f_hi = robust_range(frame, pmin, pmax, stacklevel=3)
+            frame_normalized = scale(frame, f_lo, f_hi)
         else:
-            # A constant frame has no contrast to normalise: keep its value, but
-            # clipped to [0, 1] (a frame of 1000 must not give RGB values of 1000)
-            frame_normalized = np.clip(np.nan_to_num(frame), 0.0, 1.0)
+            frame_normalized = scale(frame, lo, hi)
 
-        # Get the corresponding color value from the colormap based on the current time index
+        if combine == "argmax":
+            better = frame_normalized > best
+            best[better] = frame_normalized[better]
+            best_t[better] = t
+            continue
+
         color_value = cmap(t / max(time_dimension - 1, 1))[:3]
+        for c in range(3):  # in place, one channel at a time
+            np.maximum(rgb_image[:, :, c], frame_normalized * color_value[c], out=rgb_image[:, :, c])
 
-        # Modulate the color value by the intensity factor and update max projection
-        # Optimization: We update rgb_image iteratively to avoid allocating the large (time, y, x, 3) array.
-        # We also loop over channels to avoid allocating a full (y, x, 3) temporary for the current frame.
-        for c in range(3):  # Loop through the RGB channels
-            # Compute this channel's contribution for the current time point
-            # This allocates a temporary (y, x) array which is much smaller
-            channel_component = frame_normalized * color_value[c]
-
-            # Update the max projection in-place
-            np.maximum(rgb_image[:, :, c], channel_component, out=rgb_image[:, :, c])
+    if combine == "argmax":
+        colors = np.asarray(cmap(np.arange(time_dimension) / max(time_dimension - 1, 1)))[:, :3]
+        rgb_image[:] = np.clip(best, 0.0, 1.0)[..., None] * colors[best_t].astype(np.float32)
 
     return rgb_image
 
@@ -769,8 +1117,9 @@ def raincloud_plot(data,
         When hue is nested, whether to draw elements at different positions.
         If None, defaults to True unless hue matches x or y variable.
     raster_threshold : int, optional
-        If the total number of scatter points across all groups exceeds this threshold,
-        the jittered scatter points will be rasterized. This is useful for keeping SVG
+        If the total number of scatter points across all groups reaches this threshold,
+        the jittered scatter points will be rasterized. Changed (R5-05, 2026-11):
+        rasterizes at exactly the threshold too (``>=``, as ``savefig_svg``). This is useful for keeping SVG
         file sizes small when there are many points.
     outlier_method : str, optional
         Method to use for identifying outliers to exclude from the violin KDE estimation
@@ -1048,7 +1397,7 @@ def raincloud_plot(data,
     # --- 2. Calculate Total Points for Rasterization ---
     total_points = sum(len(item['values']) for item in plot_items)
     rasterize_scatter = False
-    if raster_threshold is not None and total_points > raster_threshold:
+    if raster_threshold is not None and total_points >= raster_threshold:  # as savefig_svg
         rasterize_scatter = True
 
     # --- 3. Setup Figure/Axes ---
@@ -1079,6 +1428,8 @@ def raincloud_plot(data,
         # A. Violin
         # Filter outliers for the KDE estimation if requested
         if outlier_method is not None:
+            from .stats import remove_outliers  # lazy: scipy.stats only when needed
+
             violin_vals = remove_outliers(vals, method=outlier_method, threshold=outlier_multiplier)
             if len(violin_vals) == 0:
                 # Fallback if everything is filtered (should be rare)
@@ -1199,7 +1550,9 @@ def colormap_maker(colors, positions=None, cmap_name=None):
         If not provided, the colors will be equally spaced.
     cmap_name : str, optional
         The name to register the colormap under in Matplotlib. If None, the colormap
-        is not registered.
+        is not registered. A name registered earlier (e.g. by this function) is
+        replaced. Changed (R5-22, 2026-11): a built-in Matplotlib name ('gray',
+        'viridis', ...) raises a ValueError that says so.
 
     Returns
     -------
@@ -1225,20 +1578,22 @@ def colormap_maker(colors, positions=None, cmap_name=None):
     else:
         color_data = colors
 
+    if cmap_name is not None and cmap_name in getattr(mpl_colormaps, "_builtin_cmaps", ()):
+        raise ValueError(
+            f"cmap_name {cmap_name!r} is a built-in Matplotlib colormap and cannot be replaced; "
+            "choose another name"
+        )
+
     # Generate a default name for internal creation if None is provided
     internal_name = cmap_name if cmap_name else "custom_cmap"
 
     cmap = LinearSegmentedColormap.from_list(internal_name, color_data)
 
     if cmap_name is not None:
-        # Register the colormap
-        # In newer Matplotlib versions, plt.colormaps.register or mpl.colormaps.register is preferred
-        # but plt.register_cmap is the classic way. Let's use mpl_colormaps for compatibility.
-        try:
+        # force=True: re-running a notebook cell re-registers the same (own) name
+        with warnings.catch_warnings():  # "Overwriting the cmap ..." is expected here
+            warnings.simplefilter("ignore", UserWarning)
             mpl_colormaps.register(cmap, name=cmap_name, force=True)
-        except AttributeError:
-            # Fallback for older Matplotlib versions
-            plt.register_cmap(name=cmap_name, cmap=cmap)
 
     return cmap
 
@@ -1253,208 +1608,50 @@ def adjust_colormap(cmap_name, start_ = 0.25, end_ = 1.0, start_color = [0.9, 0.
     new_cmap = mcolors.LinearSegmentedColormap.from_list(f"{cmap_name}_adjusted", colors)
     return new_cmap
 
+_PLOTLY_REMOVED = (
+    "{name} has been removed (plotly is no longer a dependency of eigenp_utils). "
+    "Use the scatter anywidget instead: "
+    "from eigenp_utils.tnia_plotting_anywidgets import show_zyx_max_scatter_interactive; "
+    "show_zyx_max_scatter_interactive(np.column_stack([z, y, x]), channels=[values]) "
+    "(it returns a TNIAScatterWidget)."
+)
+
+
 def plotly_scatter_3d(data=None, x=None, y=None, z=None, color=None, labels=None,
                       marker_size=5, opacity=0.8, colorscale='Purples',
                       initial_view=None, **kwargs):
+    """Removed: raises NotImplementedError.
+
+    Changed (D29, 2026-11): the Plotly 3D scatter is fully deprecated and plotly
+    is no longer a dependency. Use the scatter anywidget
+    :func:`eigenp_utils.tnia_plotting_anywidgets.show_zyx_max_scatter_interactive`
+    (a ``TNIAScatterWidget``) instead, e.g.
+    ``show_zyx_max_scatter_interactive(np.column_stack([z, y, x]), channels=[values])``.
+    The signature is kept so that old calls fail with this message.
+
+    Raises
+    ------
+    NotImplementedError
+        Always.
     """
-    Creates an interactive 3D scatter plot using Plotly.
-
-    Parameters
-    ----------
-    data : pd.DataFrame or dict, optional
-        Data source. If provided, `x`, `y`, `z`, `color`, and `labels` can be column names/keys.
-    x, y, z : str or array-like
-        Coordinates. Can be column names (if `data` is provided) or arrays.
-    color : str or array-like, optional
-        Color values. Can be a column name or an array.
-    labels : str or array-like, optional
-        Labels for hover text. Can be a column name or an array.
-    marker_size : float or array-like, default 5
-        Size of the markers.
-    opacity : float, default 0.8
-        Opacity of the markers.
-    colorscale : str, default 'Purples'
-        Name of the colorscale to use.
-    initial_view : dict, optional
-        Dictionary to set the initial camera view (e.g., `dict(eye=dict(x=1.5, y=1.5, z=1.5))`).
-    **kwargs :
-        Additional keyword arguments passed to `go.Scatter3d`.
-
-    Returns
-    -------
-    plotly.graph_objects.Figure
-        The generated Plotly figure.
-    """
-    try:
-        import plotly.graph_objects as go
-    except ImportError as e:
-        raise ImportError("Plotly is required for this function. Install it with `pip install .[plotting]`") from e
-
-    # Helper to resolve input to array
-    def resolve_input(val, data_obj):
-        if val is None:
-            return None
-        if isinstance(val, str) and data_obj is not None:
-            if isinstance(data_obj, pd.DataFrame):
-                return data_obj[val]
-            elif isinstance(data_obj, dict):
-                return data_obj[val]
-        return val
-
-    # Resolve inputs
-    x_data = resolve_input(x, data)
-    y_data = resolve_input(y, data)
-    z_data = resolve_input(z, data)
-    c_data = resolve_input(color, data)
-    l_data = resolve_input(labels, data)
-
-    if x_data is None or y_data is None or z_data is None:
-        raise ValueError("x, y, and z coordinates must be provided.")
-
-    # Prepare marker dict
-    marker = dict(
-        size=marker_size,
-        opacity=opacity,
-        colorscale=colorscale,
-    )
-
-    # Handle color
-    if c_data is not None:
-        if isinstance(c_data, (list, tuple)):
-            # is_numeric_dtype(list) is always False: test the converted values
-            c_data = pd.Series(c_data)
-        if not pd.api.types.is_numeric_dtype(c_data):
-             try:
-                # Ensure it's a Series or convert
-                c_series = pd.Series(c_data)
-                c_codes = c_series.astype('category').cat.codes
-                marker['color'] = c_codes
-             except Exception as e:
-                print(f"Warning: Failed to convert non-numeric color data to codes: {e}")
-                marker['color'] = c_data
-        else:
-            marker['color'] = c_data
-
-        marker['showscale'] = True
-        marker['colorbar'] = dict(title='Value')
-
-    # Construct hover template
-    hovertemplate = (
-        '<b>X:</b> %{x:.2f}<br>'
-        '<b>Y:</b> %{y:.2f}<br>'
-        '<b>Z:</b> %{z:.2f}<br>'
-    )
-    if l_data is not None:
-        hovertemplate = '<b>Label:</b> %{text}<br>' + hovertemplate
-
-    if c_data is not None:
-        hovertemplate += '<b>Color:</b> %{marker.color:.2f}<br>'
-
-    hovertemplate += '<extra></extra>'
-
-    # Create Scatter3d trace
-    trace = go.Scatter3d(
-        x=x_data,
-        y=y_data,
-        z=z_data,
-        mode='markers',
-        marker=marker,
-        text=l_data,
-        hovertemplate=hovertemplate,
-        **kwargs
-    )
-
-    fig = go.Figure(data=[trace])
-
-    # Update layout
-    scene = dict(
-        xaxis_title=x if isinstance(x, str) else 'X',
-        yaxis_title=y if isinstance(y, str) else 'Y',
-        zaxis_title=z if isinstance(z, str) else 'Z',
-        aspectmode='data'
-    )
-
-    if initial_view:
-        scene['camera'] = initial_view
-
-    fig.update_layout(
-        scene=scene,
-        margin=dict(l=0, r=0, b=0, t=40)
-    )
-
-    return fig
+    raise NotImplementedError(_PLOTLY_REMOVED.format(name="plotly_scatter_3d"))
 
 
 def plotly_scatter_3d_from_adata_obsm(adata, obsm_key, color_key=None, label_key=None, **kwargs):
+    """Removed: raises NotImplementedError.
+
+    Changed (D29, 2026-11): fully deprecated with :func:`plotly_scatter_3d`. Use
+    the scatter anywidget instead, e.g.
+    ``show_zyx_max_scatter_interactive(adata.obsm['X_umap'][:, :3], channels=[adata.obs['score']])``
+    from :mod:`eigenp_utils.tnia_plotting_anywidgets`.
+
+    Raises
+    ------
+    NotImplementedError
+        Always.
     """
-    Creates an interactive 3D scatter plot from an AnnData object's obsm slot.
+    raise NotImplementedError(_PLOTLY_REMOVED.format(name="plotly_scatter_3d_from_adata_obsm"))
 
-    Parameters
-    ----------
-    adata : AnnData
-        Annotated data matrix.
-    obsm_key : str
-        Key for `adata.obsm` to use as coordinates (e.g., 'X_umap', 'X_pca').
-        Expects at least 3 dimensions.
-    color_key : str, optional
-        Key for `adata.obs` to use for coloring.
-    label_key : str, optional
-        Key for `adata.obs` to use for labels.
-    **kwargs :
-        Additional keyword arguments passed to `plotly_scatter_3d`.
-
-    Returns
-    -------
-    plotly.graph_objects.Figure
-        The generated Plotly figure.
-    """
-    if obsm_key not in adata.obsm:
-        raise ValueError(f"'{obsm_key}' not found in adata.obsm.")
-
-    coords = adata.obsm[obsm_key]
-
-    if coords.shape[1] < 3:
-        # Warn or handle gracefully? User asked for 3D.
-        # We'll pad with zeros if 2D, but warn.
-        print(f"Warning: '{obsm_key}' has only {coords.shape[1]} dimensions. Padding with zeros for Z-axis.")
-        z = np.zeros(coords.shape[0])
-        x = coords[:, 0]
-        y = coords[:, 1]
-    else:
-        x = coords[:, 0]
-        y = coords[:, 1]
-        z = coords[:, 2]
-
-    # Extract color and labels
-    color = None
-    if color_key:
-        if color_key in adata.obs:
-            color = adata.obs[color_key]
-        else:
-            print(f"Warning: '{color_key}' not found in adata.obs.")
-
-    labels = None
-    if label_key:
-        if label_key in adata.obs:
-            labels = adata.obs[label_key]
-        else:
-            print(f"Warning: '{label_key}' not found in adata.obs.")
-
-    # Set default axis titles if not provided in kwargs (via passing x,y,z names)
-    # We pass arrays directly, so plotly_scatter_3d won't see names unless we pass them or update layout.
-    # To get nice axis titles, we can manually update the figure afterwards or update the scene dict inside.
-    # But plotly_scatter_3d infers titles from string args. Here we pass arrays.
-
-    fig = plotly_scatter_3d(x=x, y=y, z=z, color=color, labels=labels, **kwargs)
-
-    # Update axis titles to reflect the keys
-    fig.update_layout(scene=dict(
-        xaxis_title=f"{obsm_key}_0",
-        yaxis_title=f"{obsm_key}_1",
-        zaxis_title=f"{obsm_key}_2" if coords.shape[1] >= 3 else "Zero",
-    ))
-
-    return fig
 
 def get_nice_number(value):
     """
@@ -1484,16 +1681,18 @@ def get_nice_number(value):
     return sign * round(leading_digit * 10.0 ** exponent, -exponent)
 
 
-def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, scatter_raster_threshold=1e3, editable_text=True, **kwargs):
+def savefig_svg(filename, bgnd_color='white', bbox_inches='tight', dpi=300, pad_inches=0.1,
+                scatter_raster_threshold=1e3, editable_text=True, *, fig=None, **kwargs):
     """
-    Saves the currently active matplotlib figure as an SVG file.
+    Saves a Matplotlib figure as an SVG file.
 
     Parameters
     ----------
     filename : str or Path
         The path where the SVG will be saved. The '.svg' extension is appended if missing.
-    bgnd_color : color, default (1, 1, 1, 0.8)
-        The background color (facecolor) of the saved figure.
+    bgnd_color : color, default 'white'
+        The background color (facecolor) of the saved figure; 'none' for a
+        transparent background.
     bbox_inches : str or Bbox, default 'tight'
         Bounding box in inches: only the given portion of the figure is saved.
     dpi : float, default 300
@@ -1502,20 +1701,42 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
         Amount of padding around the figure when bbox_inches is 'tight'.
     scatter_raster_threshold : int, optional
         If provided, any scatter plot (PathCollection) in the figure containing
-        this number of points or more will be rasterized before saving. This
-        helps keep SVG file sizes manageable for large datasets.
+        this number of points or more is rasterized in the saved file. This
+        helps keep SVG file sizes manageable for large datasets. The figure's
+        own rasterization flags are restored afterwards.
     editable_text : bool, default True
         If True, exports SVGs with editable text by temporarily setting
         `svg.fonttype` to 'none' and `axes.unicode_minus` to False. If False,
         glyphs are outlined as paths (`svg.fonttype` 'path'), whatever the
         global setting (e.g. after `set_plotting_style()`).
+    fig : matplotlib.figure.Figure, optional
+        The figure to save (any Figure, pyplot-managed or not). Omitting it
+        saves pyplot's current figure with a FutureWarning; ``fig`` becomes
+        required in eigenp_utils 0.1.0.
     **kwargs :
-        Additional keyword arguments passed directly to `plt.savefig`.
+        Additional keyword arguments passed directly to `Figure.savefig`.
+
+    Raises
+    ------
+    ValueError
+        If ``fig`` is omitted and pyplot has no open figure (nothing is created).
+
+    Changed (D05, 2026-11): added ``fig``; without it a FutureWarning is
+    emitted, and a ValueError when no figure is open (it used to save a new,
+    empty figure). The rasterization flags it sets are restored after saving
+    (they stayed on). The default background is opaque white (was 80%-opaque
+    white). Nothing is printed (it printed 'Saved figure to ...').
     """
-    fig = plt.gcf()
+    if fig is None:
+        if not plt.get_fignums():
+            raise ValueError("savefig_svg: no open figure; pass fig=")
+        warn_deprecated("savefig_svg without fig=", "savefig_svg(filename, fig=fig)")
+        fig = plt.gcf()
 
     # Extract figure title for metadata
-    title = fig._suptitle.get_text() if fig._suptitle else str(filename)
+    suptitle = fig.get_suptitle() if hasattr(fig, "get_suptitle") else (
+        fig._suptitle.get_text() if fig._suptitle else "")
+    title = suptitle or str(filename)
 
     # Initialize metadata with predefined options
     # Copy: the caller's dict must not keep this figure's title/date
@@ -1524,15 +1745,17 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
     metadata.setdefault('Date', datetime.datetime.now().isoformat())
     metadata.setdefault('Title', title)
 
-    # Rasterize scatter collections if threshold is met
+    # Rasterize large scatter collections for this save only
+    changed = []
     if scatter_raster_threshold is not None:
         from matplotlib.collections import PathCollection
         for ax in fig.axes:
             for collection in ax.collections:
-                if isinstance(collection, PathCollection):
-                    # Check the number of offsets (points) in the scatter
-                    if len(collection.get_offsets()) >= scatter_raster_threshold:
-                        collection.set_rasterized(True)
+                if (isinstance(collection, PathCollection)
+                        and len(collection.get_offsets()) >= scatter_raster_threshold
+                        and not collection.get_rasterized()):
+                    changed.append(collection)
+                    collection.set_rasterized(True)
 
     # Make sure we add '.svg' if it's not present
     filename_str = str(filename)
@@ -1549,19 +1772,23 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
         # axes.unicode_minus is left alone: the style's font may lack U+2212.
         context_rc['svg.fonttype'] = 'path'
 
-    # Call savefig on the current figure with the context
-    with plt.rc_context(context_rc):
-        fig.savefig(
-            filename_str,
-            format='svg',
-            facecolor=bgnd_color,
-            bbox_inches=bbox_inches,
-            dpi=dpi,
-            pad_inches=pad_inches,
-            metadata=metadata,
-            **kwargs
-        )
-    print(f"Saved figure to {filename_str}")
+    try:
+        with plt.rc_context(context_rc):
+            fig.savefig(
+                filename_str,
+                format='svg',
+                facecolor=bgnd_color,
+                bbox_inches=bbox_inches,
+                dpi=dpi,
+                pad_inches=pad_inches,
+                metadata=metadata,
+                **kwargs
+            )
+    finally:
+        for collection in changed:
+            collection.set_rasterized(False)
+    logger.info("Saved figure to %s", filename_str)
+
 
 def brightness_diagnostic_plotter(diagnostic_data, ax=None):
     """

@@ -1,3 +1,12 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "xarray",
+#     "scikit-image",
+#     "tifffile",  # imported by image_io
+# ]
+# ///
 """Minimal 2D tile stitching for STCZYX xarray images (see :func:`stitch_tiles`)."""
 
 import warnings
@@ -5,7 +14,31 @@ import warnings
 import numpy as np
 import xarray as xr
 
+from ._conventions import is_length_unit, to_um
 from .image_io import _STCZYX, array_to_stczyx_xarray, get_stczyx_pixel_sizes
+
+# The pointer to multiview-stitcher is shown once per process (D32)
+_MINIMAL_WARNING_SHOWN = False
+
+
+def _stage_factor(stage_unit, pixel_unit):
+    """Factor converting stage positions from ``stage_unit`` to ``pixel_unit`` (1.0 when equal or
+    when the stage has no unit, which means the pixel unit). A pixel size without a unit is in µm
+    (D01). Raises ValueError when they cannot be converted."""
+    if pixel_unit is None:
+        pixel_unit = 'µm'
+    if stage_unit is None or str(stage_unit) == str(pixel_unit):
+        return 1.0
+    if is_length_unit(stage_unit) and is_length_unit(pixel_unit):
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)  # inch conversions warn
+            return float(to_um(1.0, stage_unit)) / float(to_um(1.0, pixel_unit))
+    raise ValueError(
+        f"stage positions are in {stage_unit!r} but the pixel sizes in {pixel_unit!r}, which cannot "
+        "be converted; give stage_positions in the unit of the pixel sizes"
+    )
 
 
 def _overlap(a0, a1, b0, b1):
@@ -96,6 +129,8 @@ def stitch_tiles(
     max_residual: float = 2.0,
     prior_weight: float = 0.01,
     blending: str = 'linear',
+    register: bool = True,
+    max_area_ratio=4.0,
 ) -> xr.DataArray:
     """
     Stitch the S tiles of an STCZYX image into one 2D mosaic (S = 1).
@@ -119,7 +154,9 @@ def stitch_tiles(
         STCZYX image (as from :func:`array_to_stczyx_xarray`) with stage
         positions in the coordinates ``stage_y`` / ``stage_x`` along S, in the
         unit of the pixel sizes (calibrated Y/X coordinates or
-        ``attrs['pixel_sizes']``). All tiles share one Y/X shape.
+        ``attrs['pixel_sizes']``). A ``units`` attribute on the stage
+        coordinates in another length unit (e.g. 'nm') is converted; one that
+        cannot be converted raises. All tiles share one Y/X shape.
     registration_channel : int or str
         Channel (index, or name in the C coordinate) used for registration.
         The resulting positions are applied to all channels.
@@ -151,6 +188,26 @@ def stitch_tiles(
     blending : {'linear', 'overwrite'}
         'linear' weights each tile by its distance to the tile edge;
         'overwrite' pastes tiles in S order (later tiles on top).
+    register : bool, default True
+        False: stage-only placement, no tile is registered (replaces the
+        ``min_ncc=1.1`` idiom).
+    max_area_ratio : float or None, default 4.0
+        Refuse (ValueError, before allocating) a mosaic whose area exceeds this
+        many times the area of an n·h × n·w square (n tiles of h × w px). Any
+        chain of touching tiles fits in that square, including a diagonal
+        strip, so a larger canvas usually means the stage positions are not in
+        the unit of the pixel sizes (e.g. nm read as µm) or the tiles are
+        widely separated. None disables the check.
+
+    Changed (D32, 2026-11): the pointer to multiview-stitcher is a
+    UserWarning on the first call of the process only (it was on every call);
+    added ``register``.
+    Changed (R8-11, 2026-11): stage units are checked and converted, the
+    canvas size is checked before allocation (``max_area_ratio``, relative to
+    the n·h × n·w square so diagonal strips pass; unit-less pixel sizes count
+    as µm when converting stage units), and linear
+    blending accumulates in float32 for inputs of up to 16 bits / float32
+    (float64 otherwise).
 
     Returns:
     --------
@@ -162,13 +219,17 @@ def stitch_tiles(
         ``(y, x)``), the stage-only positions and the number of registered pairs
         used.
     """
-    warnings.warn(
-        "stitch_tiles is a minimal translation-only 2D stitcher. For more control "
-        "(3D/affine registration, large datasets) consider multiview-stitcher "
-        "(Marvin Albert, https://github.com/multiview-stitcher/multiview-stitcher).",
-        UserWarning,
-        stacklevel=2,
-    )
+    global _MINIMAL_WARNING_SHOWN
+    if not _MINIMAL_WARNING_SHOWN:
+        _MINIMAL_WARNING_SHOWN = True
+        warnings.warn(
+            "stitch_tiles is a minimal translation-only 2D stitcher. For more control "
+            "(3D/affine registration, large datasets) consider multiview-stitcher "
+            "(Marvin Albert, https://github.com/multiview-stitcher/multiview-stitcher). "
+            "(Shown once per session.)",
+            UserWarning,
+            stacklevel=2,
+        )
     if tuple(tiles.dims) != tuple(_STCZYX):
         raise ValueError(
             f"tiles must have dims {tuple(_STCZYX)}, got {tuple(tiles.dims)}; "
@@ -195,24 +256,47 @@ def stitch_tiles(
     if not min_ncc >= 0:
         raise ValueError(f"min_ncc must be >= 0, got {min_ncc}.")
 
-    # 1. Stage positions -> prior top-left pixel positions
+    if max_area_ratio is not None and not max_area_ratio > 0:
+        raise ValueError(f"max_area_ratio must be > 0 or None, got {max_area_ratio}.")
+
+    # 1. Stage positions -> prior top-left pixel positions (in the pixel-size unit)
     stage = np.column_stack([tiles.coords['stage_y'].values, tiles.coords['stage_x'].values]).astype(float)
+    stage_units = {tiles.coords[c].attrs.get('units', tiles.coords[c].attrs.get('unit'))
+                   for c in ('stage_y', 'stage_x')} - {None}
+    if len(stage_units) > 1:
+        raise ValueError(f"stage_y and stage_x have different units {sorted(map(str, stage_units))}.")
+    stage = stage * _stage_factor(stage_units.pop() if stage_units else None, sizes['unit'])
     transform = np.eye(2) if stage_to_image is None else np.asarray(stage_to_image, float)
     if transform.shape != (2, 2):
         raise ValueError(f"stage_to_image must be a 2x2 matrix, got shape {transform.shape}.")
     prior = (stage @ transform.T) / pixel_yx
     prior -= prior.min(axis=0)
 
+    # Preflight: the canvas the stage positions imply, before any allocation
+    extent = np.ptp(prior, axis=0) if n_tiles else np.zeros(2)
+    est_h, est_w = int(np.ceil(extent[0])) + h, int(np.ceil(extent[1])) + w
+    # Any chain of n touching h x w tiles (row, column, diagonal) fits in an (n*h) x (n*w) square
+    bound_area = n_tiles * n_tiles * h * w
+    if max_area_ratio is not None and est_h * est_w > max_area_ratio * bound_area:
+        raise ValueError(
+            f"the stage positions imply a {est_h} x {est_w} px canvas, {est_h * est_w / bound_area:.3g}x "
+            f"the {n_tiles * h} x {n_tiles * w} px square that any chain of the {n_tiles} touching tiles "
+            f"of {h} x {w} px fits in, even a diagonal one (max_area_ratio={max_area_ratio}). "
+            f"Check that the stage positions are in the unit of the pixel sizes ({sizes['unit'] or 'µm'}); "
+            "pass max_area_ratio=None for deliberately separated tiles."
+        )
+
     # 2. Pairwise registration on the max projection of one channel
     if isinstance(registration_channel, str):
         reg = tiles.sel(C=registration_channel)
     else:
         reg = tiles.isel(C=registration_channel)
-    projections = np.asarray(reg.max(dim=('T', 'Z')).values, dtype=np.float32)
+    projections = (np.asarray(reg.max(dim=('T', 'Z')).values, dtype=np.float32)
+                   if register else None)
 
     prior_int = np.round(prior).astype(int)
     edges = []
-    for i in range(n_tiles):
+    for i in range(n_tiles if register else 0):
         for j in range(i + 1, n_tiles):
             offset = prior_int[j] - prior_int[i]
             result = _register_pair(projections[i], projections[j], offset, min_overlap, max_shift)
@@ -226,12 +310,14 @@ def stitch_tiles(
     # 4. Fusion
     out_h, out_w = positions[:, 0].max() + h, positions[:, 1].max() + w
     lead = (tiles.sizes['T'], tiles.sizes['C'], tiles.sizes['Z'])
-    canvas = np.zeros(lead + (out_h, out_w), dtype=np.float64 if blending == 'linear' else tiles.dtype)
+    # float32 accumulation is exact enough for <= 16-bit / float32 input and halves the memory
+    acc = np.result_type(tiles.dtype, np.float32) if blending == 'linear' else tiles.dtype
+    canvas = np.zeros(lead + (out_h, out_w), dtype=acc)
     if blending == 'linear':
-        ramp_y = np.minimum(np.arange(1, h + 1), np.arange(h, 0, -1)).astype(float)
-        ramp_x = np.minimum(np.arange(1, w + 1), np.arange(w, 0, -1)).astype(float)
+        ramp_y = np.minimum(np.arange(1, h + 1), np.arange(h, 0, -1)).astype(acc)
+        ramp_x = np.minimum(np.arange(1, w + 1), np.arange(w, 0, -1)).astype(acc)
         feather = np.outer(ramp_y, ramp_x)
-        weight = np.zeros((out_h, out_w))
+        weight = np.zeros((out_h, out_w), dtype=acc)
     for s in range(n_tiles):
         y, x = positions[s]
         tile = np.asarray(tiles.isel(S=s).values)
@@ -241,11 +327,13 @@ def stitch_tiles(
         else:
             canvas[..., y:y + h, x:x + w] = tile
     if blending == 'linear':
-        canvas = np.divide(canvas, weight, out=np.zeros_like(canvas), where=weight > 0)
+        covered = np.broadcast_to(weight > 0, canvas.shape)
+        np.divide(canvas, weight, out=canvas, where=covered)  # in place
         if np.issubdtype(tiles.dtype, np.integer):
             info = np.iinfo(tiles.dtype)
-            canvas = np.clip(np.round(canvas), info.min, info.max)
-        canvas = canvas.astype(tiles.dtype)
+            np.round(canvas, out=canvas)
+            np.clip(canvas, info.min, info.max, out=canvas)
+        canvas = canvas.astype(tiles.dtype, copy=False)
 
     mosaic = array_to_stczyx_xarray(
         canvas, 'TCZYX',

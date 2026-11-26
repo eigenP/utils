@@ -13,6 +13,8 @@
 # https://forum.image.sc/t/surface-peeler-fiji-macro-for-fast-near-real-time-3d-surface-identification-and-extraction/61966
 ##################
 
+import warnings
+
 import numpy as np
 from scipy import ndimage
 from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt
@@ -20,12 +22,66 @@ from scipy.interpolate import RegularGridInterpolator
 from skimage import filters
 
 from .clahe_equalize_adapthist import clahe_u8
-from typing import Union, Tuple
+from ._conventions import UM, check_zyx_input, resolve_pixel_sizes, warn_deprecated
+from typing import Optional, Sequence, Union, Tuple
+
+#: Default blur of `extract_surface`, in binned voxels (Z, Y, X)
+DEFAULT_GAUSSIAN_SIGMA = (1.0, 4.0, 4.0)
 
 def _parse_factors(downscale_factor):
     if isinstance(downscale_factor, (int, np.integer)):
         return (int(downscale_factor),) * 3
     return tuple(int(f) for f in downscale_factor)
+
+
+def _binned_sigma(gaussian_sigma, gaussian_sigma_um, pixel_sizes, s_tup, stacklevel=3):
+    """
+    The blur in binned voxels.
+
+    `gaussian_sigma` is already in binned voxels. `gaussian_sigma_um` (scalar or
+    (Z, Y, X)) is in µm and is converted per axis with `pixel_sizes` and the binning
+    factors; without `pixel_sizes` (or for an axis without a size) the pixel size is
+    taken as 1.0, with a UserWarning.
+    """
+    if gaussian_sigma_um is None:
+        if pixel_sizes is not None:
+            warnings.warn(
+                "pixel_sizes is only used to convert gaussian_sigma_um; without it the blur "
+                "is gaussian_sigma in binned voxels. Pass gaussian_sigma_um for a blur in µm.",
+                UserWarning, stacklevel=stacklevel
+            )
+        return gaussian_sigma
+    sigma_um = np.asarray(gaussian_sigma_um, dtype=np.float64)
+    if sigma_um.ndim == 0:
+        sigma_um = np.full(3, float(sigma_um))
+    elif sigma_um.shape != (3,):
+        raise ValueError(
+            f"gaussian_sigma_um must be a scalar or a (Z, Y, X) triple, got shape "
+            f"{sigma_um.shape}."
+        )
+    if not np.all(np.isfinite(sigma_um) & (sigma_um >= 0)):
+        raise ValueError(f"gaussian_sigma_um must be finite and >= 0, got {gaussian_sigma_um!r}.")
+    if pixel_sizes is None:
+        warnings.warn(
+            "gaussian_sigma_um given without pixel_sizes; using a pixel size of 1.0 "
+            "(the sigma is read in raw voxels).", UserWarning, stacklevel=stacklevel
+        )
+        sizes = (1.0, 1.0, 1.0)
+    else:
+        values, _, unit = resolve_pixel_sizes(pixel_sizes, 3, stacklevel=stacklevel)
+        if unit != UM:
+            warnings.warn(
+                f"pixel_sizes unit {unit!r} is not a length unit; its values are used as µm.",
+                UserWarning, stacklevel=stacklevel
+            )
+        missing = [k for k, v in zip("ZYX", values) if v is None]
+        if missing:
+            warnings.warn(
+                f"pixel_sizes has no value for axis {', '.join(missing)}; using 1.0 for it.",
+                UserWarning, stacklevel=stacklevel
+            )
+        sizes = tuple(1.0 if v is None else float(v) for v in values)
+    return tuple(float(s / (p * f)) for s, p, f in zip(sigma_um, sizes, s_tup))
 
 
 def _bin_volume(image, s_tup):
@@ -346,10 +402,13 @@ def _upscale_surface(surface_z_red, has_surface, s_tup, full_shape, return_heigh
 def extract_surface(
     image: np.ndarray,
     downscale_factor: Union[int, Tuple[int, int, int]] = 4,
-    gaussian_sigma: float = 4.0,
+    gaussian_sigma: Union[float, Tuple[float, float, float]] = DEFAULT_GAUSSIAN_SIGMA,
     clahe_clip: float = 0.00,
     return_heightmap: bool = False,
     threshold: float = None,
+    *,
+    gaussian_sigma_um: Optional[Union[float, Sequence[float]]] = None,
+    pixel_sizes=None,
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
     Find the top (first along Z) surface of a (Z, Y, X) volume.
@@ -359,6 +418,16 @@ def extract_surface(
     (3D components smaller than 10% of the largest), and the first foreground voxel
     of each column is refined to sub-voxel height and upscaled.
 
+    `gaussian_sigma` is the blur in *binned* voxels, a scalar or a (Z, Y, X) tuple;
+    the default (1, 4, 4) blurs Z by one binned slice (4 raw slices at the default
+    binning). A wide Z blur shifts the threshold crossing by roughly
+    sigma_Z * Phi^-1(threshold fraction), which depends on how much of the stack is
+    tissue, i.e. on the depth of the surface. Alternatively give the blur in µm with
+    `gaussian_sigma_um` (scalar or (Z, Y, X)) and `pixel_sizes` (dict, sequence or
+    scalar, as everywhere in the package); it is converted per axis to binned
+    voxels and replaces `gaussian_sigma`. `pixel_sizes` is only used for that
+    (passing it without `gaussian_sigma_um` warns).
+
     `threshold` replaces the Otsu threshold with a fixed value in the units of the
     block-averaged, blurred input (no per-call rescaling); it cannot be combined
     with CLAHE. For volumes that do not fit in memory use `extract_surface_tiled`,
@@ -366,13 +435,28 @@ def extract_surface(
 
     Returns a boolean (Z, Y, X) surface mask, plus the float height map
     (-1 where there is no surface) when `return_heightmap` is True.
+
+    Changed (D19, 2026-11): the default `gaussian_sigma` is (1, 4, 4) binned voxels
+    (it was an isotropic 4.0, i.e. 16 raw slices along Z at the default binning,
+    which put surfaces 8-13 voxels too deep near the top of the stack and too
+    shallow near the bottom). Pass ``gaussian_sigma=4.0`` for the old result.
+    This also changes unbinned input (``downscale_factor=1``): the Z blur drops
+    from 4 to 1 raw slice, which moves heights by up to about one voxel (the
+    depth-dependent bias falls from +1.0 ... -1.3 to within +-0.1 voxel).
+    New: `gaussian_sigma_um` / `pixel_sizes` for a blur in physical units.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image, "extract_surface")
     if threshold is not None and clahe_clip > 0.0:
         raise ValueError("`threshold` cannot be combined with CLAHE (clahe_clip > 0).")
     s_tup = _parse_factors(downscale_factor)
+    sigma = _binned_sigma(gaussian_sigma, gaussian_sigma_um, pixel_sizes, s_tup)
     img_reduced = _bin_volume(image, s_tup)
     surface_z_red, has_surface = _reduced_surface(
-        img_reduced, gaussian_sigma, clahe_clip, threshold
+        img_reduced, sigma, clahe_clip, threshold
     )
     del img_reduced
     return _upscale_surface(surface_z_red, has_surface, s_tup, image.shape, return_heightmap)
@@ -396,12 +480,15 @@ def _tile_bounds(n, tile, block):
 def extract_surface_tiled(
     image,
     downscale_factor: Union[int, Tuple[int, int, int]] = 4,
-    gaussian_sigma: float = 4.0,
+    gaussian_sigma: Union[float, Tuple[float, float, float]] = DEFAULT_GAUSSIAN_SIGMA,
     clahe_clip: float = 0.00,
     return_heightmap: bool = False,
     threshold: float = None,
     tile_size: Union[int, Tuple[int, int]] = 1024,
     return_mask: bool = True,
+    *,
+    gaussian_sigma_um: Optional[Union[float, Sequence[float]]] = None,
+    pixel_sizes=None,
 ):
     """
     Memory-safe `extract_surface` for large volumes (NumPy memmap, dask, zarr, ...).
@@ -417,10 +504,22 @@ def extract_surface_tiled(
     ``np.asarray`` (which computes dask tiles). Tiles are rounded up to multiples of
     the block size. With `return_mask=False` only the (Y, X) height map is
     returned, which avoids allocating the full-resolution boolean mask.
+
+    `gaussian_sigma`, `gaussian_sigma_um` and `pixel_sizes` work as in
+    `extract_surface`.
+
+    Changed (D19, 2026-11): the default `gaussian_sigma` is (1, 4, 4) binned voxels
+    (was 4.0); see `extract_surface`.
+
+    Changed (D31, 2026-11): an xarray.DataArray with more than 3 dims (e.g. the
+    STCZYX output of load_image) raises TypeError; select one image with
+    ``eigenp_utils.image_io.to_zyx`` first. 2-D / 3-D DataArrays work as before.
     """
+    check_zyx_input(image, "extract_surface_tiled")
     if threshold is not None and clahe_clip > 0.0:
         raise ValueError("`threshold` cannot be combined with CLAHE (clahe_clip > 0).")
     s_tup = _parse_factors(downscale_factor)
+    sigma = _binned_sigma(gaussian_sigma, gaussian_sigma_um, pixel_sizes, s_tup)
     sz, sy, sx = s_tup
     Z, Y, X = image.shape
     ty, tx = (tile_size, tile_size) if np.isscalar(tile_size) else tile_size
@@ -434,7 +533,7 @@ def extract_surface_tiled(
             r = _bin_volume(np.asarray(image[:, y0:y1, x0:x1]), s_tup)
             reduced[:, y0 // sy:y0 // sy + r.shape[1], x0 // sx:x0 // sx + r.shape[2]] = r
 
-    surface_z_red, has_surface = _reduced_surface(reduced, gaussian_sigma, clahe_clip, threshold)
+    surface_z_red, has_surface = _reduced_surface(reduced, sigma, clahe_clip, threshold)
     del reduced
 
     if not return_mask:
@@ -582,9 +681,10 @@ def expand_surface_z(surface: np.ndarray, thickness: int, in_place: bool = False
 ### Translate if necessary
 def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, in_place=False):
     """
-      -- when you roll to the end of the image and set off the boundary, set a warning ✅ and the rolled over value from true to false❌
-    ==================================
-    Adjust the location or morphology of a binary mask by translation or erosion/dilation
+    Adjust the location or morphology of a binary mask by translation or erosion/dilation.
+
+    Voxels translated past the volume boundary are dropped (no wrap-around), with
+    a UserWarning.
 
     Args:
     -- mask: ndarray; the original binary mask to adjust
@@ -595,6 +695,8 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, 
 
     Returns:
     mask_translated: ndarray; the adjusted binary mask
+
+    Changed (R7-09, 2026-11): the lost-voxels message is a UserWarning, not a print.
     """
     # Translation
     dz, dy, dx = translation
@@ -668,7 +770,10 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, 
             if np.any(mask[:, :, lost_x]): lost_data = True
 
     if lost_data:
-        print("Warning: The mask has rolled over the boundaries. Please adjust the value.")
+        warnings.warn(
+            "The mask has rolled over the boundaries; voxels moved out of the volume "
+            "are dropped. Please adjust the translation.", UserWarning, stacklevel=2
+        )
 
     # 2. Copy valid data
     if in_place:
@@ -702,8 +807,15 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, 
         raise ValueError(f"Invalid morphological operation '{morph}'. Options are 'erode' or 'dilate'.")
 
     return mask_translated
+
+
 def dask_extract_surface():
     """
+    Deprecated: a documentation stub that does nothing; use `extract_surface_tiled`.
+
+    Changed (D08, R7-15, 2026-11): calling it emits a FutureWarning; it will be
+    removed in eigenp_utils 0.1.0.
+
     =====================================================================
     Run surface extraction on a large (dask / zarr / memmap) volume
     =====================================================================
@@ -725,7 +837,7 @@ def dask_extract_surface():
     surface_mask, height_map = extract_surface_tiled(
         da_image,
         downscale_factor=(2, 8, 8),
-        gaussian_sigma=4.0,
+        gaussian_sigma=(1, 4, 4),  # binned voxels; or gaussian_sigma_um= + pixel_sizes=
         clahe_clip=0.00,
         tile_size=1024,            # rounded up to multiples of the block size
         return_heightmap=True,
@@ -734,4 +846,5 @@ def dask_extract_surface():
     # Height map only (avoids allocating the full-resolution boolean mask):
     height_map = extract_surface_tiled(da_image, downscale_factor=(2, 8, 8), return_mask=False)
     """
-    pass
+    warn_deprecated("dask_extract_surface", "extract_surface_tiled")
+    return None
