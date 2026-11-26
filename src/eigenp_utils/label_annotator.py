@@ -25,7 +25,15 @@ Design
   labels: ``uint32[3] = (z, Y, X)`` header, then ``Y*X`` ``uint16``
   Labels > 65535 cannot be edited in the widget (checked on input).
 - Display scaling (8-bit conversion) is for viewing only; exported images are
-  the original, unscaled array.
+  the original, unscaled array. The 8-bit slice spans each channel's
+  ``vmin``..``vmax`` in data units (default: the package's default display
+  range, as in the ortho viewers); a range change re-quantises the slice in
+  Python, the browser applies gamma and colour.
+- Labels are always (Z)YX, whatever the spatial order of ``axes``.
+- The browser redraws only the dirty rectangle of each brush stamp and keeps
+  its per-slice undo as bounding-box diffs. Keys act only while the image
+  viewport has focus and do not reach the notebook; a plain wheel zooms only
+  after the viewport was clicked.
 - z-linking (instance mode): one id across z = one 3D object. Python also
   sends the labels of slices z-1 / z+1 (``labels_prev_to_js`` /
   ``labels_next_to_js``, same encoding, empty when out of range or when
@@ -40,8 +48,10 @@ Design
   background, 1..65534 cells. ``labels_signed`` / ``save(signed=True)`` give
   the signed convention (-1 background) used for sparse Cellpose training.
 
-Only numpy, anywidget and traitlets are required (core dependencies; also
-works in marimo WASM). ``tifffile`` is imported lazily by ``save``.
+Requires numpy, anywidget, traitlets and matplotlib (colour names; all core
+dependencies; also works in marimo WASM). ``tifffile`` is imported lazily by
+``save``; DataArray input is unpacked by ``tnia_plotting_anywidgets``
+(imported only then).
 """
 
 from __future__ import annotations

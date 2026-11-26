@@ -1097,6 +1097,15 @@ def test_frontend_has_background_and_delete_tools():
 
 
 def test_display_defaults_and_outline_traits():
+    """Display traits default to filled labels with a 2-px outline and 1-px border, and accept kwargs.
+
+    Strategy: construct with defaults, switch ``display`` to ``"outlined"``,
+    try an invalid value, and construct with ``display``/``outline_px``
+    kwargs.
+    Expected outcome: defaults ``"filled"``, 2 and 1; the legacy
+    ``outline_only`` stays False; an invalid display value raises; the
+    kwargs are kept (not overwritten by the constructor).
+    """
     w = LabelAnnotator(np.zeros((8, 8), np.float32))
     assert w.display == "filled" and w.outline_px == 2 and w.outline_border_px == 1
     assert w.outline_only is False  # legacy trait unchanged
@@ -1107,7 +1116,18 @@ def test_display_defaults_and_outline_traits():
 
 
 def test_multiple_stacks_keep_separate_labels_and_state(tmp_path):
-    a = np.random.default_rng(0).random((3, 8, 9)).astype(np.float32)
+    """A list of stacks keeps labels, z and geometry per stack, and saves every stack.
+
+    Strategy: two ZYX stacks of different shapes; edit stack 0, switch to
+    stack 1 and edit it, switch back; read ``stack_labels``; save with
+    ``stacks="all"``; set an out-of-range ``stack``; pass a wrong number of
+    ``stack_names``.
+    Expected outcome: each stack shows its own shape and labels, the next
+    free id restarts per stack, z is restored on return; the saved file
+    names carry the sanitised stack names and saving leaves the shown stack
+    alone; ``stack`` is clamped; mismatched names raise ``ValueError``.
+    """
+    a =np.random.default_rng(0).random((3, 8, 9)).astype(np.float32)
     b = np.random.default_rng(1).random((2, 6, 7)).astype(np.float32)
     w = LabelAnnotator([a, b], axes="ZYX", stack_names=["cage A", "cage B"], brush_radius=0)
     assert w.stack == 0 and w.stack_names == ["cage A", "cage B"] and w.shape_zyx == [3, 8, 9]
