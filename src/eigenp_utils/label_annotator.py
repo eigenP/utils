@@ -19,7 +19,7 @@ Design
 - The browser does all compositing and painting. Python sends the current
   z-slice once as 8-bit channels (display only) plus its uint16 labels; the
   browser sends the edited slice labels back after every stroke. Python keeps
-  the authoritative label volume (``uint32``).
+  the authoritative label volume (stored as ``uint16``, returned as ``uint32``).
 - Wire format (little-endian):
   image : ``uint32[4] = (z, C, Y, X)`` header, then ``C*Y*X`` ``uint8``
   labels: ``uint32[3] = (z, Y, X)`` header, then ``Y*X`` ``uint16``
@@ -67,6 +67,11 @@ _LBL_HDR = struct.Struct("<3I")
 _MAX_WIRE_LABEL = np.iinfo(np.uint16).max
 BACKGROUND_ID = _MAX_WIRE_LABEL  # reserved id for annotated background (background=True)
 _TRACK_UNDO_MAX = 20  # whole-volume operations kept for undo
+# ... and at most this many bytes of them (the newest one is always kept)
+_TRACK_UNDO_MAX_BYTES = 512 * 2**20
+# internal label storage: ids are at most 65535 (the uint16 wire), so uint16
+# halves the memory of uint32; the public getters still return uint32 (R4-19)
+_STORE = np.uint16
 
 # The package palette (white, lime, magenta, ...), shared with the ortho viewers
 # and cycled for more channels (D03). It used to start with magenta and fail
@@ -186,7 +191,7 @@ def _display_limits(arr: np.ndarray, percentiles) -> tuple[float, float]:
 
 
 def _coerce_label_values(lab: np.ndarray, background: bool) -> np.ndarray:
-    """Validate label values and return them as ``uint32`` (a copy).
+    """Validate label values and return them as ``uint16`` (a copy; the internal storage dtype).
 
     Accepts unsigned ids in ``[0, 65535]``; with ``background`` also negative
     values (signed convention), which become ``BACKGROUND_ID``. Float arrays
@@ -206,8 +211,8 @@ def _coerce_label_values(lab: np.ndarray, background: bool) -> np.ndarray:
                 hint += " (relabel sparse ids first, e.g. skimage.segmentation.relabel_sequential)"
             raise ValueError(f"labels must be in [0, {_MAX_WIRE_LABEL}]{hint}")
         if lo < 0:
-            return np.where(lab < 0, BACKGROUND_ID, lab).astype(np.uint32)
-    return lab.astype(np.uint32, copy=True)
+            return np.where(lab < 0, BACKGROUND_ID, lab).astype(_STORE)
+    return lab.astype(_STORE, copy=True)
 
 
 def encode_image_slice(slice_cyx_u8: np.ndarray, z: int) -> bytes:
@@ -486,7 +491,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         self._limits = [_display_limits(czyx[i], percentiles) for i in range(c)]
 
         if labels is None:
-            self._labels = np.zeros((nz, ny, nx), dtype=np.uint32)
+            self._labels = np.zeros((nz, ny, nx), dtype=_STORE)
         else:
             lab = np.asarray(labels)
             lab = lab[np.newaxis] if lab.ndim == 2 else lab
@@ -513,7 +518,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         for k, (e_img, e_lab) in enumerate(extra, start=1):
             ez, ey, ex = e_img.shape[1:]
             if e_lab is None:
-                el = np.zeros((ez, ey, ex), dtype=np.uint32)
+                el = np.zeros((ez, ey, ex), dtype=_STORE)
             else:
                 el = np.asarray(e_lab)
                 el = el[np.newaxis] if el.ndim == 2 else el
@@ -636,7 +641,7 @@ class LabelAnnotator(anywidget.AnyWidget):
         out = []
         for k, p in enumerate(self._parked):
             lab = self._labels if k == self._stack_idx else p["labels"]
-            out.append(_restore_axes(lab.copy(), self._spatial_axes))
+            out.append(_restore_axes(lab.astype(np.uint32), self._spatial_axes))
         return out
 
     @traitlets.validate("z")
@@ -843,8 +848,13 @@ class LabelAnnotator(anywidget.AnyWidget):
         """Write the id ``new_values`` at flat indices ``idx``, record the old values for undo, refresh."""
         flat = self._labels.reshape(-1)
         self._track_serial += 1
+        # compact undo entry: int32 indices when they fit, uint16 old values (R4-19)
+        if flat.size <= np.iinfo(np.int32).max:
+            idx = idx.astype(np.int32, copy=False)
         self._track_undo.append((self._track_serial, idx, flat[idx].copy(), int(new_values), what))
         del self._track_undo[:-_TRACK_UNDO_MAX]
+        while len(self._track_undo) > 1 and sum(u[1].nbytes + u[2].nbytes for u in self._track_undo) > _TRACK_UNDO_MAX_BYTES:
+            del self._track_undo[0]
         flat[idx] = new_values
         self._after_volume_edit(idx)
         self.status = what
@@ -1013,7 +1023,7 @@ class LabelAnnotator(anywidget.AnyWidget):
     @property
     def labels(self) -> np.ndarray:
         """Copy of the labels (``uint32``) with the input's spatial axes."""
-        return _restore_axes(self._labels.copy(), self._spatial_axes)
+        return _restore_axes(self._labels.astype(np.uint32), self._spatial_axes)
 
     def labels_signed(self) -> np.ndarray:
         """Copy of the labels as ``int32`` with ``BACKGROUND_ID`` -> -1 (input's spatial axes).
@@ -1132,6 +1142,6 @@ class LabelAnnotator(anywidget.AnyWidget):
         for image, labels, z, pi, pm in targets:
             img = image[:, z]
             tifffile.imwrite(pi, img[0] if img.shape[0] == 1 else img, compression="zlib")
-            tifffile.imwrite(pm, self._signed(labels[z]) if signed else labels[z], compression="zlib")
+            tifffile.imwrite(pm, self._signed(labels[z]) if signed else labels[z].astype(np.uint32), compression="zlib")
             written += [pi, pm]
         return written

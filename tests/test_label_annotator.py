@@ -1408,3 +1408,35 @@ def test_rendered_view_resync_resends_stale_slice_only():
     w.labels_from_js = encode_label_slice(edit, 0)
     w.labels_resync += 1
     assert w.labels_rev == rev + 1
+
+
+# ------------------------------------------------- stage 2: API, memory, metadata (D17/D18, R4-19, R8-10)
+def test_labels_are_stored_as_uint16_and_returned_as_uint32(tmp_path):
+    """Labels live in ``uint16`` internally (ids are at most 65535) but the public API stays ``uint32`` (R4-19).
+
+    Strategy: a 2-stack widget with ids up to 65535; read ``_labels`` and the
+    parked stack, then every public getter (``labels``, ``stack_labels``,
+    ``save`` masks); run a track op and check its undo entry's dtypes.
+    Expected outcome: internal arrays are ``uint16`` (half the memory of
+    ``uint32``); ``labels``, ``stack_labels`` and saved masks are ``uint32``
+    with the same values; track-op undo stores ``int32`` indices and
+    ``uint16`` old values (not ``int64`` + ``uint32``: 6 instead of 12 bytes
+    per voxel).
+    """
+    tifffile = pytest.importorskip("tifffile")
+    lab = np.zeros((2, 6, 7), np.uint32)
+    lab[0, :2] = 65535
+    lab[1, 3:] = 7
+    w = LabelAnnotator([np.zeros((2, 6, 7)), np.zeros((2, 6, 7))], axes="ZYX", labels=[lab, lab])
+    assert w._labels.dtype == np.uint16 and w._parked[1]["labels"].dtype == np.uint16
+    assert w.labels.dtype == np.uint32 and np.array_equal(w.labels, lab)
+    assert all(s.dtype == np.uint32 and np.array_equal(s, lab) for s in w.stack_labels)
+    w.labels_from_js = encode_label_slice(np.full((6, 7), 9, np.uint16), 1)
+    assert w._labels.dtype == np.uint16 and (w.labels[1] == 9).all()
+    paths = w.save(tmp_path, "t", slices="all")
+    masks = tifffile.imread(paths[1])
+    assert masks.dtype == np.uint32 and masks.max() == 65535
+    assert w.merge_ids(9, 3)
+    _, idx, old, *_ = w._track_undo[-1]
+    assert idx.dtype == np.int32 and old.dtype == np.uint16
+    assert w.undo_track_op() and (w.labels[1] == 9).all() and w._labels.dtype == np.uint16
