@@ -655,9 +655,10 @@ def expand_surface_z(surface: np.ndarray, thickness: int, in_place: bool = False
 ### Translate if necessary
 def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, in_place=False):
     """
-      -- when you roll to the end of the image and set off the boundary, set a warning ✅ and the rolled over value from true to false❌
-    ==================================
-    Adjust the location or morphology of a binary mask by translation or erosion/dilation
+    Adjust the location or morphology of a binary mask by translation or erosion/dilation.
+
+    Voxels translated past the volume boundary are dropped (no wrap-around), with
+    a UserWarning.
 
     Args:
     -- mask: ndarray; the original binary mask to adjust
@@ -668,6 +669,8 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, 
 
     Returns:
     mask_translated: ndarray; the adjusted binary mask
+
+    Changed (R7-09, 2026-11): the lost-voxels message is a UserWarning, not a print.
     """
     # Translation
     dz, dy, dx = translation
@@ -741,7 +744,10 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, 
             if np.any(mask[:, :, lost_x]): lost_data = True
 
     if lost_data:
-        print("Warning: The mask has rolled over the boundaries. Please adjust the value.")
+        warnings.warn(
+            "The mask has rolled over the boundaries; voxels moved out of the volume "
+            "are dropped. Please adjust the translation.", UserWarning, stacklevel=2
+        )
 
     # 2. Copy valid data
     if in_place:
@@ -775,8 +781,15 @@ def adjust_mask_location(mask, translation=(0, 0, 0), morph=None, iterations=1, 
         raise ValueError(f"Invalid morphological operation '{morph}'. Options are 'erode' or 'dilate'.")
 
     return mask_translated
+
+
 def dask_extract_surface():
     """
+    Deprecated: a documentation stub that does nothing; use `extract_surface_tiled`.
+
+    Changed (D08, R7-15, 2026-11): calling it emits a FutureWarning; it will be
+    removed in eigenp_utils 0.1.0.
+
     =====================================================================
     Run surface extraction on a large (dask / zarr / memmap) volume
     =====================================================================
@@ -798,7 +811,7 @@ def dask_extract_surface():
     surface_mask, height_map = extract_surface_tiled(
         da_image,
         downscale_factor=(2, 8, 8),
-        gaussian_sigma=4.0,
+        gaussian_sigma=(1, 4, 4),  # binned voxels; or gaussian_sigma_um= + pixel_sizes=
         clahe_clip=0.00,
         tile_size=1024,            # rounded up to multiples of the block size
         return_heightmap=True,
@@ -807,4 +820,5 @@ def dask_extract_surface():
     # Height map only (avoids allocating the full-resolution boolean mask):
     height_map = extract_surface_tiled(da_image, downscale_factor=(2, 8, 8), return_mask=False)
     """
-    pass
+    warn_deprecated("dask_extract_surface", "extract_surface_tiled")
+    return None

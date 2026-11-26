@@ -4,6 +4,7 @@ from scipy import ndimage
 
 from eigenp_utils.surface_extraction import (
     adjust_mask_location,
+    dask_extract_surface,
     crop_edges,
     expand_surface_z,
     extract_surface,
@@ -279,7 +280,7 @@ def test_expand_surface_z_zero_thickness_returns_copy():
     assert expand_surface_z(s, 0, in_place=True) is s
 
 
-def test_adjust_mask_location(capsys):
+def test_adjust_mask_location():
     """Verify translation, rollover clamping, OOB clearing, in-place overlap, morphology, and error handling.
 
     Strategy: exercise positive/negative shifts, boundary rollover (checking no
@@ -301,18 +302,20 @@ def test_adjust_mask_location(capsys):
     neg = adjust_mask_location(mask, translation=(-2, -3, -1))
     assert neg[3, 2, 4] and neg.sum() == 1
 
-    # Boundary rollover drops out-of-frame voxels without wrapping and prints warning
+    # Boundary rollover drops out-of-frame voxels without wrapping and warns (R7-09:
+    # a UserWarning, not a print)
     roll = np.zeros(shape, dtype=bool)
     roll[0, 5, 5] = True
     roll[5, 5, 5] = True
-    rolled = adjust_mask_location(roll, translation=(-1, 0, 0))
+    with pytest.warns(UserWarning, match="rolled over the boundaries"):
+        rolled = adjust_mask_location(roll, translation=(-1, 0, 0))
     assert rolled[4, 5, 5] and not rolled[9, 5, 5] and rolled.sum() == 1
-    assert "rolled over the boundaries" in capsys.readouterr().out
 
     # Out-of-bounds translation clears entirely for both out-of-place and in-place
     for in_place in (False, True):
         src = mask.copy()
-        cleared = adjust_mask_location(src, translation=(10, 0, 0), in_place=in_place)
+        with pytest.warns(UserWarning, match="rolled over"):
+            cleared = adjust_mask_location(src, translation=(10, 0, 0), in_place=in_place)
         assert not np.any(cleared)
         if in_place:
             assert cleared is src
@@ -750,3 +753,32 @@ def test_extract_surface_sigma_in_micrometres():
     with pytest.warns(UserWarning, match="pixel_sizes"):
         _, raw = extract_surface(vol, gaussian_sigma_um=(2.0, 16.0, 16.0), **kw)
     np.testing.assert_array_equal(raw, ref)
+
+
+def test_adjust_mask_location_prints_nothing(capsys):
+    """R7-09: a translation that loses mask voxels warns instead of printing.
+
+    Strategy: shift a voxel on the Z=0 face out of the frame; capture stdout.
+    Expected outcome: a UserWarning and empty stdout; a translation that loses
+    nothing emits no warning.
+    """
+    mask = np.zeros((6, 6, 6), dtype=bool)
+    mask[0, 3, 3] = True
+    with pytest.warns(UserWarning, match="rolled over"):
+        adjust_mask_location(mask, translation=(-1, 0, 0))
+    assert capsys.readouterr().out == ""
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("error")
+        adjust_mask_location(mask, translation=(1, 0, 0))
+
+
+def test_dask_extract_surface_is_deprecated():
+    """R7-15 / D08: the dask_extract_surface stub warns that it will be removed in 0.1.0.
+
+    Strategy: call the stub.
+    Expected outcome: a FutureWarning naming 0.1.0 and extract_surface_tiled; returns None.
+    """
+    with pytest.warns(FutureWarning, match=r"0\.1\.0.*extract_surface_tiled"):
+        assert dask_extract_surface() is None
