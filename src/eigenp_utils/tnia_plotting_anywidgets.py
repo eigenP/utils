@@ -1997,6 +1997,9 @@ def _export_figure(widget, render, filename, default="figure.svg"):
     warns, a success is logged.
     """
     name = filename or default
+    # Cleared first, so a repeated outcome (the same error twice) still
+    # reaches the front end, which shows 'saving…' until status_msg changes.
+    widget.status_msg = ""
     try:
         fig = render()
         if not fig:
@@ -2062,7 +2065,16 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     # Resolution of the on-screen PNG in dots per inch, independent of
     # rcParams['figure.dpi'] (D14); exports keep their own 300 dpi.
+    # Must be positive and finite (TraitError otherwise).
     display_dpi = traitlets.Float(100.0)
+
+    @traitlets.validate('display_dpi')
+    def _validate_display_dpi(self, proposal):
+        dpi = float(proposal['value'])
+        if not np.isfinite(dpi) or dpi <= 0:
+            raise traitlets.TraitError(
+                f"display_dpi must be a positive finite number, got {proposal['value']!r}")
+        return dpi
 
     # Channels
     channel_names = traitlets.List(traitlets.Unicode()).tag(sync=True)
@@ -3300,6 +3312,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         deleted points stayed the latest.
         """
         filename = None
+        self.status_msg = ""  # a repeated outcome must still notify (see _export_figure)
         try:
             filename = _unique_path(self.save_csv_filename, "points.csv")
             suffix = 'um' if self._pixel_sizes_given else 'px'
@@ -3547,9 +3560,13 @@ class TNIAScatterWidget(TNIAWidgetBase):
     applies to a single continuous channel (both were ignored); categorical
     channels (one colour per channel, points mode) expose only opacity in
     the GUI (``channel_controls``) and 'ids' has no histogram of ID values;
-    a cleared vmin / vmax box means ``vmin_auto`` / ``vmax_auto`` (0 and the
-    data maximum), not the data minimum or the panel range. See also
-    `TNIASliceWidget` (display_dpi, exports, synced traits).
+    a cleared vmin / vmax box means ``vmin_auto`` / ``vmax_auto`` (0, or
+    the data minimum for negative data, and the data maximum; for categorical
+    channels in density mode, the largest bin count of the full-volume
+    panels), not the data minimum or the panel range of the current slab;
+    vmin=None is the data minimum for negative channels (it was 0, which
+    inverted their display range). See also `TNIASliceWidget` (display_dpi,
+    exports, synced traits).
     """
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
@@ -3717,11 +3734,25 @@ class TNIAScatterWidget(TNIAWidgetBase):
             else:
                 return [val] * n
 
+        def _channel_values(i):
+            if self.mode == 'cont_single':
+                return self.cont_single
+            if self.mode == 'cont_multi':
+                return self.cont_multi[:, i]
+            return None
+
         def _resolve_vmin(val, n):
+            # None: 0, or the data minimum when the data go below 0 (as
+            # `_conventions.default_display_range`), so signed data are not clipped.
             lst = per_channel(val, n, 'vmin')
             res = []
-            for x in lst:
-                res.append(0.0 if x is None else float(x))
+            for i, x in enumerate(lst):
+                if x is not None:
+                    res.append(float(x))
+                    continue
+                vals = _channel_values(i)
+                m = None if vals is None else _finite_min(vals)
+                res.append(0.0 if m is None else min(0.0, m))
             return res
 
         def _resolve_vmax(val, n, mode, cont_single, cont_multi):
@@ -3747,6 +3778,11 @@ class TNIAScatterWidget(TNIAWidgetBase):
         # density mode.
         self.vmin_auto = _resolve_vmin(None, self.C)
         self.vmax_auto = _resolve_vmax(None, self.C, self.mode, self.cont_single, self.cont_multi)
+        if render == 'density' and self.mode in ('single', 'ids', 'idx_lists'):
+            # Count panels: the automatic vmax is the channel's largest bin
+            # count over the full-volume XY / XZ / ZY panels (a vmax of 1
+            # saturates every occupied bin).
+            self.vmax_auto = [float(max(1, m)) for m in self._density_count_max()]
         self.gamma_list = per_channel(gamma, self.C, 'gamma', 1.0)
         self.opacity_list = per_channel(opacity, self.C, 'opacity', 1.0)
         # Categorical points (one colour per channel) only have an opacity (R3-09)
@@ -3856,6 +3892,34 @@ class TNIAScatterWidget(TNIAWidgetBase):
         if plane == 'zy':
             return {'z': int(np.floor((u - oz) / self.sz)), 'y': int(np.floor((v - oy) / self.sy))}
         return {'x': int(np.floor((u - ox) / self.sx)), 'z': int(np.floor((v - oz) / self.sz))}
+
+    def _density_count_max(self):
+        """Largest bin count per categorical channel over the full-volume XY, XZ and ZY density panels."""
+        if self.mode == 'single':
+            groups = [np.arange(self.N)]
+        elif self.mode == 'ids':
+            groups = [np.nonzero(self.ch_ids == c)[0] for c in range(self.C)]
+        else:
+            groups = self.idx_lists
+        bx, by, bz = self._bin_data
+        bx0, by0, bz0 = self._box_lo
+
+        def _idx(v, lo, w, n):
+            return np.clip(np.floor((v - lo) / w).astype(np.intp), 0, n - 1)
+
+        out = []
+        for idxs in groups:
+            idxs = np.asarray(idxs, dtype=np.intp)
+            if idxs.size == 0:
+                out.append(0)
+                continue
+            xi = _idx(self.X_arr[idxs], bx0, bx, self.BX)
+            yi = _idx(self.Y_arr[idxs], by0, by, self.BY)
+            zi = _idx(self.Z_arr[idxs], bz0, bz, self.BZ)
+            out.append(max(int(np.bincount(yi * self.BX + xi).max()),
+                           int(np.bincount(zi * self.BX + xi).max()),
+                           int(np.bincount(yi * self.BZ + zi).max())))
+        return out
 
     def _render(self):
         # A cleared box ("") is the channel's automatic value (R3-04)
@@ -4455,7 +4519,8 @@ sync_on_hover : bool
 display_dpi : float
     Resolution of the on-screen image (default 100 dots per inch), whatever
     rcParams['figure.dpi'] says; the image shrinks to the available width
-    and the controls wrap below it. Exports use 300 dpi. New (D14, 2026-11):
+    and the controls wrap below it. Exports use 300 dpi. A value that is
+    not positive and finite raises TraitError. New (D14, 2026-11):
     the image used to follow rcParams['figure.dpi'].
 scale_bar_show : bool
     Draw the scale bar (also a GUI checkbox).
@@ -4665,8 +4730,14 @@ def show_zyx_max_scatter_interactive(
     subplot_bg : colour, optional
         Panel background; black, or white with blending='minimum'.
     vmin, vmax : float or per-channel list (values of the channels)
-        For continuous channels; vmin defaults to 0 and vmax to the largest
-        finite value.
+        For continuous channels; vmin defaults to 0, or the data minimum when
+        the channel goes below 0, and vmax to the largest finite value. A box
+        cleared in the GUI restores these (``vmin_auto`` / ``vmax_auto``); for
+        categorical channels in density mode the cleared vmax is the largest
+        bin count of the full-volume panels (the default stays 1).
+
+    Changed (R3-04, 2026-11): vmin=None was 0 also for negative channels,
+    which inverted the display range; it is now the data minimum there.
 
     Changed (D10, 2026-11): `slabs_position` / `slabs_thickness` are physical
     (data coordinate x pixel size), centre and half-thickness, as in the image
@@ -4772,6 +4843,16 @@ class IsoScatterWidget(anywidget.AnyWidget):
         unused before) names the legend entries: a dict ``{label: name}`` or
         one name per category in sorted label order; for continuous colours
         one string, the colorbar label.
+
+        Changed (D15 / D14, 2026-11): the save button ('💾 Save', it read
+        'Save as SVG') writes the format of the ``save_filename`` extension
+        (.svg with editable text, .pdf, .png; no extension adds '.svg'; an
+        unsupported one is an error) at 300 dpi with a tight bounding box;
+        it never overwrites a file (``name_1.svg``, ``name_2.svg``, ...) and
+        reports 'saved <absolute path>' or 'error: ...' in the widget's
+        status line (synced ``status_msg``) instead of printing; it always
+        wrote SVG and overwrote. The widget uses the dark theme of the ortho
+        viewers; the exported figure keeps its white background.
         """
         super().__init__()
         if sxy is not None or sz is not None:
@@ -5136,6 +5217,13 @@ def show_iso_scatter(
     Changed (D16, 2026-11): integer and bool colours are categories (they
     were drawn as a continuous gradient), up to 64 distinct values;
     ``sxy``/``sz`` are deprecated; subsampling warns; new ``channel_labels``.
+
+    Changed (D15 / D14, 2026-11): the save button follows the extension of
+    the file name (.svg with editable text, .pdf, .png; none adds '.svg'),
+    never overwrites (adds _1, _2, ...) and shows the outcome in the
+    widget's status line (``status_msg``), not via print; it always wrote
+    SVG and overwrote. The widget has a dark theme; exports keep their
+    white background.
     """
     if sxy is not None or sz is not None:
         warn_deprecated("Passing 'sxy'/'sz'", "'pixel_sizes'")

@@ -5704,3 +5704,119 @@ def test_points_csv_has_physical_columns_is_always_written_and_never_overwritten
     u.save_csv_filename = str(tmp_path / "u.csv")
     u.save_csv_trigger += 1
     assert (tmp_path / "u.csv").read_text() == "z,y,x,z_px,y_px,x_px\n1,2,3,1.0,2.0,3.0\n"
+
+
+def test_scatter_auto_vmin_follows_negative_data():
+    """R3-04 (verifier note): the scatter's automatic vmin is 0, or the data minimum when the data go below 0.
+
+    Strategy: a points-mode scatter whose one continuous channel lies in
+    [-5, -1] (vmin and vmax left automatic); then clear the vmin box.
+    Expected outcome: ``vmin_auto`` (and the initial vmin) is the data
+    minimum, the start image and the cleared box render without the
+    'vmin > vmax' warning, and a cleared box renders exactly like
+    vmin = data minimum.
+    Negative control: non-negative data in [5, 10] keep ``vmin_auto == [0.0]``.
+    """
+    pts = _scatter_points()
+    vals = -np.linspace(1, 5, len(pts))
+    s = show_zyx_max_scatter_interactive(pts, channels=vals, figsize=(4, 4), point_size=40, alpha=1.0)
+    assert s.vmin_auto == [pytest.approx(-5.0)] and s.vmax_auto == [pytest.approx(-1.0)]
+    assert s.vmin_list == s.vmin_auto
+    assert s.warning_msg == ""
+    s.vmin_list = [-5.0]
+    ref = s.image_data
+    s.vmin_list = [""]
+    assert s.warning_msg == ""
+    assert s.image_data == ref
+
+    pos = show_zyx_max_scatter_interactive(pts, channels=np.linspace(5, 10, len(pts)), figsize=(4, 4))
+    assert pos.vmin_auto == [0.0]
+
+
+def test_scatter_density_categorical_auto_vmax_is_the_count_maximum():
+    """R3-04: in density mode a categorical channel's automatic vmax is its largest bin count, not 1.
+
+    Strategy: 20 points on the diagonal (i, i, i) plus 7 more copies of
+    (3, 3, 3), unit pixel sizes and 20 bins, so every bin is one unit wide
+    and the fullest bin holds 8 points in each panel. Clear the vmax box.
+    Expected outcome: ``vmax_auto == [8.0]``, and a cleared box renders like
+    vmax = 8.
+    Negative control: points mode keeps ``vmax_auto == [1.0]`` (vmax does not
+    act on categorical points), and vmax = 1 renders differently from the
+    cleared box in density mode.
+    """
+    diag = np.repeat(np.arange(20.0)[:, None], 3, axis=1)
+    pts = np.vstack([diag, np.full((7, 3), 3.0)])
+    d = show_zyx_max_scatter_interactive(pts, render="density", bins=20, pixel_sizes=(1, 1, 1), figsize=(4, 4))
+    assert d.vmax_auto == [8.0]
+    d.vmax_list = [8.0]
+    ref = d.image_data
+    d.vmax_list = [""]
+    assert d.image_data == ref
+    d.vmax_list = [1.0]
+    assert d.image_data != ref
+
+    p = show_zyx_max_scatter_interactive(pts, render="points", pixel_sizes=(1, 1, 1), figsize=(4, 4))
+    assert p.vmax_auto == [1.0]
+
+
+def test_repeated_failing_save_reports_every_attempt(tmp_path):
+    """R3-12 / D15: each save reports its outcome to ``status_msg``, even when it repeats the last message.
+
+    The front end writes 'saving…' on click and waits for a change of
+    ``status_msg``; traitlets sends nothing when the value is unchanged, so
+    a repeated error used to leave 'saving…' on screen.
+    Strategy: observe ``status_msg``; save the figure twice to a missing
+    directory (slice widget and IsoScatter), and the points CSV twice
+    (annotator).
+    Expected outcome: two 'error: ...' notifications per widget, and the
+    final value is the error.
+    Negative control: a successful save after the errors notifies 'saved ...'.
+    """
+    def outcomes(widget, trigger, attr, value):
+        seen = []
+        widget.observe(lambda c: c["new"] and seen.append(c["new"]), names="status_msg")
+        setattr(widget, attr, value)
+        with pytest.warns(UserWarning):
+            for _ in range(2):
+                setattr(widget, trigger, getattr(widget, trigger) + 1)
+        return seen
+
+    missing = str(tmp_path / "missing" / "fig.svg")
+    w = show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4))
+    seen = outcomes(w, "save_trigger", "save_filename", missing)
+    assert len(seen) == 2 and all(m.startswith("error:") for m in seen)
+    assert w.status_msg.startswith("error:")
+    w.save_filename = str(tmp_path / "ok.svg")
+    w.save_trigger += 1
+    assert seen[-1].startswith("saved ")
+
+    iso = show_iso_scatter(*_iso_points(n=30), figsize=(4, 4))
+    seen = outcomes(iso, "save_trigger", "save_filename", missing)
+    assert len(seen) == 2 and all(m.startswith("error:") for m in seen)
+
+    a = show_zyx_max_slice_interactive_point_annotator(_structured_volume(), figsize=(4, 4))
+    a.points = [[1, 2, 3]]
+    seen = outcomes(a, "save_csv_trigger", "save_csv_filename", str(tmp_path / "missing" / "p.csv"))
+    assert len(seen) == 2 and all(m.startswith("error:") for m in seen)
+
+
+@pytest.mark.parametrize("bad", [0, -5, float("nan"), float("inf")])
+def test_display_dpi_must_be_positive_and_finite(bad):
+    """D14: ``display_dpi`` rejects values that cannot render (TraitError), on the trait and in the factory.
+
+    Strategy: set ``display_dpi`` to 0, -5, NaN and inf on a built widget and
+    pass it to the factory.
+    Expected outcome: TraitError, and the widget keeps its previous value
+    and image.
+    Positive control: 150 is accepted and re-renders.
+    """
+    w = show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4))
+    img = w.image_data
+    with pytest.raises(traitlets.TraitError):
+        w.display_dpi = bad
+    assert w.display_dpi == 100.0 and w.image_data == img
+    with pytest.raises(traitlets.TraitError):
+        show_zyx_max_slice_interactive(_structured_volume(), figsize=(4, 4), display_dpi=bad)
+    w.display_dpi = 150
+    assert w.image_data != img
