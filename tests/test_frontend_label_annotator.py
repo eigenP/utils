@@ -965,3 +965,72 @@ def test_controls_have_accessible_names(page, serve):
             .map((e) => e.className || e.type)"""
     )
     assert unnamed == []
+
+
+def test_handled_keys_do_not_reach_the_host(page, serve):
+    """Keys the widget handles stop at the viewport; others reach the host (D17, R4-06).
+
+    Strategy: a document-level keydown listener (where JupyterLab's command
+    mode listens) records keys while the focused viewport receives the
+    annotator's single-letter keys, digits, brackets, arrows, PageDown and
+    ctrl+z; then keys the widget does not handle (``q``, ctrl+s).
+    Expected outcome (+): none of the handled keys reaches the document (they
+    used to bubble: b, x, m, 0, ... are JupyterLab cell commands) and the
+    viewport carries ``data-lm-suppress-shortcuts`` (Lumino skips shortcut
+    matching inside it); the tools still switch. (−) unhandled keys and
+    modified letters still reach the host.
+    """
+    w, _ = _widget3d()
+    _open(page, serve(w))
+    assert page.get_attribute(".lbl-viewport", "data-lm-suppress-shortcuts") is not None
+    page.evaluate("window.hostKeys = []; document.addEventListener('keydown', (e) => window.hostKeys.push(e.key))")
+    page.locator(".lbl-viewport").focus()
+    for key in ("b", "x", "m", "s", "f", "e", "p", "o", "n", "0", "[", "]", "ArrowUp", "ArrowDown",
+                "Alt+ArrowRight", "PageDown", "Control+z", "o"):
+        page.keyboard.press(key)
+    assert [k for k in page.evaluate("window.hostKeys") if k not in ("Control", "Alt", "Shift", "Meta")] == []
+    assert _get(page, "tool") == "picker"
+    page.evaluate("window.hostKeys = []")
+    page.keyboard.press("q")
+    page.keyboard.press("Control+s")
+    assert page.evaluate("window.hostKeys") == ["q", "Control", "s"]
+
+
+def _zoom(page):
+    return page.evaluate("document.querySelector('.lbl-stage').style.transform")
+
+
+def test_plain_wheel_zooms_only_after_the_viewport_is_focused(page, serve):
+    """A plain wheel over an unfocused widget scrolls the page; zoom needs a click/focus or ctrl (D17, R4-16).
+
+    Strategy: make the page taller than the window, put the pointer over the
+    viewport while focus is elsewhere and turn the wheel; then the same with
+    ctrl held; then focus the viewport and turn the plain wheel.
+    Expected outcome: (−) unfocused plain wheel leaves the zoom alone and the
+    page scrolls (the wheel used to always zoom: a scroll trap); (+) ctrl
+    (trackpad pinch) zooms without focus; after focusing, the plain wheel
+    zooms and does not scroll the page.
+    """
+    w = _widget()
+    _open(page, serve(w))
+    page.evaluate("document.body.appendChild(Object.assign(document.createElement('div'), {style: 'height: 3000px'}))")
+    page.evaluate("document.activeElement && document.activeElement.blur()")
+    page.mouse.move(*_client_xy(page, 20, 20))
+    z0 = _zoom(page)
+    page.mouse.wheel(0, 200)
+    page.wait_for_timeout(200)
+    assert _zoom(page) == z0, "unfocused plain wheel must not zoom"
+    assert page.evaluate("window.scrollY") > 0, "the page scrolls"
+    page.evaluate("window.scrollTo(0, 0)")
+    page.mouse.move(*_client_xy(page, 20, 20))
+    page.keyboard.down("Control")
+    page.mouse.wheel(0, -200)
+    page.keyboard.up("Control")
+    z1 = _zoom(page)
+    assert z1 != z0, "ctrl+wheel (pinch) zooms without focus"
+    page.locator(".lbl-viewport").focus()
+    y = page.evaluate("window.scrollY")
+    page.mouse.move(*_client_xy(page, 20, 20))
+    page.mouse.wheel(0, -200)
+    page.wait_for_timeout(200)
+    assert _zoom(page) != z1 and page.evaluate("window.scrollY") == y

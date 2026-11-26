@@ -470,12 +470,20 @@ class LabelAnnotator(anywidget.AnyWidget):
     labelling convention only: training code must map it to its own loss
     (e.g. mask out 0); Cellpose itself does not interpret -1.
 
-    Keyboard (viewport focused): o toggle filled/outlined display, b/e/f/p brush/eraser/fill/picker, g
+    Keyboard (only while the image viewport has focus: click it first): o
+    toggle filled/outlined display, b/e/f/p brush/eraser/fill/picker, g
     background brush (``background=True``), x delete mask (shift+click: all
     slices), m/s merge/split track, n new id, [ / ] brush radius,
-    ArrowUp/ArrowDown or Alt+ArrowRight/Alt+ArrowLeft z+1/z-1, 0 fit, ctrl+z
-    undo, space+drag or right/middle drag pan, wheel zoom, 1-9 class
-    (semantic mode).
+    ArrowUp/ArrowDown or Alt+ArrowRight/Alt+ArrowLeft z+1/z-1,
+    PageUp/PageDown previous/next stack, 0 fit, ctrl+z undo, space+drag or
+    right/middle drag pan, 1-9 class (semantic mode). Keys the widget handles
+    do not reach the notebook (no JupyterLab command-mode side effects); other
+    keys and modified letters (ctrl+s, ...) do. Mouse wheel: zooms once the
+    viewport was clicked (focused), otherwise scrolls the page; ctrl+wheel and
+    trackpad pinch always zoom.
+
+    Changed (D17, 2026-11): handled keys used to bubble to the host, and the
+    plain wheel always zoomed (the page could not be scrolled past the widget).
     """
 
     BACKGROUND_ID = BACKGROUND_ID

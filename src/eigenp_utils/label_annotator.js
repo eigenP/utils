@@ -13,9 +13,11 @@ const MAX_LABEL = 65535; // labels travel as uint16: larger ids would wrap (6553
 // reserved annotated-background id when the model's `background` is on (Python BACKGROUND_ID)
 const BG_ID = 65535;
 const BG_RGB_A = [112, 112, 112], BG_RGB_B = [48, 48, 48]; // hatched neutral greys, not in the cell palette
-const KEY_HELP = "keys: b/e/f/p brush/eraser/fill/picker, g background brush (if enabled), " +
-  "x delete mask (shift+click: all z), m/s merge/split track, n new id, [ ] radius, " +
-  "ArrowUp/Down or Alt+ArrowRight/Left z+1/z-1, 0 fit, ctrl+z undo, space/right drag pan, wheel zoom, 1-9 class (semantic)";
+const KEY_HELP = "keys (click the image first; they then stay in the widget): " +
+  "b/e/f/p brush/eraser/fill/picker, g background brush (if enabled), " +
+  "x delete mask (shift+click: all z), m/s merge/split track, n new id, [ ] radius, o filled/outlined, " +
+  "ArrowUp/Down or Alt+ArrowRight/Left z+1/z-1, PageUp/PageDown previous/next stack, 0 fit, ctrl+z undo, " +
+  "space/right/middle drag pan, wheel zoom (after a click; ctrl+wheel or pinch always), 1-9 class (semantic)";
 
 function asBytes(v) {
   if (!v) return null;
@@ -99,7 +101,7 @@ function render({ model, el: root }) {
   root.style.position = "relative";
   const toolbar = el("div", { class: "lbl-toolbar" });
   const chanPanel = el("div", { class: "lbl-channels" });
-  const viewport = el("div", { class: "lbl-viewport", tabindex: "0" });
+  const viewport = el("div", { class: "lbl-viewport", tabindex: "0", "data-lm-suppress-shortcuts": "true", role: "application", "aria-label": "label annotator: image and labels; " + KEY_HELP });
   const stage = el("div", { class: "lbl-stage" });
   const imgCanvas = el("canvas", { class: "lbl-img" });
   const labCanvas = el("canvas", { class: "lbl-lab" });
@@ -649,7 +651,7 @@ function render({ model, el: root }) {
 
   viewport.addEventListener("contextmenu", (e) => e.preventDefault());
   viewport.addEventListener("pointerdown", (ev) => {
-    viewport.focus();
+    viewport.focus({ preventScroll: true });
     if (!state.lab) return;
     if (ev.button === 1 || ev.button === 2 || state.spaceDown) {
       state.panning = true; state.last = [ev.clientX, ev.clientY];
@@ -731,8 +733,14 @@ function render({ model, el: root }) {
   viewport.addEventListener("pointerup", endStroke);
   viewport.addEventListener("pointercancel", endStroke);
   viewport.addEventListener("pointerleave", () => { state.cursor = null; drawCursor(); });
+  // Input capture (D17). A plain wheel zooms only while the viewport has focus
+  // (after a click on it, or tabbing to it), so a notebook can be scrolled past
+  // the widget; ctrl/meta + wheel (a trackpad pinch sets ctrlKey) always zooms.
+  viewport.addEventListener("focus", () => { state.focused = true; });
+  viewport.addEventListener("blur", () => { state.focused = false; state.spaceDown = false; });
   viewport.addEventListener("wheel", (ev) => {
     if (!state.img) return;
+    if (!(ev.ctrlKey || ev.metaKey) && !state.focused) return; // let the page scroll
     ev.preventDefault();
     const r = viewport.getBoundingClientRect();
     const mx = ev.clientX - r.left, my = ev.clientY - r.top;
@@ -743,42 +751,48 @@ function render({ model, el: root }) {
     state.zoom = nz; state.userView = true;
     applyTransform();
   }, { passive: false });
+  // Keys act only on the focused viewport. Every key the widget handles is
+  // stopped here (preventDefault + stopPropagation), so it never reaches the
+  // host: JupyterLab's command mode maps b, x, m, 0 0, 1-6, z, Up / Down to
+  // cell commands. The viewport also carries data-lm-suppress-shortcuts, which
+  // Lumino honours in both capture and bubble phase. Keys the widget does not
+  // handle (and modified letters such as ctrl+s) go to the host unchanged.
   viewport.addEventListener("keydown", (ev) => {
+    if (handleKey(ev)) { ev.preventDefault(); ev.stopPropagation(); }
+  });
+  function handleKey(ev) {
     const k = ev.key;
-    if (k === " ") { state.spaceDown = true; ev.preventDefault(); return; }
-    if ((ev.ctrlKey || ev.metaKey) && k.toLowerCase() === "z") { undo(); ev.preventDefault(); return; }
-    if (ev.altKey && (k === "ArrowLeft" || k === "ArrowRight")) {
+    if (k === " " && !ev.ctrlKey && !ev.metaKey && !ev.altKey) { state.spaceDown = true; return true; }
+    if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && k.toLowerCase() === "z") { undo(); return true; }
+    if (ev.altKey && !ev.ctrlKey && !ev.metaKey && (k === "ArrowLeft" || k === "ArrowRight")) {
       // Alt+Left/Right step z (and must not trigger browser back/forward);
       // z / stack keys do nothing during a stroke, which belongs to one slice
-      ev.preventDefault(); ev.stopPropagation();
       if (!state.painting) stepZ(k === "ArrowRight" ? 1 : -1);
-      return;
+      return true;
     }
-    // letter keys only without modifiers: ctrl+s / ctrl+f / ctrl+p belong to the
-    // host (saving the notebook must not silently arm the split tool)
-    const mod = ev.ctrlKey || ev.metaKey || ev.altKey;
-    if (k === "o" && !mod) { model.set("display", model.get("display") === "outlined" ? "filled" : "outlined"); model.save_changes(); return; }
+    // everything else only without modifiers: ctrl+s / ctrl+f / ctrl+p belong to
+    // the host (saving the notebook must not silently arm the split tool)
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return false;
+    if (k === "o") { model.set("display", model.get("display") === "outlined" ? "filled" : "outlined"); model.save_changes(); return true; }
     const map = { b: "brush", e: "eraser", f: "fill", p: "picker", x: "delete" };
     if (model.get("mode") !== "semantic") Object.assign(map, { m: "merge", s: "split" });
     if (bgOn()) map.g = "background";
-    if (map[k]) { if (!mod) { model.set("tool", map[k]); model.save_changes(); } return; }
+    if (map[k]) { model.set("tool", map[k]); model.save_changes(); return true; }
     if (k === "[" || k === "]") {
       const r = Math.max(0, (model.get("brush_radius") ?? 2) + (k === "]" ? 1 : -1));
-      model.set("brush_radius", r); model.save_changes(); return;
+      model.set("brush_radius", r); model.save_changes(); return true;
     }
-    if (k === "n" && !mod) { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); return; }
-    if (k === "0") { fit(); return; }
+    if (k === "n") { model.set("new_label_trigger", (model.get("new_label_trigger") || 0) + 1); model.save_changes(); return true; }
+    if (k === "0") { fit(); return true; }
     if (/^[1-9]$/.test(k) && model.get("mode") === "semantic") {
       const id = parseInt(k);
       if (id <= (model.get("class_names") || []).length) { model.set("active_label", id); model.save_changes(); }
-      return;
+      return true;
     }
-    if (k === "PageUp" || k === "PageDown") { if (!state.painting) stepStack(k === "PageDown" ? 1 : -1); ev.preventDefault(); return; }
-    if (k === "ArrowUp" || k === "ArrowDown") {
-      if (!state.painting) stepZ(k === "ArrowUp" ? 1 : -1);
-      ev.preventDefault();
-    }
-  });
+    if (k === "PageUp" || k === "PageDown") { if (!state.painting) stepStack(k === "PageDown" ? 1 : -1); return true; }
+    if (k === "ArrowUp" || k === "ArrowDown") { if (!state.painting) stepZ(k === "ArrowUp" ? 1 : -1); return true; }
+    return false;
+  }
   function stepStack(d) {
     const n = (model.get("stack_names") || []).length;
     if (n < 2) return;
