@@ -3,6 +3,7 @@
 # dependencies = [
 #     "numpy",
 #     "scikit-image",
+#     "numba",  # optional accelerator (the [fast] extra); NumPy fallback otherwise
 # ]
 # ///
 

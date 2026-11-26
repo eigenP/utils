@@ -1,3 +1,22 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "pandas",
+#     "scipy",
+#     "matplotlib",
+#     "scikit-learn",
+#     "seaborn",
+#     "scanpy",
+#     "anndata",
+#     "pacmap>=0.7.3",  # optional from here on: the [single-cell] extra
+#     "esda",
+#     "libpysal",
+#     "triku",
+#     "leidenalg",
+#     "adjustText",
+# ]
+# ///
 from __future__ import annotations
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Literal, Any, Union
 import contextlib

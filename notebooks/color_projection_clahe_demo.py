@@ -1,10 +1,10 @@
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "marimo",
-#     "matplotlib==3.10.6",
-#     "numpy==2.2.6",
-#     "scikit-image==0.25.2",
+#     "matplotlib",
+#     "numpy",
+#     "scikit-image",
 #     "eigenp-utils @ git+https://github.com/eigenP/utils.git@main ; sys_platform != 'emscripten'",
 # ]
 # ///

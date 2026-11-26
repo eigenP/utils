@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "xarray",
+#     "tifffile",
+# ]
+# ///
 import warnings
 from pathlib import Path
 

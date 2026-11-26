@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "numpy",
+#     "scipy",
+#     "scikit-image",
+# ]
+# ///
 import numpy as np
 import functools
 import logging

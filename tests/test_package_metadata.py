@@ -4,6 +4,7 @@ and the PEP 723 headers of ``src/eigenp_utils/*.py`` (D09 = A)."""
 import ast
 import importlib
 import importlib.abc
+import re
 import subprocess
 import sys
 import textwrap
@@ -368,3 +369,206 @@ def test_library_code_neither_prints_nor_uses_the_root_logger():
                 if f.attr in ROOT_LOGGER_CALLS or (f.attr == "getLogger" and not node.args):
                     offenders.append(f"{path.name}:{node.lineno} logging.{f.attr}")
     assert not offenders, offenders
+
+
+# ---------------------------------------------------------------------------
+# D09 = A: PEP 723 headers in src/ are complete and agree with pyproject
+# ---------------------------------------------------------------------------
+
+PYPROJECT = REPO / "pyproject.toml"
+NOTEBOOKS_DIR = REPO / "notebooks"
+HEADER_RE = re.compile(r"^# /// script\s*$(.*?)^# ///\s*$", re.M | re.S)
+
+# import name -> pyproject distribution name, where they differ
+IMPORT_TO_DIST = {
+    "skimage": "scikit-image",
+    "sklearn": "scikit-learn",
+    "cv2": "opencv-python",
+    "umap": "umap-learn",
+    "ruamel": "ruamel.yaml",
+    "yaml": "pyyaml",
+    "mpl_toolkits": "matplotlib",
+    "PIL": "pillow",
+}
+# provided by the platform, never pip-installed
+PLATFORM_MODULES = {"pyodide", "js"}
+# PEP 723 headers whose dependency list is not checked against pyproject
+# (a marimo notebook kept in src/: user decision, it keeps plotly)
+HEADER_SUBSET_EXEMPT = {"task_calendar_scheduler.py"}
+
+
+def _norm(dist):
+    """PEP 503 normalised distribution name, without extras, versions or markers."""
+    name = re.split(r"[\s;\[<>=!~@]", dist.strip(), maxsplit=1)[0]
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _pyproject():
+    if not PYPROJECT.exists():
+        pytest.skip("pyproject.toml not available (installed package)")
+    import tomllib
+
+    return tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+
+
+def _declared_dists():
+    proj = _pyproject()
+    names = {_norm(d) for d in proj["dependencies"]}
+    for extra in proj["optional-dependencies"].values():
+        names |= {_norm(d) for d in extra if not d.startswith("eigenp_utils[")}
+    return names
+
+
+def _header(path):
+    """(requires_python, [dependencies]) of a PEP 723 header, or None."""
+    import tomllib
+
+    m = HEADER_RE.search(path.read_text(encoding="utf-8"))
+    if m is None:
+        return None
+    body = "\n".join(line[2:] if line.startswith("# ") else line.lstrip("#")
+                     for line in m.group(1).splitlines())
+    data = tomllib.loads(body)
+    return data.get("requires-python"), data.get("dependencies", [])
+
+
+def _guards_import_error(handler):
+    names = []
+    t = handler.type
+    for n in (t.elts if isinstance(t, ast.Tuple) else [t]):
+        if isinstance(n, ast.Name):
+            names.append(n.id)
+    return t is None or bool({"ImportError", "ModuleNotFoundError", "Exception"} & set(names))
+
+
+def _required_imports(path):
+    """Top-level names of the third-party packages a module imports unconditionally.
+
+    Scans every import (module level and inside functions). An import inside a
+    ``try`` whose handler catches ImportError is optional and not required.
+    ``_LazyModule("name")`` (single_cell's lazy scanpy/anndata) counts as an import.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    optional = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try) and any(_guards_import_error(h) for h in node.handlers):
+            for stmt in node.body:
+                optional |= {id(n) for n in ast.walk(stmt)}
+    found = set()
+    for node in ast.walk(tree):
+        if id(node) in optional:
+            continue
+        if isinstance(node, ast.Import):
+            mods = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and not node.level:
+            mods = [node.module]
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "_LazyModule" and node.args
+              and isinstance(node.args[0], ast.Constant)):
+            mods = [node.args[0].value]
+        else:
+            continue
+        for m in mods:
+            top = m.split(".")[0]
+            if top not in sys.stdlib_module_names and top not in PLATFORM_MODULES \
+                    and top != "eigenp_utils" and top != "__future__":
+                found.add(top)
+    return found
+
+
+def _src_modules():
+    if not SRC.exists() or not (SRC / "__init__.py").exists():
+        pytest.skip("src/ not available")
+    return sorted(SRC.glob("*.py"))
+
+
+def test_header_parser_and_import_scanner_controls():
+    """Controls for the D09 checker itself.
+
+    (+) a header missing a dependency is detected; a function-level import counts;
+        ``_LazyModule("scanpy")`` counts.
+    (-) an import guarded by ``try/except ImportError`` is optional; stdlib,
+        relative and platform (pyodide) imports are ignored.
+    """
+    import tempfile
+
+    src = textwrap.dedent('''\
+        # /// script
+        # requires-python = ">=3.11"
+        # dependencies = [
+        #     "numpy",  # comment
+        # ]
+        # ///
+        import os
+        import numpy as np
+        from . import _conventions
+        sc = _LazyModule("scanpy")
+        def f():
+            from skimage import filters
+            from pyodide.http import pyfetch
+            try:
+                import numba
+            except ImportError:
+                numba = None
+    ''')
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "m.py"
+        p.write_text(src, encoding="utf-8")
+        assert _header(p) == (">=3.11", ["numpy"])
+        assert _required_imports(p) == {"numpy", "scanpy", "skimage"}
+    assert _norm("eigenp-utils @ git+https://x ; sys_platform != 'emscripten'") == "eigenp-utils"
+    assert _norm("ruamel.yaml>=0.17") == "ruamel-yaml"
+
+
+def test_src_pep723_headers_list_every_third_party_import():
+    """D09 = A (R8-21): every src module with third-party imports has a PEP 723 header that
+
+    (+) lists each unconditional third-party import under its pyproject distribution
+        name (AST scan, including function-level imports; optional imports guarded
+        by ``try/except ImportError`` may be omitted);
+    (+) declares ``requires-python`` equal to pyproject's;
+    (-) lists only distributions that pyproject declares (core or an extra), so a
+        header cannot drift from the package metadata (task_calendar_scheduler, a
+        marimo notebook kept in src/, is exempt from this subset check only).
+    """
+    requires = _pyproject()["requires-python"]
+    declared = _declared_dists()
+    problems = []
+    for path in _src_modules():
+        needed = {_norm(IMPORT_TO_DIST.get(m, m)) for m in _required_imports(path)}
+        header = _header(path)
+        if header is None:
+            if needed:
+                problems.append(f"{path.name}: no PEP 723 header (imports {sorted(needed)})")
+            continue
+        rp, deps = header
+        listed = {_norm(d) for d in deps}
+        if rp != requires:
+            problems.append(f"{path.name}: requires-python {rp!r} != pyproject {requires!r}")
+        if needed - listed:
+            problems.append(f"{path.name}: header misses {sorted(needed - listed)}")
+        if path.name not in HEADER_SUBSET_EXEMPT and listed - declared:
+            problems.append(f"{path.name}: header lists {sorted(listed - declared)}, not in pyproject")
+    assert not problems, "\n".join(problems)
+
+
+def test_notebook_headers_require_the_package_python_without_pins():
+    """D09 / R8-21: notebook headers use pyproject's requires-python and no hard pins.
+
+    (+) every ``notebooks/*.py`` with a header says requires-python == pyproject's.
+    (-) no dependency is pinned with ``==`` (color_projection_clahe_demo had
+        matplotlib==3.10.6, numpy==2.2.6, scikit-image==0.25.2 and >=3.12).
+    """
+    if not NOTEBOOKS_DIR.exists():
+        pytest.skip("notebooks/ not available")
+    requires = _pyproject()["requires-python"]
+    problems = []
+    for path in sorted(NOTEBOOKS_DIR.glob("*.py")):
+        header = _header(path)
+        if header is None:
+            continue
+        rp, deps = header
+        if rp != requires:
+            problems.append(f"{path.name}: requires-python {rp!r}")
+        problems += [f"{path.name}: pinned {d!r}" for d in deps if "==" in d]
+    assert not problems, "\n".join(problems)

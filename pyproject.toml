@@ -52,6 +52,8 @@ single-cell = [
     "adjustText",
     # scanpy's default seurat_v3 HVG flavor (preprocess_subset, kknn_ingest)
     "scikit-misc",
+    # plot_coupling_heatmap (clustermap)
+    "seaborn",
 ]
 # Bonsai cell-tree reconstruction (eigenp_utils.bonsai_tree). Bonsai itself is a
 # script repository (github.com/dhdegroot/Bonsai-data-representation, CC BY-NC 4.0),
@@ -82,9 +84,16 @@ dev = [
 image-analysis = [
     "scikit-image",
     "xarray",
+    # image_io reads TIFFs with it (it also arrives with scikit-image, but is imported directly)
+    "tifffile",
+]
+# Optional accelerator: numba kernels for clahe_u8 and median_filter_fast
+# (both fall back to NumPy without it; numba has no WebAssembly build).
+fast = [
+    "numba",
 ]
 all = [
-    "eigenp_utils[image-analysis,plotting,single-cell,bonsai,dev]"
+    "eigenp_utils[image-analysis,plotting,single-cell,bonsai,fast,dev]"
 ]
 
 [tool.setuptools]
