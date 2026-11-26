@@ -3175,6 +3175,132 @@ def _scatter_auto_figsize(xb, yb, zb, sizes, rotate_view, has_labels, label_font
     return _auto_figsize(cols, rows, has_labels, box=(8.0, 8.0), label_fontsize_pt=label_fontsize_pt)
 
 
+_CHANNEL_MODES = ('auto', 'values', 'categories', 'index_lists')
+# 'auto' reads one integer label per point as categories up to this many
+# distinct labels; more are ambiguous (intensities?) and need channel_mode.
+_MAX_AUTO_CATEGORIES = 64
+
+
+def _is_index_list(a, n):
+    """True if ``a`` could be indices of distinct points among ``n`` (integers in [0, n), no repeats)."""
+    a = np.asarray(a)
+    if a.size and not (np.issubdtype(a.dtype, np.integer) and a.min() >= 0 and a.max() < n):
+        return False
+    return len(np.unique(a)) == a.size
+
+
+def _classify_scatter_channels(channels, n, channel_mode='auto'):
+    """
+    Interpret the scatter viewer's ``channels`` for ``n`` points (D13).
+
+    Returns ``(mode, data)``: 'single' (None), 'cont_single' ((n,) floats),
+    'cont_multi' ((n, C) floats), 'ids' (``(codes, labels)`` from
+    ``np.unique``, so sparse and negative labels work), or 'idx_lists'
+    (list of integer index arrays).
+
+    ``channel_mode='auto'`` infers, and raises ValueError when the input is
+    ambiguous: a list of equal-length (n) arrays is values unless every one
+    is a valid index list (then ambiguous); lists of other lengths are index
+    lists; an (n, C) array or one float array is values; one integer/bool
+    array is categories up to 64 distinct labels (ambiguous above); strings
+    are categories. 'values', 'categories' and 'index_lists' force a reading.
+    """
+    if channel_mode not in _CHANNEL_MODES:
+        raise ValueError(f"channel_mode must be one of {_CHANNEL_MODES}, got {channel_mode!r}")
+    if channels is None:
+        return 'single', None
+    hint = "pass channel_mode='values', 'categories' or 'index_lists'"
+    if isinstance(channels, (list, tuple)):
+        arrs = [np.asarray(a).reshape(-1) for a in channels]
+        per_point = all(len(a) == n for a in arrs)
+        mode = channel_mode
+        if mode == 'auto':
+            if not per_point:
+                mode = 'index_lists'
+            elif any(not np.issubdtype(a.dtype, np.integer) for a in arrs) or \
+                    not all(_is_index_list(a, n) for a in arrs):
+                mode = 'values'
+            else:
+                raise ValueError(f"channels is a list of {len(arrs)} integer arrays of one entry per point that "
+                                 f"are also valid point-index lists; {hint}.")
+        if mode == 'values':
+            if not per_point:
+                raise ValueError(f"channel_mode='values' needs one value per point ({n}) in every channel, "
+                                 f"got lengths {[len(a) for a in arrs]}")
+            return 'cont_multi', np.stack([a.astype(float) for a in arrs], axis=1)
+        if mode == 'index_lists':
+            lists = []
+            for a in arrs:
+                if a.size and not (np.issubdtype(a.dtype, np.integer) or np.all(a == np.round(a))):
+                    raise ValueError("index lists must hold integer point indices")
+                a = a.astype(int)
+                if a.size and (a.min() < 0 or a.max() >= n):
+                    raise ValueError(f"index lists must hold point indices in [0, {n}), got [{a.min()}, {a.max()}]")
+                lists.append(a)
+            return 'idx_lists', lists
+        raise ValueError("channel_mode='categories' takes one label per point (an array), not a list")
+
+    a = np.asarray(channels)
+    if a.ndim == 2:
+        if channel_mode not in ('auto', 'values'):
+            raise ValueError(f"an (n_points, n_channels) array holds values; got channel_mode={channel_mode!r}")
+        if a.shape[0] != n:
+            raise ValueError(
+                f"A 2D channels array must have shape (n_points, n_channels) = ({n}, C), got {a.shape}")
+        return 'cont_multi', a.astype(float)
+    a = a.reshape(-1)
+    if len(a) != n:
+        if channel_mode in ('auto', 'index_lists'):
+            return _classify_scatter_channels([a], n, 'index_lists')
+        raise ValueError(f"channels has {len(a)} entries for {n} points")
+    numeric = np.issubdtype(a.dtype, np.number) or a.dtype == bool
+    mode = channel_mode
+    if mode == 'auto':
+        if not numeric:
+            mode = 'categories'
+        elif np.issubdtype(a.dtype, np.integer) or a.dtype == bool:
+            if len(np.unique(a)) > _MAX_AUTO_CATEGORIES:
+                raise ValueError(f"channels has {len(np.unique(a))} distinct integer values: categories or "
+                                 f"values (e.g. intensities)? {hint}.")
+            mode = 'categories'
+        else:
+            mode = 'values'
+    if mode == 'values':
+        if not numeric:
+            raise ValueError("channel_mode='values' needs numeric channels")
+        return 'cont_single', a.astype(float)
+    if mode == 'categories':
+        labels, codes = np.unique(a, return_inverse=True)
+        return 'ids', (codes.reshape(-1).astype(int), labels)
+    return _classify_scatter_channels([a], n, 'index_lists')
+
+
+def _filter_channels(mode, data, keep):
+    """Keep the channel data of the points where ``keep`` (index lists are re-indexed)."""
+    if keep is None or mode == 'single':
+        return data
+    if mode == 'idx_lists':
+        new_index = np.cumsum(keep) - 1
+        return [new_index[ix[keep[ix]]] for ix in data]
+    if mode == 'ids':
+        return data[0][keep], data[1]
+    return data[keep]
+
+
+def _finite_mask(X, Y, Z, warn=True):
+    """Coordinates as 1D arrays, and the mask of points with finite coordinates (None if all are)."""
+    X, Y, Z = (np.asarray(a).reshape(-1) for a in (X, Y, Z))
+    if not (len(X) == len(Y) == len(Z)):
+        raise ValueError(f"X, Y and Z must have the same length, got {len(X)}, {len(Y)}, {len(Z)}")
+    keep = np.isfinite(X.astype(float)) & np.isfinite(Y.astype(float)) & np.isfinite(Z.astype(float))
+    if keep.all():
+        return X, Y, Z, None
+    if warn:
+        warnings.warn(f"Dropping {int((~keep).sum())} of {len(X)} points with non-finite coordinates.",
+                      UserWarning, stacklevel=4)
+    return X, Y, Z, keep
+
+
 def _finite_points(X, Y, Z, channels=None):
     """
     Drop points with a non-finite coordinate (with a warning), together with
@@ -3208,7 +3334,7 @@ class TNIAScatterWidget(TNIAWidgetBase):
     def __init__(self, X_arr, Y_arr, Z_arr, channels=None, pixel_sizes=None, render='points', bins=512,
                  point_size=4, alpha=0.6, colormap=None, colors=None, opacity=None, gamma=1, vmin=None, vmax=None, figsize=None,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, subplot_bg=None, slabs_position=None, x_s=None, y_s=None, z_s=None, slabs_thickness=None, x_t=None, y_t=None, z_t=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-                 blending=None, **kwargs):
+                 blending=None, channel_mode='auto', **kwargs):
         self._check_trait_kwargs(kwargs)
         # Keyword-only channel compositing (not in the GUI); see `show_zyx`.
         # 'minimum' also switches to a white canvas and inverted default colours.
@@ -3230,7 +3356,13 @@ class TNIAScatterWidget(TNIAWidgetBase):
             if slabs_thickness is None:
                 slabs_thickness = (z_t, y_t, x_t)
 
-        X_arr, Y_arr, Z_arr, channels = _finite_points(X_arr, Y_arr, Z_arr, channels)
+        if channel_mode is None:
+            channel_mode = 'auto'
+        X_arr, Y_arr, Z_arr, keep = _finite_mask(X_arr, Y_arr, Z_arr)
+        mode, ch_data = _classify_scatter_channels(channels, len(X_arr), channel_mode)
+        if keep is not None:
+            X_arr, Y_arr, Z_arr = X_arr[keep], Y_arr[keep], Z_arr[keep]
+            ch_data = _filter_channels(mode, ch_data, keep)
         self.X_arr = X_arr
         self.Y_arr = Y_arr
         self.Z_arr = Z_arr
@@ -3297,49 +3429,23 @@ class TNIAScatterWidget(TNIAWidgetBase):
         # Analyze channels
         self.N = len(self.X_arr)
 
-        def _is_int_like(a): return np.issubdtype(np.asarray(a).dtype, np.integer) or np.asarray(a).dtype == bool
-        def _as_1d(a):
-            a = np.asarray(a)
-            return a.reshape(-1) if a.ndim == 1 else a
-
-        self.mode = 'single'
-        self.ch_ids = None
-        self.cont_single = None
-        self.cont_multi = None
-        self.idx_lists = None
-
-        if channels is None:
-            self.mode = 'single'
-        elif isinstance(channels, (list, tuple)):
-            arrs = [ _as_1d(a) for a in channels ]
-            lens = {len(a) for a in arrs}
-            if lens == {self.N} and any(np.issubdtype(a.dtype, np.floating) for a in arrs):
-                self.mode = 'cont_multi'
-                self.cont_multi = np.stack([a.astype(float) for a in arrs], axis=1)
-            else:
-                self.mode = 'idx_lists'
-                self.idx_lists = [np.asarray(ix, dtype=int) for ix in channels]
-        else:
-            a = _as_1d(channels)
-            if a.ndim == 2:
-                # (N, C) array: one column of values per channel
-                if a.shape[0] != self.N:
-                    raise ValueError(
-                        f"A 2D channels array must have shape (n_points, n_channels) = ({self.N}, C), got {a.shape}"
-                    )
-                self.mode = 'cont_multi'
-                self.cont_multi = a.astype(float)
-            elif _is_int_like(a):
-                self.mode = 'ids'
-                self.ch_ids = np.asarray(a, dtype=int)
-            else:
-                self.mode = 'cont_single'
-                self.cont_single = np.asarray(a, dtype=float)
+        # Channel interpretation (D13): see _classify_scatter_channels
+        self.mode = mode
+        self.ch_ids = self.category_labels = None
+        self.cont_single = self.cont_multi = self.idx_lists = None
+        if mode == 'ids':
+            self.ch_ids, self.category_labels = ch_data
+        elif mode == 'cont_single':
+            self.cont_single = ch_data
+        elif mode == 'cont_multi':
+            self.cont_multi = ch_data
+        elif mode == 'idx_lists':
+            self.idx_lists = ch_data
 
         if self.mode in ('single',):
             self.C = 1
         elif self.mode == 'ids':
-            self.C = int(self.ch_ids.max()) + 1 if self.ch_ids.size else 1
+            self.C = max(1, len(self.category_labels))
         elif self.mode == 'idx_lists':
             self.C = len(self.idx_lists)
         elif self.mode == 'cont_single':
@@ -3422,7 +3528,8 @@ class TNIAScatterWidget(TNIAWidgetBase):
         if channel_labels is not None:
             self.channel_names = _to_list(channel_labels, self.C, "Channel")
         else:
-            self.channel_names = [f"Channel {i}" for i in range(self.C)]
+            self.channel_names = ([str(v) for v in self.category_labels] if self.mode == 'ids'
+                                  else [f"Channel {i}" for i in range(self.C)])
         self.channel_dtypes = ["float"] * self.C
         GUI_CHANNEL_COLORS = [get_gui_channel_color(matplotlib.colors.to_hex(c)) for c in self.colors_rgb]
         self.channel_colors = GUI_CHANNEL_COLORS
@@ -4252,7 +4359,7 @@ def show_zyx_max_scatter_interactive(
     slabs_position=None, x_s=None, y_s=None, z_s=None,
     slabs_thickness=None, x_t=None, y_t=None, z_t=None,
     rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
-    blending=None,
+    blending=None, channel_mode='auto',
 ):
     """
     Interactive ortho-slab viewer of a 3D point cloud (anywidget): the
@@ -4269,9 +4376,21 @@ def show_zyx_max_scatter_interactive(
     channels : array or list, optional
         How points are coloured (see ``channel_mode``): one value per point
         (a continuous channel), an (N, C) array or a list of C per-point
-        arrays (C continuous channels), one integer label per point
-        (categories: one channel per label), or a list of index arrays
-        (index lists: channel c is the points ``channels[c]``).
+        arrays (C continuous channels), one label per point (categories:
+        one channel per distinct label, named after it; -1 and sparse labels
+        work), or a list of index arrays (index lists: channel c is the
+        points ``channels[c]``).
+    channel_mode : 'auto', 'values', 'categories' or 'index_lists'
+        How ``channels`` is read. 'auto' (default) infers it and raises
+        ValueError when the input is ambiguous: integer arrays of one entry
+        per point that are also valid index lists, or one integer array with
+        more than 64 distinct values (categories or intensities?). Lists of
+        other lengths are index lists.
+
+    Changed (D13, 2026-11): integer channels were guessed silently: a list
+    of integer per-point values became index lists, an integer array
+    became max+1 category channels (label -1 was never drawn); categories
+    now go through ``np.unique`` and ambiguous input raises.
     render : 'points', 'density' or None
         Scatter markers, or 2D histograms of the slab (``bins``); None picks
         'points' below 10,000 points.
@@ -4326,22 +4445,19 @@ def show_zyx_max_scatter_interactive(
         else:
             raise ValueError("points must be an array of shape (N, 3) representing (Z, Y, X) or a tuple/list of 3 arrays (Z, Y, X).")
 
-    X, Y, Z, channels = _finite_points(X, Y, Z, channels)
+    # Points with a non-finite coordinate are dropped (with a warning) by the widget
+    Xf, Yf, Zf, keep = _finite_mask(X, Y, Z, warn=False)
+    if keep is not None:
+        Xf, Yf, Zf = Xf[keep], Yf[keep], Zf[keep]
 
     if render is None:
-        if len(X) < 10000:
-            render = 'points'
-        else:
-            render = 'density'
+        render = 'points' if len(Xf) < 10000 else 'density'
 
-
-    (xmin, xmax), (ymin, ymax), (zmin, zmax) = (_int_bounds(a) for a in (X, Y, Z))
-
-    if figsize is None:
+    if figsize is None and figsize_scale != 1.0:
         # The class's automatic size, from the physical extents of the data box
-        figsize = _scatter_auto_figsize(_int_bounds(X), _int_bounds(Y), _int_bounds(Z), (pz, py, px),
+        figsize = _scatter_auto_figsize(_int_bounds(Xf), _int_bounds(Yf), _int_bounds(Zf), (pz, py, px),
                                         rotate_view, channel_labels is not None, channel_label_fontsize_pt)
-    if figsize_scale != 1.0:
+    if figsize is not None and figsize_scale != 1.0:
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
     w = TNIAScatterWidget(
@@ -4352,17 +4468,17 @@ def show_zyx_max_scatter_interactive(
         subplot_bg=subplot_bg,
         slabs_position=slabs_position, slabs_thickness=slabs_thickness,
         rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt,
-        blending=blending,
+        blending=blending, channel_mode=channel_mode,
     )
     w.X_arr_phys = w.X_arr * px
     w.Y_arr_phys = w.Y_arr * py
     w.Z_arr_phys = w.Z_arr * pz
-    w.x_min_phys = xmin * px
-    w.x_max_phys = xmax * px
-    w.y_min_phys = ymin * py
-    w.y_max_phys = ymax * py
-    w.z_min_phys = zmin * pz
-    w.z_max_phys = zmax * pz
+    w.x_min_phys = w.xmin * px
+    w.x_max_phys = w.xmax * px
+    w.y_min_phys = w.ymin * py
+    w.y_max_phys = w.ymax * py
+    w.z_min_phys = w.zmin * pz
+    w.z_max_phys = w.zmax * pz
     return w
 
 class IsoScatterWidget(anywidget.AnyWidget):

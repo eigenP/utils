@@ -5057,3 +5057,80 @@ def test_image_factories_share_one_argument_preparation():
     b = show_zyx_max_slice_interactive_point_annotator(czyx, channel_axis=0)
     assert a.num_channels == 2 and b.num_channels == 3  # + the annotation channel
     np.testing.assert_allclose(a.figsize, b.figsize)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): scatter channel interpretation (D13)
+# ---------------------------------------------------------------------------
+
+def _scatter_pts(n=200, seed=0):
+    rng = np.random.default_rng(seed)
+    return rng.uniform(0, 30, (n, 3)), rng
+
+
+def test_scatter_integer_value_lists_are_values_not_index_lists():
+    """D13 / R2-02: a list of per-point integer values is read as values.
+
+    Strategy: two per-point uint16 intensity arrays (with repeats, so they
+    cannot be index lists) as a list, and the same data as an (N, 2) array.
+    Expected outcome: both give the continuous multi-channel mode with the
+    same values (the list used to become index lists: values used as point
+    indices, arbitrary points drawn).
+    """
+    pts, rng = _scatter_pts()
+    vals = [rng.integers(0, 4000, 200).astype(np.uint16) for _ in range(2)]
+    w_list = show_zyx_max_scatter_interactive(pts, channels=vals, render="points")
+    w_arr = show_zyx_max_scatter_interactive(pts, channels=np.stack(vals, axis=1), render="points")
+    assert w_list.mode == w_arr.mode == "cont_multi"
+    np.testing.assert_array_equal(w_list.cont_multi, w_arr.cont_multi)
+
+
+def test_scatter_ambiguous_integer_channels_raise_in_auto_mode():
+    """D13: ``channel_mode='auto'`` raises on ambiguous input and the explicit modes resolve it.
+
+    Strategy: (a) a single uint16 array with thousands of distinct values;
+    (b) two equal-length integer arrays that are both valid index lists
+    (permutations of the points).
+    Expected outcome: ValueError naming ``channel_mode`` in both cases (they
+    used to become 4001 category channels and index lists silently);
+    ``channel_mode='values'`` gives one continuous channel,
+    ``'categories'`` one channel per distinct value, ``'index_lists'`` the
+    index lists.
+    """
+    pts, rng = _scatter_pts()
+    intens = rng.integers(0, 4000, 200).astype(np.uint16)
+    with pytest.raises(ValueError, match="channel_mode"):
+        show_zyx_max_scatter_interactive(pts, channels=intens, render="points")
+    w = show_zyx_max_scatter_interactive(pts, channels=intens, channel_mode="values", render="points")
+    assert w.mode == "cont_single" and w.C == 1 and len(w.channel_names) == 1
+    w = show_zyx_max_scatter_interactive(pts, channels=intens, channel_mode="categories", render="points")
+    assert w.mode == "ids" and w.C == len(np.unique(intens))
+
+    perms = [rng.permutation(200), rng.permutation(200)]
+    with pytest.raises(ValueError, match="channel_mode"):
+        show_zyx_max_scatter_interactive(pts, channels=perms, render="points")
+    w = show_zyx_max_scatter_interactive(pts, channels=perms, channel_mode="index_lists", render="points")
+    assert w.mode == "idx_lists" and w.C == 2
+    w = show_zyx_max_scatter_interactive(pts, channels=perms, channel_mode="values", render="points")
+    assert w.mode == "cont_multi"
+    with pytest.raises(ValueError, match="channel_mode"):
+        show_zyx_max_scatter_interactive(pts, channels=perms, channel_mode="bogus")
+
+
+def test_scatter_categories_keep_negative_and_sparse_labels():
+    """D13 / R2-02: category labels go through ``np.unique``; -1 (noise) is kept.
+
+    Strategy: labels -1, 0 and 7 (sparse), and string labels.
+    Expected outcome: three channels named '-1', '0', '7' and every point
+    drawn (points labelled -1 used to vanish, and label 7 created 8
+    channels); string labels are categories too.
+    """
+    pts, rng = _scatter_pts(90)
+    labels = np.repeat([-1, 0, 7], 30)
+    w = show_zyx_max_scatter_interactive(pts, channels=labels, render="points", slabs_thickness=(1e3, 1e3, 1e3))
+    assert w.mode == "ids" and w.C == 3 and w.channel_names == ["-1", "0", "7"]
+    fig = w._render()
+    drawn = sum(len(c.get_offsets()) for c in fig.axXY.collections if isinstance(c, mcollections.PathCollection))
+    assert drawn == 90
+    w = show_zyx_max_scatter_interactive(pts, channels=np.repeat(["a", "b", "c"], 30), render="points")
+    assert w.mode == "ids" and w.channel_names == ["a", "b", "c"]
