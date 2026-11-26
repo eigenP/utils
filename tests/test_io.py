@@ -475,3 +475,19 @@ def test_download_file_async_wasm_pyfetch_paths(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="HTTP 404"):
         _drive_sync_coroutine(download_file_async("https://example.invalid/missing.bin", err_dest))
     assert not err_dest.exists()
+
+
+def test_io_helpers_log_instead_of_printing(tmp_path, capsys, caplog):
+    """check_file_before_save and un_gzip print nothing; their messages go to the module logger (INFO)."""
+    import logging
+
+    gz_path = tmp_path / "a.txt.gz"
+    with gzip.open(gz_path, "wb") as f:
+        f.write(b"hello")
+    with caplog.at_level(logging.INFO, logger="eigenp_utils.io"):
+        check_file_before_save(tmp_path / "new.txt")
+        un_gzip(gz_path)
+        un_gzip(gz_path)
+    assert capsys.readouterr().out == ""
+    text = caplog.text
+    assert "Saving at" in text and "Unzipping" in text and "already unzipped" in text

@@ -1,11 +1,14 @@
 from pathlib import Path
 import asyncio
 import gzip
+import logging
 import os
 import shutil
 import sys
 import urllib.request
 import warnings
+
+logger = logging.getLogger(__name__)
 
 # True inside Pyodide (e.g. marimo WASM notebooks), where there are no sockets
 IN_WASM = sys.platform == "emscripten"
@@ -23,9 +26,12 @@ def check_file_before_save(filename, overwrite=False):
     - overwrite: If False and the file exists, raises FileExistsAssertionError
       (a FileExistsError that is also an AssertionError). Unlike a bare assert,
       the check also runs under ``python -O``.
+
+    Changed (2026-11): the 'Saving at' message goes to the module logger
+    (``logging.getLogger('eigenp_utils.io')``, INFO); it was printed.
     """
     path = Path(filename)
-    print(f'Saving at: {path}')
+    logger.info('Saving at: %s', path)
     if not overwrite and path.exists():
         raise FileExistsAssertionError(f"File exists and overwrite is False: {path}")
 
@@ -63,7 +69,7 @@ def un_gzip(input_file_path, output=None):
 
     # Check if the unzipped file already exists to avoid re-unzipping
     if not output_path.exists():
-        print(f"Unzipping {input_path} to {output_path}...")
+        logger.info("Unzipping %s to %s", input_path, output_path)
         # Decompress next to the output and move it into place only once complete, so
         # an interrupted unzip (error, KeyboardInterrupt, killed kernel) is never
         # mistaken for a finished one later
@@ -73,12 +79,12 @@ def un_gzip(input_file_path, output=None):
                 with open(part, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
             os.replace(part, output_path)
-            print("Unzipping complete.")
+            logger.info("Unzipping complete.")
         finally:
             if part.exists():
                 part.unlink()
     else:
-        print(f"File already unzipped at {output_path}.")
+        logger.info("File already unzipped at %s.", output_path)
 
     return output_path
 
@@ -122,7 +128,7 @@ def download_file(url: str, dest: Path, chunk: int = 8192) -> Path:
                     "import importlib; importlib.reload(eigenp_utils.io)"
                 )
                 raise e
-            print(f"urllib failed ({e}), falling back to requests...")
+            logger.warning("urllib failed (%s), falling back to requests", e)
             resp = requests.get(url, stream=True, timeout=30)
             resp.raise_for_status()
             with open(part, "wb") as f:
