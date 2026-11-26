@@ -14,7 +14,7 @@ from eigenp_utils.clahe_equalize_adapthist import (
 # _my_clahe_ is deprecated (use clahe_u8); its tests stay until removal, and
 # only this expected warning is ignored for them
 _IGNORE_MY_CLAHE_DEPRECATION = pytest.mark.filterwarnings(
-    "ignore:_my_clahe_ is deprecated:DeprecationWarning"
+    "ignore:_my_clahe_ is deprecated:FutureWarning"
 )
 
 
@@ -41,9 +41,13 @@ def _camera():
 
 
 def test_my_clahe_warns_deprecated():
-    """Verify ``_my_clahe_`` emits a ``DeprecationWarning`` pointing to ``clahe_u8`` at the caller line."""
+    """Verify ``_my_clahe_`` emits a ``FutureWarning`` naming the removal version and ``clahe_u8``, at the caller line.
+
+    Changed (D08): it was a DeprecationWarning, which Python hides when the
+    warning is attributed to library code.
+    """
     image = np.random.default_rng(0).random((32, 32))
-    with pytest.warns(DeprecationWarning, match="clahe_u8") as record:
+    with pytest.warns(FutureWarning, match=r"removed in eigenp_utils 0\.1\.0.*clahe_u8") as record:
         _my_clahe_(image, kernel_size=8)
     assert record[0].filename == __file__
 
@@ -321,7 +325,16 @@ def test_clahe_u8_matches_skimage_reference():
 
 
 def test_clahe_u8_axis_permutation_equivariance():
-    """The N-D path treats every axis alike: permuting axes commutes with CLAHE to within 2 gray levels."""
+    """Swapping Y and X commutes with CLAHE to within 2 grey levels; moving an axis
+    to or from the leading position changes the output only by the half-pixel
+    tile-centre convention.
+
+    Changed (D20): the leading (folded) axes use pixel-centred tile coordinates
+    and Y/X keep OpenCV's (i / k - 0.5), so a permutation that moves an axis
+    into the leading position is no longer equivariant to 2 levels (it was
+    when every axis used the OpenCV shift). Expected outcome: Y/X transpose
+    max <= 2; other permutations mean |diff| < 2.5 grey levels.
+    """
     from scipy import ndimage
 
     rng = np.random.default_rng(1)
@@ -329,10 +342,13 @@ def test_clahe_u8_axis_permutation_equivariance():
     vol = (255 * (vol - vol.min()) / np.ptp(vol)).astype(np.uint8)
     ks = (5, 9, 12)
     out = clahe_u8(vol, kernel_size=ks)
-    for perm in ((2, 0, 1), (1, 2, 0)):
+    for perm in ((0, 2, 1), (2, 0, 1), (1, 2, 0)):
         out_p = clahe_u8(vol.transpose(perm), kernel_size=tuple(ks[p] for p in perm))
         d = np.abs(out_p.astype(int) - out.transpose(perm).astype(int))
-        assert d.max() <= 2, (perm, d.max())
+        if perm == (0, 2, 1):
+            assert d.max() <= 2, (perm, d.max())
+        else:
+            assert d.mean() < 2.5, (perm, d.mean())
 
 
 def test_clahe_u8_z_constant_volume_equals_2d():
@@ -503,3 +519,136 @@ def test_clahe_module_runs_standalone_with_sibling_conventions(tmp_path):
                          env={"MPLBACKEND": "Agg", "PATH": ""})
     assert out.returncode == 0, out.stderr[-2000:]
     assert out.stdout.strip().endswith("ok")
+
+
+# ---------------------------------------------------------------------------
+# D20: pixel-centred tile coordinates on the folded (leading) axes
+# ---------------------------------------------------------------------------
+
+
+def _d20_backends():
+    """Backends to check: NumPy always, numba when importable."""
+    try:
+        import numba  # noqa: F401
+    except ImportError:
+        return ["numpy"]
+    return ["numpy", "numba"]
+
+
+def _d20_image2d():
+    """Deterministic 97x131 uint8 ramp with pseudo-random texture (no RNG, so the hash is portable)."""
+    yy, xx = np.mgrid[:97, :131].astype(np.int64)
+    noise = (xx * 7919 + yy * 104729 + xx * yy * 31) % 41 - 20
+    return np.clip(40 + xx + yy // 2 + noise, 0, 255).astype(np.uint8)
+
+
+# sha256 of the base-commit (33bb6ff) 2D output; identical on both backends
+_D20_2D_HASHES = {
+    (None, 0.01): "b0aa4a2ac807e92864677290102b18528d80187da55f6a89743d1efae507ff97",
+    ((16, 20), 0.03): "d8ad57b1f04a3a68092314bdc11334eed94941973718b1bd36983c5f418071bc",
+    (7, None): "a19f7868a670bf2bd0e1eaa283835032bacba4539aa754b2db32d122ab4c7386",
+}
+
+
+@pytest.mark.parametrize("backend", _d20_backends())
+def test_clahe_u8_2d_output_bit_identical_to_base(backend):
+    """(-) control for D20: 2D output keeps OpenCV's tile convention, bit for bit.
+
+    Strategy: equalise a deterministic 2D image with three kernel/clip settings
+    and hash the output. Expected outcome: the sha256 equals the output of the
+    base commit (before the leading-axis change), on both backends.
+    """
+    import hashlib
+
+    img = _d20_image2d()
+    for (ks, clip), digest in _D20_2D_HASHES.items():
+        out = clahe_u8(img, kernel_size=ks, clip_limit=clip, backend=backend)
+        assert hashlib.sha256(out.tobytes()).hexdigest() == digest, (ks, clip)
+
+
+@pytest.mark.parametrize("backend", _d20_backends())
+def test_clahe_u8_z_flip_equivariance(backend):
+    """(+) control for D20: flipping Z commutes with CLAHE when Z is a multiple of the Z tile.
+
+    Strategy: a smooth random 10x48x40 volume (Z < 16, so the default Z tile is
+    1 voxel), and explicit Z tiles of 2 and 5. Before D20 the half-pixel OpenCV
+    shift on Z made slice i a 50/50 blend of the LUTs of slices i-1 and i, and
+    flipping Z changed the output by up to 64 grey levels.
+    Expected outcome: ||C(flip_z x) - flip_z C(x)||_inf == 0.
+    """
+    from scipy import ndimage
+
+    rng = np.random.default_rng(7)
+    vol = ndimage.gaussian_filter(rng.random((10, 48, 40)), (0.5, 3, 3))
+    vol = (255 * (vol - vol.min()) / np.ptp(vol)).astype(np.uint8)
+    for ks in (None, (2, 12, 10), (5, 16, 8)):
+        a = clahe_u8(vol[::-1], kernel_size=ks, backend=backend)
+        b = clahe_u8(vol, kernel_size=ks, backend=backend)[::-1]
+        assert np.abs(a.astype(int) - b.astype(int)).max() == 0, ks
+
+
+@pytest.mark.parametrize("backend", _d20_backends())
+def test_clahe_u8_unit_z_tiles_keep_slices_independent(backend):
+    """(+) control for D20: with 1-voxel Z tiles, each slice is equalised on its own.
+
+    Strategy: a (C, Y, X) stack with kernel_size (1, 16, 16); perturb slice j
+    only. Expected outcome: every other slice i is unchanged, and each slice
+    equals the 2D CLAHE of that slice alone (no LUT leaks between channels).
+    """
+    rng = np.random.default_rng(8)
+    stack = rng.integers(0, 256, (4, 64, 48), dtype=np.uint8)
+    ks = (1, 16, 16)
+    base = clahe_u8(stack, kernel_size=ks, backend=backend)
+    pert = stack.copy()
+    pert[2] = 255 - pert[2]
+    out = clahe_u8(pert, kernel_size=ks, backend=backend)
+    for i in (0, 1, 3):
+        np.testing.assert_array_equal(out[i], base[i], err_msg=f"slice {i}")
+    assert np.any(out[2] != base[2])
+    for i in range(4):
+        np.testing.assert_array_equal(
+            base[i], clahe_u8(stack[i], kernel_size=ks[1:], backend=backend), err_msg=f"slice {i}"
+        )
+
+
+def test_clahe_u8_warns_on_trailing_colour_axis():
+    """C-07: a trailing axis of length 3 or 4 is tiled as if it were spatial, so clahe_u8 warns.
+
+    Strategy: a flat pure-red (32, 32, 3) uint8 image (channel-last RGB, as
+    ``color_coded_projection`` returns). Expected outcome: a UserWarning that
+    names the channel axis and points to channel-first processing. Negative
+    control: a (3, 32, 32) channel-first stack and a (32, 32) image do not warn.
+    """
+    import warnings
+
+    rgb = np.zeros((32, 32, 3), np.uint8)
+    rgb[..., 0] = 255
+    with pytest.warns(UserWarning, match="trailing axis of length 3"):
+        clahe_u8(rgb, backend="numpy")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        clahe_u8(np.moveaxis(rgb, -1, 0), kernel_size=(1, 8, 8), backend="numpy")
+        clahe_u8(rgb[..., 0], backend="numpy")
+
+
+def test_clahe_u8_nan_policy():
+    """R6-15: NaN input maps to 0 with a UserWarning instead of silently becoming black.
+
+    Strategy: a float ramp with a NaN block. Expected outcome: a UserWarning
+    that counts the NaN pixels, and those pixels are equalised from grey level
+    0 (identical to the same image with the block set to the data minimum).
+    Negative control: finite float input does not warn.
+    """
+    import warnings
+
+    img = np.tile(np.linspace(0, 1, 64, dtype=np.float32), (64, 1))
+    nan_img = img.copy()
+    nan_img[:8, :8] = np.nan
+    with pytest.warns(UserWarning, match="64 NaN"):
+        out = clahe_u8(nan_img, kernel_size=16, backend="numpy")
+    ref_img = img.copy()
+    ref_img[:8, :8] = 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ref = clahe_u8(ref_img, kernel_size=16, backend="numpy")
+    np.testing.assert_array_equal(out, ref)

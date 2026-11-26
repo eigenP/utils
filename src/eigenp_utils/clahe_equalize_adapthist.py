@@ -5,7 +5,6 @@
 #     "scikit-image",
 # ]
 # ///
-#@markdown `def equalize_adapthist_(image, kernel_size=None, clip_limit=0.01, nbins=256, output_float_dtype = np.float16):`
 
 """
 Adapted code from "Contrast Limited Adaptive Histogram Equalization" by Karel
@@ -28,7 +27,7 @@ import warnings
 import numpy as np
 
 try:
-    from ._conventions import _degenerate_fallback, robust_range, sample_values
+    from ._conventions import _degenerate_fallback, robust_range, sample_values, warn_deprecated
 except ImportError:  # run as a standalone script: load _conventions.py from next to this file
     import importlib.util as _ilu
     import pathlib as _pathlib
@@ -37,8 +36,9 @@ except ImportError:  # run as a standalone script: load _conventions.py from nex
         "_eigenp_conventions", _pathlib.Path(__file__).resolve().with_name("_conventions.py"))
     _conv = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_conv)
-    _degenerate_fallback, robust_range, sample_values = (
-        _conv._degenerate_fallback, _conv.robust_range, _conv.sample_values)
+    _degenerate_fallback, robust_range, sample_values, warn_deprecated = (
+        _conv._degenerate_fallback, _conv.robust_range, _conv.sample_values,
+        _conv.warn_deprecated)
 
 # scikit-image is imported inside the legacy `_my_clahe_` only, so `clahe_u8`
 # (numba / NumPy) works in minimal environments without scikit-image.
@@ -52,11 +52,13 @@ def _my_clahe_(image, kernel_size=None,
     """Contrast Limited Adaptive Histogram Equalization (CLAHE).
 
     .. deprecated::
-        Use :func:`clahe_u8`: same algorithm and ``clip_limit`` scale, N-D,
+        Emits a FutureWarning; removed in eigenp_utils 0.1.0 (D08). Use
+        :func:`clahe_u8`: same algorithm and ``clip_limit`` scale, N-D,
         5-150x faster, robust percentile input scaling. It returns uint8 in
         [0, 255] rather than float in [0, 1] (divide by 255 if needed). For a
         float result faithful to skimage, use
-        ``skimage.exposure.equalize_adapthist``.
+        ``skimage.exposure.equalize_adapthist`` (but note that there
+        ``clip_limit=0`` means unclipped AHE, while here it means identity).
 
     An algorithm for local contrast enhancement, that uses histograms computed
     over different tile regions of the image. Local details can therefore be
@@ -109,12 +111,10 @@ def _my_clahe_(image, kernel_size=None,
     .. [2] https://en.wikipedia.org/wiki/CLAHE#CLAHE
     """
 
-    warnings.warn(
-        "_my_clahe_ is deprecated and will be removed; use clahe_u8 (same "
-        "clip_limit scale, much faster, returns uint8 in [0, 255] instead of "
-        "float in [0, 1]).",
-        DeprecationWarning,
-        stacklevel=2,
+    warn_deprecated(
+        "_my_clahe_",
+        "clahe_u8 (same clip_limit scale, much faster, returns uint8 in "
+        "[0, 255] instead of float in [0, 1])",
     )
     from skimage.exposure import rescale_intensity
     from skimage.util import img_as_uint
@@ -494,8 +494,9 @@ def _hist_to_lut(hist, nt, n_px, clip_limit):
     """
     ndim = len(nt)
     if clip_limit is not None:
-        # Normalised limit as in skimage/_my_clahe_: 0 -> identity, 1 -> AHE
-        # (integer count, as OpenCV and skimage)
+        # Normalised limit as in _my_clahe_: 0 -> identity, 1 -> AHE. Unlike
+        # skimage and OpenCV, where 0 disables clipping (AHE, R6-08); the
+        # count is an integer, as in both of them.
         clim = int(np.clip(int(clip_limit * n_px), 1, n_px))
         # OpenCV's single clip + redistribution pass, vectorised over tiles:
         # every bin gets excess // 256, then the remainder r adds 1 to bins
@@ -522,9 +523,18 @@ def _tile_luts_u8(img, ks, clip_limit):
     return _hist_to_lut(hist, _tile_grid(img.shape, ks), int(np.prod(ks)), clip_limit)
 
 
-def _interp_coords(size, k):
-    """Padded-grid lower tile index and weight for each coordinate (OpenCV convention)."""
-    f = np.arange(size, dtype=np.float64) / k - 0.5
+def _interp_coords(size, k, centred=False):
+    """Padded-grid lower tile index and weight for each coordinate.
+
+    ``centred=False`` is OpenCV's convention, f = i / k - 0.5 (used on Y/X so
+    2D output matches OpenCV). ``centred=True`` measures from the true tile
+    centre, f = (i + 0.5) / k - 0.5 (used on the folded leading axes, D20): a
+    1-voxel tile then gives weight 0, so thin Z (or C, T) tiles do not blend
+    50% of the neighbouring slice's LUT, and flipping the axis commutes with
+    CLAHE when the axis is a multiple of the tile.
+    """
+    i = np.arange(size, dtype=np.float64)
+    f = ((i + 0.5) / k - 0.5) if centred else (i / k - 0.5)
     t = np.floor(f)
     w = (f - t).astype(np.float32)
     return (t.astype(np.int64) + 1), w
@@ -558,7 +568,7 @@ def _clahe_u8_numpy(img, ks, clip_limit, chunk_px=1 << 16):
     wx = np.round(wx * _W_ONE).astype(np.int16)[None, :]
     wy = np.round(wy * _W_ONE).astype(np.int16)[:, None]
 
-    lead_coords = [_interp_coords(s, k) for s, k in zip(lead_shape, ks[:-2])]
+    lead_coords = [_interp_coords(s, k, centred=True) for s, k in zip(lead_shape, ks[:-2])]
     rows = max(1, chunk_px // W)  # keep temporaries cache-resident
     out = np.empty(img.shape, np.uint8)
 
@@ -616,7 +626,9 @@ def _clahe_u8_numba(img, ks, clip_limit, kernels):
     hist = kernels.tile_hist(np.ascontiguousarray(vol), *ks3, *nt)
     lut = _hist_to_lut(hist, nt, int(np.prod(ks3)), clip_limit)
 
-    (tz, wz), (ty, wy), (tx, wx) = (_interp_coords(s, k) for s, k in zip(vol.shape, ks3))
+    # Z (the folded leading axis) is pixel-centred, Y/X follow OpenCV (D20)
+    (tz, wz), (ty, wy), (tx, wx) = (_interp_coords(s, k, centred=(d == 0))
+                                    for d, (s, k) in enumerate(zip(vol.shape, ks3)))
     wy = np.round(wy * _W_ONE).astype(np.int32)
     wx = np.round(wx * _W_ONE).astype(np.int32)
     out = kernels.interp(vol, lut, tz, wz, ty, wy, tx, wx, _W_BITS)
@@ -634,6 +646,22 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
     axes are folded into one LUT per 2D slice, so every pixel needs 4 lookups
     whatever the dimensionality.
 
+    **Every axis is spatial.** There is no channel axis: contextual regions
+    span all axes, so a (C, Y, X) or (T, Y, X) stack shares histograms across
+    C or T unless its kernel_size is 1 on that axis, and a channel-last RGB
+    (Y, X, 3) image mixes its colours (a UserWarning flags a trailing axis of
+    length 3 or 4). Put channels first and use ``kernel_size=(1, ky, kx)``,
+    or call this per channel.
+
+    Tile coordinates: Y and X (the last two axes) use OpenCV's convention, so
+    2D output matches OpenCV. The leading axes are pixel-centred, so with a
+    1-voxel tile along Z (the default when Z < 16) each slice uses its own
+    LUT, and flipping Z commutes with CLAHE when Z is a multiple of the tile.
+    Changed (D20, 2026-11): the leading axes used OpenCV's half-pixel shift,
+    which blended 50% of the previous slice's (or channel's) LUT into each
+    slice when the tile was 1 voxel thick, and made the result depend on the
+    Z direction (up to 64 grey levels). 2D output is unchanged, bit for bit.
+
     Two backends give bit-identical results:
 
     * ``'numba'`` (used by ``'auto'`` when numba is importable and
@@ -647,15 +675,25 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
     Parameters
     ----------
     image : (N1, ..., NN) ndarray
-        uint8 is used as is. Any other dtype is mapped to [0, 255] between the
-        ``percentiles`` (so isolated hot/dead pixels do not set the range).
+        uint8 is used as is (no stretching, so dim uint8 data stay dim while
+        the same counts in uint16 are stretched). bool maps to {0, 255}. Any
+        other dtype is mapped to [0, 255] between the ``percentiles`` (so
+        isolated hot/dead pixels do not set the range). NaN pixels become 0
+        before equalisation, with a UserWarning: they then take part in the
+        tile histograms and come out as equalised grey levels, so mask them
+        afterwards if needed (uint8 cannot hold NaN).
     kernel_size : int or sequence of int, optional
-        Tile shape. Default 1/8 of each dimension.
+        Tile shape. Default 1/8 of each dimension (at least 1).
     clip_limit : float or None
-        Normalised clip limit as in ``_my_clahe_``: 0 ~ identity, 1 or None = AHE.
-        Equivalent to OpenCV's ``clipLimit = 256 * clip_limit``.
+        Normalised clip limit as in ``_my_clahe_``: 1 or None = AHE (maximum
+        contrast), equivalent to OpenCV's ``clipLimit = 256 * clip_limit``.
+        **0 means identity (minimum contrast) here, unlike skimage and
+        OpenCV, where 0 disables clipping and gives AHE.** Use None for AHE;
+        ``surface_extraction`` relies on 0 meaning "off".
     percentiles : (float, float)
-        Input range for non-uint8 images, estimated on a fixed-seed random
+        Input range for non-uint8 images, default (0.1, 99.9): the processing
+        default shared with ``intensity_rescaling`` (D02/D27; the viewers
+        display up to p99.99 instead). Estimated on a fixed-seed random
         sample of at most 4M values. When the two percentiles are equal
         (signal on fewer than (100 - upper)% of the voxels) the range falls
         back to the data maximum (and minimum), with a UserWarning.
@@ -670,6 +708,21 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
     """
     if backend not in ('auto', 'numba', 'numpy'):
         raise ValueError(f'Unknown backend: {backend!r}')
+    image = np.asarray(image)
+    if image.ndim >= 3 and image.shape[-1] in (3, 4):
+        warnings.warn(
+            f"clahe_u8 tiles every axis, including the trailing axis of length "
+            f"{image.shape[-1]} of this {image.shape} image: if it holds colour "
+            "channels (RGB/RGBA), they are mixed. Put channels first and use "
+            "kernel_size=(1, ky, kx), or equalise each channel separately.",
+            UserWarning, stacklevel=2)
+    if image.dtype.kind == 'f':
+        n_nan = int(np.count_nonzero(np.isnan(image)))
+        if n_nan:
+            warnings.warn(
+                f"clahe_u8: {n_nan} NaN pixels are mapped to 0 and equalised with "
+                "the rest (uint8 output cannot hold NaN); mask them afterwards "
+                "if needed.", UserWarning, stacklevel=2)
     img = _to_uint8(image, percentiles)
     if img.ndim == 0:
         raise ValueError('`image` must have at least one dimension')
