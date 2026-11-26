@@ -771,8 +771,11 @@ def test_interactive_kwargs_scatter():
 
     Strategy: pass seeded ``(Z, Y, X)`` point arrays in ``[0, 1]`` with explicit
     ``slabs_thickness``, ``slabs_position``, and ``pixel_sizes``.
-    Expected outcome: thickness traits equal ``(2, 3, 4)``, out-of-range
-    positions clamp to ``1``, and pixel size traits match.
+    Expected outcome: the slabs are in physical units, as in the image
+    viewers (D10): thickness ``(2, 3, 4)`` with pixel sizes ``(2, 1, 0.5)``
+    gives index half-thicknesses ``(1, 3, 8)``; out-of-range positions clamp
+    to ``1``, and pixel size traits match. (Changed by D10: the scatter took
+    slabs in data units, so ``z_t`` was 2 and ``x_t`` 4.)
     """
     rng = np.random.default_rng(4)
     Z, Y, X = rng.random(10), rng.random(10), rng.random(10)
@@ -786,7 +789,7 @@ def test_interactive_kwargs_scatter():
     )
     assert w.show_crosshair is False
     assert w.sync_on_hover is True
-    assert w.z_t == 2 and w.y_t == 3 and w.x_t == 4
+    assert w.z_t == 1 and w.y_t == 3 and w.x_t == 8
     assert w.z_s == 1 and w.y_s == 1 and w.x_s == 1
     assert w.sz == 2.0 and w.sy == 1.0 and w.sx == 0.5
 
@@ -4642,3 +4645,148 @@ def test_widget_classes_deprecate_legacy_kwargs_and_still_apply_them():
     with pytest.warns(FutureWarning, match="'x_t'/'y_t'/'z_t'.*'slabs_thickness'"):
         ws = tpa.TNIAScatterWidget(pts[:, 2], pts[:, 1], pts[:, 0], x_t=3, y_t=3, z_t=3)
     assert ws.x_t == 3
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (viewers): slab semantics (D10)
+# ---------------------------------------------------------------------------
+
+def _eval_copy_params(w):
+    w.copy_params_trigger += 1
+    return eval(f"dict({w.copy_params_string})", {"__builtins__": {"dict": dict}}, {})
+
+
+_SLABS = ("x_start", "x_end", "y_start", "y_end", "z_start", "z_end")
+
+
+@pytest.mark.parametrize("factory", [show_zyx_max_slice_interactive, show_zyx_max_slice_interactive_point_annotator])
+def test_copy_kwargs_round_trip_even_and_odd_width_slabs(factory):
+    """D10 controls: copy-kwargs of an even-width slab rebuild the identical view.
+
+    Strategy: set an even-width X slab [10, 13] (4 voxels) and odd-width Y/Z
+    slabs, copy the kwargs and rebuild the widget from them.
+    Expected outcome (+): every inclusive [start, end] matches, so the drawn
+    slabs are identical; the emitted position/thickness hold half-voxels
+    (11.5 and 1.5 voxels). (−) The odd widths give the same integer
+    centre/half-thickness as before. (The (s, t) form used to drop one voxel
+    of an even width: [10, 13] came back as [10, 12].)
+    """
+    vol = _structured_volume((16, 48, 48))
+    ps = {"Z": 2.0, "Y": 0.5, "X": 0.5}
+    w = factory(vol, pixel_sizes=ps, figsize=(4, 4))
+    w.x_start, w.x_end = 10, 13
+    w.y_start, w.y_end = 20, 26
+    w.z_start, w.z_end = 4, 8
+    params = _eval_copy_params(w)
+    assert params["slabs_position"] == (6 * 2.0, 23 * 0.5, 11.5 * 0.5)
+    assert params["slabs_thickness"] == (2 * 2.0, 3 * 0.5, 1.5 * 0.5)
+    rebuilt = factory(vol, pixel_sizes=ps, figsize=(4, 4),
+                      slabs_position=params["slabs_position"], slabs_thickness=params["slabs_thickness"])
+    assert [getattr(rebuilt, a) for a in _SLABS] == [10, 13, 20, 26, 4, 8]
+    assert (rebuilt.y_s, rebuilt.y_t, rebuilt.z_s, rebuilt.z_t) == (23, 3, 6, 2)
+
+
+def test_scatter_slabs_are_physical_like_the_image_viewer_and_round_trip():
+    """D10 / R2-12 / R8-09: the same slab kwargs select the same slabs in the image and scatter viewers.
+
+    Strategy: pixel sizes (2, 0.5, 0.5), position (20, 50, 50) and thickness
+    (4, 5, 5) (physical), for a 40 x 200 x 200 image and for points covering
+    the same index box (data coordinates 0..39, 0..199, 0..199); then an
+    even-width scatter slab through copy-kwargs.
+    Expected outcome: both viewers select X [90, 110] and Z [8, 12] (the
+    scatter used to take the numbers as data units: X [45, 55], Z [16, 24]);
+    the even-width scatter slab round-trips exactly.
+    """
+    ps = (2.0, 0.5, 0.5)
+    kw = dict(pixel_sizes=ps, slabs_position=(20, 50, 50), slabs_thickness=(4, 5, 5))
+    wi = show_zyx_max_slice_interactive(np.zeros((40, 200, 200), np.uint8), figsize=(4, 4), **kw)
+    corners = np.array([[0, 0, 0], [39, 199, 199]], dtype=float)
+    rng = np.random.default_rng(0)
+    pts = np.vstack([corners, rng.uniform(0, 1, (100, 3)) * [39, 199, 199]])
+    wsc = show_zyx_max_scatter_interactive(pts, render="points", figsize=(4, 4), **kw)
+    for w in (wi, wsc):
+        assert (w.x_start, w.x_end, w.z_start, w.z_end) == (90, 110, 8, 12)
+
+    wsc.x_start, wsc.x_end = 41, 50
+    params = _eval_copy_params(wsc)
+    rebuilt = show_zyx_max_scatter_interactive(
+        pts, render="points", figsize=(4, 4), pixel_sizes=ps,
+        slabs_position=params["slabs_position"], slabs_thickness=params["slabs_thickness"])
+    assert [getattr(rebuilt, a) for a in _SLABS] == [getattr(wsc, a) for a in _SLABS]
+
+
+def test_hover_sync_keeps_an_even_slab_width():
+    """D10 / R2-01: hover sync moves the drawn slab without changing its width.
+
+    Strategy: an even-width X slab [10, 13] (4 voxels), then hover the XY
+    panel over voxel x = 30.
+    Expected outcome: the slab becomes [29, 32] (centre index 30, still 4
+    voxels; the (s, t) path made it 3 voxels wide); Y keeps its width too.
+    """
+    w = show_zyx_max_slice_interactive(_structured_volume((16, 48, 48)), figsize=(4, 4))
+    w.x_start, w.x_end = 10, 13
+    y_width = w.y_end - w.y_start
+    fig = w._render()
+    fx, fy = _fig_frac(fig, fig.axXY, 30.5, 20.5)
+    w.hover_coords = {"plane": "xy", "x": fx, "y": fy, "t": 1}
+    assert (w.x_start, w.x_end) == (29, 32) and w.x_s == 30
+    assert w.y_end - w.y_start == y_width and w.y_s == 20
+
+
+def test_annotator_delete_uses_the_drawn_slab_and_a_screen_pixel_radius():
+    """D10 / R2-01 / R2-06: deletion selects points in the drawn slab, within ~12 screen px.
+
+    Strategy: 60 x 256 x 256 volume with pixel sizes (5, 0.2, 0.2) (the Z
+    panels are wide on screen), even-width Z slab; (a) a point on the last
+    plane of the even slab, clicked exactly; (b) a ZY click 19 z-slices
+    (95 µm) from a point; (c) an XY click about 6 screen px from a point;
+    (d) an XY click about 30 screen px away.
+    Expected outcome: (a) deleted (the (s, t) form excluded that plane);
+    (b) kept (it was deleted: the radius was 20 voxel indices); (c) deleted;
+    (d) kept.
+    """
+    vol = np.zeros((60, 256, 256), np.uint8)
+    w = show_zyx_max_slice_interactive_point_annotator(vol, pixel_sizes=(5, 0.2, 0.2), figsize=(8, 8))
+    w.annotation_mode = True
+    w.annotation_action = "delete"
+
+    def click(plane, a, b, t):
+        fig = w._render()
+        ax = getattr(fig, f"ax{plane.upper()}")
+        fx, fy = _fig_frac(fig, ax, a, b)
+        w.click_coords = {"plane": plane, "x": fx, "y": fy, "t": t}
+
+    w.z_start, w.z_end = 30, 33
+    w.points = [[33, 128, 128]]
+    click("xy", 128.5 * 0.2, 128.5 * 0.2, 1)
+    assert w.points == []
+
+    w.points = [[30, 128, 128]]
+    w.x_start, w.x_end = 127, 129
+    click("zy", (30 + 19 + 0.5) * 5, 128.5 * 0.2, 2)
+    assert w.points == [[30, 128, 128]]
+
+    fig = w._render()
+    um_per_px = (fig.axXY.get_xlim()[1] - fig.axXY.get_xlim()[0]) / (
+        w.axis_bounds["xy"]["x1"] - w.axis_bounds["xy"]["x0"]) / (fig.get_figwidth() * fig.dpi)
+    w.z_start, w.z_end = 29, 31
+    click("xy", 128.5 * 0.2 + 6 * um_per_px, 128.5 * 0.2, 3)
+    assert w.points == []
+
+    w.points = [[30, 128, 128]]
+    click("xy", 128.5 * 0.2 + 30 * um_per_px, 128.5 * 0.2, 4)
+    assert w.points == [[30, 128, 128]]
+
+
+def test_half_voxel_slab_kwargs_select_even_widths():
+    """D10: ``(s, t)`` accepts half-voxels, so even widths can be requested directly.
+
+    Strategy: position 11.5 voxels and half-thickness 1.5 voxels on X (unit
+    pixel sizes); negative control: integer position 11 with half-thickness 1.
+    Expected outcome: X [10, 13] (4 voxels) and X [10, 12] (3 voxels).
+    """
+    vol = _structured_volume((16, 48, 48))
+    w = show_zyx_max_slice_interactive(vol, slabs_position=(8, 24, 11.5), slabs_thickness=(1, 1, 1.5), figsize=(4, 4))
+    assert (w.x_start, w.x_end) == (10, 13)
+    w = show_zyx_max_slice_interactive(vol, slabs_position=(8, 24, 11), slabs_thickness=(1, 1, 1), figsize=(4, 4))
+    assert (w.x_start, w.x_end) == (10, 12)

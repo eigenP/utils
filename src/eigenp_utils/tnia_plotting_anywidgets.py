@@ -1930,95 +1930,104 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         # Observe copy params trigger
         self.observe(self._copy_params, names='copy_params_trigger')
 
-        # Sync initial start/end from initial x_s, x_t
-        self._sync_start_end_from_st()
-
         # Initial bounds update
         self._update_bounds(None)
 
         # Initial render
         self._render_wrapper(None)
 
-    def _sync_start_end_from_st(self):
-        if getattr(self, '_syncing_traits', False):
-            return
+    # Slabs (D10). The inclusive index range [start, end] of each axis is the
+    # state that is drawn, exported and used for selection; the centre and
+    # half-thickness (x_s, x_t) are derived from it ((start + end) // 2 and
+    # (end - start) // 2), so an even width is never rounded away. Writing
+    # x_s moves the slab and keeps its width; writing x_t sets [s - t, s + t].
+
+    _AXIS_INDEX = {'x': 2, 'y': 1, 'z': 0}
+
+    def _axis_size(self, axis):
+        return self.dims[self._AXIS_INDEX[axis]]
+
+    def _set_slab_traits(self, axis, start, end, s=None, t=None, keep_width=False):
+        """
+        Write one axis's [start, end] (clamped to the volume) and its centre/half-thickness.
+
+        The requested width ``end - start`` (before clamping) is remembered as
+        the slab's nominal width, which hover moves keep (``keep_width``), so a
+        slab narrowed at a border widens again when it moves back.
+        """
+        if not keep_width:
+            if not hasattr(self, '_slab_width'):
+                self._slab_width = {}
+            self._slab_width[axis] = max(0, int(end) - int(start))
+        n = self._axis_size(axis)
+        start = max(0, min(n - 1, int(start)))
+        end = max(start, min(n - 1, int(end)))
+        if s is None:
+            s, t = (start + end) // 2, (end - start) // 2
+        was = getattr(self, '_syncing_traits', False)
         self._syncing_traits = True
         try:
-            Z, Y, X = self.dims
-            x_s_c = max(0, min(X - 1, self.x_s))
-            y_s_c = max(0, min(Y - 1, self.y_s))
-            z_s_c = max(0, min(Z - 1, self.z_s))
-
-            nx_start = max(0, min(X - 1, x_s_c - self.x_t))
-            nx_end = max(0, min(X - 1, x_s_c + self.x_t))
-            if nx_end < nx_start: nx_end = nx_start
-
-            ny_start = max(0, min(Y - 1, y_s_c - self.y_t))
-            ny_end = max(0, min(Y - 1, y_s_c + self.y_t))
-            if ny_end < ny_start: ny_end = ny_start
-
-            nz_start = max(0, min(Z - 1, z_s_c - self.z_t))
-            nz_end = max(0, min(Z - 1, z_s_c + self.z_t))
-            if nz_end < nz_start: nz_end = nz_start
-
             with self.hold_trait_notifications():
-                self.x_s = x_s_c
-                self.y_s = y_s_c
-                self.z_s = z_s_c
-                self.x_start = nx_start
-                self.x_end = nx_end
-                self.y_start = ny_start
-                self.y_end = ny_end
-                self.z_start = nz_start
-                self.z_end = nz_end
+                setattr(self, f'{axis}_start', start)
+                setattr(self, f'{axis}_end', end)
+                setattr(self, f'{axis}_s', int(s))
+                setattr(self, f'{axis}_t', int(t))
         finally:
-            self._syncing_traits = False
+            self._syncing_traits = was
+
+    def _init_slab(self, axis, centre, half):
+        """
+        Place a slab from a centre and half-thickness in index units (floats).
+
+        ``centre`` is clamped into the volume first. When ``centre -/+ half``
+        are whole indices (half-voxel values, as copy-kwargs emits for even
+        widths) they are the inclusive range exactly; otherwise the centre and
+        half-thickness are rounded (to the nearest index, as before) and the
+        range ``[s - t, s + t]`` is clipped to the volume.
+        """
+        n = self._axis_size(axis)
+        c = min(max(float(centre), 0.0), n - 1.0)
+        h = max(0.0, float(half))
+        lo, hi = c - h, c + h
+        if abs(lo - round(lo)) < 1e-6 and abs(hi - round(hi)) < 1e-6:
+            start, end = int(round(lo)), int(round(hi))
+            s, t = None, None
+            if c == round(c) and h == round(h):
+                s, t = int(round(c)), int(round(h))  # an odd width keeps its centre when clipped
+        else:
+            s, t = int(round(c)), int(round(h))
+            start, end = s - t, s + t
+        self._set_slab_traits(axis, start, end, s, t)
+
+    def _translate_slab(self, axis, centre):
+        """
+        Centre the slab on index ``centre``, keeping its nominal width.
+
+        For a width w (``end - start``) the slab is ``[c - w // 2, c - w // 2 + w]``,
+        so ``(start + end) // 2 == c`` for odd and even widths; at a border it
+        is clipped (``x_s`` stays ``c``) and regains its width when moved back.
+        """
+        widths = getattr(self, '_slab_width', {})
+        width = widths.get(axis, getattr(self, f'{axis}_end') - getattr(self, f'{axis}_start'))
+        c = int(centre)
+        start = c - width // 2
+        self._set_slab_traits(axis, start, start + width, c, width // 2, keep_width=True)
 
     def _on_st_changed(self, change):
-        self._sync_start_end_from_st()
+        if getattr(self, '_syncing_traits', False):
+            return
+        axis, kind = change.name[0], change.name[2]
+        if kind == 's':
+            self._translate_slab(axis, change.new)
+        else:
+            s = getattr(self, f'{axis}_s')
+            self._set_slab_traits(axis, s - change.new, s + change.new, s, change.new)
 
     def _on_start_end_changed(self, change):
         if getattr(self, '_syncing_traits', False):
             return
-        self._syncing_traits = True
-        try:
-            Z, Y, X = self.dims
-            nx_start = max(0, min(X - 1, self.x_start))
-            nx_end = max(0, min(X - 1, self.x_end))
-            if nx_end < nx_start: nx_end = nx_start
-
-            ny_start = max(0, min(Y - 1, self.y_start))
-            ny_end = max(0, min(Y - 1, self.y_end))
-            if ny_end < ny_start: ny_end = ny_start
-
-            nz_start = max(0, min(Z - 1, self.z_start))
-            nz_end = max(0, min(Z - 1, self.z_end))
-            if nz_end < nz_start: nz_end = nz_start
-
-            nx_s = (nx_start + nx_end) // 2
-            nx_t = max(0, (nx_end - nx_start) // 2)
-
-            ny_s = (ny_start + ny_end) // 2
-            ny_t = max(0, (ny_end - ny_start) // 2)
-
-            nz_s = (nz_start + nz_end) // 2
-            nz_t = max(0, (nz_end - nz_start) // 2)
-
-            with self.hold_trait_notifications():
-                self.x_start = nx_start
-                self.x_end = nx_end
-                self.y_start = ny_start
-                self.y_end = ny_end
-                self.z_start = nz_start
-                self.z_end = nz_end
-                self.x_s = nx_s
-                self.x_t = nx_t
-                self.y_s = ny_s
-                self.y_t = ny_t
-                self.z_s = nz_s
-                self.z_t = nz_t
-        finally:
-            self._syncing_traits = False
+        axis = change.name[0]
+        self._set_slab_traits(axis, getattr(self, f'{axis}_start'), getattr(self, f'{axis}_end'))
 
     def _update_bounds(self, change):
         # x
@@ -2107,6 +2116,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
                 # computed in, whatever the user's savefig rcParams (e.g. 'tight').
                 with matplotlib.rc_context({'savefig.bbox': 'standard'}):
                     fig.savefig(buf, format='png')
+                    dpi = matplotlib.rcParams['savefig.dpi']
+                dpi = fig.dpi if dpi == 'figure' else float(dpi)
+                # Size of the displayed PNG, for distances in screen pixels
+                self._png_px = tuple(float(v) for v in fig.get_size_inches() * dpi)
                 self.image_data = base64.b64encode(buf.getvalue()).decode('utf-8')
             # Recorded only after a successful render, so a state whose render
             # failed is retried by the next notification.
@@ -2183,14 +2196,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         idx = self._phys_to_index(plane, phys_x, phys_y)
         if idx is None:
             return
-        Z, Y, X = self.dims
         with self.hold_trait_notifications():
-            if 'x' in idx:
-                self.x_s = max(0, min(X - 1, idx['x']))
-            if 'y' in idx:
-                self.y_s = max(0, min(Y - 1, idx['y']))
-            if 'z' in idx:
-                self.z_s = max(0, min(Z - 1, idx['z']))
+            # Move each slab under the cursor, keeping its width (D10)
+            for axis, i in idx.items():
+                self._translate_slab(axis, max(0, min(self._axis_size(axis) - 1, i)))
 
     def _panel_geometry(self, plane):
         """
@@ -2225,6 +2234,10 @@ class TNIAWidgetBase(anywidget.AnyWidget):
 
     def _render(self):
         raise NotImplementedError
+
+    def _slab_origin(self):
+        """Data coordinate (z, y, x) of widget index 0 (copy-kwargs positions are measured from 0)."""
+        return (0, 0, 0)
 
     def _save_svg(self, change):
         fig = self._render()
@@ -2265,15 +2278,17 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         """The current view as keyword-argument lines (one ``key=value,`` each)."""
         s = []
 
-        x_s_phys = self.x_s * self.sx
-        y_s_phys = self.y_s * self.sy
-        z_s_phys = self.z_s * self.sz
-        s.append(f"slabs_position=({z_s_phys}, {y_s_phys}, {x_s_phys}),")
-
-        x_t_phys = self.x_t * self.sx
-        y_t_phys = self.y_t * self.sy
-        z_t_phys = self.z_t * self.sz
-        s.append(f"slabs_thickness=({z_t_phys}, {y_t_phys}, {x_t_phys}),")
+        # Physical centre and half-thickness of the drawn [start, end] slabs
+        # (half-voxel values for even widths, so the paste rebuilds the same
+        # slabs; D10). The scatter viewer's index 0 is its data minimum.
+        oz, oy, ox = self._slab_origin()
+        pos, half = [], []
+        for axis, o, step in (('z', oz, self.sz), ('y', oy, self.sy), ('x', ox, self.sx)):
+            a, b = getattr(self, f'{axis}_start'), getattr(self, f'{axis}_end')
+            pos.append(float(((a + b) / 2.0 + o) * step))
+            half.append(float((b - a) / 2.0 * step))
+        s.append(f"slabs_position=({pos[0]}, {pos[1]}, {pos[2]}),")
+        s.append(f"slabs_thickness=({half[0]}, {half[1]}, {half[2]}),")
 
         # Handle channels
         if hasattr(self, 'num_channels'):
@@ -2341,6 +2356,14 @@ class TNIASliceWidget(TNIAWidgetBase):
     registered Colormap instances are accepted. Per-channel vmin / vmax /
     gamma / opacity lists longer than the number of channels raise
     ValueError, as in the static viewers (extra entries used to be dropped).
+
+    Slabs: ``slabs_position`` is the physical centre and ``slabs_thickness``
+    the physical half-thickness of each slab, (Z, Y, X). The drawn slab is
+    the inclusive index range ``[x_start, x_end]``; ``x_s`` / ``x_t`` are its
+    centre and half-thickness in indices. Changed (D10, 2026-11): half-voxel
+    values select even widths (centre 11.5, half 1.5 voxels -> [10, 13]), and
+    copy-kwargs, hover sync and the annotator use the drawn range; the
+    (x_s, x_t) form used to drop one voxel of an even width.
     """
     def __init__(self, im, pixel_sizes=None, figsize=None, colormap=None, vmin=None, vmax=None, gamma=1,
                  show_crosshair=True, sync_on_hover=True, scale_bar_show=True, scale_bar_fontsize_pt=None, slabs_position=None, slabs_thickness=None, opacity=None, rotate_view=None, channel_labels=None, channel_label_fontsize_pt=None,
@@ -2452,33 +2475,16 @@ class TNIASliceWidget(TNIAWidgetBase):
         self.gamma_list = per_channel(gamma, self.num_channels, 'gamma', 1.0)
         self.opacity_list = per_channel(opacity, self.num_channels, 'opacity', 1.0)
 
-        # Convert physical position/thickness to pixel indices
+        # Physical position / half-thickness -> index slabs (D10: half-voxel
+        # values select even widths exactly; see TNIAWidgetBase._init_slab)
         def _default_t(n): return max(1, n // 64)
-        x_t_idx = int(round(x_t / px)) if x_t is not None else _default_t(X)
-        y_t_idx = int(round(y_t / py)) if y_t is not None else _default_t(Y)
-        z_t_idx = int(round(z_t / pz)) if z_t is not None else _default_t(Z)
-
-        x_s_idx = int(round(x_s / px)) if x_s is not None else X // 2
-        y_s_idx = int(round(y_s / py)) if y_s is not None else Y // 2
-        z_s_idx = int(round(z_s / pz)) if z_s is not None else Z // 2
-
-        # Override for max projection if thickness exceeds shape
-        if x_t_idx >= X:
-            x_t_idx = max(1, X // 2)
-            x_s_idx = X // 2
-        if y_t_idx >= Y:
-            y_t_idx = max(1, Y // 2)
-            y_s_idx = Y // 2
-        if z_t_idx >= Z:
-            z_t_idx = max(1, Z // 2)
-            z_s_idx = Z // 2
-
-        self.x_t = x_t_idx
-        self.y_t = y_t_idx
-        self.z_t = z_t_idx
-        self.x_s = x_s_idx
-        self.y_s = y_s_idx
-        self.z_s = z_s_idx
+        for axis, n, pos, half, step in (('x', X, x_s, x_t, px), ('y', Y, y_s, y_t, py), ('z', Z, z_s, z_t, pz)):
+            h = half / step if half is not None else _default_t(n)
+            c = pos / step if pos is not None else n // 2
+            if round(h) >= n:
+                # Thicker than the volume: the whole axis
+                c, h = n // 2, max(1, n // 2)
+            self._init_slab(axis, c, h)
 
         # Compute histograms over each channel's (inferred or enforced) bit-depth range
         hists = []
@@ -2656,6 +2662,15 @@ class _PointList(traitlets.List):
 class TNIAAnnotatorWidget(TNIASliceWidget):
     """
     Subclass of TNIASliceWidget that supports interactive point annotation.
+
+    ``points`` are voxel indices ``[z, y, x]`` (not physical coordinates).
+    In delete mode a click removes the nearest point drawn within about 12
+    screen pixels (at least the marker's size) among the points inside the
+    panel's drawn slab. Clicks on the padding of a rotated panel are ignored.
+
+    Changed (D10, 2026-11): the delete radius was 20 voxel indices mixed
+    across axes, and the visible slab was the (x_s, x_t) form, which drops
+    one plane of an even-width slab.
     """
     # UI Toggles
     annotation_mode = traitlets.Bool(False).tag(sync=True)
@@ -2846,40 +2861,53 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
         data_y = max(0, min(Y - 1, data_y))
         data_z = max(0, min(Z - 1, data_z))
 
+        if outside:
+            return  # padding of a rotated panel: neither add nor delete
         if self.annotation_action == 'add':
-            if not outside:
-                self.add_point(data_z, data_y, data_x)
+            self.add_point(data_z, data_y, data_x)
         elif self.annotation_action == 'delete':
-            if not self.points:
-                return
-            pts = np.array(self.points)
-            x0_sl = max(0, self.x_s - self.x_t)
-            x1_sl = min(self.dims[2] - 1, self.x_s + self.x_t)
-            y0_sl = max(0, self.y_s - self.y_t)
-            y1_sl = min(self.dims[1] - 1, self.y_s + self.y_t)
-            z0_sl = max(0, self.z_s - self.z_t)
-            z1_sl = min(self.dims[0] - 1, self.z_s + self.z_t)
+            self._delete_near(plane, frac_x, frac_y, info)
 
-            if plane == 'xy':
-                mask = (pts[:, 0] >= z0_sl) & (pts[:, 0] <= z1_sl)
-                if not np.any(mask): return
-                visible_pts = pts[mask]
-                dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 1] - data_y)**2
-            elif plane == 'zy':
-                mask = (pts[:, 2] >= x0_sl) & (pts[:, 2] <= x1_sl)
-                if not np.any(mask): return
-                visible_pts = pts[mask]
-                dist = (visible_pts[:, 0] - data_z)**2 + (visible_pts[:, 1] - data_y)**2
-            elif plane == 'xz':
-                mask = (pts[:, 1] >= y0_sl) & (pts[:, 1] <= y1_sl)
-                if not np.any(mask): return
-                visible_pts = pts[mask]
-                dist = (visible_pts[:, 2] - data_x)**2 + (visible_pts[:, 0] - data_z)**2
+    # Delete radius in rendered (PNG) pixels (D10): fixed on screen, whatever
+    # the voxel size or the panel's zoom.
+    _DELETE_RADIUS_PX = 12.0
 
-            closest_idx = np.argmin(dist)
-            if dist[closest_idx] <= 400:
-                closest_pt = visible_pts[closest_idx]
-                self.remove_point(closest_pt[0], closest_pt[1], closest_pt[2])
+    def _delete_near(self, plane, frac_x, frac_y, info):
+        """Remove the visible point drawn nearest to a click, if within ~12 screen px.
+
+        Visible means inside the drawn slab ``[start, end]`` of the panel's
+        normal axis. Distances are measured on the rendered image between the
+        click and each point's drawn position (voxel centre, rotation applied).
+        """
+        if not self.points:
+            return
+        pts = np.array(self.points)
+        normal = {'xy': ('z', 0), 'zy': ('x', 2), 'xz': ('y', 1)}[plane]
+        lo, hi = getattr(self, f'{normal[0]}_start'), getattr(self, f'{normal[0]}_end')
+        visible = pts[(pts[:, normal[1]] >= lo) & (pts[:, normal[1]] <= hi)]
+        if visible.size == 0:
+            return
+        # Panel coordinates (horizontal, vertical) of each point's voxel centre
+        steps = {0: self.sz, 1: self.sy, 2: self.sx}
+        col_ax, row_ax = {'xy': (2, 1), 'zy': (0, 1), 'xz': (2, 0)}[plane]
+        a = (visible[:, col_ax] + 0.5) * steps[col_ax]
+        b = (visible[:, row_ax] + 0.5) * steps[row_ax]
+        a, b = self._panel_geometry(plane).forward(a, b)
+
+        (x0, x1), (y0, y1) = (info['x0'], info['x1']), (info['y0_js'], info['y1_js'])
+        (xl0, xl1), (yl0, yl1) = info['xlim'], info['ylim']
+        w_px, h_px = getattr(self, '_png_px', (1.0, 1.0))
+        fx = x0 + (np.asarray(a) - xl0) / (xl1 - xl0) * (x1 - x0)
+        fy = y0 + (np.asarray(b) - yl1) / (yl0 - yl1) * (y1 - y0)
+        dist = np.hypot((fx - frac_x) * w_px, (fy - frac_y) * h_px)
+
+        # At least the drawn marker's half-size on screen
+        marker_um = max(1, self.point_size // 2) * min(self.sx, self.sz)
+        marker_px = marker_um / abs(xl1 - xl0) * (x1 - x0) * w_px
+        k = int(np.argmin(dist))
+        if dist[k] <= max(self._DELETE_RADIUS_PX, marker_px):
+            self.remove_point(*visible[k])
+
     def add_point(self, z, y, x):
         """Programmatically add a point"""
         pt = [int(z), int(y), int(x)]
@@ -3201,20 +3229,15 @@ class TNIAScatterWidget(TNIAWidgetBase):
         z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
         z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
 
-        # Init values
-        if x_t_in is not None: self.x_t = int(x_t_in)
-        if y_t_in is not None: self.y_t = int(y_t_in)
-        if z_t_in is not None: self.z_t = int(z_t_in)
-
-        # Center default
-        if x_s_in is None: self.x_s = int((self.xmax - self.xmin)/2) # relative to 0
-        else: self.x_s = int(x_s_in)
-
-        if y_s_in is None: self.y_s = int((self.ymax - self.ymin)/2)
-        else: self.y_s = int(y_s_in)
-
-        if z_s_in is None: self.z_s = int((self.zmax - self.zmin)/2)
-        else: self.z_s = int(z_s_in)
+        # Slabs in physical units, as in the image viewers (D10): data
+        # coordinate = physical / pixel size, widget index = data - minimum.
+        for axis, n, pos, half, step, lo, hi in (
+                ('x', X_dim, x_s_in, x_t_in, px, xmin, xmax),
+                ('y', Y_dim, y_s_in, y_t_in, py, ymin, ymax),
+                ('z', Z_dim, z_s_in, z_t_in, pz, zmin, zmax)):
+            h = half / step if half is not None else max(1, n // 64)
+            c = pos / step - lo if pos is not None else int((hi - lo) / 2)
+            self._init_slab(axis, c, h)
 
         # Compute histograms
         hists = []
@@ -3240,17 +3263,9 @@ class TNIAScatterWidget(TNIAWidgetBase):
         # Initialize observers and render
         self._init_observers()
 
-    def _copy_params_lines(self):
-        """
-        Like the base class, but slabs in the units ``show_zyx_max_scatter_interactive``
-        takes: positions in data coordinates (index + data minimum), thicknesses in
-        data units (one index is one data unit).
-        """
-        lines = super()._copy_params_lines()
-        lines[0] = (f"slabs_position=({self.z_s + self.zmin}, {self.y_s + self.ymin}, "
-                    f"{self.x_s + self.xmin}),")
-        lines[1] = f"slabs_thickness=({self.z_t}, {self.y_t}, {self.x_t}),"
-        return lines
+    # Widget index 0 is the data minimum of each axis (``_copy_params_lines``)
+    def _slab_origin(self):
+        return (self.zmin, self.ymin, self.xmin)
 
     def _label_colors(self):
         """Colour of each channel as drawn (used for the channel labels)."""
@@ -4061,6 +4076,11 @@ def show_zyx_max_scatter_interactive(
         - The function dynamically determines its rendering mode: if `render=None`, it defaults to
           `'points'` for point counts under 10,000, and `'density'` for larger datasets to optimize interactive performance.
 
+    Changed (D10, 2026-11): `slabs_position` / `slabs_thickness` are physical
+    (data coordinate x pixel size), centre and half-thickness, as in the image
+    viewers; they used to be data units, so the same kwargs selected
+    different slabs in the two viewers. Copy-kwargs emits physical values.
+
     Changed (D04, 2026-11): per-channel `vmin`, `vmax`, `gamma` and `opacity`
     follow the static viewers' rule (`_conventions.per_channel`): a list
     longer than the number of channels raises ValueError (extra entries used
@@ -4142,45 +4162,13 @@ def show_zyx_max_scatter_interactive(
     elif figsize_scale != 1.0:
         figsize = (figsize[0] * figsize_scale, figsize[1] * figsize_scale)
 
-    def _default_t(n): return max(1, int(n // 64))
-    Xdim = int(np.ceil(XN)); Ydim = int(np.ceil(YN)); Zdim = int(np.ceil(ZN))
-
-    if x_t is None: x_t = _default_t(Xdim)
-    if y_t is None: y_t = _default_t(Ydim)
-    if z_t is None: z_t = _default_t(Zdim)
-
-    # Note: s inputs to scatter are in data coords (min-max range)
-    # The Widget expects 0-Dim range?
-    # Wait, my logic in TNIAScatterWidget._render adds xmin to x_s.
-    # So x_s inside the widget is 0-based offset.
-    # But x_s PASSED here is likely data coord?
-    # Original code:
-    # x_center_default = int(np.round((xmin + xmax) * 0.5))
-    # x_s0 = _clip(int(x_s if x_s is not None else x_center_default), x_lo0, x_hi0)
-    # So original input x_s is data coordinate.
-
-    # Merge individual args and tuple arg before offsetting
-    z_s_in, y_s_in, x_s_in = _parse_zyx_tuple_or_dict(slabs_position, default_val=None)
-    x_s = x_s_in if x_s is None else x_s
-    y_s = y_s_in if y_s is None else y_s
-    z_s = z_s_in if z_s is None else z_s
-
-    # So if x_s is provided, I need to subtract xmin to get 0-based offset for the widget init.
-    if x_s is not None: x_s = int(x_s - xmin)
-    if y_s is not None: y_s = int(y_s - ymin)
-    if z_s is not None: z_s = int(z_s - zmin)
-    z_t_in, y_t_in, x_t_in = _parse_zyx_tuple_or_dict(slabs_thickness, default_val=None)
-    x_t = x_t_in if x_t is None else x_t
-    y_t = y_t_in if y_t is None else y_t
-    z_t = z_t_in if z_t is None else z_t
-
     w = TNIAScatterWidget(
         X, Y, Z,
         channels=channels, pixel_sizes=pixel_sizes, render=render, bins=bins,
         point_size=point_size, alpha=alpha, colormap=colormap if colormap is not None else colors, opacity=opacity,
         gamma=gamma, vmin=vmin, vmax=vmax, figsize=figsize, show_crosshair=show_crosshair, sync_on_hover=sync_on_hover, scale_bar_show=scale_bar_show, scale_bar_fontsize_pt=scale_bar_fontsize_pt,
         subplot_bg=subplot_bg,
-        slabs_position=(z_s, y_s, x_s), slabs_thickness=(z_t, y_t, x_t),
+        slabs_position=slabs_position, slabs_thickness=slabs_thickness,
         rotate_view=rotate_view, channel_labels=channel_labels, channel_label_fontsize_pt=channel_label_fontsize_pt,
         blending=blending,
     )
