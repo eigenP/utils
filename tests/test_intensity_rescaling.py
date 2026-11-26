@@ -14,8 +14,9 @@ from eigenp_utils.intensity_rescaling import (
     ensure_float_and_restore_dtype,
     fit_basic_shading,
     normalize_image,
-    test_z_axis_orientation as _z_orientation,
+    check_z_axis_orientation as _z_orientation,
 )
+from eigenp_utils.intensity_rescaling import test_z_axis_orientation as _legacy_z_orientation
 
 
 def _radial_gradient(sizes):
@@ -492,19 +493,32 @@ def test_return_diagnostic_dict():
 
 
 def test_deprecated_z_decay_wrappers():
-    """Deprecated adjust_gamma_per_slice and adjust_brightness_per_slice warn and remap kwargs."""
+    """Deprecated adjust_gamma_per_slice and adjust_brightness_per_slice warn and remap kwargs.
+
+    Changed (D08, R6-14): they emit a FutureWarning naming the removal version
+    (was DeprecationWarning, hidden from users), and FLIP_Z_AXIS=True is no
+    longer dropped silently: it is still ignored (the result equals the
+    unflipped correction) but a UserWarning says so and how to flip.
+    FLIP_Z_AXIS=False stays silent.
+    """
     stack, _ = _generate_trend_stack(shape=(8, 32, 32), decay_func=lambda z: 0.8 * np.exp(-0.1 * z), seed=9)
 
     ref_gamma = correct_z_intensity_decay(stack, method="gamma", fit_model="linear")
-    with pytest.warns(DeprecationWarning, match="adjust_gamma_per_slice is deprecated"):
-        out_gamma = adjust_gamma_per_slice(stack, gamma_fit_func="linear", FLIP_Z_AXIS=True)
+    with pytest.warns(FutureWarning, match=r"adjust_gamma_per_slice is deprecated and will be removed in eigenp_utils 0\.1\.0"):
+        with pytest.warns(UserWarning, match="FLIP_Z_AXIS"):
+            out_gamma = adjust_gamma_per_slice(stack, gamma_fit_func="linear", FLIP_Z_AXIS=True)
     np.testing.assert_array_equal(out_gamma, ref_gamma)
 
     ref_gain = correct_z_intensity_decay(stack, method="gain", fit_model="exponential")
-    with pytest.warns(DeprecationWarning, match="adjust_brightness_per_slice is deprecated"):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         out_gain = adjust_brightness_per_slice(
             stack, method="gain", gamma_fit_func="exponential", FLIP_Z_AXIS=False
         )
+    assert [str(w.message) for w in caught if w.category is FutureWarning][0].startswith(
+        "adjust_brightness_per_slice is deprecated")
+    assert not [w for w in caught if "FLIP_Z_AXIS" in str(w.message)]
+    assert all(w.filename == __file__ for w in caught)
     np.testing.assert_array_equal(out_gain, ref_gain)
 
 
@@ -962,6 +976,31 @@ def test_z_axis_orientation_return_image_and_invalid_channel_dims():
 
     with pytest.raises(ValueError, match="channel given"):
         _z_orientation(np.zeros((8, 8)), channel=0, return_image=False)
+
+
+def test_z_axis_orientation_check_is_quiet_nan_safe_and_renamed(capsys):
+    """R6-16 / R6-15: check_z_axis_orientation prints nothing, ignores NaN voxels, and the old name warns.
+
+    Strategy: (1) a stack brighter at the bottom with one NaN voxel in the
+    top half: np.percentile made the comparison False (no flip, no warning);
+    (2) the deprecated name test_z_axis_orientation; (3) an all-NaN half.
+    Expected outcome: (1) True and nothing on stdout; (2) a FutureWarning
+    and the same result; (3) a UserWarning and no flip.
+    """
+    vol = np.zeros((4, 8, 8), np.float32)
+    vol[3] = 1.0
+    vol[0, 0, 0] = np.nan
+    assert _z_orientation(vol, return_image=False) is True
+    assert capsys.readouterr().out == ""
+
+    with pytest.warns(FutureWarning, match="test_z_axis_orientation is deprecated.*check_z_axis_orientation"):
+        assert _legacy_z_orientation(vol, return_image=False) is True
+
+    half_nan = vol.copy()
+    half_nan[:2] = np.nan
+    with pytest.warns(UserWarning, match="NaN"):
+        out, flag = _z_orientation(half_nan, return_image=True)
+    assert flag is False and out is half_nan
 
 
 def test_basic_rejects_zero_reweight_iterations():

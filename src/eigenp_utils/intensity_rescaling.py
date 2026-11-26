@@ -1,5 +1,6 @@
 import numpy as np
 import functools
+import logging
 import warnings
 from skimage.exposure import rescale_intensity
 from scipy.optimize import curve_fit
@@ -7,7 +8,9 @@ import scipy.ndimage as ndimage
 from scipy.fft import dctn, idctn
 import skimage.transform as transform
 
-from ._conventions import robust_range
+from ._conventions import robust_range, warn_deprecated
+
+logger = logging.getLogger(__name__)
 
 
 def _float_to_int(arr, dtype):
@@ -171,31 +174,46 @@ FIT_MODELS = {
     'exponential': _fit_exponential
 }
 
-# Removed @ensure_float_and_restore_dtype to avoid double-decoration
-def adjust_gamma_per_slice(*args, **kwargs):
-    """Deprecated. Use correct_z_intensity_decay with method='gamma' instead."""
-    warnings.warn(
-        "adjust_gamma_per_slice is deprecated. Use correct_z_intensity_decay with method='gamma' instead.",
-        DeprecationWarning, stacklevel=2
-    )
+def _legacy_z_decay_kwargs(kwargs):
+    """Map the deprecated wrappers' keywords onto correct_z_intensity_decay's.
+
+    gamma_fit_func -> fit_model. FLIP_Z_AXIS was dropped silently; it is still
+    ignored (the wrappers never flipped anything), but True now warns (R6-14).
+    """
     if 'gamma_fit_func' in kwargs:
         kwargs['fit_model'] = kwargs.pop('gamma_fit_func')
-    if 'FLIP_Z_AXIS' in kwargs:
-        kwargs.pop('FLIP_Z_AXIS')
+    if kwargs.pop('FLIP_Z_AXIS', False):
+        warnings.warn(
+            "FLIP_Z_AXIS=True is ignored: correct_z_intensity_decay has no flip option. "
+            "Flip the stack yourself (image[::-1]; check_z_axis_orientation tells "
+            "whether it is needed) and flip the result back.",
+            UserWarning, stacklevel=3)
+    return kwargs
+
+
+# Removed @ensure_float_and_restore_dtype to avoid double-decoration
+def adjust_gamma_per_slice(*args, **kwargs):
+    """Deprecated: use ``correct_z_intensity_decay(image, method='gamma', fit_model=...)``.
+
+    Emits a FutureWarning; removed in eigenp_utils 0.1.0 (D08).
+    ``gamma_fit_func`` maps to ``fit_model``; ``FLIP_Z_AXIS=True`` is ignored
+    with a UserWarning.
+    """
+    warn_deprecated("adjust_gamma_per_slice", "correct_z_intensity_decay(image, method='gamma')")
+    kwargs = _legacy_z_decay_kwargs(kwargs)
     return correct_z_intensity_decay(*args, method='gamma', **kwargs)
 
 
 # Removed @ensure_float_and_restore_dtype to avoid double-decoration
 def adjust_brightness_per_slice(*args, **kwargs):
-    """Deprecated. Use correct_z_intensity_decay instead."""
-    warnings.warn(
-        "adjust_brightness_per_slice is deprecated. Use correct_z_intensity_decay instead.",
-        DeprecationWarning, stacklevel=2
-    )
-    if 'gamma_fit_func' in kwargs:
-        kwargs['fit_model'] = kwargs.pop('gamma_fit_func')
-    if 'FLIP_Z_AXIS' in kwargs:
-        kwargs.pop('FLIP_Z_AXIS')
+    """Deprecated: use ``correct_z_intensity_decay`` (``method='gamma'`` or ``'gain'``).
+
+    Emits a FutureWarning; removed in eigenp_utils 0.1.0 (D08). Its default
+    method is 'gamma', as correct_z_intensity_decay's. ``gamma_fit_func``
+    maps to ``fit_model``; ``FLIP_Z_AXIS=True`` is ignored with a UserWarning.
+    """
+    warn_deprecated("adjust_brightness_per_slice", "correct_z_intensity_decay")
+    kwargs = _legacy_z_decay_kwargs(kwargs)
     return correct_z_intensity_decay(*args, **kwargs)
 
 @ensure_float_and_restore_dtype
@@ -471,10 +489,18 @@ def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z
 
     return adjusted_image
 
-def test_z_axis_orientation(img, channel=None, return_image=True):
+def check_z_axis_orientation(img, channel=None, return_image=True):
     """
-    Check if the Z-axis needs to be flipped based on brightness metrics of top vs bottom halves.
-    Assumes standard orientation where the ventral side (brighter) should be processed specifically.
+    Check whether the Z axis should be flipped so that the brighter half comes first.
+
+    Compares the 99.99th percentile of the top half (first Z slices) with the
+    bottom half; flag is True when the bottom half is brighter. Z-decay
+    correction (`correct_z_intensity_decay`) assumes intensity falls with Z,
+    so a True flag means the stack is probably upside down for it.
+
+    NaN voxels are ignored. If either half has no finite voxel the halves
+    cannot be compared: a UserWarning is emitted and the flag is False. The
+    two metrics are logged at DEBUG level (module logger).
 
     Args:
         img (numpy.ndarray): Input image (nD). Expected 6D (S,T,C,Z,Y,X) or 3D (Z,Y,X).
@@ -483,6 +509,11 @@ def test_z_axis_orientation(img, channel=None, return_image=True):
 
     Returns:
         tuple or bool: (flipped_image, flag) if return_image is True, else flag.
+
+    Changed (D07/R6-16, 2026-11): renamed from ``test_z_axis_orientation``
+    (pytest collected it as a test; the old name is a deprecated alias); it no
+    longer prints the two metrics; NaN voxels are ignored (one NaN made the
+    comparison silently False).
     """
     # Extract Z-stack for metric calculation
     if img.ndim == 3:
@@ -508,12 +539,18 @@ def test_z_axis_orientation(img, channel=None, return_image=True):
 
     # Compare 99.99th percentile of top vs bottom half of Z
     z_mid = img_Z.shape[0] // 2
-    top_image_metric = np.percentile(img_Z[0:z_mid, :, :], 99.99)
-    bot_image_metric = np.percentile(img_Z[z_mid:, :, :], 99.99)
-    print(top_image_metric, bot_image_metric)
-
-    if top_image_metric < bot_image_metric:
-        FLAG = True
+    halves = (img_Z[0:z_mid, :, :], img_Z[z_mid:, :, :])
+    if not all(np.isfinite(h).any() for h in halves):
+        warnings.warn(
+            "check_z_axis_orientation: one half of the stack has no finite voxel "
+            "(all NaN), so the halves cannot be compared; not flipping.",
+            UserWarning, stacklevel=2)
+    else:
+        top_image_metric, bot_image_metric = (float(np.nanpercentile(h, 99.99)) for h in halves)
+        logger.debug("Z orientation: p99.99 top half %g, bottom half %g",
+                     top_image_metric, bot_image_metric)
+        if top_image_metric < bot_image_metric:
+            FLAG = True
 
     if return_image:
         if FLAG:
@@ -523,6 +560,20 @@ def test_z_axis_orientation(img, channel=None, return_image=True):
         return img, FLAG
     else:
         return FLAG
+
+
+def test_z_axis_orientation(img, channel=None, return_image=True):
+    """Deprecated alias of `check_z_axis_orientation` (FutureWarning; removed in eigenp_utils 0.1.0).
+
+    The ``test_`` prefix made pytest collect this library function as a test
+    whenever a test module imported it under its own name.
+    """
+    warn_deprecated("test_z_axis_orientation", "check_z_axis_orientation")
+    return check_z_axis_orientation(img, channel=channel, return_image=return_image)
+
+
+# Do not let pytest collect the deprecated alias in modules that import it
+test_z_axis_orientation.__test__ = False
 
 
 def _tshrinkage(x, thresh):
