@@ -338,7 +338,7 @@ def test_sparse_signal_is_not_blanked_by_degenerate_percentiles():
     ramp = np.linspace(0, 1, 40_000, dtype=np.float32).reshape(200, 200)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        lo, hi = np.percentile(ramp, (0.5, 99.9))
+        lo, hi = np.percentile(ramp, (0.1, 99.9))  # Changed (D27): default lower was 0.5
         np.testing.assert_allclose(normalize_image(ramp), np.clip((ramp - lo) / (hi - lo), 0, 1), atol=1e-6)
 
 
@@ -351,25 +351,31 @@ def test_large_images_keep_exact_percentiles():
     Expected outcome: equal to float precision (a sampled estimate differed by
     up to ~1% of the output range). Negative control: a small image is exact
     either way (covered by the ramp check above).
+    Changed (D27): both functions now default to the shared processing
+    percentiles (0.1, 99.9); they were (0.5, 99.9) and (0.0, 99.9).
     """
     img = np.random.default_rng(0).gamma(2.0, 50.0, (1100, 1000)).astype(np.float32)
-    lo, hi = np.nanpercentile(img, (0.5, 99.9))
+    lo, hi = np.nanpercentile(img, (0.1, 99.9))
     np.testing.assert_allclose(normalize_image(img), np.clip((img - lo) / (hi - lo), 0, 1), atol=1e-5)
-    lo, hi = np.nanpercentile(img, (0.0, 99.9))
     np.testing.assert_allclose(contrast_stretching(img), np.clip((img - lo) / (hi - lo), 0, 1), atol=1e-5)
 
 
 def test_contrast_stretching_and_normalize_image_constant_and_dtypes():
-    """Constant images produce finite outputs without NaNs, and normalize_image converts dtypes."""
+    """Constant images map to 0 in both functions, without NaNs, and normalize_image converts dtypes.
+
+    Changed (D27, R6-11): contrast_stretching returned a constant image
+    unchanged (0.42 stayed 0.42, raw units outside [0, 1]) while
+    normalize_image returned zeros; both now return zeros.
+    """
     const_f32 = np.full((16, 16), 0.42, dtype=np.float32)
     out_cs_f32 = contrast_stretching(const_f32)
     assert out_cs_f32.dtype == np.float32
-    np.testing.assert_allclose(out_cs_f32, const_f32)
+    np.testing.assert_array_equal(out_cs_f32, np.zeros_like(const_f32))
 
     const_u8 = np.full((16, 16), 77, dtype=np.uint8)
     out_cs_u8 = contrast_stretching(const_u8)
     assert out_cs_u8.dtype == np.uint8
-    np.testing.assert_array_equal(out_cs_u8, const_u8)
+    np.testing.assert_array_equal(out_cs_u8, np.zeros_like(const_u8))
 
     out_norm_const = normalize_image(const_f32)
     assert out_norm_const.dtype == np.float32
@@ -390,6 +396,78 @@ def test_contrast_stretching_and_normalize_image_constant_and_dtypes():
     norm_f32 = normalize_image(ramp_u16, lower_percentile=0.0, upper_percentile=100.0, dtype=np.float32)
     assert norm_f32.dtype == np.float32
     np.testing.assert_allclose([norm_f32.min(), norm_f32.max()], [0.0, 1.0], atol=1e-6)
+
+
+def test_processing_percentile_defaults_are_shared():
+    """D27 / D02 (i): contrast_stretching, normalize_image and clahe_u8 share the (0.1, 99.9) default.
+
+    Strategy: a float image with a dead pixel (0) and a hot pixel; compare
+    each function's default with explicit (0.1, 99.9). Before, the defaults
+    were (0.0, 99.9), (0.5, 99.9) and (0.1, 99.9), so a single dead pixel set
+    contrast_stretching's floor. Expected outcome: identical outputs, and
+    contrast_stretching == normalize_image for float input.
+    """
+    import inspect
+
+    from eigenp_utils.clahe_equalize_adapthist import clahe_u8
+
+    img = np.random.default_rng(5).gamma(4.0, 50.0, (64, 64)).astype(np.float32)
+    img[0, 0], img[1, 1] = 0.0, 1e5
+    np.testing.assert_array_equal(contrast_stretching(img), contrast_stretching(img, percentiles=(0.1, 99.9)))
+    np.testing.assert_array_equal(normalize_image(img), normalize_image(img, percentiles=(0.1, 99.9)))
+    np.testing.assert_allclose(contrast_stretching(img), normalize_image(img), atol=1e-6)
+    assert inspect.signature(clahe_u8).parameters["percentiles"].default == (0.1, 99.9)
+
+
+def test_percentile_and_dtype_names_have_deprecated_aliases():
+    """R6-21: percentiles=(lo, hi) and output_dtype= are the names; the old ones still work with a FutureWarning.
+
+    Strategy: call each function with the new names, and with the old
+    keywords and positional forms (contrast_stretching(img, p_min, p_max),
+    normalize_image(img, lower, upper, dtype)). Expected outcome: identical
+    results; each old form warns (FutureWarning naming 0.1.0); passing both a
+    new name and its alias raises TypeError. Negative control: the new names
+    do not warn.
+    """
+    img = np.random.default_rng(6).gamma(3.0, 40.0, (32, 32)).astype(np.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        cs = contrast_stretching(img, percentiles=(1.0, 99.0))
+        ni = normalize_image(img, percentiles=(1.0, 99.0), output_dtype=np.uint16)
+    for call in (lambda: contrast_stretching(img, 1.0, 99.0),
+                 lambda: contrast_stretching(img, p_min=1.0, p_max=99.0)):
+        with pytest.warns(FutureWarning, match=r"removed in eigenp_utils 0\.1\.0.*percentiles"):
+            np.testing.assert_array_equal(call(), cs)
+    for call in (lambda: normalize_image(img, 1.0, 99.0, np.uint16),
+                 lambda: normalize_image(img, lower_percentile=1.0, upper_percentile=99.0, dtype=np.uint16)):
+        with pytest.warns(FutureWarning, match=r"removed in eigenp_utils 0\.1\.0"):
+            np.testing.assert_array_equal(call(), ni)
+    with pytest.raises(TypeError, match="p_min"):
+        contrast_stretching(img, percentiles=(1.0, 99.0), p_min=1.0)
+    with pytest.raises(TypeError, match="dtype"):
+        normalize_image(img, output_dtype=np.uint8, dtype=np.uint8)
+
+
+def test_contrast_stretch_per_slice_names_and_deprecated_aliases():
+    """R6-10 / R6-21: in_min / in_max (absolute intensities) and flip_z replace p_min_array / p_max_array / FLIP_Z_AXIS.
+
+    The old names meant intensities while p_min elsewhere is a percentile.
+    Expected outcome: the old keywords give the same result with a
+    FutureWarning; the new names do not warn; both forms together raise.
+    """
+    base = np.array([[0.0, 100.0], [200.0, 400.0]], dtype=np.float64)
+    img = np.stack([base, base, base], axis=0)
+    lo = np.array([0.0, 50.0, 100.0])
+    hi = np.array([100.0, 200.0, 400.0])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        new = contrast_stretch_per_slice(img, in_min=lo, in_max=hi, flip_z=True)
+    with pytest.warns(FutureWarning, match="in_min"):
+        old = contrast_stretch_per_slice(img, p_min_array=lo, p_max_array=hi, FLIP_Z_AXIS=True)
+    np.testing.assert_array_equal(old, new)
+    np.testing.assert_allclose(new, contrast_stretch_per_slice(img, lo[::-1], hi[::-1]))
+    with pytest.raises(TypeError, match="p_min_array"):
+        contrast_stretch_per_slice(img, in_min=lo, p_min_array=lo)
 
 
 # --- Z-axis intensity decay correction & deprecated wrappers ---

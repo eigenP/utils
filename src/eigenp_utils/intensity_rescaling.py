@@ -95,40 +95,131 @@ def ensure_float_and_restore_dtype(func):
 
     return wrapper
 
-@ensure_float_and_restore_dtype
-def contrast_stretching(image, p_min=0.0, p_max=99.9):
+# Default (lower, upper) percentiles of the input range for processing (D02 (i),
+# D27): contrast_stretching, normalize_image and clahe_u8 share it. Processing
+# for segmentation tolerates clipping the top 0.1%; the viewers display up to
+# p99.99 instead, so sparse bright signal is not saturated on screen.
+PROCESSING_PERCENTILES = (0.1, 99.9)
+
+
+def _resolve_percentiles(func, percentiles, lo_name, lo, hi_name, hi, stacklevel):
+    """(lo, hi) from ``percentiles`` or from the deprecated per-bound names (R6-21).
+
+    A scalar in the ``percentiles`` slot is the legacy positional lower bound.
+    ``stacklevel`` is passed to warn_deprecated (frames up to the user's call).
     """
-    Stretch the intensity range of the image based on percentiles, to [0, 1]
-    (floats) or [0, dtype max] (integers).
+    if percentiles is not None and np.ndim(percentiles) == 0:
+        if lo is not None:
+            raise TypeError(f"{func}() got multiple values for {lo_name!r}")
+        lo, percentiles = percentiles, None
+    if lo is None and hi is None:
+        pct = PROCESSING_PERCENTILES if percentiles is None else tuple(percentiles)
+        if len(pct) != 2:
+            raise ValueError(f"percentiles must be a (lower, upper) pair, got {percentiles!r}")
+        return pct
+    if percentiles is not None:
+        raise TypeError(f"{func}() got both 'percentiles' and its deprecated aliases "
+                        f"{lo_name!r}/{hi_name!r}")
+    warn_deprecated(f"{func}({lo_name}, {hi_name})", f"{func}(image, percentiles=(lo, hi))",
+                    stacklevel=stacklevel)
+    d_lo, d_hi = PROCESSING_PERCENTILES
+    return (d_lo if lo is None else lo, d_hi if hi is None else hi)
+
+
+@ensure_float_and_restore_dtype
+def contrast_stretching(image, percentiles=None, p_max=None, *, p_min=None):
+    """
+    Stretch the intensity range between two percentiles to [0, 1].
+
+    Parameters
+    ----------
+    image : ndarray
+    percentiles : (float, float), optional
+        Lower and upper percentiles of the input range, default
+        ``PROCESSING_PERCENTILES`` = (0.1, 99.9).
+    p_min, p_max : float, deprecated
+        Old names of the two bounds (also accepted positionally,
+        ``contrast_stretching(image, p_min, p_max)``); FutureWarning, removed
+        in eigenp_utils 0.1.0.
+
+    Returns
+    -------
+    ndarray of the input dtype: floats in [0, 1]; 8/16-bit integers in
+    [0, dtype max]; 32/64-bit integers in [0, data max] (the dtype decorator
+    scales them by the data's own maximum magnitude, see
+    `ensure_float_and_restore_dtype`). Use `normalize_image` for
+    [0, dtype max] with wide integers and for a choice of output dtype.
 
     The percentiles are exact, over the finite values (NaN and inf ignored).
     When they are equal although the image is not constant (signal on fewer than
-    (100 - p_max)% of the pixels), the range falls back to the data maximum
-    (and minimum) with a UserWarning. A constant image is returned unchanged.
+    (100 - upper)% of the pixels), the range falls back to the data maximum
+    (and minimum) with a UserWarning. A constant image gives 0 (NaN stays NaN
+    in float output).
 
     Changed (D02, 2026-11): the degenerate case used to return the input
     unchanged (raw units, not mapped to [0, 1]).
+    Changed (D27, 2026-11): the default lower percentile is 0.1 (was 0.0,
+    so one dead pixel set the floor); a constant image gives 0 (it was
+    returned unchanged, while normalize_image gave 0); the bounds are passed
+    as ``percentiles=(lo, hi)`` (R6-21).
     """
-    v_min, v_max = robust_range(image, p_min, p_max, n=max(np.size(image), 1), stacklevel=3)
+    lo_pct, hi_pct = _resolve_percentiles("contrast_stretching", percentiles,
+                                          "p_min", p_min, "p_max", p_max, stacklevel=5)
+    v_min, v_max = robust_range(image, lo_pct, hi_pct, n=max(np.size(image), 1), stacklevel=3)
     if v_min == v_max:
-        return image
-    return rescale_intensity(image, in_range=(v_min, v_max), out_range=(0.0, 1.0))
+        image = np.asarray(image)
+        return np.where(np.isnan(image), image, 0).astype(image.dtype)
+    out = rescale_intensity(image, in_range=(v_min, v_max), out_range=(0.0, 1.0))
+    # float32 rounding of the bounds can leave the top at 0.9999999: pin both ends
+    out[image >= v_max] = 1.0
+    out[image <= v_min] = 0.0
+    return out
 
-def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=None):
+
+def normalize_image(image, percentiles=None, upper_percentile=None, dtype=None, *,
+                    output_dtype=None, lower_percentile=None):
     """
-    Normalize image intensities to lie between 0 and 1 (for float) or 0 and MAX (for int).
+    Normalize intensities between two percentiles to [0, 1] (float) or [0, dtype max] (int).
+
+    Parameters
+    ----------
+    image : ndarray
+    percentiles : (float, float), optional
+        Lower and upper percentiles of the input range, default
+        ``PROCESSING_PERCENTILES`` = (0.1, 99.9).
+    output_dtype : dtype, optional
+        Output dtype, default the input dtype. Integer outputs span
+        [0, dtype max] for every integer width (int64 included).
+    lower_percentile, upper_percentile, dtype : deprecated
+        Old names (also accepted positionally,
+        ``normalize_image(image, lower, upper, dtype)``); FutureWarning,
+        removed in eigenp_utils 0.1.0.
 
     NaN pixels are ignored when computing the percentiles; they stay NaN in float
     outputs and become 0 in integer outputs (inf is ignored too). The
     percentiles are exact. When they are equal although the image is not constant (signal on fewer
-    than (100 - upper_percentile)% of the pixels), the range falls back to the
+    than (100 - upper)% of the pixels), the range falls back to the
     data maximum (and minimum) with a UserWarning. A constant image gives 0.
 
+    Unlike `contrast_stretching` (same mapping), the computation is in float32
+    for float32 input and float64 otherwise, without the dtype decorator.
+
     Changed (D02, 2026-11): the degenerate case used to give an all-zero image.
+    Changed (D27, 2026-11): the default lower percentile is 0.1 (was 0.5),
+    shared with contrast_stretching and clahe_u8; the bounds are passed as
+    ``percentiles=(lo, hi)`` and the dtype as ``output_dtype`` (R6-21).
     """
+    lo_pct, hi_pct = _resolve_percentiles("normalize_image", percentiles, "lower_percentile",
+                                          lower_percentile, "upper_percentile",
+                                          upper_percentile, stacklevel=4)
+    if dtype is not None:
+        if output_dtype is not None:
+            raise TypeError("normalize_image() got both 'output_dtype' and its deprecated alias 'dtype'")
+        warn_deprecated("normalize_image(dtype=...)", "output_dtype=...")
+        output_dtype = dtype
+
     image = np.asarray(image)
-    lower_bound, upper_bound = robust_range(image, lower_percentile, upper_percentile,
-                                            n=max(image.size, 1))
+    lower_bound, upper_bound = robust_range(image, lo_pct, hi_pct, n=max(image.size, 1))
 
     work = image if image.dtype == np.float32 else image.astype(np.float64)
     denom = upper_bound - lower_bound
@@ -137,12 +228,12 @@ def normalize_image(image, lower_percentile=0.5, upper_percentile=99.9, dtype=No
 
     normalized_image = (np.clip(work, lower_bound, upper_bound) - lower_bound) / denom
 
-    if dtype is None:
-        dtype = image.dtype
+    if output_dtype is None:
+        output_dtype = image.dtype
 
-    if np.issubdtype(dtype, np.integer):
-        return _float_to_int(normalized_image.astype(np.float64) * np.iinfo(dtype).max, dtype)
-    return normalized_image.astype(dtype)
+    if np.issubdtype(output_dtype, np.integer):
+        return _float_to_int(normalized_image.astype(np.float64) * np.iinfo(output_dtype).max, output_dtype)
+    return normalized_image.astype(output_dtype)
 
 def _fit_linear(x_data, y_data):
     """Exact OLS for linear decay (additive noise)."""
@@ -436,25 +527,47 @@ def _background_only_slices(image, p99, idx):
     sel = (p99[idx] <= b + _BG_MADS * mad) & (p99[idx] - b <= _BG_FRACTION * top)
     return idx[sel]
 
-def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z_AXIS=False):
+def contrast_stretch_per_slice(image, in_min=None, in_max=None, flip_z=False, *,
+                               p_min_array=None, p_max_array=None, FLIP_Z_AXIS=None):
     """
     Adjusts the intensity of each slice in a 3D image along the Z-axis using per-slice min/max intensity values.
 
     Args:
         image (numpy.ndarray): The 3D image array in Z, Y, X order.
-        p_min_array (numpy.ndarray): Array of min intensity values for each slice.
-        p_max_array (numpy.ndarray): Array of max intensity values for each slice.
-        FLIP_Z_AXIS (bool): Whether to flip the order of min/max arrays.
+        in_min (numpy.ndarray): Per-slice lower bound of the input range, in
+            intensity units (not a percentile). None: each slice's own minimum.
+        in_max (numpy.ndarray): Per-slice upper bound, in intensity units.
+            None: each slice's own maximum.
+        flip_z (bool): Reverse in_min / in_max along Z before applying them.
+        p_min_array, p_max_array, FLIP_Z_AXIS: deprecated names of in_min,
+            in_max and flip_z (FutureWarning, removed in eigenp_utils 0.1.0).
+            They were renamed because p_min elsewhere means a percentile.
 
     Returns:
         numpy.ndarray: A new 3D image array with adjusted intensities per slice,
         in [0, 1] for floats and [0, dtype max] for unsigned integers.
+
+    Changed (R6-21, 2026-11): parameters renamed (in_min, in_max, flip_z).
     """
+    renamed = (("in_min", in_min, "p_min_array", p_min_array),
+               ("in_max", in_max, "p_max_array", p_max_array),
+               ("flip_z", flip_z or None, "FLIP_Z_AXIS", FLIP_Z_AXIS))
+    values = []
+    for new, new_value, old, old_value in renamed:
+        if old_value is not None:
+            if new_value is not None:
+                raise TypeError(f"contrast_stretch_per_slice() got both {new!r} and its "
+                                f"deprecated alias {old!r}")
+            warn_deprecated(f"contrast_stretch_per_slice({old}=...)", f"{new}=...")
+            new_value = old_value
+        values.append(new_value)
+    p_min_array, p_max_array, flip = values
+
     # Validate inputs
     if not isinstance(image, np.ndarray) or image.ndim != 3:
         raise ValueError("Image must be a 3D numpy array.")
     if p_min_array is None and p_max_array is None:
-        raise ValueError("p_min_array & p_max_array are None, no difference will be produced in the image")
+        raise ValueError("in_min and in_max are both None, no difference will be produced in the image")
 
     # Floats always map to [0, 1]: out_range='dtype' gives [-1, 1] for a float
     # slice whose lower bound is negative (as in contrast_stretching)
@@ -466,7 +579,7 @@ def contrast_stretch_per_slice(image, p_min_array=None, p_max_array=None, FLIP_Z
     # Create an output image array
     adjusted_image = np.empty_like(image)
 
-    if FLIP_Z_AXIS:
+    if flip:
         if p_min_array is not None:
             p_min_array = p_min_array[::-1]
         if p_max_array is not None:
