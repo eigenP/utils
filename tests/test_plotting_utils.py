@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import sys
+import warnings
 import xml.etree.ElementTree as ET
 
 import matplotlib as mpl
@@ -113,7 +114,7 @@ def test_savefig_svg_metadata_and_title_fallback(tmp_path, suptitle):
             fig.suptitle(suptitle)
 
         svg_stem = tmp_path / ("with_title" if suptitle else "no_title")
-        savefig_svg(svg_stem, bgnd_color=(1, 0, 0, 0.5), pad_inches=0.2)
+        savefig_svg(svg_stem, fig=fig, bgnd_color=(1, 0, 0, 0.5), pad_inches=0.2)
 
         svg_file = svg_stem.with_suffix(".svg")
         assert svg_file.exists()
@@ -150,7 +151,7 @@ def test_savefig_svg_custom_metadata_extension_and_no_mutation(tmp_path):
     try:
         ax.plot([0, 1], [0, 1])
         svg_path = tmp_path / "already_suffixed.svg"
-        savefig_svg(svg_path, metadata=md)
+        savefig_svg(svg_path, fig=fig, metadata=md)
 
         assert svg_path.exists()
         assert not (tmp_path / "already_suffixed.svg.svg").exists()
@@ -203,14 +204,14 @@ def test_savefig_svg_editable_text(tmp_path):
             ax.text(0.5, 0.5, "Test Editable Text")
 
             svg_path_true = tmp_path / "editable_true"
-            savefig_svg(svg_path_true)
+            savefig_svg(svg_path_true, fig=fig)
             assert plt.rcParams["svg.fonttype"] == "path"
             assert plt.rcParams["axes.unicode_minus"] is True
             content_true = svg_path_true.with_suffix(".svg").read_text()
             assert "<text" in content_true
 
             svg_path_false = tmp_path / "editable_false"
-            savefig_svg(svg_path_false, editable_text=False)
+            savefig_svg(svg_path_false, fig=fig, editable_text=False)
             assert plt.rcParams["svg.fonttype"] == "path"
             content_false = svg_path_false.with_suffix(".svg").read_text()
             assert "<text" not in content_false
@@ -235,12 +236,12 @@ def test_savefig_svg_editable_text_false_outlines_glyphs_after_set_plotting_styl
             ax.text(0.5, 0.5, "Outlined Text")
 
             svg_outlined = tmp_path / "outlined"
-            savefig_svg(svg_outlined, editable_text=False)
+            savefig_svg(svg_outlined, fig=fig, editable_text=False)
             assert "<text" not in svg_outlined.with_suffix(".svg").read_text()
             assert plt.rcParams["svg.fonttype"] == "none"
 
             svg_editable = tmp_path / "editable"
-            savefig_svg(svg_editable)
+            savefig_svg(svg_editable, fig=fig)
             assert "<text" in svg_editable.with_suffix(".svg").read_text()
         finally:
             plt.close(fig)
@@ -252,8 +253,9 @@ def test_savefig_svg_raster_threshold_and_file_size(tmp_path):
     Strategy: first check rasterized state transitions on a 100-point scatter for threshold
     None (disabled), 500 (unmet), and 50 (met); then save a seeded 2000-point scatter as
     vector (threshold=3000) vs rasterized (threshold=1000) and compare file sizes on disk.
-    Expected: PathCollection rasterization flips only when point count >= threshold,
-    threshold=None never rasterizes, and rasterized SVG is strictly smaller than vector SVG.
+    Expected: the saved SVG embeds a raster <image> only when point count >= threshold,
+    threshold=None never rasterizes, the figure's rasterized flag is restored after the
+    save (changed deliberately, D05), and rasterized SVG is strictly smaller than vector SVG.
     """
     fig, ax = plt.subplots()
     try:
@@ -262,19 +264,22 @@ def test_savefig_svg_raster_threshold_and_file_size(tmp_path):
         assert scatter_col.get_rasterized() is False
 
         out_none = tmp_path / "test_none_threshold.svg"
-        savefig_svg(out_none, scatter_raster_threshold=None)
+        savefig_svg(out_none, fig=fig, scatter_raster_threshold=None)
         assert scatter_col.get_rasterized() is False
         assert out_none.exists()
 
         out_no_raster = tmp_path / "test_no_raster.svg"
-        savefig_svg(out_no_raster, scatter_raster_threshold=500)
+        savefig_svg(out_no_raster, fig=fig, scatter_raster_threshold=500)
         assert scatter_col.get_rasterized() is False
         assert out_no_raster.exists()
 
         out_raster = tmp_path / "test_raster.svg"
-        savefig_svg(out_raster, scatter_raster_threshold=50)
-        assert scatter_col.get_rasterized() is True
-        assert out_raster.exists()
+        savefig_svg(out_raster, fig=fig, scatter_raster_threshold=50)
+        # changed on purpose (D05): the flag is restored after the save; the SVG
+        # embeds the scatter as an <image>
+        assert scatter_col.get_rasterized() is False
+        assert "<image" in out_raster.read_text()
+        assert "<image" not in out_no_raster.read_text()
     finally:
         plt.close(fig)
 
@@ -285,11 +290,112 @@ def test_savefig_svg_raster_threshold_and_file_size(tmp_path):
         out_vector = tmp_path / "size_vector.svg"
         out_raster_size = tmp_path / "size_raster.svg"
 
-        savefig_svg(out_vector, scatter_raster_threshold=3000, dpi=100)
-        savefig_svg(out_raster_size, scatter_raster_threshold=1000, dpi=100)
+        savefig_svg(out_vector, fig=fig_size, scatter_raster_threshold=3000, dpi=100)
+        savefig_svg(out_raster_size, fig=fig_size, scatter_raster_threshold=1000, dpi=100)
         assert out_raster_size.stat().st_size < out_vector.stat().st_size
     finally:
         plt.close(fig_size)
+
+
+def test_savefig_svg_saves_the_given_oo_figure(tmp_path):
+    """D05 (b): fig= saves that figure, even a pyplot-free Figure() while another pyplot figure is current."""
+    oo = Figure()
+    oo.add_subplot().set_title("oo figure")
+    other, ax = plt.subplots()
+    ax.set_title("other pyplot figure")
+    out = tmp_path / "oo.svg"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        savefig_svg(out, fig=oo)
+    text = out.read_text()
+    assert "oo figure" in text and "other pyplot figure" not in text
+
+
+def test_savefig_svg_without_fig_warns_or_raises(tmp_path, capsys):
+    """D05 (b): omitting fig gives a FutureWarning naming 0.1.0; with no open figure a ValueError,
+    and no figure is created. Nothing is printed."""
+    plt.close("all")
+    with pytest.raises(ValueError, match="no open figure; pass fig="):
+        savefig_svg(tmp_path / "none.svg")
+    assert plt.get_fignums() == []
+
+    fig, ax = plt.subplots()
+    ax.set_title("current figure")
+    with pytest.warns(FutureWarning, match=r"will be removed in eigenp_utils 0\.1\.0"):
+        savefig_svg(tmp_path / "cur.svg")
+    assert "current figure" in (tmp_path / "cur.svg").read_text()
+    assert capsys.readouterr().out == ""
+
+
+def test_savefig_svg_default_background_is_opaque_white(tmp_path):
+    """D05 (d): the default background is opaque white (was 80%-opaque white: 'opacity: 0.8')."""
+    fig, ax = plt.subplots()
+    savefig_svg(tmp_path / "w.svg", fig=fig, bbox_inches=None)
+    root = ET.parse(tmp_path / "w.svg").getroot()
+    patch = root.find(".//svg:g[@id='figure_1']/svg:g[@id='patch_1']/svg:path", SVG_NAMESPACES)
+    style = patch.get("style")
+    assert "fill: #ffffff" in style and "opacity" not in style
+
+
+def test_savefig_svg_restores_rasterization_even_if_saving_fails(tmp_path):
+    """D05 (c): flags set for the save are restored, also when savefig raises; flags set by the caller stay."""
+    fig, ax = plt.subplots()
+    big = ax.scatter(range(2000), range(2000))
+    mine = ax.scatter(range(3000), range(3000))
+    mine.set_rasterized(True)
+    with pytest.raises(Exception):
+        savefig_svg(tmp_path / "x.svg", fig=fig, not_a_savefig_kwarg=1)
+    assert big.get_rasterized() is False
+    savefig_svg(tmp_path / "y.svg", fig=fig)
+    assert big.get_rasterized() is False and mine.get_rasterized() is True
+
+
+def test_set_plotting_style_returns_a_restoring_handle_and_context_manager():
+    """D05 (e): set_plotting_style() returns a handle; .restore() and `with` put every rcParam back."""
+    before = dict(mpl.rcParams)
+    with plt.rc_context():
+        handle = set_plotting_style()
+        assert mpl.rcParams["svg.fonttype"] == "none"
+        handle.restore()
+        assert {k for k, v in before.items() if mpl.rcParams[k] != v} == set()
+
+        with set_plotting_style(editable_text=False) as h:
+            assert mpl.rcParams["svg.fonttype"] == "path"
+            assert h is not None
+        assert {k for k, v in before.items() if mpl.rcParams[k] != v} == set()
+
+
+def test_set_plotting_style_warns_instead_of_printing(monkeypatch, capsys):
+    """Missing style/font files give UserWarnings, not prints."""
+    import eigenp_utils.plotting_utils as pu
+
+    monkeypatch.setattr(pu, "style_path", pu.ROOT_DIR / "missing.mplstyle")
+    monkeypatch.setattr(pu, "font_path", pu.ROOT_DIR / "missing.ttf")
+    with plt.rc_context():
+        with pytest.warns(UserWarning) as rec:
+            set_plotting_style()
+    msgs = " ".join(str(r.message) for r in rec)
+    assert "Style file not found" in msgs and "Font file not found" in msgs
+    assert capsys.readouterr().out == ""
+
+
+def test_set_plotting_style_math_in_dejavu_sans_with_fallback(tmp_path):
+    """D30: math text in DejaVu Sans and Inter falls back to DejaVu Sans; no Computer Modern in SVGs.
+
+    (+) '$\\mu$m' and '$R^2$' in an editable SVG reference no cmr10/cmmi10 font.
+    (-) plain text still uses Inter (the first sans-serif entry).
+    """
+    with plt.rc_context():
+        set_plotting_style()
+        assert mpl.rcParams["mathtext.fontset"] == "dejavusans"
+        assert mpl.rcParams["font.sans-serif"][:2] == ["Inter", "DejaVu Sans"]
+        fig, ax = plt.subplots()
+        ax.set_xlabel(r"Distance ($\mu$m)")
+        ax.set_ylabel(r"$R^2$")
+        savefig_svg(tmp_path / "m.svg", fig=fig)
+        text = (tmp_path / "m.svg").read_text()
+    assert "cmmi10" not in text and "cmr10" not in text
+    assert "Inter" in text
 
 
 # =========================================

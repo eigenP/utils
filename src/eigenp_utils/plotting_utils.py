@@ -19,37 +19,101 @@ import itertools
 import math
 import datetime
 import warnings
+import logging
 from ._conventions import channel_color_hex, warn_deprecated
+
+logger = logging.getLogger(__name__)
 
 # --- Initialization: Load Font and Style ---
 ROOT_DIR = Path(__file__).parent
 font_path = ROOT_DIR / 'Inter-Regular.ttf'
 style_path = ROOT_DIR / 'scientific.mplstyle'
 
-# Load Style
+class PlottingStyle:
+    """Handle returned by :func:`set_plotting_style`: holds the rcParams from before the call.
+
+    ``restore()`` puts them back; used as a context manager
+    (``with set_plotting_style(): ...``) it restores on exit.
+    """
+
+    def __init__(self, saved):
+        self._saved = saved
+        self.restored = False
+
+    def restore(self):
+        """Restore every rcParam to its value before :func:`set_plotting_style` was called."""
+        import matplotlib as mpl
+
+        # dict.update bypasses re-validation and deprecation warnings, like plt.rc_context
+        dict.update(mpl.rcParams, self._saved)
+        self.restored = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.restore()
+        return False
+
 
 def set_plotting_style(editable_text=True):
+    """Apply the package's figure style (``scientific.mplstyle``, Inter font) to Matplotlib's rcParams.
+
+    The style changes global rcParams, so every later figure in the session
+    uses it; the returned handle undoes that.
+
+    Text uses the bundled Inter font with DejaVu Sans as fallback (for glyphs
+    and weights Inter-Regular lacks, e.g. bold), and math text uses
+    DejaVu Sans (``mathtext.fontset='dejavusans'``), so labels like
+    ``'Distance ($\\mu$m)'`` stay sans-serif and editable SVGs reference no
+    Computer Modern fonts.
+
+    Parameters
+    ----------
+    editable_text : bool, default True
+        True: SVG text stays text (``svg.fonttype='none'``, ASCII minus).
+        False: glyphs are outlined as paths.
+
+    Returns
+    -------
+    PlottingStyle
+        Handle with ``.restore()``; also a context manager::
+
+            with set_plotting_style():
+                fig, ax = plt.subplots()  # styled
+            # rcParams are back to what they were
+
+    Changed (D05, 2026-11): returns a handle (was None); a missing style or
+    font file gives a UserWarning (was a print).
+    Changed (D30, 2026-11): math text in DejaVu Sans (was Computer Modern, from
+    the style), and ``font.sans-serif`` is ``['Inter', 'DejaVu Sans']`` (was
+    Inter only, so bold fell back to Inter Regular).
+    """
+    import matplotlib as mpl
+
+    handle = PlottingStyle(dict(mpl.rcParams.copy()))
+
     # Load Style
     try:
         if style_path.exists():
             plt.style.use(str(style_path))
         else:
-            print(f"Warning: Style file not found at {style_path}")
+            warnings.warn(f"Style file not found at {style_path}", UserWarning, stacklevel=2)
     except Exception as e:
-        print(f"Warning: Failed to load style from {style_path}: {e}")
-    
-    # Load Font
+        warnings.warn(f"Failed to load style from {style_path}: {e}", UserWarning, stacklevel=2)
+
+    # Load Font: Inter first, DejaVu Sans (always shipped with Matplotlib) as fallback
     try:
         if font_path.exists():
             font_manager.fontManager.addfont(str(font_path))
             prop = font_manager.FontProperties(fname=str(font_path))
             plt.rcParams['font.family'] = 'sans-serif'
-            plt.rcParams['font.sans-serif'] = prop.get_name()
+            plt.rcParams['font.sans-serif'] = [prop.get_name(), 'DejaVu Sans']
         else:
-            # Fallback if file not found, though it should be there
-            print(f"Warning: Font file not found at {font_path}")
+            warnings.warn(f"Font file not found at {font_path}", UserWarning, stacklevel=2)
     except Exception as e:
-        print(f"Warning: Failed to load font from {font_path}: {e}")
+        warnings.warn(f"Failed to load font from {font_path}: {e}", UserWarning, stacklevel=2)
+    plt.rcParams['mathtext.fontset'] = 'dejavusans'
 
     # Set SVG export settings for editable text globally if requested
     if editable_text:
@@ -58,7 +122,7 @@ def set_plotting_style(editable_text=True):
     else:
         plt.rcParams['svg.fonttype'] = 'path'
         plt.rcParams['axes.unicode_minus'] = True
-
+    return handle
 
 
 # --- Initialization: Create labels_cmap ---
@@ -1606,16 +1670,18 @@ def get_nice_number(value):
     return sign * round(leading_digit * 10.0 ** exponent, -exponent)
 
 
-def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=300, pad_inches=0.1, scatter_raster_threshold=1e3, editable_text=True, **kwargs):
+def savefig_svg(filename, bgnd_color='white', bbox_inches='tight', dpi=300, pad_inches=0.1,
+                scatter_raster_threshold=1e3, editable_text=True, *, fig=None, **kwargs):
     """
-    Saves the currently active matplotlib figure as an SVG file.
+    Saves a Matplotlib figure as an SVG file.
 
     Parameters
     ----------
     filename : str or Path
         The path where the SVG will be saved. The '.svg' extension is appended if missing.
-    bgnd_color : color, default (1, 1, 1, 0.8)
-        The background color (facecolor) of the saved figure.
+    bgnd_color : color, default 'white'
+        The background color (facecolor) of the saved figure; 'none' for a
+        transparent background.
     bbox_inches : str or Bbox, default 'tight'
         Bounding box in inches: only the given portion of the figure is saved.
     dpi : float, default 300
@@ -1624,20 +1690,42 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
         Amount of padding around the figure when bbox_inches is 'tight'.
     scatter_raster_threshold : int, optional
         If provided, any scatter plot (PathCollection) in the figure containing
-        this number of points or more will be rasterized before saving. This
-        helps keep SVG file sizes manageable for large datasets.
+        this number of points or more is rasterized in the saved file. This
+        helps keep SVG file sizes manageable for large datasets. The figure's
+        own rasterization flags are restored afterwards.
     editable_text : bool, default True
         If True, exports SVGs with editable text by temporarily setting
         `svg.fonttype` to 'none' and `axes.unicode_minus` to False. If False,
         glyphs are outlined as paths (`svg.fonttype` 'path'), whatever the
         global setting (e.g. after `set_plotting_style()`).
+    fig : matplotlib.figure.Figure, optional
+        The figure to save (any Figure, pyplot-managed or not). Omitting it
+        saves pyplot's current figure with a FutureWarning; ``fig`` becomes
+        required in eigenp_utils 0.1.0.
     **kwargs :
-        Additional keyword arguments passed directly to `plt.savefig`.
+        Additional keyword arguments passed directly to `Figure.savefig`.
+
+    Raises
+    ------
+    ValueError
+        If ``fig`` is omitted and pyplot has no open figure (nothing is created).
+
+    Changed (D05, 2026-11): added ``fig``; without it a FutureWarning is
+    emitted, and a ValueError when no figure is open (it used to save a new,
+    empty figure). The rasterization flags it sets are restored after saving
+    (they stayed on). The default background is opaque white (was 80%-opaque
+    white). Nothing is printed (it printed 'Saved figure to ...').
     """
-    fig = plt.gcf()
+    if fig is None:
+        if not plt.get_fignums():
+            raise ValueError("savefig_svg: no open figure; pass fig=")
+        warn_deprecated("savefig_svg without fig=", "savefig_svg(filename, fig=fig)")
+        fig = plt.gcf()
 
     # Extract figure title for metadata
-    title = fig._suptitle.get_text() if fig._suptitle else str(filename)
+    suptitle = fig.get_suptitle() if hasattr(fig, "get_suptitle") else (
+        fig._suptitle.get_text() if fig._suptitle else "")
+    title = suptitle or str(filename)
 
     # Initialize metadata with predefined options
     # Copy: the caller's dict must not keep this figure's title/date
@@ -1646,15 +1734,17 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
     metadata.setdefault('Date', datetime.datetime.now().isoformat())
     metadata.setdefault('Title', title)
 
-    # Rasterize scatter collections if threshold is met
+    # Rasterize large scatter collections for this save only
+    changed = []
     if scatter_raster_threshold is not None:
         from matplotlib.collections import PathCollection
         for ax in fig.axes:
             for collection in ax.collections:
-                if isinstance(collection, PathCollection):
-                    # Check the number of offsets (points) in the scatter
-                    if len(collection.get_offsets()) >= scatter_raster_threshold:
-                        collection.set_rasterized(True)
+                if (isinstance(collection, PathCollection)
+                        and len(collection.get_offsets()) >= scatter_raster_threshold
+                        and not collection.get_rasterized()):
+                    changed.append(collection)
+                    collection.set_rasterized(True)
 
     # Make sure we add '.svg' if it's not present
     filename_str = str(filename)
@@ -1671,19 +1761,23 @@ def savefig_svg(filename, bgnd_color=(1, 1, 1, 0.8), bbox_inches='tight', dpi=30
         # axes.unicode_minus is left alone: the style's font may lack U+2212.
         context_rc['svg.fonttype'] = 'path'
 
-    # Call savefig on the current figure with the context
-    with plt.rc_context(context_rc):
-        fig.savefig(
-            filename_str,
-            format='svg',
-            facecolor=bgnd_color,
-            bbox_inches=bbox_inches,
-            dpi=dpi,
-            pad_inches=pad_inches,
-            metadata=metadata,
-            **kwargs
-        )
-    print(f"Saved figure to {filename_str}")
+    try:
+        with plt.rc_context(context_rc):
+            fig.savefig(
+                filename_str,
+                format='svg',
+                facecolor=bgnd_color,
+                bbox_inches=bbox_inches,
+                dpi=dpi,
+                pad_inches=pad_inches,
+                metadata=metadata,
+                **kwargs
+            )
+    finally:
+        for collection in changed:
+            collection.set_rasterized(False)
+    logger.info("Saved figure to %s", filename_str)
+
 
 def brightness_diagnostic_plotter(diagnostic_data, ax=None):
     """
