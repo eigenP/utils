@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import sys
 import xml.etree.ElementTree as ET
 
 import matplotlib as mpl
@@ -1158,6 +1159,121 @@ def test_labels_cmap_low_ids_stay_opaque_with_many_labels():
     assert rgba[0, 1, 3] == 1
     # Entries match the public lookup table: labels_cmap(i / 255) == labels_cmap.colors[i]
     np.testing.assert_allclose(labels_cmap(np.arange(256) / 255), np.asarray(labels_cmap.colors))
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="no subprocesses in Pyodide")
+def test_import_prints_nothing():
+    """Importing the package writes nothing to stdout (the labels_cmap hint is gone, D06 / R5-11)."""
+    import subprocess
+
+    out = subprocess.run(
+        [sys.executable, "-c", "import eigenp_utils.plotting_utils"],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout == ""
+
+
+def test_labels_cmap_black_is_registered_and_opaque():
+    """labels_cmap_black: entry 0 opaque black, labels as in labels_cmap; usable by name (D06).
+
+    (+) the registered copy (cmap='labels_cmap_black') has an opaque black background.
+    (-) labels_cmap itself keeps its transparent entry 0 and the same label colours.
+    """
+    from eigenp_utils.plotting_utils import labels_cmap_black
+
+    assert labels_cmap_black.name == "labels_cmap_black"
+    np.testing.assert_allclose(mpl_colormaps["labels_cmap_black"](0.0), (0, 0, 0, 1))
+    np.testing.assert_allclose(labels_cmap_black(0.0), (0, 0, 0, 1))
+    np.testing.assert_allclose(np.asarray(labels_cmap_black.colors)[1:], np.asarray(labels_cmap.colors)[1:])
+    assert mpl_colormaps["labels_cmap"](0.0) == (0.0, 0.0, 0.0, 0.0)
+    # still keeps the low-id bump of _LabelsColormap
+    np.testing.assert_allclose(labels_cmap_black(0.001), labels_cmap.colors[1])
+
+
+def test_make_labels_cmap_background_returns_a_fresh_copy():
+    """make_labels_cmap(background=...) sets entry 0 on a new object; the shared labels_cmap is untouched."""
+    from eigenp_utils.plotting_utils import make_labels_cmap
+
+    white = make_labels_cmap(background="white")
+    np.testing.assert_allclose(white(0.0), (1, 1, 1, 1))
+    assert white is not labels_cmap
+    np.testing.assert_allclose(np.asarray(white.colors)[1:], np.asarray(labels_cmap.colors)[1:])
+    np.testing.assert_allclose(make_labels_cmap()(0.0), (0, 0, 0, 0))  # default: transparent
+    np.testing.assert_allclose(make_labels_cmap((0, 0, 0, 1))(0.0), (0, 0, 0, 1))
+    assert labels_cmap(0.0) == (0.0, 0.0, 0.0, 0.0)
+    with pytest.raises(ValueError):
+        make_labels_cmap(background="not-a-colour")
+
+
+def test_label_rgba_matches_label_annotator_and_cycles():
+    """label_rgba(ids): id k -> palette[(k - 1) % 255], 0 -> background, independent of the image's max (D28).
+
+    (+) ids 256, 300, 400 get three different colours (they used to clip to one), and id k and
+        k + 255 share a colour; each matches LabelAnnotator's instance_palette entry.
+    (-) ids 1..255 give labels_cmap.colors[k] exactly (the existing LUT identity).
+    """
+    from eigenp_utils.plotting_utils import label_rgba
+
+    _rgb_hex = pytest.importorskip("eigenp_utils.label_annotator")._rgb_hex
+
+    ids = np.arange(0, 256)
+    np.testing.assert_allclose(label_rgba(ids), np.asarray(labels_cmap.colors))
+    annot = [_rgb_hex(c) for c in LABELS_CMAP_COLORS]  # LabelAnnotator.instance_palette
+    for k in (1, 10, 255, 256, 300, 511, 1000, 65535):
+        assert mpl.colors.to_hex(label_rgba(k)) == annot[(k - 1) % len(annot)]
+    big = label_rgba(np.array([256, 300, 400]))
+    assert len({tuple(c) for c in big}) == 3
+    np.testing.assert_allclose(label_rgba(7), label_rgba(7 + 255))
+    # 2-D input keeps its shape and adds an RGBA axis; background as given
+    lab = np.array([[0, 1], [2, 0]], dtype=np.uint16)
+    out = label_rgba(lab, background="black")
+    assert out.shape == (2, 2, 4)
+    np.testing.assert_allclose(out[0, 0], (0, 0, 0, 1))
+    np.testing.assert_allclose(out[1, 0], labels_cmap.colors[2])
+    # a label's colour does not depend on the other labels present
+    np.testing.assert_allclose(label_rgba(np.array([1, 10]))[0], label_rgba(np.array([1, 1000]))[0])
+    with pytest.raises(ValueError, match="negative"):
+        label_rgba(np.array([-1, 2]))
+
+
+def test_label_norm_gives_label_rgba_through_imshow():
+    """imshow(lab, cmap=labels_cmap, norm=LabelNorm()) draws every id with label_rgba's colour (D28)."""
+    from eigenp_utils.plotting_utils import LabelNorm, label_rgba
+
+    lab = np.array([[0, 1, 2, 255], [256, 300, 511, 1000]])
+    fig, ax = plt.subplots()
+    im = ax.imshow(lab, cmap=labels_cmap, norm=LabelNorm(), interpolation="nearest")
+    np.testing.assert_allclose(im.to_rgba(lab), label_rgba(lab))
+    # the registered name works too
+    im2 = ax.imshow(lab, cmap="labels_cmap", norm=LabelNorm(), interpolation="nearest")
+    np.testing.assert_allclose(im2.to_rgba(lab), label_rgba(lab))
+
+
+def test_colormap_maker_rejects_builtin_names_but_re_registers_own():
+    """colormap_maker(cmap_name=<builtin>) raises a clear ValueError; re-registering one's own name works (R5-22)."""
+    with pytest.raises(ValueError, match="built-in"):
+        colormap_maker(["k", "w"], cmap_name="gray")
+    name = "eigenp_test_rereg"
+    try:
+        colormap_maker(["k", "r"], cmap_name=name)
+        cmap = colormap_maker(["k", "b"], cmap_name=name)  # re-running a notebook cell
+        np.testing.assert_allclose(mpl_colormaps[name](1.0), (0, 0, 1, 1))
+        assert cmap.name == name
+    finally:
+        if name in mpl_colormaps:
+            mpl_colormaps.unregister(name)
+
+
+def test_plotting_utils_imports_scipy_stats_lazily():
+    """plotting_utils does not import eigenp_utils.stats (and so scipy.stats) at import time (R5-22)."""
+    import inspect
+
+    import eigenp_utils.plotting_utils as pu
+
+    src = inspect.getsource(pu)
+    head = src.split("def set_plotting_style")[0]
+    assert "remove_outliers" not in head and "scipy" not in head
+    assert "register_cmap" not in src  # dead pre-3.7 fallbacks removed
 
 
 # =========================================

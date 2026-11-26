@@ -19,7 +19,6 @@ import itertools
 import math
 import datetime
 import warnings
-from .stats import remove_outliers
 from ._conventions import channel_color_hex
 
 # --- Initialization: Load Font and Style ---
@@ -72,6 +71,10 @@ final_colors = [(0, 0, 0, 0)]
 for r, g, b in LABELS_CMAP_COLORS:
     final_colors.append((r, g, b, 1.0))
 
+# Number of label colours (entries 1..255): id k uses entry ((k - 1) % 255) + 1,
+# LabelAnnotator's rule (instance_palette[(k - 1) % 255]).
+_N_LABEL_COLORS = len(LABELS_CMAP_COLORS)
+
 
 class _LabelsColormap(ListedColormap):
     """Lookup table whose transparent entry 0 is reserved for background (value 0).
@@ -93,18 +96,121 @@ class _LabelsColormap(ListedColormap):
         return super().__call__(X, alpha=alpha, bytes=bytes)
 
 
+def make_labels_cmap(background=(0, 0, 0, 0), *, name="labels_cmap"):
+    """A fresh copy of :data:`labels_cmap` whose entry 0 (background, label 0) is ``background``.
+
+    The label colours (entries 1..255) are the same as ``labels_cmap``'s; the shared
+    ``labels_cmap`` object and the registered colormaps are not changed, and the copy
+    is not registered (pass it as ``cmap=`` or register it yourself).
+
+    The palette is tuned for a dark background (every colour has L* >= 40), so a
+    black background (``'labels_cmap_black'``) shows near-white labels best.
+
+    Parameters
+    ----------
+    background : color, default (0, 0, 0, 0)
+        Any Matplotlib colour; the default is transparent.
+    name : str
+        Name of the returned colormap.
+
+    Examples
+    --------
+    >>> ax.imshow(lab, cmap=make_labels_cmap('black'), norm=LabelNorm(), interpolation='nearest')
+    """
+    colors = [mcolors.to_rgba(background)] + [(r, g, b, 1.0) for r, g, b in LABELS_CMAP_COLORS]
+    return _LabelsColormap(colors, name=name)
+
+
 # Create the new colormap (entry i is final_colors[i])
 labels_cmap = _LabelsColormap(final_colors, name="labels_cmap")
+mpl_colormaps.register(labels_cmap, name="labels_cmap", force=True)
 
-try:
-    mpl_colormaps.register(labels_cmap, name="labels_cmap", force=True)
-except AttributeError:
-    # Fallback for older Matplotlib versions
-    plt.register_cmap(name="labels_cmap", cmap=labels_cmap)
+#: ``labels_cmap`` with an opaque black background, registered as ``'labels_cmap_black'``.
+#: Added (D06, 2026-11): the import-time hint that suggested mutating
+#: ``labels_cmap._lut`` is gone (it did not affect ``cmap='labels_cmap'``).
+labels_cmap_black = make_labels_cmap((0, 0, 0, 1), name="labels_cmap_black")
+mpl_colormaps.register(labels_cmap_black, name="labels_cmap_black", force=True)
 
-# Print a hint for users who might need the background to be black
-print("Hint: labels_cmap background is transparent by default. To set it to black, run:")
-print("labels_cmap._init(); labels_cmap._lut[0] = [0, 0, 0, 1]")
+
+def _label_lut_index(ids):
+    """LUT entry of each label id: 0 for background, ``((k - 1) % 255) + 1`` otherwise."""
+    ids = np.asarray(ids)
+    if ids.dtype == bool:
+        ids = ids.astype(np.uint8)
+    if ids.dtype.kind == "f":
+        if not np.all(np.isfinite(ids)) or not np.all(ids == np.rint(ids)):
+            raise ValueError("label ids must be finite integers")
+        ids = ids.astype(np.int64)
+    elif ids.dtype.kind not in "iu":
+        raise ValueError(f"label ids must be integers, got dtype {ids.dtype}")
+    if ids.dtype.kind == "i" and ids.size and ids.min() < 0:
+        raise ValueError("label ids must not be negative")
+    ids = ids.astype(np.int64, copy=False)
+    return np.where(ids > 0, (ids - 1) % _N_LABEL_COLORS + 1, 0)
+
+
+def label_rgba(labels, background=(0, 0, 0, 0)):
+    """RGBA colour of every label id, the same colour LabelAnnotator draws for that id.
+
+    Id ``k > 0`` gets ``labels_cmap.colors[((k - 1) % 255) + 1]`` (the palette cycles
+    every 255 ids), id 0 gets ``background``. A label's colour therefore does not
+    depend on the other ids in the image, unlike ``imshow(lab, cmap=labels_cmap)``,
+    whose autoscaled norm moves the colours with the image's maximum and squeezes
+    several neighbouring ids into one entry above 256 labels.
+
+    Added (D28, 2026-11).
+
+    Parameters
+    ----------
+    labels : int or array of int
+        Label ids (non-negative; integer-valued floats are accepted).
+    background : color, default (0, 0, 0, 0)
+        Colour of label 0 (transparent by default).
+
+    Returns
+    -------
+    numpy.ndarray
+        Float RGBA in [0, 1], shape ``labels.shape + (4,)``.
+
+    Examples
+    --------
+    >>> ax.imshow(label_rgba(lab), interpolation='nearest')
+    """
+    lut = np.asarray(labels_cmap.colors, dtype=float).copy()
+    lut[0] = mcolors.to_rgba(background)
+    return lut[_label_lut_index(labels)]
+
+
+class LabelNorm(mcolors.Normalize):
+    """Normalisation that maps label id ``k`` onto ``labels_cmap`` entry ``((k - 1) % 255) + 1``.
+
+    With ``imshow(lab, cmap=labels_cmap, norm=LabelNorm(), interpolation='nearest')``
+    each id is drawn with :func:`label_rgba`'s colour (LabelAnnotator's colour),
+    whatever the image's maximum id. Meant for 256-entry label colormaps
+    (``labels_cmap``, ``labels_cmap_black``, :func:`make_labels_cmap`). Values are
+    rounded to the nearest integer; negative ids map below the range (the
+    colormap's "under" colour). Not invertible, so no colorbar.
+
+    Added (D28, 2026-11).
+    """
+
+    def __init__(self):
+        super().__init__(vmin=0, vmax=None, clip=False)
+
+    def __call__(self, value, clip=None):
+        result, is_scalar = self.process_value(value)
+        self.autoscale_None(result)
+        data = np.ma.getdata(result).astype(float)
+        bad = np.ma.getmaskarray(result) | ~np.isfinite(data)
+        ids = np.rint(np.where(bad, 0, data)).astype(np.int64)
+        idx = np.where(ids > 0, (ids - 1) % _N_LABEL_COLORS + 1, 0)
+        out = np.where(idx > 0, (idx + 0.5) / (_N_LABEL_COLORS + 1), 0.0)
+        out = np.where(ids < 0, -1.0, out)
+        out = np.ma.array(out, mask=bad)
+        return out[0] if is_scalar else out
+
+    def inverse(self, value):
+        raise ValueError("LabelNorm is not invertible")
 
 
 # --- Color Stops (White -> Pastel -> Pure -> Deep Saturated) ---
@@ -142,12 +248,8 @@ i_slate = I_SERIES_COLORMAPS["I Slate"]
 for name, cmap in I_SERIES_COLORMAPS.items():
     alias_name = name.lower().replace(" ", "_")
 
-    # Matplotlib >= 3.7 registry pattern with backward-compatibility fallback
     for reg_name in (name, alias_name):
-        try:
-            mpl_colormaps.register(cmap, name=reg_name, force=True)
-        except AttributeError:
-            plt.register_cmap(name=reg_name, cmap=cmap)
+        mpl_colormaps.register(cmap, name=reg_name, force=True)
 
 
 def _image_info(image, shown=None):
@@ -1079,6 +1181,8 @@ def raincloud_plot(data,
         # A. Violin
         # Filter outliers for the KDE estimation if requested
         if outlier_method is not None:
+            from .stats import remove_outliers  # lazy: scipy.stats only when needed
+
             violin_vals = remove_outliers(vals, method=outlier_method, threshold=outlier_multiplier)
             if len(violin_vals) == 0:
                 # Fallback if everything is filtered (should be rare)
@@ -1199,7 +1303,9 @@ def colormap_maker(colors, positions=None, cmap_name=None):
         If not provided, the colors will be equally spaced.
     cmap_name : str, optional
         The name to register the colormap under in Matplotlib. If None, the colormap
-        is not registered.
+        is not registered. A name registered earlier (e.g. by this function) is
+        replaced. Changed (R5-22, 2026-11): a built-in Matplotlib name ('gray',
+        'viridis', ...) raises a ValueError that says so.
 
     Returns
     -------
@@ -1225,20 +1331,22 @@ def colormap_maker(colors, positions=None, cmap_name=None):
     else:
         color_data = colors
 
+    if cmap_name is not None and cmap_name in getattr(mpl_colormaps, "_builtin_cmaps", ()):
+        raise ValueError(
+            f"cmap_name {cmap_name!r} is a built-in Matplotlib colormap and cannot be replaced; "
+            "choose another name"
+        )
+
     # Generate a default name for internal creation if None is provided
     internal_name = cmap_name if cmap_name else "custom_cmap"
 
     cmap = LinearSegmentedColormap.from_list(internal_name, color_data)
 
     if cmap_name is not None:
-        # Register the colormap
-        # In newer Matplotlib versions, plt.colormaps.register or mpl.colormaps.register is preferred
-        # but plt.register_cmap is the classic way. Let's use mpl_colormaps for compatibility.
-        try:
+        # force=True: re-running a notebook cell re-registers the same (own) name
+        with warnings.catch_warnings():  # "Overwriting the cmap ..." is expected here
+            warnings.simplefilter("ignore", UserWarning)
             mpl_colormaps.register(cmap, name=cmap_name, force=True)
-        except AttributeError:
-            # Fallback for older Matplotlib versions
-            plt.register_cmap(name=cmap_name, cmap=cmap)
 
     return cmap
 
