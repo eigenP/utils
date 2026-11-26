@@ -6,7 +6,9 @@ import xarray as xr
 import tifffile
 import xml.etree.ElementTree as ET
 
-from ._conventions import UM, is_inch_unit, is_length_unit, is_pixel_unit, resolve_pixel_sizes, to_um
+from ._conventions import (
+    UM, is_inch_unit, is_length_unit, is_pixel_unit, resolve_pixel_sizes, to_um, warn_deprecated,
+)
 
 
 _STCZYX = 'STCZYX'
@@ -246,23 +248,134 @@ def channels_by(da: xr.DataArray, field: str, values, allow_missing: bool = Fals
     return out
 
 
-def _read_tiff(path, input_axes, series=None):
+def _is_dataarray(obj) -> bool:
+    """Duck-typed test for an ``xarray.DataArray`` (no xarray import needed)."""
+    return hasattr(obj, "dims") and hasattr(obj, "isel") and hasattr(obj, "coords")
+
+
+def check_zyx_input(image, func_name: str = "this function"):
+    """Return ``image`` unchanged, or raise a TypeError for an xarray DataArray above 3-D.
+
+    The (Z)YX processing functions take NumPy-like arrays; a 2-D or 3-D
+    DataArray works as one, but an STCZYX DataArray from :func:`load_image`
+    would be projected or broadcast along S/T/C. The message points to
+    :func:`to_zyx`. Plain arrays of any shape pass (their own checks apply).
+
+    Added (D31, 2026-11). Duck-typed: it does not import xarray.
+    """
+    if _is_dataarray(image) and len(image.dims) > 3:
+        sizes = ", ".join(f"{d}={n}" for d, n in zip(image.dims, image.shape))
+        raise TypeError(
+            f"{func_name} takes a (Z)YX array, got a {len(image.dims)}-D xarray.DataArray ({sizes}). "
+            "Select one scene, time point and channel first: "
+            "arr, pixel_sizes = eigenp_utils.image_io.to_zyx(da, C=0), then pass arr "
+            "(and pixel_sizes=pixel_sizes)."
+        )
+    return image
+
+
+def to_zyx(da, *, S=0, T=0, C=None):
+    """Squeeze an (STCZYX) ``xarray.DataArray`` to the (Z)YX array the processing functions take.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        An STCZYX image (e.g. from :func:`load_image`), or any DataArray with
+        single-letter dims from STCZYX (converted with
+        :func:`array_to_stczyx_xarray`).
+    S, T, C : int, label or None
+        The entry to keep along each axis: an int position, or a coordinate
+        label (e.g. a channel name for ``C``). None requires the axis to have
+        size 1. Defaults: the first scene and time point; ``C=None`` (choose a
+        channel explicitly when there are several).
+
+    Returns
+    -------
+    (array, pixel_sizes)
+        ``array`` is the underlying data (NumPy stays NumPy, dask stays lazy)
+        with dims (Z, Y, X), or (Y, X) when Z has size 1. ``pixel_sizes`` is
+        :func:`get_stczyx_pixel_sizes` of the selection
+        (``{'Z', 'Y', 'X', 'unit'}``, µm), ready for ``pixel_sizes=``.
+
+    Added (D31, 2026-11).
+
+    Examples
+    --------
+    >>> da = load_image("stack.tif")
+    >>> arr, ps = to_zyx(da, C="DAPI")
+    >>> labels = voronoi_otsu_labeling(arr, pixel_sizes=ps)
+    """
+    if not _is_dataarray(da):
+        raise TypeError(f"to_zyx takes an xarray.DataArray, got {type(da).__name__}")
+    if tuple(da.dims) != tuple(_STCZYX):
+        da = array_to_stczyx_xarray(da)
+    sel = {}
+    for dim, want in (("S", S), ("T", T), ("C", C)):
+        n = da.sizes[dim]
+        if want is None:
+            if n != 1:
+                raise ValueError(f"{dim} has {n} entries; choose one with {dim}=<index or label>")
+            sel[dim] = 0
+        elif isinstance(want, (int, np.integer)) and not isinstance(want, (bool, np.bool_)):
+            if not -n <= int(want) < n:
+                raise IndexError(f"{dim}={want} is out of range for {n} entries")
+            sel[dim] = int(want)
+        else:
+            labels = [str(v) for v in da.coords[dim].values]
+            if str(want) not in labels:
+                raise KeyError(f"{dim}={want!r} not found; available: {labels}")
+            sel[dim] = labels.index(str(want))
+    out = da.isel(sel)
+    if out.sizes["Z"] == 1:
+        out = out.isel(Z=0)
+    return out.data, get_stczyx_pixel_sizes(da.isel(sel))
+
+
+def _read_tiff_lazy(path, chosen_index, n_series):
+    """Lazy pixel data of TIFF series: a read-only memmap when the data are uncompressed and
+    contiguous, else tifffile's zarr store wrapped in dask."""
+    if n_series == 1:
+        try:
+            return tifffile.memmap(path, series=chosen_index[0], mode="r")
+        except ValueError:
+            pass  # compressed or not contiguous: not memory-mappable
+    try:
+        import dask.array as dsa
+        import zarr
+    except ImportError as e:
+        raise ImportError(
+            f"{Path(path).name}: lazy=True needs dask and zarr for compressed, tiled or multi-series "
+            "TIFFs (only uncompressed contiguous TIFFs are memory-mapped); install dask and zarr, or "
+            "use lazy=False"
+        ) from e
+    arrays = []
+    for i in chosen_index:
+        store = tifffile.imread(path, series=i, aszarr=True)
+        arrays.append(dsa.from_zarr(zarr.open(store, mode="r")))
+    return arrays[0] if len(arrays) == 1 else dsa.stack(arrays)
+
+
+def _read_tiff(path, input_axes, series=None, lazy=False):
     with tifffile.TiffFile(path) as tif:
         all_series = list(tif.series)
         if series is not None:
-            chosen = [all_series[series]]
+            index = [range(len(all_series))[series]]
         elif len(all_series) > 1 and len({(s.shape, s.axes, str(s.dtype)) for s in all_series}) == 1:
-            chosen = all_series  # e.g. multi-position OME-TIFF: stack along S
+            index = list(range(len(all_series)))  # e.g. multi-position OME-TIFF: stack along S
         else:
-            chosen = all_series[:1]
+            index = [0]
             if len(all_series) > 1:
                 warnings.warn(
                     f"{Path(path).name}: {len(all_series)} series of different shapes; read series 0 "
                     "(pass series= to choose)",
                     stacklevel=3,
                 )
+        chosen = [all_series[i] for i in index]
         file_axes = chosen[0].axes.upper()
-        data = chosen[0].asarray() if len(chosen) == 1 else np.stack([s.asarray() for s in chosen])
+        if not lazy:
+            data = chosen[0].asarray() if len(chosen) == 1 else np.stack([s.asarray() for s in chosen])
+    if lazy:
+        data = _read_tiff_lazy(path, index, len(index))
     if input_axes is not None:
         axes = input_axes.upper()
     else:
@@ -292,6 +405,7 @@ def load_image(
     pixel_sizes=None,
     strict: bool = True,
     series: int = None,
+    lazy: bool = False,
 ) -> xr.DataArray:
     """Convert an image (TIFF file, array, or DataArray from any reader) to a strict STCZYX ``xarray.DataArray``.
 
@@ -331,6 +445,14 @@ def load_image(
         (multi-position OME-TIFF) are stacked along ``S``; otherwise series 0
         is read with a warning. tifffile's samples axis (RGB / planar 'S') is
         read as ``C``.
+    lazy : bool, default False
+        TIFF only: do not read the pixels now. An uncompressed, contiguous
+        series is memory-mapped (read-only ``numpy.memmap``); other TIFFs
+        (compressed, tiled, several series) are opened through tifffile's
+        zarr store as a dask array (needs dask and zarr). Calibration and
+        channel metadata are read as usual. Use :func:`to_zyx` to select one
+        (Z)YX volume, e.g. for ``extract_surface_tiled``.
+        Added (D31, 2026-11).
 
     Returns
     -------
@@ -341,12 +463,15 @@ def load_image(
     attrs = {}
     file_ps = None
     data = source
+    if lazy and not isinstance(source, (str, Path)):
+        raise ValueError("lazy=True applies to file paths; an array source is used as given "
+                         "(pass a dask array to keep it lazy)")
     if isinstance(source, (str, Path)):
         path = Path(source)
         attrs["source"] = str(path)
         name = path.name.lower()
         if name.endswith((".tif", ".tiff")):
-            data, file_ps, input_axes = _read_tiff(path, input_axes, series)
+            data, file_ps, input_axes = _read_tiff(path, input_axes, series, lazy=lazy)
         else:
             raise ValueError(
                 f"unsupported file type: {path.name}; load_image reads .tif/.tiff. For other formats read "
@@ -616,12 +741,12 @@ def numpy_to_stczyx_xarray(
     channel_names: list = None,
     attrs: dict = None
 ) -> xr.DataArray:
-    """Deprecated alias of :func:`array_to_stczyx_xarray`."""
-    warnings.warn(
-        "numpy_to_stczyx_xarray is deprecated. Use array_to_stczyx_xarray instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
+    """Deprecated alias of :func:`array_to_stczyx_xarray`.
+
+    Changed (D08, 2026-11): emits a FutureWarning (was a DeprecationWarning);
+    it will be removed in eigenp_utils 0.1.0.
+    """
+    warn_deprecated("numpy_to_stczyx_xarray", "array_to_stczyx_xarray")
     return array_to_stczyx_xarray(
         image_array, input_axes, channel_names=channel_names, attrs=attrs
     )
