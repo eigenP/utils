@@ -9,8 +9,11 @@
 # ]
 # ///
 
+import logging
 import pathlib
 import warnings
+
+_log = logging.getLogger(__name__)
 
 def _safe_float(v):
     if v is None:
@@ -2364,9 +2367,9 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         if fig:
             try:
                 fig.savefig(self.save_filename, format='svg', dpi=300, bbox_inches='tight')
-                print(f"Saved to {self.save_filename}")
+                _log.info("Saved to %s", self.save_filename)
             except Exception as e:
-                print(f"Error saving file: {e}")
+                warnings.warn(f"Error saving {self.save_filename}: {e}", UserWarning, stacklevel=2)
 
     def _png_bytes(self, dpi=300):
         """The figure as PNG bytes, cropped like the SVG export (bbox 'tight')."""
@@ -2383,7 +2386,7 @@ class TNIAWidgetBase(anywidget.AnyWidget):
         try:
             data = self._png_bytes()
         except Exception as e:
-            print(f"Error rendering PNG: {e}")
+            warnings.warn(f"Error rendering PNG: {e}", UserWarning, stacklevel=2)
             data = None
         self.copy_png_data = base64.b64encode(data).decode('utf-8') if data else "error"
 
@@ -3118,7 +3121,7 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
 
     def _save_csv(self, change):
         if not self.points:
-            print("No points to save.")
+            warnings.warn("No points to save.", UserWarning, stacklevel=2)
             return
 
         import os
@@ -3133,9 +3136,9 @@ class TNIAAnnotatorWidget(TNIASliceWidget):
                 f.write("z,y,x\n")
                 for p in self.points:
                     f.write(f"{p[0]},{p[1]},{p[2]}\n")
-            print(f"Saved {len(self.points)} points to {filename}")
+            _log.info("Saved %d points to %s", len(self.points), filename)
         except Exception as e:
-            print(f"Error saving CSV: {e}")
+            warnings.warn(f"Error saving CSV {filename}: {e}", UserWarning, stacklevel=2)
 
 
     def _on_points_changed(self, change):
@@ -4628,9 +4631,9 @@ class IsoScatterWidget(anywidget.AnyWidget):
         if fig:
             try:
                 fig.savefig(self.save_filename, format='svg', dpi=300, bbox_inches='tight')
-                print(f"Saved to {self.save_filename}")
+                _log.info("Saved to %s", self.save_filename)
             except Exception as e:
-                print(f"Error saving file: {e}")
+                warnings.warn(f"Error saving {self.save_filename}: {e}", UserWarning, stacklevel=2)
 
     def _get_rotation_matrix(self, elev_deg, azim_deg):
         # Convert to radians

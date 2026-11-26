@@ -5179,3 +5179,26 @@ def test_iso_scatter_sxy_sz_are_deprecated_and_still_apply():
         show_iso_scatter(X, Y, Z, figsize=(4, 4))
     assert (inspect.signature(IsoScatterWidget).parameters["figsize"].default
             == inspect.signature(show_iso_scatter).parameters["figsize"].default)
+
+
+def test_exports_report_through_warnings_and_the_module_logger_not_print(tmp_path, capsys, caplog):
+    """Global rule (D07): exports never ``print``; failures warn, successes go to the module logger.
+
+    Strategy: save an SVG (success), save into a missing directory (failure),
+    and save a CSV without points, capturing stdout, warnings and logs.
+    Expected outcome: nothing on stdout; a UserWarning for each failure; an
+    INFO record from ``eigenp_utils.tnia_plotting_anywidgets`` for the save.
+    (Changed: these messages were printed, invisible in a JupyterLab cell.)
+    """
+    import logging
+    w = show_zyx_max_slice_interactive_point_annotator(_structured_volume(), figsize=(4, 4))
+    with caplog.at_level(logging.INFO, logger="eigenp_utils.tnia_plotting_anywidgets"):
+        w.save_filename = str(tmp_path / "ok.svg")
+        w.save_trigger += 1
+    assert any("ok.svg" in r.getMessage() for r in caplog.records)
+    with pytest.warns(UserWarning, match="Error saving"):
+        w.save_filename = str(tmp_path / "missing" / "x.svg")
+        w.save_trigger += 1
+    with pytest.warns(UserWarning, match="No points"):
+        w.save_csv_trigger += 1
+    assert capsys.readouterr().out == ""
