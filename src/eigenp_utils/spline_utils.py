@@ -5,7 +5,7 @@ from scipy.interpolate import splprep, splev
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-from ._conventions import resolve_pixel_sizes
+from ._conventions import resolve_pixel_sizes, warn_deprecated
 
 # Function to generate random 3D coordinates
 def generate_random_3d_coordinates(num_points=10, seed=None):
@@ -19,10 +19,17 @@ def generate_random_3d_coordinates(num_points=10, seed=None):
 def _mark_points(image, points):
     """Set the voxels containing `points` (one row per point) to 1.
 
-    Points outside the image are skipped. Coordinates are floored, so -0.5 lies
-    outside (not in voxel 0), and negative indices never wrap around.
+    Voxel centres sit at integer coordinates (as in SciPy, skimage and the
+    package's sampling functions): voxel i covers [i - 0.5, i + 0.5). Coordinates
+    are rounded half up, ``floor(c + 0.5)``, so a tie x.5 goes to the higher voxel
+    (2.5 -> 3, not banker's rounding). Points outside the image, i.e. outside
+    [-0.5, n - 0.5) on any axis, are skipped; negative indices never wrap around.
+
+    Changed (D23, R7-02, 2026-11): coordinates are rounded, not floored. Flooring
+    put voxel corners at integers, so a spline through integer knots (splev returns
+    e.g. 4.999999999999996) was drawn doubled and one voxel off.
     """
-    idx = np.floor(np.asarray(points)).astype(int)
+    idx = np.floor(np.asarray(points, dtype=np.float64) + 0.5).astype(int)
     shape = np.asarray(image.shape)
     inside = np.all((idx >= 0) & (idx < shape), axis=1)
     image[tuple(idx[inside].T)] = 1
@@ -30,8 +37,20 @@ def _mark_points(image, points):
 
 # Function to fit a cubic spline through 3D coordinates
 def fit_cubic_spline(coordinates, return_u = False):
+    """
+    Interpolating B-spline through the last three columns of `coordinates` (N, >= 3).
+
+    The degree is min(3, N - 1): cubic for 4 or more points, quadratic for 3, linear
+    for 2. Returns ``tck`` (and the parameter values ``u`` of the points when
+    `return_u`).
+
+    Changed (D23, R7-16, 2026-11): 2 and 3 points work (the degree is lowered, as in
+    `create_resampled_spline`); splprep raised for them.
+    """
+    coordinates = np.asarray(coordinates)
+    k = min(3, len(coordinates) - 1)
     # Fit a cubic spline (B-spline) to the 3D coordinates
-    tck, u = splprep([coordinates[:,-3], coordinates[:,-2], coordinates[:,-1]], s=0)
+    tck, u = splprep([coordinates[:,-3], coordinates[:,-2], coordinates[:,-1]], s=0, k=k)
     if return_u:
         return tck, u
     else:
@@ -49,6 +68,10 @@ def create_3d_image_from_spline(spline_tck, shape=None, num_points=2500):
 
     Returns:
     - A 3D numpy array representing the image.
+
+    Changed (D23, R7-02, 2026-11): sample points are rounded to the nearest voxel
+    (half up; voxel centres at integer coordinates), not floored, so drawn voxels
+    can move by up to one voxel; see `_mark_points` for the tie rule.
     """
     # Sample points along the spline
     u_fine = np.linspace(0, 1, num_points)
@@ -80,6 +103,10 @@ def create_nd_image_from_spline(spline_tck, shape=None, num_points=2500):
 
     Returns:
     - An n-dimensional numpy array representing the image.
+
+    Changed (D23, R7-02, 2026-11): sample points are rounded to the nearest voxel
+    (half up; voxel centres at integer coordinates), not floored, so drawn voxels
+    can move by up to one voxel; see `_mark_points` for the tie rule.
     """
     # Sample points along the spline
     u_fine = np.linspace(0, 1, num_points)
@@ -103,7 +130,7 @@ def create_nd_image_from_spline(spline_tck, shape=None, num_points=2500):
 
 
 # Function to plot the initial points and the spline
-def plot_3d_spline(coordinates, spline_tck, num_points=1000, ax=None):
+def plot_3d_spline(coordinates, spline_tck, num_points=1000, ax=None, title=None):
     """
     Plot the initial points and the cubic spline in 3D.
 
@@ -113,9 +140,13 @@ def plot_3d_spline(coordinates, spline_tck, num_points=1000, ax=None):
     - spline_tck: The parameters of the fitted spline.
     - num_points: Number of points to sample along the spline.
     - ax: Optional existing 3D axes to draw on.
+    - title: Optional axes title (default: none).
 
     Returns:
     - The matplotlib Figure.
+
+    Changed (D23, R7-16, 2026-11): new `title` parameter; there is no default title
+    (it was the hard-coded '3D Cubic Spline through Random Points').
     """
     # Sample points along the spline
     u_fine = np.linspace(0, 1, num_points)
@@ -140,12 +171,32 @@ def plot_3d_spline(coordinates, spline_tck, num_points=1000, ax=None):
     ax.set_zlabel('X')
     ax.legend()
 
-    ax.set_title('3D Cubic Spline through Random Points')
+    if title is not None:
+        ax.set_title(title)
     return fig
 
 
 # Function to create and resample spline
 def create_resampled_spline(points, num_points=1000):
+    """
+    Resample the interpolating spline through `points` (N, d) to `num_points` points.
+
+    Repeated consecutive points (common in tracked or pixel-snapped polylines) are
+    dropped first, because splprep rejects them. The degree is min(3, n - 1) for n
+    distinct points; fewer than 2 distinct points raise ValueError.
+
+    Changed (D23, R7-07, 2026-11): repeated consecutive points are dropped instead
+    of making splprep fail with 'Error on input data'.
+    """
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or len(points) == 0:
+        raise ValueError(f"points must be an (N, d) array with N >= 2, got shape {points.shape}.")
+    keep = np.r_[True, np.any(np.diff(points, axis=0) != 0, axis=1)]
+    points = points[keep]
+    if len(points) < 2:
+        raise ValueError(
+            f"A spline needs at least 2 distinct points, got {len(points)}."
+        )
     # splprep needs more points than the spline degree: lower it for 2-3 points
     tck, _ = splprep(points.T, s=0, k=min(3, len(points) - 1))
     u_fine = np.linspace(0, 1, num_points)
@@ -190,27 +241,47 @@ def _clip_polyline_to_box(points, lo, hi):
     return clipped[keep]
 
 
-def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=False, num_points=1000):
+def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=False, num_points=1000,
+                                resample=True):
     '''
     Return the vector difference of equally resampled splines.
 
     Parameters:
     - spline_origin: The origin spline points (N x d array)
     - spline_endpoint: The endpoint spline points (M x d array)
-    - overlap_only: If True, only consider the overlap region of the splines
+    - overlap_only: If True, only consider the part of both splines inside the
+      intersection of their bounding boxes (each is clipped exactly at the box faces
+      and resampled to `num_points`)
     - num_points: Number of points to resample the splines
+    - resample: If True (default), both splines are resampled to `num_points`
+      points, uniform in the chord-length parameter, so the i-th vectors compare
+      corresponding positions along each curve whatever the input sampling. If
+      False (and not `overlap_only`), equal-length inputs are paired by index and
+      different lengths raise ValueError. Repeated consecutive points are dropped
+      before resampling; a spline with fewer than 2 distinct points raises
+      ValueError (use ``resample=False`` to pair such inputs by index).
 
     Returns:
-    - vectors: An N x d array where N is the number of points and d the dimension of the space
-      (`num_points` rows when the splines are resampled)
-    '''
+    - vectors: A (num_points, d) array (N x d when paired by index). With
+      `overlap_only` and no overlap the vectors are all NaN.
 
-    if spline_origin.shape != spline_endpoint.shape:
-        # Resample both splines to ensure they have the same number of points
-        spline_origin = create_resampled_spline(spline_origin, num_points=num_points)
-        spline_endpoint = create_resampled_spline(spline_endpoint, num_points=num_points)
+    Changed (D23, R7-07, 2026-11): equal-length inputs are resampled by default (they
+    were paired by index and `num_points` was ignored, so two samplings of the same
+    curve could differ by the curve's length); new `resample` parameter. No overlap
+    returns NaN (it returned zeros, which looks exactly like perfect agreement).
+    '''
+    spline_origin = np.asarray(spline_origin)
+    spline_endpoint = np.asarray(spline_endpoint)
 
     if overlap_only == False:
+        if resample:
+            spline_origin = create_resampled_spline(spline_origin, num_points=num_points)
+            spline_endpoint = create_resampled_spline(spline_endpoint, num_points=num_points)
+        elif spline_origin.shape != spline_endpoint.shape:
+            raise ValueError(
+                f"With resample=False the splines must have the same shape, got "
+                f"{spline_origin.shape} and {spline_endpoint.shape}."
+            )
         vectors = spline_endpoint - spline_origin
         return vectors
 
@@ -232,9 +303,8 @@ def calculate_vector_difference(spline_origin, spline_endpoint, overlap_only=Fal
         common_origin = create_resampled_spline(overlap_origin, num_points=num_points)
         common_endpoint = create_resampled_spline(overlap_endpoint, num_points=num_points)
     else:
-        # Fallback if there is no significant overlap
-        common_origin = np.zeros((num_points, spline_origin.shape[1]))
-        common_endpoint = np.zeros((num_points, spline_endpoint.shape[1]))
+        # No overlap: undefined, not zero
+        return np.full((num_points, spline_origin.shape[1]), np.nan)
 
     vectors = common_endpoint - common_origin
     return vectors
@@ -284,17 +354,70 @@ def normalize_vectors(vectors):
     np.divide(vectors, norms, out=unit_vectors, where=norms > 0)
     return unit_vectors
 
-def calculate_spline_length(coords, resolution=None):
+def _length_pixel_sizes(pixel_sizes, ndim, name="pixel_sizes"):
+    """Per-axis pixel sizes (µm) for the last `ndim` of Z, Y, X; None or missing -> 1.0."""
+    if pixel_sizes is None:
+        return (1.0,) * ndim
+    if not isinstance(pixel_sizes, dict) and np.ndim(pixel_sizes) > 1:
+        pixel_sizes = list(np.ravel(np.asarray(pixel_sizes, dtype=object)))
+    values, _, _ = resolve_pixel_sizes(pixel_sizes, ndim, stacklevel=3)
+    out = []
+    for axis, value in zip(('Z', 'Y', 'X')[-ndim:], values):
+        if value is None:
+            warnings.warn(
+                f"No pixel size for axis {axis} in {name}; using 1.0.", stacklevel=3
+            )
+            out.append(1.0)
+        else:
+            out.append(float(value))
+    return tuple(out)
+
+
+def spline_length(points, pixel_sizes=None):
+    """
+    Arc length of a polyline / sampled spline given as (N, d) points, d = 2 or 3.
+
+    Point-major, like the rest of this module: one row per point, columns in
+    (Z, Y, X) or (Y, X) order.
+
+    Parameters:
+    - points: (N, 2) or (N, 3) array.
+    - pixel_sizes: Pixel sizes for the columns, in the package's usual forms (dict
+      {'Z','Y','X'} with an optional length 'unit', a sequence in column order (a
+      [Z, Y, X] triple also works for 2D), a scalar) or None (1.0, i.e. pixels).
+      Missing entries fall back to 1.0 with a warning (a missing Z with known Y and
+      X takes the finest of them).
+
+    Returns:
+    - The length in µm (pixels where no size is given), as a float.
+
+    New (D23, R7-06, 2026-11).
+    """
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] not in (2, 3):
+        raise ValueError(f"points must have shape (N, 2) or (N, 3), got {points.shape}.")
+    sizes = np.asarray(_length_pixel_sizes(pixel_sizes, points.shape[1]))
+    if len(points) < 2:
+        return 0.0
+    steps = np.diff(points, axis=0) * sizes
+    return float(np.sum(np.sqrt(np.sum(steps ** 2, axis=1))))
+
+
+def calculate_spline_length(coords, pixel_sizes=None, resolution=None):
     """
     Calculates the arc length of a 2D or 3D spline given evaluated points.
 
+    Axis-major: `coords` holds one array per axis. For an (N, d) array of points
+    use `spline_length`.
+
     Parameters:
     - coords: List or tuple of arrays in order [Z, Y, X] for 3D or [Y, X] for 2D.
-    - resolution: Pixel sizes as a sequence/array in the same axis order as `coords`
+    - pixel_sizes: Pixel sizes as a sequence/array in the same axis order as `coords`
       ([Z, Y, X] or [Y, X]; a [Z, Y, X] triple is also accepted for 2D), a dictionary
       {'Z','Y','X'} (with an optional length 'unit', converted to µm), a scalar, or None.
       A missing Z with known Y and X takes the finest of them; other missing or None
       entries fall back to 1.0. Both warn. Non-finite or non-positive sizes raise.
+    - resolution: Deprecated alias of `pixel_sizes`.
 
     Returns:
     - Real-world length in µm (in pixels for axes without a size).
@@ -302,45 +425,36 @@ def calculate_spline_length(coords, resolution=None):
     Changed (D01, 2026-11): resolution goes through the package's shared
     parser: units are converted to µm, a missing Z takes the finest of Y/X
     (it used to be 1.0), and non-positive sizes raise ValueError.
+
+    Changed (D23, R7-06, R8-18, 2026-11): the parameter is `pixel_sizes`
+    (`resolution=` warns, FutureWarning, removed in 0.1.0). An ndarray with 2 or 3
+    rows and at most 3 columns, e.g. 3 points as (3, 3), is ambiguous (rows are read
+    as axes) and warns; use `spline_length` for (N, d) points.
     """
+    if resolution is not None:
+        if pixel_sizes is not None:
+            raise TypeError("Pass pixel_sizes or the deprecated resolution, not both.")
+        warn_deprecated("calculate_spline_length(resolution=...)", "pixel_sizes=")
+        pixel_sizes = resolution
+
+    ambiguous = (
+        isinstance(coords, np.ndarray) and coords.ndim == 2
+        and coords.shape[0] in (2, 3) and coords.shape[1] <= 3
+    )
+    if ambiguous:
+        warnings.warn(
+            f"calculate_spline_length reads the rows of a {coords.shape} array as the "
+            f"{coords.shape[0]} axes ([Z,] Y, X). If the rows are points, use "
+            f"spline_length(points) instead.", UserWarning, stacklevel=2
+        )
+
     ndim = len(coords)
     if ndim not in [2, 3]:
         raise ValueError("coords must be a list of 2 or 3 arrays ([Z], Y, X)")
 
-    res = {'X': 1.0, 'Y': 1.0, 'Z': 1.0}
-    axes_used = ['Z', 'Y', 'X'][-ndim:]
-
-    if resolution is not None:
-        if not isinstance(resolution, dict) and np.ndim(resolution) > 1:
-            resolution = list(np.ravel(np.asarray(resolution, dtype=object)))
-        values, _, _ = resolve_pixel_sizes(resolution, ndim)
-        for axis, value in zip(axes_used, values):
-            if value is None:
-                warnings.warn(
-                    f"No pixel size for axis {axis} in resolution; using 1.0.", stacklevel=2
-                )
-            else:
-                res[axis] = value
-
-    # Map coordinates to resolutions:
-    # If 3D, coords are [Z, Y, X]
-    # If 2D, coords are [Y, X]
-    scaled_diffs_sq = []
-
-    if ndim == 3:
-        # Scale Z
-        scaled_diffs_sq.append(np.diff(coords[0] * res['Z'])**2)
-        # Scale Y
-        scaled_diffs_sq.append(np.diff(coords[1] * res['Y'])**2)
-        # Scale X
-        scaled_diffs_sq.append(np.diff(coords[2] * res['X'])**2)
-    else:
-        # Scale Y
-        scaled_diffs_sq.append(np.diff(coords[0] * res['Y'])**2)
-        # Scale X
-        scaled_diffs_sq.append(np.diff(coords[1] * res['X'])**2)
-
-    # Euclidean distance: sqrt(sum of squared differences)
+    sizes = _length_pixel_sizes(pixel_sizes, ndim)
+    # Euclidean distance: sqrt(sum of squared, scaled differences)
+    scaled_diffs_sq = [np.diff(np.asarray(c) * s) ** 2 for c, s in zip(coords, sizes)]
     segment_lengths = np.sqrt(sum(scaled_diffs_sq))
 
     return np.sum(segment_lengths)

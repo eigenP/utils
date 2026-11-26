@@ -404,3 +404,53 @@ def test_best_focus_image_non_square_prime_shape(patch_size):
     plane = np.random.default_rng(100).uniform(2.0, 12.0, size=(H, W)).astype(np.float32)
     ident = best_focus_image(np.repeat(plane[None], Z, axis=0), patch_size=patch_size)
     np.testing.assert_allclose(ident, plane, atol=1e-4)
+
+
+def test_best_focus_default_patch_is_32_px_capped_at_image_size():
+    """D24 / R7-08: the default patch size is a fixed 32 px, capped at min(H, W).
+
+    Strategy: compare the default call with explicit patch sizes on a 300x260 image
+    (the old default was min(H, W) // 10 = 26) and on a 20x24 image (cap 20).
+    Expected outcome: identical outputs to patch_size=32 and patch_size=20.
+    """
+    big = _textured_stack((6, 300, 260), seed=5)
+    np.testing.assert_array_equal(best_focus_image(big), best_focus_image(big, patch_size=32))
+    small = _textured_stack((6, 20, 24), seed=6)
+    np.testing.assert_array_equal(best_focus_image(small), best_focus_image(small, patch_size=20))
+
+
+def test_best_focus_crop_and_full_image_agree():
+    """D24 / R7-08: the default focus map does not depend on the field of view.
+
+    Strategy: a 12 x 512 x 512 stack whose focus height varies sinusoidally
+    (period 200 px); compare the height map of a 160 x 160 top-left crop with the
+    same region of the full image (the patch grids coincide at the origin). The old
+    default used 51 px patches on the full image and 16 px patches on the crop.
+    Expected outcome: mean |h_full - h_crop| over the crop's interior < 0.1 slice,
+    and both recover the true heights within 0.35 slice on average.
+    """
+    Z, H, W = 12, 512, 512
+    yy, xx = np.mgrid[:H, :W]
+    z_map = 5.5 + 3.0 * np.sin(2 * np.pi * xx / 200.0) * np.cos(2 * np.pi * yy / 260.0)
+    stack = _generate_focus_stack((Z, H, W), z_map, sigma=1.5, seed=1).astype(np.float32)
+    _, h_full = best_focus_image(stack, return_heightmap=True)
+    _, h_crop = best_focus_image(stack[:, :160, :160], return_heightmap=True)
+    inner = (slice(16, 144), slice(16, 144))
+    assert np.mean(np.abs(h_full[:160, :160][inner] - h_crop[inner])) < 0.1
+    assert np.mean(np.abs(h_crop[inner] - z_map[:160, :160][inner])) < 0.35
+    assert np.mean(np.abs(h_full[:160, :160][inner] - z_map[:160, :160][inner])) < 0.35
+
+
+def test_best_focus_test_parameter_is_deprecated():
+    """R7-15 / D08: the unused `test=` parameter warns (FutureWarning, removed in 0.1.0)."""
+    stack = _textured_stack((4, 32, 32), seed=7)
+    with pytest.warns(FutureWarning, match=r"test.*0\.1\.0"):
+        out = best_focus_image(stack, test=True)
+    np.testing.assert_array_equal(out, best_focus_image(stack))
+
+
+def test_best_focus_output_is_float32():
+    """R7-14: the fused image (and height map) are float32 whatever the input dtype (documented)."""
+    stack = (_textured_stack((4, 32, 32), seed=8) * 1000).astype(np.uint16)
+    fused, height = best_focus_image(stack, return_heightmap=True)
+    assert fused.dtype == np.float32 and height.dtype == np.float32

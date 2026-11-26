@@ -4,6 +4,7 @@ from scipy import ndimage
 
 from eigenp_utils.surface_extraction import (
     adjust_mask_location,
+    dask_extract_surface,
     crop_edges,
     expand_surface_z,
     extract_surface,
@@ -279,7 +280,7 @@ def test_expand_surface_z_zero_thickness_returns_copy():
     assert expand_surface_z(s, 0, in_place=True) is s
 
 
-def test_adjust_mask_location(capsys):
+def test_adjust_mask_location():
     """Verify translation, rollover clamping, OOB clearing, in-place overlap, morphology, and error handling.
 
     Strategy: exercise positive/negative shifts, boundary rollover (checking no
@@ -301,18 +302,20 @@ def test_adjust_mask_location(capsys):
     neg = adjust_mask_location(mask, translation=(-2, -3, -1))
     assert neg[3, 2, 4] and neg.sum() == 1
 
-    # Boundary rollover drops out-of-frame voxels without wrapping and prints warning
+    # Boundary rollover drops out-of-frame voxels without wrapping and warns (R7-09:
+    # a UserWarning, not a print)
     roll = np.zeros(shape, dtype=bool)
     roll[0, 5, 5] = True
     roll[5, 5, 5] = True
-    rolled = adjust_mask_location(roll, translation=(-1, 0, 0))
+    with pytest.warns(UserWarning, match="rolled over the boundaries"):
+        rolled = adjust_mask_location(roll, translation=(-1, 0, 0))
     assert rolled[4, 5, 5] and not rolled[9, 5, 5] and rolled.sum() == 1
-    assert "rolled over the boundaries" in capsys.readouterr().out
 
     # Out-of-bounds translation clears entirely for both out-of-place and in-place
     for in_place in (False, True):
         src = mask.copy()
-        cleared = adjust_mask_location(src, translation=(10, 0, 0), in_place=in_place)
+        with pytest.warns(UserWarning, match="rolled over"):
+            cleared = adjust_mask_location(src, translation=(10, 0, 0), in_place=in_place)
         assert not np.any(cleared)
         if in_place:
             assert cleared is src
@@ -636,3 +639,183 @@ def test_extract_surface_tiled_reads_one_tile_at_a_time():
     m_lazy = extract_surface_tiled(lazy, downscale_factor=4, gaussian_sigma=1.0, tile_size=32)
     np.testing.assert_array_equal(m_lazy, extract_surface(vol, downscale_factor=4, gaussian_sigma=1.0))
     assert lazy.largest_read <= 24 * 32 * 32
+
+
+def _tilted_textured_half_space(depth, shape=(64, 64, 64), tilt=3.0, seed=0):
+    """Poisson volume: textured tissue below a plane tilted by +-`tilt` voxels around `depth`.
+
+    Returns the uint16 volume and the true height map (Z of the tissue boundary per column).
+    """
+    Z, Y, X = shape
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[:Y, :X]
+    h = depth + tilt * (xx - X / 2) / (X / 2)
+    tissue = np.arange(Z)[:, None, None] >= h[None]
+    texture = 1 + 0.5 * np.sin(yy / 3.0) * np.cos(xx / 4.0)
+    lam = np.where(tissue, 40.0 * texture[None], 5.0)
+    return rng.poisson(lam).astype(np.uint16), h
+
+
+def _median_bias_per_depth(Z=64, **kw):
+    """Median (estimated - true) height of `extract_surface` at depths Z/8 ... 7Z/8."""
+    bias = []
+    for k in range(1, 8):
+        vol, h = _tilted_textured_half_space(k * Z / 8, shape=(Z, 64, 64))
+        _, est = extract_surface(vol, return_heightmap=True, **kw)
+        bias.append(float(np.median((est - h)[est >= 0])))
+    return np.array(bias)
+
+
+def test_extract_surface_default_blur_has_small_depth_independent_bias():
+    """D19 / R7-01: the default Z blur no longer moves the surface by 8-13 voxels with depth.
+
+    Strategy: tilted (+-3 voxel) textured Poisson half-spaces at depths Z/8 ... 7Z/8
+    of a 64-slice stack, default parameters (Z binned by 4). The old default
+    (isotropic sigma 4 in binned voxels = 16 raw slices along Z) gave biases from
+    +12.6 at Z/8 to -13.6 at 7Z/8.
+    Expected outcome: |median(h_est - h)| <= 2 voxels at every depth (measured
+    +1.1 ... -1.7), and the spread of the bias across depths is <= 3 voxels
+    (measured 2.8, was 26). The plan's tighter target, a spread <= 1 voxel, is NOT
+    met by the (1, 4, 4) default on this geometry: Otsu's threshold fraction still
+    moves with the tissue fraction, times a Z blur of 4 raw slices; the bias grows
+    towards 7Z/8, where the tissue is only 2 binned blocks thick. For reference,
+    (0.5, 4, 4) measures a spread of 1.04 at Z=64 and 0.42 at Z=128; (1, 4, 4)
+    measures 2.77 and 1.20. Tightening needs a decision on the default.
+    """
+    bias = _median_bias_per_depth()
+    assert np.all(np.abs(bias) <= 2.0), bias
+    assert np.ptp(bias) <= 3.0, bias
+
+
+def test_extract_surface_old_isotropic_sigma_is_depth_biased():
+    """Negative control for D19: an explicit isotropic gaussian_sigma=4 still gives the old bias.
+
+    Strategy: the same depth series as the default-blur test with gaussian_sigma=4.0.
+    Expected outcome: the bias spread across depths exceeds 15 voxels, so the new
+    default (not the test volume) is what removes it.
+    """
+    bias = _median_bias_per_depth(gaussian_sigma=4.0)
+    assert np.ptp(bias) > 15.0, bias
+
+
+def test_extract_surface_default_sigma_is_per_axis():
+    """D19: the default gaussian_sigma is (1, 4, 4) binned voxels, for both entry points.
+
+    Strategy: compare the default call with explicit gaussian_sigma=(1, 4, 4).
+    Expected outcome: identical heights for extract_surface and extract_surface_tiled.
+    """
+    vol, _ = _tilted_textured_half_space(24, shape=(48, 48, 48))
+    _, h_default = extract_surface(vol, return_heightmap=True)
+    _, h_explicit = extract_surface(vol, gaussian_sigma=(1, 4, 4), return_heightmap=True)
+    np.testing.assert_array_equal(h_default, h_explicit)
+    tiled = extract_surface_tiled(vol, tile_size=16, return_mask=False)
+    np.testing.assert_array_equal(tiled, h_default)
+
+
+def test_extract_surface_unbinned_old_sigma_reproduces_base_and_default_changes():
+    """D19 negative control, unbinned input (downscale_factor=1).
+
+    The plan's control "isotropic, unbinned input: unchanged" does not hold for a
+    default call: (1, 4, 4) also lowers the unbinned Z blur from 4 to 1 slice (a
+    tautological comparison of sigma 2.0 with (2, 2, 2) used to stand in for it).
+    Strategy: the depth series of the default-blur test, unbinned. An explicit
+    gaussian_sigma=4.0 must reproduce the base commit's (33bb6ff) default biases,
+    pinned here: +1.03, +0.37, +0.10, -0.06, -0.22, -0.48, -1.26. The default call
+    must differ from that (so the change is visible, and documented in the
+    docstring) and stay within 0.15 voxel of the truth at every depth.
+    Expected outcome: the old-sigma biases match the pinned values within 0.02;
+    the default biases are all <= 0.15 in magnitude and differ from the old ones.
+    """
+    old = _median_bias_per_depth(downscale_factor=1, gaussian_sigma=4.0)
+    np.testing.assert_allclose(
+        old, [1.032, 0.368, 0.102, -0.062, -0.215, -0.481, -1.261], atol=0.02
+    )
+    new = _median_bias_per_depth(downscale_factor=1)
+    assert np.all(np.abs(new) <= 0.15), new
+    assert np.max(np.abs(new - old)) > 0.5
+
+
+def test_extract_surface_pixel_sizes_without_sigma_um_warns_and_sigma_um_is_validated():
+    """D19 opt-in follow-up: pixel_sizes alone is not silently ignored; bad sigma_um raises.
+
+    Strategy: pass pixel_sizes without gaussian_sigma_um (it only converts a
+    gaussian_sigma_um, so the blur stays in binned voxels), then malformed
+    gaussian_sigma_um values (a 2-tuple raised numpy's broadcast error).
+    Expected outcome: a UserWarning mentioning gaussian_sigma_um, with heights equal
+    to the call without pixel_sizes; ValueError naming gaussian_sigma_um for a
+    2-tuple, a 4-tuple, a negative and a NaN sigma, in both entry points.
+    """
+    vol, _ = _tilted_textured_half_space(24, shape=(48, 48, 48))
+    _, ref = extract_surface(vol, return_heightmap=True)
+    with pytest.warns(UserWarning, match="gaussian_sigma_um") as rec:
+        _, h = extract_surface(vol, pixel_sizes=(2.0, 0.5, 0.5), return_heightmap=True)
+    assert rec[0].filename == __file__
+    np.testing.assert_array_equal(h, ref)
+    with pytest.warns(UserWarning, match="gaussian_sigma_um"):
+        extract_surface_tiled(vol, pixel_sizes=(2.0, 0.5, 0.5), return_mask=False)
+    ps = (2.0, 0.5, 0.5)
+    for bad in ((1.0, 2.0), (1, 2, 3, 4), -1.0, (1.0, np.nan, 1.0)):
+        with pytest.raises(ValueError, match="gaussian_sigma_um"):
+            extract_surface(vol, gaussian_sigma_um=bad, pixel_sizes=ps)
+        with pytest.raises(ValueError, match="gaussian_sigma_um"):
+            extract_surface_tiled(vol, gaussian_sigma_um=bad, pixel_sizes=ps, return_mask=False)
+
+
+def test_extract_surface_sigma_in_micrometres():
+    """D19 opt-in: gaussian_sigma_um with pixel_sizes converts the blur to binned voxels per axis.
+
+    Strategy: Z step 2 µm, XY 0.5 µm, downscale_factor (2, 4, 4): binned voxels are
+    4 x 2 x 2 µm, so gaussian_sigma_um=(4, 8, 8) equals gaussian_sigma=(1, 4, 4) and a
+    scalar 8 µm equals (2, 4, 4). Units in a pixel_sizes dict are converted (nm).
+    Expected outcome: identical height maps for the matching pairs (both entry points);
+    gaussian_sigma_um without pixel_sizes warns and reads the sigma in raw voxels.
+    """
+    vol, _ = _tilted_textured_half_space(24, shape=(48, 48, 48))
+    kw = dict(downscale_factor=(2, 4, 4), return_heightmap=True)
+    ps = {"Z": 2.0, "Y": 0.5, "X": 0.5}
+    _, ref = extract_surface(vol, gaussian_sigma=(1, 4, 4), **kw)
+    _, um = extract_surface(vol, gaussian_sigma_um=(4.0, 8.0, 8.0), pixel_sizes=ps, **kw)
+    np.testing.assert_array_equal(um, ref)
+    nm_ps = {"Z": 2000, "Y": 500, "X": 500, "unit": "nm"}
+    _, nm = extract_surface(vol, gaussian_sigma_um=(4.0, 8.0, 8.0), pixel_sizes=nm_ps, **kw)
+    np.testing.assert_array_equal(nm, ref)
+    _, ref2 = extract_surface(vol, gaussian_sigma=(2, 4, 4), **kw)
+    _, um2 = extract_surface(vol, gaussian_sigma_um=8.0, pixel_sizes=ps, **kw)
+    np.testing.assert_array_equal(um2, ref2)
+    tiled = extract_surface_tiled(
+        vol, downscale_factor=(2, 4, 4), gaussian_sigma_um=8.0, pixel_sizes=ps, tile_size=16, return_mask=False
+    )
+    np.testing.assert_array_equal(tiled, ref2)
+
+    with pytest.warns(UserWarning, match="pixel_sizes"):
+        _, raw = extract_surface(vol, gaussian_sigma_um=(2.0, 16.0, 16.0), **kw)
+    np.testing.assert_array_equal(raw, ref)
+
+
+def test_adjust_mask_location_prints_nothing(capsys):
+    """R7-09: a translation that loses mask voxels warns instead of printing.
+
+    Strategy: shift a voxel on the Z=0 face out of the frame; capture stdout.
+    Expected outcome: a UserWarning and empty stdout; a translation that loses
+    nothing emits no warning.
+    """
+    mask = np.zeros((6, 6, 6), dtype=bool)
+    mask[0, 3, 3] = True
+    with pytest.warns(UserWarning, match="rolled over"):
+        adjust_mask_location(mask, translation=(-1, 0, 0))
+    assert capsys.readouterr().out == ""
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("error")
+        adjust_mask_location(mask, translation=(1, 0, 0))
+
+
+def test_dask_extract_surface_is_deprecated():
+    """R7-15 / D08: the dask_extract_surface stub warns that it will be removed in 0.1.0.
+
+    Strategy: call the stub.
+    Expected outcome: a FutureWarning naming 0.1.0 and extract_surface_tiled; returns None.
+    """
+    with pytest.warns(FutureWarning, match=r"0\.1\.0.*extract_surface_tiled"):
+        assert dask_extract_surface() is None
