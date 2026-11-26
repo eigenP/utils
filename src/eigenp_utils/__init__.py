@@ -7,6 +7,9 @@ package colormaps by name), and ``eigenp_utils.load_image`` imports
 ImportError naming the extra to install (``pip install "eigenp-utils[image-analysis]"``);
 any other import error propagates unchanged, so a genuine bug is not hidden.
 
+Submodules are attributes too (``eigenp_utils.image_io`` imports
+:mod:`eigenp_utils.image_io` on first access, with the same install hint).
+
 Deprecated names (``hist_imshow``, ``numpy_to_stczyx_xarray``) stay importable
 but are not in ``__all__``. ``from eigenp_utils import *`` imports every module
 in ``__all__`` and therefore needs the ``image-analysis`` extra.
@@ -46,6 +49,9 @@ _EXTRA_OF_MODULE = {
 _EXTRA_PACKAGES = {
     "image-analysis": ("skimage", "xarray", "tifffile"),
 }
+
+# import name -> distribution name, for the install hint
+_DIST_OF_IMPORT = {"skimage": "scikit-image"}
 
 _PUBLIC = {
     "plotting_utils": (
@@ -128,22 +134,47 @@ def _install_hint(name, module, exc):
     if not missing or (exc.name is not None and failing not in missing):
         return None
     return ImportError(
-        f"eigenp_utils.{name} needs {', '.join(missing)}: "
+        f"eigenp_utils.{name} needs {', '.join(_DIST_OF_IMPORT.get(p, p) for p in missing)}: "
         f'pip install "eigenp-utils[{extra}]"'
     )
 
 
-def __getattr__(name):
-    module = _LAZY.get(name)
-    if module is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+_SUBMODULES = None
+
+
+def _is_submodule(name):
+    """True when ``name`` is a submodule of this package (``eigenp_utils.image_io``).
+
+    Listed from the package directory (no import, no import-hook lookup).
+    """
+    global _SUBMODULES
+    if name.startswith("__"):
+        return False
+    if _SUBMODULES is None:
+        import pkgutil
+        _SUBMODULES = frozenset(m.name for m in pkgutil.iter_modules(__path__))
+    return name in _SUBMODULES
+
+
+def _import(name, module):
     try:
-        mod = importlib.import_module(f".{module}", __name__)
+        return importlib.import_module(f".{module}", __name__)
     except ImportError as exc:
         hint = _install_hint(name, module, exc)
         if hint is None:
             raise
         raise hint from exc
+
+
+def __getattr__(name):
+    module = _LAZY.get(name)
+    if module is None:
+        if _is_submodule(name):
+            # Submodules stay reachable as attributes after a bare
+            # `import eigenp_utils` (the eager imports used to bind them).
+            return _import(name, name)
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    mod = _import(name, module)
     value = getattr(mod, name)
     if name not in _DEPRECATED:
         globals()[name] = value  # cache; deprecated names stay on the slow path

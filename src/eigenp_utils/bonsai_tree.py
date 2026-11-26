@@ -606,8 +606,8 @@ def run_bonsai(
     verbose
         Bonsai's verbose flag. Bonsai's output goes to ``bonsai_run.log`` in
         ``results_folder`` either way. With ``verbose=True`` a one-line summary
-        goes to the ``eigenp_utils.bonsai_tree`` logger (INFO; it was printed
-        before 2026-11, D07).
+        goes to the ``eigenp_utils.bonsai_tree`` logger (INFO).
+        Changed (D07, 2026-11): the summary used to be printed.
     timeout
         Seconds before the run is killed (``subprocess.TimeoutExpired``).
     n_threads
@@ -865,6 +865,10 @@ def tl_bonsai(
     Returns
     -------
     BonsaiTree whose ``cell_ids`` are ``adata.obs_names``.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.bonsai_tree`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if "sanity_dir" in run_kwargs:
         raise ValueError(
@@ -988,6 +992,10 @@ def bonsai_neighbors(
         ``adata.uns`` key of the tree.
     key_added
         ``uns`` key of the graph description and prefix of the two ``obsp`` keys.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.bonsai_tree`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if key_added == key:
         raise ValueError("key_added must differ from key (it would overwrite the tree).")

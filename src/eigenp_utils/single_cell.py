@@ -392,6 +392,9 @@ def pflogpf(
     Optional[sc.AnnData]
         If `copy` is True, returns a new AnnData object with PFlogPF values in `.layers[key_added]`.
         Otherwise, modifies `adata` in-place and returns `None`.
+
+    Changed (D07, 2026-11): when scclr is missing, the ImportError carries the
+    install steps; the docstring is no longer printed.
     """
     if not _has_integer_like_counts(adata.X):
         raise ValueError(
@@ -1043,6 +1046,10 @@ def import_obs_to_adata_from_csv(
         '{obs_key}_imported' (or '{obs_key}_imported_2', ... if that name is taken too).
     to_category
         If True, convert object-type columns in the imported data to categorical.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     # Read the table (auto-detects comma vs tab)
     df = pd.read_csv(path, index_col=index_col, sep=sep, engine=engine)
@@ -1192,6 +1199,8 @@ def plot_marker_genes_dict_on_embedding(
     Notes:
         Supports passing a list of `score_method`s to compute and dynamically append multiple
         types of cell type scores (e.g., standard vs. net scores) to the visualized embedding.
+
+    Changed (D07, 2026-11): messages that used to be printed are UserWarnings.
     """
 
     # 1. Validate Basis
@@ -1407,6 +1416,8 @@ def check_gene_adata(adata, gene, use_raw: bool = False):
 
     Returns:
     - A sanitized version of the input 'gene', containing only genes present in adata.
+
+    Changed (D07, 2026-11): messages that used to be printed are UserWarnings.
     """
     var_names = (
         adata.raw.var_names if use_raw and adata.raw is not None else adata.var_names
@@ -2056,6 +2067,10 @@ def find_expression_archetypes(
         - 'gene_list': The list of gene names used, in the same order as 'clusters'
                        and 'gene_corrs'.
         - 'linkage_matrix': The (n_genes-1, 4) linkage matrix from hierarchy.ward.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     logger.info("Finding gene archetypes ...")
 
@@ -2522,6 +2537,10 @@ def run_triku(
          `max_genes_for_triku` by total counts).
       2. Runs Triku on this subset (using a copy to protect the original adata).
       3. Maps the results back to `adata.var` (setting unselected genes to False/NaN).
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if n_neighbors is None:
         n_neighbors = pacmap_heuristic_n_neighbors(adata.n_obs)
@@ -2702,6 +2721,10 @@ def filter_marker_dict_by_triku(
 def save_pacmap_model(model: Any, filepath: str) -> None:
     """
     Saves a fitted PaCMAP model to disk using joblib.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     try:
         import joblib
@@ -2717,6 +2740,10 @@ def save_pacmap_model(model: Any, filepath: str) -> None:
 def load_pacmap_model(filepath: str) -> Any:
     """
     Loads a saved PaCMAP model from disk using joblib.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     try:
         import joblib
@@ -2836,6 +2863,10 @@ def tl_pacmap(
     -------
     None
         Updates adata.obsm['X_pacmap'] with the embedding.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     try:
         import pacmap
@@ -3066,6 +3097,10 @@ def calculate_lineage_coupling(
         Z-scores of co-occurrence.
     p_values : pd.DataFrame
         Right-tailed P-values of co-occurrence.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     # 1. Prepare Data
     # Create a binary matrix: Clones (rows) x Cell Types (columns)
@@ -3368,6 +3403,10 @@ def multiscale_coarsening(
             - 'purity': Mapping of {(fine_res, coarse_res): {fine_cluster: purity_score}}.
               Purity is the fraction of cells in the fine cluster that belong to the assigned coarse cluster.
         - 'consistency': DataFrame flagging clusters with lineage inconsistencies (direct vs indirect parent mismatch).
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
 
     # 1. Validation & Setup
@@ -3716,6 +3755,10 @@ def filter_markers_by_moran(
         {category: [genes]}
     report : dict
         Per-category details: missing_in_df, below_threshold, used_fallback
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
 
     # Build score lookup
@@ -4293,6 +4336,10 @@ def sweep_leiden_and_annotate(
     per-cell assigned cell types across adjacent resolutions.
 
     Scores are computed ONCE and reused across all resolutions.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if not neighbors_already_computed and "connectivities" not in adata.obsp:
         raise ValueError(
@@ -4437,6 +4484,10 @@ def export_obs_from_adata_to_csv(
 ) -> None:
     """
     Export a single adata.obs column (e.g. cell type annotations) to CSV, optionally including its colors.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     from pathlib import Path
 
@@ -4530,6 +4581,8 @@ def plot_volcano_adata(
     Notes:
         This function requires the 'adjustText' library to be installed
         (`pip install adjustText`) for non-overlapping gene labels.
+
+    Changed (D07, 2026-11): messages that used to be printed are UserWarnings.
     """
     if adjust_text is None:
         raise ImportError(
@@ -4986,6 +5039,10 @@ def compute_kknn_neighbors(
     Returns:
         A tuple of (pruned_distances, pruned_indices) where each element is a list of arrays
         (one array per query cell).
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if query_use_rep is None:
         query_use_rep = use_rep
@@ -5115,6 +5172,10 @@ def _project_onto_reference_pca(adata_query, adata_fit) -> np.ndarray:
     2. If the PCA was zero-centred, the column means of the fitted matrix are
        subtracted. The query's own mean is never used: it depends on the query's
        cell-type composition.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if not adata_query.var_names.equals(adata_fit.var_names):
         raise ValueError(
@@ -5289,6 +5350,10 @@ def kknn_ingest(
           reference's `.obs` and `.obsm` keys with a `_kknn` suffix, and setting ground-truth reference
           tracking metadata (like `kknn_k` and `mapping_confidence`) to `NaN`. This ensures keys align
           perfectly when preserving non-overlapping metadata via outer join.
+
+    Changed (D07, 2026-11): messages that used to be printed go to the
+    ``eigenp_utils.single_cell`` logger (INFO/DEBUG; configure logging to see them);
+    those the user can act on are UserWarnings.
     """
     if isinstance(obs_keys, str):
         obs_keys = [obs_keys]

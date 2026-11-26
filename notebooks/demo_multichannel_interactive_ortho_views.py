@@ -129,12 +129,17 @@ async def _():
     membrane = cells[:, 0, :, :].astype(float)
     # skimage.data.cells3d: voxel size (Z, Y, X) = (0.29, 0.26, 0.26) µm
     CELLS3D_PIXEL_SIZES = {'Z': 0.29, 'Y': 0.26, 'X': 0.26, 'unit': 'µm'}
+
+    def voxels_to_um(z, y, x):
+        """(Z, Y, X) voxel counts -> µm. With pixel_sizes, slabs_thickness is physical."""
+        return (z * CELLS3D_PIXEL_SIZES['Z'], y * CELLS3D_PIXEL_SIZES['Y'], x * CELLS3D_PIXEL_SIZES['X'])
     return (
         CELLS3D_PIXEL_SIZES,
         membrane,
         nuclei,
         show_zyx_max_slice_interactive,
         show_zyx_max_slice_interactive_point_annotator,
+        voxels_to_um,
     )
 
 
@@ -149,12 +154,13 @@ def _(mo):
 
 
 @app.cell
-def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive, voxels_to_um):
     # Standard Viewer
     viewer = show_zyx_max_slice_interactive(
         [nuclei, membrane],
         colormap=['viridis', 'magma'],
-        slabs_thickness=(nuclei.shape[0] // 2 - 1, 3, 3),  # (Z, Y, X) voxels
+        # half-thickness in µm: (Z, Y, X) = (Z/2 - 1, 3, 3) voxels
+        slabs_thickness=voxels_to_um(nuclei.shape[0] // 2 - 1, 3, 3),
         pixel_sizes=CELLS3D_PIXEL_SIZES,
         show_crosshair=True
     )
@@ -180,12 +186,13 @@ def _(mo):
 
 
 @app.cell
-def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive, voxels_to_um):
     viewer_minimum = show_zyx_max_slice_interactive(
         [nuclei, membrane],
         colormap=['Blues', 'Oranges'],
         blending='minimum',
-        slabs_thickness=(nuclei.shape[0] // 2 - 1, 3, 3),  # (Z, Y, X) voxels
+        # half-thickness in µm: (Z, Y, X) = (Z/2 - 1, 3, 3) voxels
+        slabs_thickness=voxels_to_um(nuclei.shape[0] // 2 - 1, 3, 3),
         pixel_sizes=CELLS3D_PIXEL_SIZES,
     )
     viewer_minimum
@@ -193,13 +200,14 @@ def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive):
 
 
 @app.cell
-def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive):
+def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive, voxels_to_um):
     viewer_attenuated = show_zyx_max_slice_interactive(
         [nuclei, membrane],
         colormap=['lime', 'magenta'],
         projection='attenuated_mip',
         attenuation=0.05,
-        slabs_thickness=(nuclei.shape[0] // 2 - 1, 20, 20),  # (Z, Y, X) voxels
+        # half-thickness in µm: (Z, Y, X) = (Z/2 - 1, 20, 20) voxels
+        slabs_thickness=voxels_to_um(nuclei.shape[0] // 2 - 1, 20, 20),
         pixel_sizes=CELLS3D_PIXEL_SIZES,
     )
     viewer_attenuated
@@ -217,12 +225,13 @@ def _(mo):
 
 
 @app.cell
-def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive_point_annotator):
+def _(CELLS3D_PIXEL_SIZES, membrane, nuclei, show_zyx_max_slice_interactive_point_annotator, voxels_to_um):
     # Annotator Viewer
     annotator = show_zyx_max_slice_interactive_point_annotator(
         [nuclei, membrane],
         colormap=['green', 'magenta'],
-        slabs_thickness=(nuclei.shape[0] // 2 - 1, 5, 5),  # (Z, Y, X) voxels
+        # half-thickness in µm: (Z, Y, X) = (Z/2 - 1, 5, 5) voxels
+        slabs_thickness=voxels_to_um(nuclei.shape[0] // 2 - 1, 5, 5),
         pixel_sizes=CELLS3D_PIXEL_SIZES,
         show_crosshair=True,
         point_size_scale=0.015  # Adjust marker size

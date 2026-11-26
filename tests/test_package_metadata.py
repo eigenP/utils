@@ -106,7 +106,42 @@ def test_missing_optional_dependency_gives_an_install_hint(monkeypatch):
         eigenp_utils.estimate_drift
     assert info.value.__cause__ is exc
     assert "estimate_drift" in str(info.value)
+    # the hint names the distribution to install, not the import name
+    assert "needs scikit-image" in str(info.value)
     assert callable(eigenp_utils.show_zyx)
+
+    # a submodule accessed as an attribute gets the same hint (_force_reimport dropped it)
+    with pytest.raises(ImportError, match=r"eigenp-utils\[image-analysis\]"):
+        eigenp_utils.maxproj_registration
+
+
+def test_submodules_are_attributes_after_a_bare_import(monkeypatch):
+    """D06 compat: ``eigenp_utils.image_io`` etc. resolve as attributes, as with the
+    old eager imports, even when nothing has imported the submodule by name yet.
+
+    Strategy: remove the submodule attribute the import system bound on the package
+    (and, for one module, the sys.modules entry), then access it.
+    (+) ``eigenp_utils.image_io`` / ``tnia_plotting_anywidgets`` / ``label_annotator``
+        are the submodule objects; a dropped module is imported afresh.
+    (-) a name that is neither a public name nor a submodule raises AttributeError;
+        dunder lookups do not try to import anything.
+    """
+    import eigenp_utils.image_io as image_io_mod
+
+    for name in ("image_io", "tnia_plotting_anywidgets", "label_annotator", "maxproj_registration"):
+        monkeypatch.delattr(eigenp_utils, name, raising=False)
+        mod = getattr(eigenp_utils, name)
+        assert mod is sys.modules[f"eigenp_utils.{name}"]
+    assert eigenp_utils.image_io is image_io_mod
+
+    _force_reimport(monkeypatch, "spline_utils", "spline_length")
+    monkeypatch.delattr(eigenp_utils, "spline_utils", raising=False)
+    assert eigenp_utils.spline_utils.spline_length is sys.modules["eigenp_utils.spline_utils"].spline_length
+
+    with pytest.raises(AttributeError):
+        eigenp_utils.no_such_module_or_name
+    with pytest.raises(AttributeError):
+        eigenp_utils.__wrapped__
 
 
 def test_real_import_errors_propagate_unchanged(monkeypatch):
@@ -277,6 +312,30 @@ def _iso_scatter(tmp_path):
     show_iso_scatter(x, x, x, sxy=1.0, sz=2.0)
 
 
+def _drift_default_order():
+    import numpy as np
+    from eigenp_utils.maxproj_registration import estimate_drift
+
+    a = _vol()[0].astype(float)
+    estimate_drift(a, np.roll(a, 1, axis=0))
+
+
+def _slice_widget_colors(tmp_path):
+    from eigenp_utils.tnia_plotting_anywidgets import TNIASliceWidget
+
+    TNIASliceWidget(_vol(), colors=["lime"])
+
+
+def _scatter(**kw):
+    def run(tmp_path):
+        import numpy as np
+        from eigenp_utils.tnia_plotting_anywidgets import TNIAScatterWidget
+
+        x = np.linspace(0.0, 10.0, 20)
+        TNIAScatterWidget(x, x, x, **kw)
+    return run
+
+
 LEGACY = {
     # Viewers
     "colors=": _widget(colors=["lime"]),
@@ -284,6 +343,9 @@ LEGACY = {
     "x_s..z_s": _widget(x_s=3),
     "x_t..z_t": _widget(x_t=3),
     "IsoScatter sxy/sz": _iso_scatter,
+    "TNIASliceWidget(colors=)": _slice_widget_colors,
+    "TNIAScatterWidget x_s..z_s": _scatter(x_s=3.0),
+    "TNIAScatterWidget x_t..z_t": _scatter(x_t=2.0),
     "tnia_plotting_3d": lambda tmp_path: _tnia_plotting_3d(),
     # Plotting / I/O
     "hist_imshow": lambda tmp_path: _hist_imshow(),
@@ -297,14 +359,21 @@ LEGACY = {
     "contrast_stretching(p_max=)": _call("intensity_rescaling", "contrast_stretching", _vol, p_max=99.0),
     "normalize_image(upper_percentile=)": _call("intensity_rescaling", "normalize_image", _vol,
                                                 upper_percentile=99.0),
+    "contrast_stretching(p_min=)": _call("intensity_rescaling", "contrast_stretching", _vol, p_min=1.0),
+    "normalize_image(lower_percentile=)": _call("intensity_rescaling", "normalize_image", _vol,
+                                                lower_percentile=1.0),
     "normalize_image(dtype=)": _call("intensity_rescaling", "normalize_image", _vol, dtype="float32"),
     "contrast_stretch_per_slice(p_min_array=)": _call(
         "intensity_rescaling", "contrast_stretch_per_slice", _vol,
         p_min_array=[0] * 6, p_max_array=[1000] * 6),
+    "contrast_stretch_per_slice(FLIP_Z_AXIS=)": _call(
+        "intensity_rescaling", "contrast_stretch_per_slice", _vol,
+        in_min=[0] * 6, in_max=[1000] * 6, FLIP_Z_AXIS=True),
     # Geometry
     "dask_extract_surface": _call("surface_extraction", "dask_extract_surface"),
     "best_focus_image(test=)": _call("extended_depth_of_focus", "best_focus_image", _vol, test=True),
     "estimate_drift(return_ccm=)": lambda tmp_path: _drift(),
+    "estimate_drift default order ('xy')": lambda tmp_path: _drift_default_order(),
     "apply_subpixel_drift_correction(drift=)": _call(
         "maxproj_registration", "apply_subpixel_drift_correction", _vol, drift=(0.0, 0.0, 0.0)),
     "spacing=": _call("image_and_labels_utils", "voronoi_otsu_labeling", _vol, spacing=(1, 1, 1)),
@@ -313,6 +382,11 @@ LEGACY = {
     # Single cell
     "annotate_clusters_by_markers(beta=)": lambda tmp_path: _annotate_beta(),
 }
+
+
+# deprecated on import: the warning points at the importing line (here importlib,
+# because the test imports through importlib.import_module)
+IMPORT_LEGACY = {"tnia_plotting_3d"}
 
 
 @pytest.mark.parametrize("name", list(LEGACY))
@@ -330,10 +404,14 @@ def test_every_legacy_name_emits_future_warning_naming_0_1_0(name, tmp_path):
         warnings.simplefilter("always")
         LEGACY[name](tmp_path)
     ours = [w for w in rec if issubclass(w.category, FutureWarning)
-            and "will be removed in eigenp_utils 0.1.0" in str(w.message)]
+            and "eigenp_utils 0.1.0" in str(w.message)]
     assert ours, [f"{w.category.__name__}: {w.message}" for w in rec]
     assert not any(issubclass(w.category, DeprecationWarning) and "eigenp" in w.filename
                    for w in rec if "deprecated" in str(w.message))
+    if name not in IMPORT_LEGACY:
+        # stacklevel: attributed to the caller (this file), not to eigenp_utils
+        assert all(Path(w.filename).name == Path(__file__).name for w in ours), \
+            [(w.filename, w.lineno, str(w.message)) for w in ours]
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +450,38 @@ def test_library_code_neither_prints_nor_uses_the_root_logger():
                 if f.attr in ROOT_LOGGER_CALLS or (f.attr == "getLogger" and not node.args):
                     offenders.append(f"{path.name}:{node.lineno} logging.{f.attr}")
     assert not offenders, offenders
+
+
+# functions whose printed output moved to the module logger or to UserWarnings (D07)
+D07_CHANGED = {
+    "single_cell.py": (
+        "pflogpf", "import_obs_to_adata_from_csv", "plot_marker_genes_dict_on_embedding",
+        "check_gene_adata", "find_expression_archetypes", "run_triku", "save_pacmap_model",
+        "load_pacmap_model", "tl_pacmap", "calculate_lineage_coupling", "multiscale_coarsening",
+        "filter_markers_to_adata", "filter_markers_by_moran", "sweep_leiden_and_annotate",
+        "export_obs_from_adata_to_csv", "plot_volcano_adata", "compute_kknn_neighbors",
+        "_project_onto_reference_pca", "kknn_ingest",
+    ),
+    "bonsai_tree.py": ("run_bonsai", "tl_bonsai", "bonsai_neighbors"),
+}
+
+
+def test_functions_that_stopped_printing_document_it():
+    """D07 / COMMON 'Changed:' rule: each function whose output stopped being printed
+    says so in its docstring (verbose=True output now needs logging configured).
+
+    Strategy: AST-read the module (no scanpy import needed).
+    (+) every listed function has a 'Changed (D07' note in its docstring.
+    (-) the listed functions still exist (a rename would make the check vacuous).
+    """
+    missing = []
+    for fname, funcs in D07_CHANGED.items():
+        tree = ast.parse((SRC / fname).read_text(encoding="utf-8"))
+        docs = {n.name: ast.get_docstring(n) or "" for n in tree.body
+                if isinstance(n, ast.FunctionDef)}
+        assert set(funcs) <= set(docs), set(funcs) - set(docs)
+        missing += [f"{fname}:{f}" for f in funcs if "Changed (D07" not in docs[f]]
+    assert not missing, missing
 
 
 # ---------------------------------------------------------------------------

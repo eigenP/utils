@@ -55,8 +55,8 @@
 * **Display range**: the viewers default to vmin = 0 (or the data minimum when it is negative) and vmax = the 99.99th percentile of the whole volume. Processing functions (`contrast_stretching`, `normalize_image`, `clahe_u8`) rescale between the `(0.1, 99.9)` percentiles by default (`intensity_rescaling.PROCESSING_PERCENTILES`).
 * **Channel colours**: one default palette for every viewer and `LabelAnnotator` (white, lime, magenta, yellow, cyan, red, blue); `blending=None` picks additive for colours, maximum for colormaps, and minimum for colormaps that start at white.
 * **Deprecations**: legacy names keep working and emit a `FutureWarning` saying they will be removed in eigenp_utils 0.1.0.
-* **Output**: library code never prints. Information goes to module loggers (`logging.getLogger("eigenp_utils.<module>")`, nothing is configured on the root logger) and anything you can act on is a `UserWarning`. The drift functions take `progress=` to switch off their progress bars.
-* **Imports**: `import eigenp_utils` is lazy: apart from `plotting_utils` (which registers the package colormaps by name), each top-level name imports its module on first use. A name whose optional dependencies are missing raises an ImportError naming the extra to install (e.g. `pip install "eigenp-utils[image-analysis]"`); other import errors are not hidden.
+* **Output**: library code never prints. Information goes to module loggers (`logging.getLogger("eigenp_utils.<module>")`, nothing is configured on the root logger) and anything you can act on is a `UserWarning`. The drift functions take `progress=` to switch off their progress bars. `verbose=True` reports (e.g. `filter_markers_by_moran`) and other progress messages are logged at INFO, so they show only once logging is configured: `logging.basicConfig()` in your script or notebook, then `logging.getLogger("eigenp_utils").setLevel("INFO")`.
+* **Imports**: `import eigenp_utils` is lazy: apart from `plotting_utils` (which registers the package colormaps by name), each top-level name imports its module on first use. Submodules are reachable the same way (`eigenp_utils.image_io`). A name whose optional dependencies are missing raises an ImportError naming the missing distributions and the extra to install (e.g. `eigenp_utils.estimate_drift needs scikit-image: pip install "eigenp-utils[image-analysis]"`); other import errors are not hidden.
 
 ### Examples
 * **Notebooks**: The `notebooks/` directory contains Marimo notebooks demonstrating package functionalities, such as using statistical utilities with classic datasets.
@@ -134,7 +134,7 @@ uv pip install "eigenp_utils[image-analysis,plotting,single-cell] @ git+https://
 
 Pick the groups you need, e.g. `[single-cell]` or `[image-analysis,single-cell]`.
 
-Each module in `src/eigenp_utils/` also carries a PEP 723 header (`# /// script`) listing its third-party imports, for running a module in a sandbox with `uv run`; a test keeps the headers in step with `pyproject.toml`.
+Each module in `src/eigenp_utils/` with third-party imports also carries a PEP 723 header (`# /// script`) listing its third-party imports, for running a module in a sandbox with `uv run`; a test keeps the headers in step with `pyproject.toml`.
 
 ### Browser / WASM (marimo, Pyodide)
 
