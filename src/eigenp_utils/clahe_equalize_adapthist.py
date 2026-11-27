@@ -664,19 +664,24 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
     so permuting axes commutes with CLAHE (up to 2 grey levels of fixed-point
     rounding). The default ``'pixel'`` interpolates between true tile centres:
     with a 1-voxel tile along Z (the default when Z < 16) each slice uses its
-    own LUT, and flipping any axis commutes with CLAHE when the axis is a
-    multiple of the tile. ``'opencv'`` uses OpenCV's half-pixel-shifted
-    centres on every axis: 2D output then matches ``cv2.createCLAHE`` to 1
-    grey level, but a 1-voxel Z tile blends 50% of the previous slice's LUT
-    into each slice and the result depends on axis direction.
+    own LUT, and flipping an axis that is a multiple of the tile commutes
+    with CLAHE (exactly on Y/X and for 1-voxel leading tiles; within 1 grey
+    level on leading axes with thicker tiles, from the float32 LUT blend).
+    ``'opencv'`` uses OpenCV's half-pixel-shifted centres on every axis: 2D
+    output then matches ``cv2.createCLAHE`` to 1 grey level when the tiles
+    divide the image (OpenCV pads non-divisible images differently), but a
+    1-voxel Z tile blends 50% of the previous slice's LUT into each slice and
+    the result depends on axis direction.
     Changed (D20, 2026-11): every axis used OpenCV's convention, which blended
     50% of the previous slice's (or channel's) LUT into each slice when the
     tile was 1 voxel thick and made the result depend on the Z direction (up
     to 64 grey levels). Every axis is now pixel-centred. 2D output differs
-    from the previous (OpenCV-matching) output by up to 2-4 grey levels at
-    the default tile size (mean < 0.6), more for small tiles (8-16 px: up to
-    12-25, mean 1-4); pass ``tile_centres='opencv'`` for the previous output,
-    bit for bit.
+    from the previous (OpenCV-matching) output by an amount that grows as
+    tiles shrink (measured on skimage test images): <= 4 grey levels at 64 px
+    tiles (mean < 0.6), up to ~6 at 32-48 px (mean < 1), 7-12 at 16 px and
+    up to ~27 at 8 px (mean up to ~6). The default tile is 1/8 of each
+    dimension, so small images get small tiles. Pass
+    ``tile_centres='opencv'`` for the previous output, bit for bit.
     Changed (C-07 / R6-15, 2026-11): a UserWarning is now emitted for a
     trailing axis of length 3 or 4 (a likely channel-last colour axis) and
     for NaN input (mapped to 0, as before); the output is unchanged.

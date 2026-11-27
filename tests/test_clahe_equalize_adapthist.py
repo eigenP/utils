@@ -348,6 +348,33 @@ def test_clahe_u8_axis_permutation_equivariance(tile_centres):
         assert d.max() <= 2, (perm, d.max(), d.mean())
 
 
+@pytest.mark.parametrize("tile_centres", ["pixel", "opencv"])
+def test_clahe_u8_4d_axis_permutation_equivariance(tile_centres):
+    """The N-D (ndim > 3, NumPy-only) path treats every axis alike too.
+
+    Regression guard for the D20 bug class: centring only some of the leading
+    axes passes every 3D test. Expected outcome: permutations of a small
+    (C, Z, Y, X) volume agree to <= 2 grey levels, both conventions; in pixel
+    mode a 1-voxel tile on axis 0 equals stacking the per-volume 3D results.
+    """
+    from scipy import ndimage
+
+    rng = np.random.default_rng(11)
+    vol = ndimage.gaussian_filter(rng.random((4, 9, 30, 34)), (0, 1, 2, 2))
+    vol = (255 * (vol - vol.min()) / np.ptp(vol)).astype(np.uint8)
+    ks = (2, 3, 10, 17)
+    out = clahe_u8(vol, kernel_size=ks, tile_centres=tile_centres)
+    for perm in ((1, 0, 2, 3), (0, 1, 3, 2), (2, 3, 0, 1), (3, 2, 1, 0)):
+        out_p = clahe_u8(vol.transpose(perm), kernel_size=tuple(ks[p] for p in perm),
+                         tile_centres=tile_centres)
+        d = np.abs(out_p.astype(int) - out.transpose(perm).astype(int))
+        assert d.max() <= 2, (perm, d.max())
+    if tile_centres == "pixel":
+        out4 = clahe_u8(vol, kernel_size=(1, 3, 10, 17), backend="numpy")
+        for c in range(vol.shape[0]):
+            np.testing.assert_array_equal(out4[c], clahe_u8(vol[c], kernel_size=(3, 10, 17), backend="numpy"))
+
+
 def test_clahe_u8_z_constant_volume_equals_2d():
     """A volume constant along Z with one Z tile matches 2D AHE of a slice bit-for-bit."""
     image = _camera()[::2, ::2]
