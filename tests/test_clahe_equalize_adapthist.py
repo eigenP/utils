@@ -258,7 +258,7 @@ def test_map_histogram_monotonicity_and_bounds():
 
 
 def test_clahe_u8_numpy_matches_opencv():
-    """The NumPy backend reproduces OpenCV's CLAHE to within rounding.
+    """With ``tile_centres='opencv'`` the NumPy backend reproduces OpenCV's CLAHE to within rounding.
 
     OpenCV is only a test oracle here (not a dependency). Strategy: kernel sizes
     dividing the image, three clip regimes (identity-like, default, AHE).
@@ -268,7 +268,7 @@ def test_clahe_u8_numpy_matches_opencv():
     image = _camera()
     for clip in (0.0, 0.01, None):
         for ks in ((64, 64), (128, 32)):
-            a = clahe_u8(image, kernel_size=ks, clip_limit=clip, backend="numpy")
+            a = clahe_u8(image, kernel_size=ks, clip_limit=clip, backend="numpy", tile_centres="opencv")
             cv_clip = 0.0 if clip is None else max(256 * clip, 1e-6)
             tiles = (image.shape[1] // ks[1], image.shape[0] // ks[0])
             b = cv2.createCLAHE(clipLimit=cv_clip, tileGridSize=tiles).apply(image)
@@ -294,9 +294,10 @@ def test_clahe_u8_numba_bit_identical_to_numpy():
     ]
     for arr, ks in cases:
         for clip in (0.0, 0.01, None):
-            a = clahe_u8(arr, kernel_size=ks, clip_limit=clip, backend="numba")
-            b = clahe_u8(arr, kernel_size=ks, clip_limit=clip, backend="numpy")
-            np.testing.assert_array_equal(a, b, err_msg=f"{arr.shape} {ks} {clip}")
+            for tc in ("pixel", "opencv"):
+                a = clahe_u8(arr, kernel_size=ks, clip_limit=clip, backend="numba", tile_centres=tc)
+                b = clahe_u8(arr, kernel_size=ks, clip_limit=clip, backend="numpy", tile_centres=tc)
+                np.testing.assert_array_equal(a, b, err_msg=f"{arr.shape} {ks} {clip} {tc}")
 
 
 def test_clahe_u8_falls_back_to_numpy_without_numba(monkeypatch):
@@ -324,17 +325,14 @@ def test_clahe_u8_matches_skimage_reference():
     assert abs(ours.mean() - ref.mean()) < 3
 
 
-def test_clahe_u8_axis_permutation_equivariance():
-    """Swapping Y and X commutes with CLAHE to within 2 grey levels; moving an axis
-    to or from the leading position changes the output only by the half-pixel
-    tile-centre convention.
+@pytest.mark.parametrize("tile_centres", ["pixel", "opencv"])
+def test_clahe_u8_axis_permutation_equivariance(tile_centres):
+    """Permuting axes commutes with CLAHE to within 2 grey levels (fixed-point rounding).
 
-    Changed (D20): the leading (folded) axes use pixel-centred tile coordinates
-    and Y/X keep OpenCV's (i / k - 0.5), so a permutation that moves an axis
-    into the leading position is no longer equivariant to 2 levels (it was
-    when every axis used the OpenCV shift). Expected outcome: Y/X transpose
-    max <= 2; other permutations mean |diff| < 2.0 and max <= 12 grey levels
-    (measured after D20: mean 1.69 / 1.80, max 10 / 11, on both backends).
+    Every axis uses the same tile-centre convention, so no axis is special.
+    (An interim D20 version centred only the leading axes; permutations that
+    moved an axis into the leading position then differed by up to 12 levels.)
+    Expected outcome: max |diff| <= 2 for every permutation, both conventions.
     """
     from scipy import ndimage
 
@@ -342,14 +340,39 @@ def test_clahe_u8_axis_permutation_equivariance():
     vol = ndimage.gaussian_filter(rng.random((21, 37, 45)), 2)
     vol = (255 * (vol - vol.min()) / np.ptp(vol)).astype(np.uint8)
     ks = (5, 9, 12)
-    out = clahe_u8(vol, kernel_size=ks)
-    for perm in ((0, 2, 1), (2, 0, 1), (1, 2, 0)):
-        out_p = clahe_u8(vol.transpose(perm), kernel_size=tuple(ks[p] for p in perm))
+    out = clahe_u8(vol, kernel_size=ks, tile_centres=tile_centres)
+    for perm in ((0, 2, 1), (1, 0, 2), (2, 0, 1), (1, 2, 0), (2, 1, 0)):
+        out_p = clahe_u8(vol.transpose(perm), kernel_size=tuple(ks[p] for p in perm),
+                         tile_centres=tile_centres)
         d = np.abs(out_p.astype(int) - out.transpose(perm).astype(int))
-        if perm == (0, 2, 1):
-            assert d.max() <= 2, (perm, d.max())
-        else:
-            assert d.mean() < 2.0 and d.max() <= 12, (perm, d.mean(), d.max())
+        assert d.max() <= 2, (perm, d.max(), d.mean())
+
+
+@pytest.mark.parametrize("tile_centres", ["pixel", "opencv"])
+def test_clahe_u8_4d_axis_permutation_equivariance(tile_centres):
+    """The N-D (ndim > 3, NumPy-only) path treats every axis alike too.
+
+    Regression guard for the D20 bug class: centring only some of the leading
+    axes passes every 3D test. Expected outcome: permutations of a small
+    (C, Z, Y, X) volume agree to <= 2 grey levels, both conventions; in pixel
+    mode a 1-voxel tile on axis 0 equals stacking the per-volume 3D results.
+    """
+    from scipy import ndimage
+
+    rng = np.random.default_rng(11)
+    vol = ndimage.gaussian_filter(rng.random((4, 9, 30, 34)), (0, 1, 2, 2))
+    vol = (255 * (vol - vol.min()) / np.ptp(vol)).astype(np.uint8)
+    ks = (2, 3, 10, 17)
+    out = clahe_u8(vol, kernel_size=ks, tile_centres=tile_centres)
+    for perm in ((1, 0, 2, 3), (0, 1, 3, 2), (2, 3, 0, 1), (3, 2, 1, 0)):
+        out_p = clahe_u8(vol.transpose(perm), kernel_size=tuple(ks[p] for p in perm),
+                         tile_centres=tile_centres)
+        d = np.abs(out_p.astype(int) - out.transpose(perm).astype(int))
+        assert d.max() <= 2, (perm, d.max())
+    if tile_centres == "pixel":
+        out4 = clahe_u8(vol, kernel_size=(1, 3, 10, 17), backend="numpy")
+        for c in range(vol.shape[0]):
+            np.testing.assert_array_equal(out4[c], clahe_u8(vol[c], kernel_size=(3, 10, 17), backend="numpy"))
 
 
 def test_clahe_u8_z_constant_volume_equals_2d():
@@ -552,19 +575,98 @@ _D20_2D_HASHES = {
 
 
 @pytest.mark.parametrize("backend", _d20_backends())
-def test_clahe_u8_2d_output_bit_identical_to_base(backend):
-    """(-) control for D20: 2D output keeps OpenCV's tile convention, bit for bit.
+def test_clahe_u8_opencv_tile_centres_reproduce_base_2d(backend):
+    """(-) control for D20: ``tile_centres='opencv'`` reproduces the previous 2D output, bit for bit.
 
     Strategy: equalise a deterministic 2D image with three kernel/clip settings
     and hash the output. Expected outcome: the sha256 equals the output of the
-    base commit (before the leading-axis change), on both backends.
+    base commit (before D20), on both backends.
     """
     import hashlib
 
     img = _d20_image2d()
     for (ks, clip), digest in _D20_2D_HASHES.items():
-        out = clahe_u8(img, kernel_size=ks, clip_limit=clip, backend=backend)
+        out = clahe_u8(img, kernel_size=ks, clip_limit=clip, backend=backend, tile_centres="opencv")
         assert hashlib.sha256(out.tobytes()).hexdigest() == digest, (ks, clip)
+
+
+# sha256 of clahe_u8 on _d20_volume() at the pre-D20 base commit (33bb6ff),
+# where every axis used OpenCV's convention (numpy and numba agree)
+_D20_3D_BASE_HASHES = {
+    (None, 0.01): "7d902f7304f7fbb1186516b6f8a84a422930cea2fec247d7db482d4287571428",
+    ((2, 12, 10), 0.01): "11bba981b5f0bca8bd9f40293fa6b0fee4fa0c18276b4bfaabf60da90a3a5b31",
+    ((5, 16, 8), None): "001ee89d4c05a9a77ea960251e09ac71b6c328ea970a8becdabc7a59dc7a0f4b",
+    ((1, 16, 16), 0.0): "cc0d809f00199522343370f087cb55b189a0c303e5b427eb70e8201df9133b2a",
+}
+
+
+def _d20_volume():
+    """The smooth random 10x48x40 uint8 volume of the Z-flip test."""
+    from scipy import ndimage
+
+    rng = np.random.default_rng(7)
+    vol = ndimage.gaussian_filter(rng.random((10, 48, 40)), (0.5, 3, 3))
+    return (255 * (vol - vol.min()) / np.ptp(vol)).astype(np.uint8)
+
+
+@pytest.mark.parametrize("backend", _d20_backends())
+def test_clahe_u8_opencv_tile_centres_reproduce_base_3d(backend):
+    """(-) control for D20: ``tile_centres='opencv'`` is the previous N-D behaviour, bit for bit.
+
+    Expected outcome: the sha256 of four kernel/clip settings equals the output
+    of the pre-D20 base commit, on both backends.
+    """
+    import hashlib
+
+    vol = _d20_volume()
+    for (ks, clip), digest in _D20_3D_BASE_HASHES.items():
+        out = clahe_u8(vol, kernel_size=ks, clip_limit=clip, backend=backend, tile_centres="opencv")
+        assert hashlib.sha256(out.tobytes()).hexdigest() == digest, (ks, clip)
+
+
+@pytest.mark.parametrize("backend", _d20_backends())
+def test_clahe_u8_pixel_tile_centres_commute_with_flips_on_every_axis(backend):
+    """(+) control for D20: with pixel-centred tiles, flipping Y or X (not only Z) commutes with CLAHE.
+
+    OpenCV's half-pixel shift makes even its own 2D CLAHE direction-dependent;
+    the pixel convention does not. Expected outcome: ||C(flip x) - flip C(x)||_inf
+    == 0 on every axis whose length is a multiple of the tile, and > 0 on Y or X
+    with ``tile_centres='opencv'`` (negative control).
+    """
+    vol = _d20_volume()
+    ks = (5, 16, 8)
+    for axis in range(3):
+        flip = [slice(None)] * 3
+        flip[axis] = slice(None, None, -1)
+        flip = tuple(flip)
+        a = clahe_u8(vol[flip], kernel_size=ks, backend=backend)[flip]
+        b = clahe_u8(vol, kernel_size=ks, backend=backend)
+        assert np.abs(a.astype(int) - b.astype(int)).max() == 0, axis
+    a = clahe_u8(vol[:, :, ::-1], kernel_size=ks, backend=backend, tile_centres="opencv")[:, :, ::-1]
+    b = clahe_u8(vol, kernel_size=ks, backend=backend, tile_centres="opencv")
+    assert np.abs(a.astype(int) - b.astype(int)).max() > 0
+
+
+def test_clahe_u8_pixel_tile_centres_stay_close_to_opencv_in_2d():
+    """D20 bound: the default 2D output moves only slightly from the OpenCV convention.
+
+    Strategy: camera-like texture at default and explicit tile sizes. Expected
+    outcome: at the default tile (1/8 of each dim) max |diff| <= 4 and mean < 0.6
+    grey levels versus ``tile_centres='opencv'``; the change grows for small tiles.
+    """
+    img = _camera()
+    for clip in (0.01, None):
+        a = clahe_u8(img, clip_limit=clip).astype(int)
+        b = clahe_u8(img, clip_limit=clip, tile_centres="opencv").astype(int)
+        d = np.abs(a - b)
+        assert d.max() <= 4 and d.mean() < 0.6, (clip, d.max(), d.mean())
+        assert d.max() > 0  # the conventions do differ
+
+
+def test_clahe_u8_rejects_unknown_tile_centres():
+    """``tile_centres`` accepts only 'pixel' and 'opencv'."""
+    with pytest.raises(ValueError, match="tile_centres"):
+        clahe_u8(_camera(), tile_centres="center")
 
 
 @pytest.mark.parametrize("backend", _d20_backends())
