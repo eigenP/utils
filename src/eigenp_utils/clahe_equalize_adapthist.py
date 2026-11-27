@@ -525,15 +525,20 @@ def _tile_luts_u8(img, ks, clip_limit):
     return _hist_to_lut(hist, _tile_grid(img.shape, ks), int(np.prod(ks)), clip_limit)
 
 
-def _interp_coords(size, k, centred=False):
+_TILE_CENTRES = ('pixel', 'opencv')
+
+
+def _interp_coords(size, k, centred=True):
     """Padded-grid lower tile index and weight for each coordinate.
 
-    ``centred=False`` is OpenCV's convention, f = i / k - 0.5 (used on Y/X so
-    2D output matches OpenCV). ``centred=True`` measures from the true tile
-    centre, f = (i + 0.5) / k - 0.5 (used on the folded leading axes, D20): a
-    1-voxel tile then gives weight 0, so thin Z (or C, T) tiles do not blend
-    50% of the neighbouring slice's LUT, and flipping the axis commutes with
-    CLAHE when the axis is a multiple of the tile.
+    ``centred=True`` (``tile_centres='pixel'``) measures from the true tile
+    centre, f = (i + 0.5) / k - 0.5: a 1-voxel tile gives weight 0, so thin
+    Z (or C, T) tiles do not blend the neighbouring slice's LUT, and flipping
+    an axis commutes with CLAHE when the axis is a multiple of the tile.
+    ``centred=False`` (``tile_centres='opencv'``) is OpenCV's f = i / k - 0.5,
+    half a pixel off the tile centre (OpenCV itself is not flip-symmetric).
+    The same convention is used on every axis, so permuting axes commutes
+    with CLAHE up to fixed-point rounding.
     """
     i = np.arange(size, dtype=np.float64)
     f = ((i + 0.5) / k - 0.5) if centred else (i / k - 0.5)
@@ -549,7 +554,7 @@ _W_ONE = 1 << _W_BITS
 _W_HALF = 1 << (_W_BITS - 1)
 
 
-def _clahe_u8_numpy(img, ks, clip_limit, chunk_px=1 << 16):
+def _clahe_u8_numpy(img, ks, clip_limit, chunk_px=1 << 16, centred=True):
     """CLAHE mapping + interpolation in int16 fixed point.
 
     The leading axes are folded into one (gy, gx, 256) LUT per 2D slice, then
@@ -561,8 +566,8 @@ def _clahe_u8_numpy(img, ks, clip_limit, chunk_px=1 << 16):
     *lead_shape, H, W = img.shape
     gx = lut.shape[-2]
 
-    ty, wy = _interp_coords(H, ks[-2])
-    tx, wx = _interp_coords(W, ks[-1])
+    ty, wy = _interp_coords(H, ks[-2], centred)
+    tx, wx = _interp_coords(W, ks[-1], centred)
     # Flat index of the (ty, tx) corner in a (gy, gx, 256) slice LUT
     base = ((ty * gx).astype(np.int32)[:, None] + tx.astype(np.int32)[None, :])
     base *= _NBINS_U8
@@ -570,7 +575,7 @@ def _clahe_u8_numpy(img, ks, clip_limit, chunk_px=1 << 16):
     wx = np.round(wx * _W_ONE).astype(np.int16)[None, :]
     wy = np.round(wy * _W_ONE).astype(np.int16)[:, None]
 
-    lead_coords = [_interp_coords(s, k, centred=True) for s, k in zip(lead_shape, ks[:-2])]
+    lead_coords = [_interp_coords(s, k, centred) for s, k in zip(lead_shape, ks[:-2])]
     rows = max(1, chunk_px // W)  # keep temporaries cache-resident
     out = np.empty(img.shape, np.uint8)
 
@@ -617,7 +622,7 @@ def _numba_kernels():
     return _clahe_numba
 
 
-def _clahe_u8_numba(img, ks, clip_limit, kernels):
+def _clahe_u8_numba(img, ks, clip_limit, kernels, centred=True):
     """Fused, multithreaded equivalent of `_clahe_u8_numpy` for ndim <= 3."""
     # Treat 1D/2D as (1, ..., N) volumes with unit kernels on the added axes
     lead = 3 - img.ndim
@@ -628,9 +633,9 @@ def _clahe_u8_numba(img, ks, clip_limit, kernels):
     hist = kernels.tile_hist(np.ascontiguousarray(vol), *ks3, *nt)
     lut = _hist_to_lut(hist, nt, int(np.prod(ks3)), clip_limit)
 
-    # Z (the folded leading axis) is pixel-centred, Y/X follow OpenCV (D20)
-    (tz, wz), (ty, wy), (tx, wx) = (_interp_coords(s, k, centred=(d == 0))
-                                    for d, (s, k) in enumerate(zip(vol.shape, ks3)))
+    # One tile-centre convention on every axis (D20)
+    (tz, wz), (ty, wy), (tx, wx) = (_interp_coords(s, k, centred)
+                                    for s, k in zip(vol.shape, ks3))
     wy = np.round(wy * _W_ONE).astype(np.int32)
     wx = np.round(wx * _W_ONE).astype(np.int32)
     out = kernels.interp(vol, lut, tz, wz, ty, wy, tx, wx, _W_BITS)
@@ -638,7 +643,7 @@ def _clahe_u8_numba(img, ks, clip_limit, kernels):
 
 
 def clahe_u8(image, kernel_size=None, clip_limit=0.01,
-             percentiles=(0.1, 99.9), backend='auto'):
+             percentiles=(0.1, 99.9), backend='auto', *, tile_centres='pixel'):
     """Fast N-D CLAHE on 8 bits, for segmentation preprocessing (uint8 in and out).
 
     Same contextual-region algorithm as ``_my_clahe_`` / skimage, but it trades
@@ -655,14 +660,23 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
     length 3 or 4). Put channels first and use ``kernel_size=(1, ky, kx)``,
     or call this per channel.
 
-    Tile coordinates: Y and X (the last two axes) use OpenCV's convention, so
-    2D output matches OpenCV. The leading axes are pixel-centred, so with a
-    1-voxel tile along Z (the default when Z < 16) each slice uses its own
-    LUT, and flipping Z commutes with CLAHE when Z is a multiple of the tile.
-    Changed (D20, 2026-11): the leading axes used OpenCV's half-pixel shift,
-    which blended 50% of the previous slice's (or channel's) LUT into each
-    slice when the tile was 1 voxel thick, and made the result depend on the
-    Z direction (up to 64 grey levels). 2D output is unchanged, bit for bit.
+    Tile coordinates (``tile_centres``): the same convention on every axis,
+    so permuting axes commutes with CLAHE (up to 2 grey levels of fixed-point
+    rounding). The default ``'pixel'`` interpolates between true tile centres:
+    with a 1-voxel tile along Z (the default when Z < 16) each slice uses its
+    own LUT, and flipping any axis commutes with CLAHE when the axis is a
+    multiple of the tile. ``'opencv'`` uses OpenCV's half-pixel-shifted
+    centres on every axis: 2D output then matches ``cv2.createCLAHE`` to 1
+    grey level, but a 1-voxel Z tile blends 50% of the previous slice's LUT
+    into each slice and the result depends on axis direction.
+    Changed (D20, 2026-11): every axis used OpenCV's convention, which blended
+    50% of the previous slice's (or channel's) LUT into each slice when the
+    tile was 1 voxel thick and made the result depend on the Z direction (up
+    to 64 grey levels). Every axis is now pixel-centred. 2D output differs
+    from the previous (OpenCV-matching) output by up to 2-4 grey levels at
+    the default tile size (mean < 0.6), more for small tiles (8-16 px: up to
+    12-25, mean 1-4); pass ``tile_centres='opencv'`` for the previous output,
+    bit for bit.
     Changed (C-07 / R6-15, 2026-11): a UserWarning is now emitted for a
     trailing axis of length 3 or 4 (a likely channel-last colour axis) and
     for NaN input (mapped to 0, as before); the output is unchanged.
@@ -706,6 +720,8 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
         (all-zero for integer input); the sample used to be strided, which
         aliases with image columns.
     backend : {'auto', 'numba', 'numpy'}
+    tile_centres : {'pixel', 'opencv'}, keyword-only
+        Tile-centre convention on every axis, see above. Default 'pixel'.
 
     Returns
     -------
@@ -718,6 +734,9 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
     check_zyx_input(image, "clahe_u8")
     if backend not in ('auto', 'numba', 'numpy'):
         raise ValueError(f'Unknown backend: {backend!r}')
+    if tile_centres not in _TILE_CENTRES:
+        raise ValueError(f"tile_centres must be one of {_TILE_CENTRES}, got {tile_centres!r}")
+    centred = tile_centres == 'pixel'
     image = np.asarray(image)
     if image.ndim >= 3 and image.shape[-1] in (3, 4):
         warnings.warn(
@@ -750,8 +769,8 @@ def clahe_u8(image, kernel_size=None, clip_limit=0.01,
             if img.ndim > 3:
                 raise ValueError("backend='numba' supports up to 3 dimensions")
         if kernels is not None and img.ndim <= 3:
-            return _clahe_u8_numba(img, ks, clip_limit, kernels)
+            return _clahe_u8_numba(img, ks, clip_limit, kernels, centred)
 
     if img.ndim == 1:
-        return _clahe_u8_numpy(img[None], (1,) + ks, clip_limit)[0]
-    return _clahe_u8_numpy(img, ks, clip_limit)
+        return _clahe_u8_numpy(img[None], (1,) + ks, clip_limit, centred=centred)[0]
+    return _clahe_u8_numpy(img, ks, clip_limit, centred=centred)
